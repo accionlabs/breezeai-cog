@@ -35,6 +35,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Apex | `.cls .trigger` | REST resources (`@RestResource`), Lightning (`@AuraEnabled`), SOAP `webservice`, triggers (record changes, Platform Events, Change Data Capture), scheduled Apex (`System.schedule`); SOQL / SOSL / DML, HTTP callouts and `EventBus.publish` |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | C | `.c .h` (`.h` shared with C++: each header goes to the language that includes it) | — ; calls between C and C++ resolve (C → C++ only through `extern "C"`) |
+| CUDA | `.cu .cuh` | — ; kernels and `__device__` functions are functions, a `<<<…>>>` launch is a call; calls into C and C++ resolve |
 | JSP | `.jsp .jspx .jspf .tag .tagx` ‡ | JSP 1.0 – Jakarta Pages 4.0, standard and XML syntax: directly served pages as `page` routes, links and Struts tags as navigation; directives, standard actions, JSTL / custom tags, EL and deferred EL; `<%! %>` methods as Functions and scriptlet code as Java statements (JDBC in a scriptlet is a db call); includes, preludes / codas, tag files, `.tld` descriptors and `page import` classes as `importFiles`; declared legacy encodings decoded |
 | Groovy † | `.groovy` | Vert.x |
 | HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |

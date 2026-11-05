@@ -12,20 +12,29 @@ and ``private`` in a class, updated by ``access_specifier`` labels in the body."
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, ClassType, ConstructorParam, Function, Statement
+from ...schemas import Class, ClassType, ConstructorParam, Decorator, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members, member_statement
-from ..treesitter import line_span, node_text
+from ..treesitter import line_span, node_text, parse_source
 from .functions import (
+    ATTRIBUTE_TYPES,
+    attribute_decorators,
     build_member_function,
+    decorators_of,
+    enumerator_decorators,
     extract_params,
+    is_macro_call_declarator,
     function_declarator_of,
-    has_declaration_error,
     is_function_pointer,
+    read_member,
 )
+from .mappings import KEYWORDS, MACRO_TYPES
+from .statements import macro_statement
 
 #: Aggregate specifiers that become a ``Class`` node, mapped to their ``type``. A union is
 #: a distinct kind (overlapping storage, one member active at a time) — it is not a struct,
@@ -66,6 +75,854 @@ def _defines(spec: Node) -> bool:
 #: an inline definition (or ``= default``) is a ``function_definition``.
 _MEMBER_FN_TYPES = ("field_declaration", "function_definition", "declaration")
 
+#: ``class WORD Name [final] :`` or ``{`` — a word between the class keyword and the class
+#: name. Only a candidate: the tree decides (:func:`_class_macro_words`).
+_CLASS_HEAD_WITH_WORD = re.compile(
+    rb"\b(?:class|struct|union)\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
+)
+_SPECIFIERS = ("class_specifier", "struct_specifier", "union_specifier")
+
+#: A macro's byte span and the class name's byte span after it.
+_MacroWord = tuple[tuple[int, int], tuple[int, int]]
+
+
+def _class_macro_words(root: Node, source: bytes) -> list[_MacroWord]:
+    """Macros written between ``class`` and the class name: ``class OPENVINO_API GatherMatmul
+    : public Op { … }``. In C++ only an attribute can sit there, and ``alignas`` / ``[[…]]``
+    parse; a bare word is an export macro the grammar can't expand. It takes the macro for the
+    class name and reads the class as a function or a broken declaration, so the class is lost.
+    A word counts only when the grammar did misread it that way: the name of a head with no
+    body, whose declaration is a function definition or has an error — a clean ``struct Point
+    p{1, 2};`` is a variable."""
+    words = []
+    for m in _CLASS_HEAD_WITH_WORD.finditer(source):
+        word = root.descendant_for_byte_range(m.start(1), m.end(1))
+        head = word.parent if word is not None else None
+        if (
+            word is None or head is None or word.type != "type_identifier"
+            or word.start_byte != m.start(1) or word.end_byte != m.end(1)
+            or head.type not in _SPECIFIERS or head.child_by_field_name("body") is not None
+        ):
+            continue
+        owner = head.parent
+        if owner is not None and (owner.type == "function_definition" or owner.has_error):
+            words.append(((m.start(1), m.end(1)), (m.start(2), m.end(2))))
+    return words
+
+
+def _reads_as_class(root: Node, name_span: tuple[int, int]) -> bool:
+    """Whether the name at ``name_span`` heads a class with a body, outside any error — the
+    class parsed whole once its macro was blanked."""
+    name = root.descendant_for_byte_range(*name_span)
+    head = name.parent if name is not None else None
+    if (
+        name is None or head is None or name.type != "type_identifier"
+        or (name.start_byte, name.end_byte) != name_span
+        or head.type not in _SPECIFIERS or head.child_by_field_name("body") is None
+    ):
+        return False
+    node: Node | None = head
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+_WORD = re.compile(rb"[A-Za-z_]\w*")
+
+
+def _head_decorators(node: Node, source: bytes) -> list[Decorator]:
+    """The attributes and the export macro between ``class`` and the class name, in source
+    order: ``class [[deprecated]] __declspec(dllexport) K``, ``class OPENVINO_API Op``. A macro
+    there was blanked before parsing (:func:`parse_cfamily`), so it is the one word in the
+    original source that no node covers."""
+    name = node.child_by_field_name("name")
+    if name is None or not node.children:
+        return []
+    out: list[Decorator] = []
+    cursor = node.children[0].end_byte  # after `class` / `struct` / `union`
+    for c in node.children[1:]:
+        if c.start_byte >= name.start_byte:
+            break
+        out.extend(Decorator(name=w.decode()) for w in _WORD.findall(source[cursor:c.start_byte]))
+        if c.type in ATTRIBUTE_TYPES:
+            out.extend(attribute_decorators(c, source))
+        cursor = c.end_byte
+    out.extend(Decorator(name=w.decode()) for w in _WORD.findall(source[cursor:name.start_byte]))
+    return out
+
+
+#: ``NAME(`` at the start of a line: a candidate wrapper macro around a declaration.
+_WRAPPER_HEAD = re.compile(rb"^[ \t]*([A-Za-z_]\w*)[ \t]*\(", re.M)
+#: The arguments after a wrapper's declaration: string literals, commas and comments only.
+_STRING_ARGS = re.compile(rb'(?:\s|,|//[^\n]*|/\*.*?\*/|"(?:[^"\\\n]|\\.)*")*', re.S)
+_PARAMS_END = re.compile(rb"\)(?:\s|//[^\n]*|/\*.*?\*/)*\Z", re.S)
+
+
+def _close_paren(source: bytes, start: int) -> tuple[int, int | None] | None:
+    """For an argument list opened just before ``start``: the offset of its closing ``)`` and
+    of its first top-level comma (``None`` when it has one argument). Strings, character
+    literals and comments are skipped; ``None`` when it never closes."""
+    depth, comma, i, n = 1, None, start, len(source)
+    while i < n:
+        c = source[i]
+        if c in (0x22, 0x27):  # a string or character literal
+            quote, i = c, i + 1
+            while i < n and source[i] != quote:
+                i += 2 if source[i] == 0x5C else 1
+        elif source.startswith(b"//", i):
+            i = source.find(b"\n", i)
+            if i < 0:
+                return None
+        elif source.startswith(b"/*", i):
+            i = source.find(b"*/", i)
+            if i < 0:
+                return None
+            i += 1
+        elif c in b"([{":
+            depth += 1
+        elif c in b")]}":
+            depth -= 1
+            if depth == 0:
+                return i, comma
+        elif c == 0x2C and depth == 1 and comma is None:
+            comma = i
+        i += 1
+    return None
+
+
+#: A wrapper's two blanked spans (``NAME(`` and ``, "msg")``) and where its declaration starts.
+_Wrapper = tuple[tuple[int, int], tuple[int, int], int]
+
+
+def _declaration_wrappers(root: Node, source: bytes) -> list[_Wrapper]:
+    """Macros wrapped around a whole declaration: ``DEPRECATED(LLAMA_API int f(int a), "use
+    g");``. The grammar can't read a declaration as a macro argument, and its error runs on
+    over the clean declarations after it. A wrapper counts only outside a function body, with
+    a first argument ending in a parameter list, string literals as its other arguments, and
+    ``;`` right after it."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _WRAPPER_HEAD.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.end(1))
+        while node is not None and node.type != "compound_statement":
+            node = node.parent
+        if node is not None:
+            continue  # inside a function body: a call
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        close, comma = closed
+        if comma is None:
+            continue
+        first = source[m.end():comma]
+        if (
+            b"(" not in first or _PARAMS_END.search(first) is None
+            or _STRING_ARGS.fullmatch(source, comma, close) is None
+            or b'"' not in source[comma:close]
+            or not source[close + 1:close + 64].lstrip().startswith(b";")
+        ):
+            continue
+        decl = m.end() + len(first) - len(first.lstrip())
+        found.append(((m.start(1), m.end()), (comma, close + 1), decl))
+    return found
+
+
+def _reads_as_declaration(root: Node, wrapper: _Wrapper) -> bool:
+    """Whether a wrapper's declaration parsed whole once the wrapper was blanked: one
+    declaration from its first word through the ``;`` after the wrapper, outside any error.
+    Whether its name can be trusted is ``functions.read_declaration``'s to say, as for any other."""
+    (_, _), (_, end), start = wrapper
+    node: Node | None = root.descendant_for_byte_range(start, start)
+    while node is not None and not (node.type == "declaration" and node.start_byte == start):
+        node = node.parent
+    if node is None or node.end_byte <= end:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+#: What may end the text before a member: the end of a member, the body's ``{`` or an access
+#: label.
+_MEMBER_BEFORE = re.compile(rb"(?:[;{}]|\b(?:public|protected|private)[ \t]*:)\Z")
+#: What continues a declaration rather than starting a new member: a constructor's initializer
+#: list or body, ``= default``, a qualifier, a trailing return type, an attribute.
+_DECLARATION_GOES_ON = re.compile(
+    rb"(?:[{:=;,)&]|->|\[\[|(?:const|volatile|noexcept|override|final|try|throw|requires"
+    rb"|__attribute__)\b)"
+)
+_MEMBER_START = re.compile(rb"[A-Za-z_~}#]")
+_CLASS_KEYWORDS = ("class", "struct", "union")
+_LINE_COMMENT = re.compile(rb"//[^\n]*")
+
+
+def _text_before(source: bytes, at: int) -> bytes:
+    """The code before ``at``, without trailing blank and ``//``-comment lines."""
+    end = at
+    while end > 0:
+        start = source.rfind(b"\n", 0, end - 1) + 1
+        line = _LINE_COMMENT.sub(b"", source[start:end]).strip()
+        if line:
+            return line
+        end = start
+    return b""
+
+
+def _member_macros(root: Node, source: bytes) -> list[tuple[int, int]]:
+    """Macros written as a whole member of a class body: ``OPENVINO_MATCHER_PASS_RTTI("…")``.
+    A line that is only ``NAME(…)`` has no ``;`` and no body, so it can't be a member; the
+    grammar reads it as the start of a field and runs on into the next member, breaking the
+    class. A line counts only where the grammar failed on it in a class body (a field with an
+    error, or an error holding the class keyword before it), outside a function body, after the end of a member or an access label, and followed by the
+    start of another member — not ``:``, ``{``, ``=`` or a qualifier, which would make it a
+    constructor written over two lines."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _WRAPPER_HEAD.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.end(1))
+        in_class = False
+        while node is not None and node.type != "compound_statement":
+            in_class = in_class or (
+                node.type == "field_declaration" and node.has_error
+            ) or (
+                node.type == "ERROR" and any(
+                    c.type in _CLASS_KEYWORDS and c.start_byte < m.start() for c in node.children
+                )
+            )
+            node = node.parent
+        if node is not None or not in_class:
+            continue  # clean, outside a class body, or inside a function body
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        end = closed[0] + 1
+        line_end = source.find(b"\n", end)
+        line_end = len(source) if line_end < 0 else line_end
+        if _LINE_COMMENT.sub(b"", source[end:line_end]).strip():
+            continue  # more on the line
+        after = _LINE_COMMENT.sub(b"", source[line_end:line_end + 256]).lstrip()
+        if (
+            _MEMBER_BEFORE.search(_text_before(source, m.start(1))) is None
+            or not _MEMBER_START.match(after) or _DECLARATION_GOES_ON.match(after)
+        ):
+            continue
+        found.append((m.start(1), end))
+    return found
+
+
+def _reads_as_members(root: Node, span: tuple[int, int]) -> bool:
+    """Whether a blanked member macro now sits in a class body, outside any error, with the
+    member after it parsed whole."""
+    start, end = span
+    body = root.descendant_for_byte_range(start, end)
+    while body is not None and body.type != "field_declaration_list":
+        if body.type == "ERROR":
+            return False
+        body = body.parent
+    if body is None or body.parent is None or body.parent.type not in _SPECIFIERS:
+        return False
+    following = next((c for c in body.children if c.start_byte >= end), None)
+    if following is None or following.type == "ERROR" or following.has_error:
+        return False
+    node: Node | None = body
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+#: ``) NAME`` — the start of a candidate run of attribute macros after a declaration's parameter
+#: list: ``void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);``.
+_TRAILING_MACRO = re.compile(rb"\)[ \t\r\n]*(?=[A-Za-z_])")
+#: One attribute macro: a call in capitals (or ``__``-prefixed, ``__printflike(1, 2)``), or a bare
+#: word in capitals. A lower-case call there is a function's name, not an attribute.
+_MACRO_CALL = re.compile(rb"([A-Z][A-Z0-9_]*|__\w+)[ \t]*\(")
+_MACRO_WORD = re.compile(rb"[A-Z][A-Z0-9_]*\b")
+_DECLARATION_TYPES = ("declaration", "field_declaration")
+
+#: A trailing macro run's blanked span, and the offsets of the ``)`` before it and the ``;`` after.
+_Trailing = tuple[tuple[int, int], int, int]
+
+
+def _macro_run(source: bytes, at: int) -> tuple[int, int] | None:
+    """The end of a run of attribute macros starting at ``at`` and the offset of the ``;`` right
+    after it (``WARN_UNUSED_RESULT CURL_PRINTF(2, 3);``), or ``None``."""
+    end = at
+    while True:
+        if (call := _MACRO_CALL.match(source, end)) is not None:
+            closed = _close_paren(source, call.end())
+            if closed is None:
+                return None
+            end = closed[0] + 1
+        elif (word := _MACRO_WORD.match(source, end)) is not None:
+            end = word.end()
+        else:
+            return None
+        nxt = end
+        while nxt < len(source) and source[nxt] in b" \t\r\n":
+            nxt += 1
+        if source.startswith(b";", nxt):
+            return end, nxt
+        if nxt == end:
+            return None  # two macros need space between them
+        end = nxt
+
+
+def _trailing_macros(root: Node, source: bytes) -> list[_Trailing]:
+    """Attribute macros after a declaration's parameter list: ``void errorf(const char *fmt,
+    ...) CURL_PRINTF(1, 2);``, ``CURLcode f(void) WARN_UNUSED_RESULT;``, or several in a row.
+    They expand to ``__attribute__((…))``, which the grammar reads there, but a macro breaks the
+    declaration. A candidate counts only where the grammar failed on it or cut the declaration
+    before it short, outside a function body. Each macro is in capitals (or ``__``-prefixed): a
+    lower-case word there is a K&R parameter (``int f(a) int a;``) or a function's name."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _TRAILING_MACRO.finditer(source):
+        paren = root.descendant_for_byte_range(m.start(), m.start() + 1)
+        if paren is None or paren.type != ")" or paren.parent is None or (
+            paren.parent.type != "parameter_list"
+        ):
+            continue  # not the end of a parameter list (a comment, a macro body, a call)
+        run = _macro_run(source, m.end())
+        if run is None:
+            continue
+        failed, in_body = False, False
+        for at in (m.start(), m.end()):  # the `)` (a declaration cut short) and the macro
+            node: Node | None = root.descendant_for_byte_range(at, at + 1)
+            while node is not None and node.type != "compound_statement":
+                if node.type == "ERROR" or (node.type in _DECLARATION_TYPES and node.has_error):
+                    failed = True
+                node = node.parent
+            in_body = in_body or node is not None
+        if in_body or not failed:
+            continue
+        found.append(((m.end(), run[0]), m.start(), run[1]))
+    return found
+
+
+def _reads_with_trailing_macro_gone(root: Node, trailing: _Trailing) -> bool:
+    """Whether a blanked trailing macro left a declaration that parses whole: its parameter list
+    ends at the ``)`` and the declaration at the ``;``, outside any error."""
+    _, paren, semicolon = trailing
+    node: Node | None = root.descendant_for_byte_range(paren, paren + 1)
+    if node is None or node.parent is None or node.parent.type != "parameter_list":
+        return False
+    while node is not None and node.type not in _DECLARATION_TYPES:
+        node = node.parent
+    if node is None or node.end_byte != semicolon + 1:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+_TAG_KEYWORDS = (b"struct", b"union", b"enum")
+
+
+def _tag_type_macros(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Macros in front of a ``struct`` / ``union`` / ``enum`` type: ``UNITTEST struct stsentry
+    *hsts_check(…)``, ``CURL_EXTERN struct curl_slist *curl_slist_append(…);``. The C grammar
+    splits such a line into a broken ``UNITTEST struct`` (its ``;`` missing) and ``stsentry
+    *hsts_check(…)``, losing the tag keyword and the macro. A macro counts only in exactly that
+    split: a declaration of a type name, the keyword and a missing ``;``, followed at once by a
+    declaration or definition whose type is a plain name."""
+    if not root.has_error:
+        return []
+    found = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        for c in node.children:
+            if c.type in ("compound_statement", "field_declaration_list"):
+                continue
+            stack.append(c)
+        if node.type != "declaration":
+            continue
+        kids = [c for c in node.children if c.type != "storage_class_specifier"]
+        after = node.next_sibling
+        if (
+            len(kids) != 3 or kids[0].type != "type_identifier"
+            or kids[1].type != "identifier"
+            or source[kids[1].start_byte:kids[1].end_byte] not in _TAG_KEYWORDS
+            or not kids[2].is_missing
+            or after is None or after.type not in ("declaration", "function_definition")
+            or (ret := after.child_by_field_name("type")) is None
+            or ret.type != "type_identifier" or after.start_byte != ret.start_byte
+        ):
+            continue
+        found.append(((kids[0].start_byte, kids[0].end_byte), kids[1].start_byte))
+    return found
+
+
+def _reads_with_tag_type(root: Node, tagged: tuple[tuple[int, int], int]) -> bool:
+    """Whether a blanked macro left a declaration or definition whose type is the tagged type
+    (starting at its keyword), outside any error and with no error of its own in its header."""
+    keyword = tagged[1]
+    node: Node | None = root.descendant_for_byte_range(keyword, keyword + 1)
+    while node is not None and node.type not in ("declaration", "function_definition"):
+        node = node.parent
+    if node is None:
+        return False
+    ret = node.child_by_field_name("type")
+    if (
+        ret is None or ret.type not in ("struct_specifier", "union_specifier", "enum_specifier")
+        or ret.start_byte != keyword
+        or any(c.type == "ERROR" or c.is_missing for c in node.children)
+    ):
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+def _misread_qualifier_macros(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Qualifier macros in a C++ definition read as a variable: ``void unpack(tile_t * RESTRICT
+    tile, const void * RESTRICT p) { … }``. When no parameter has an unambiguous type, C++ reads
+    the name and parentheses as a variable initialised with ``tile_t * RESTRICT`` (``tile`` left
+    in an error) and the body as a stray block. A macro counts only in exactly that shape: a
+    declaration whose one declarator is initialised with an argument list, followed at once by
+    ``{ … }``, where an ``A * MACRO`` argument is followed by an error starting with one word (the
+    name; the parameters after it may be in the error too). Its
+    start is kept so the second parse can be checked to read a definition there."""
+    if not root.has_error:
+        return []
+    found: list[tuple[tuple[int, int], int]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        for c in node.children:
+            if c.type not in ("compound_statement", "field_declaration_list"):
+                stack.append(c)
+        if node.type != "declaration":
+            continue
+        holder = node.parent if node.parent is not None and node.parent.type == "template_declaration" else node
+        body = holder.next_sibling
+        init = node.child_by_field_name("declarator")
+        args = init.child_by_field_name("value") if init is not None and init.type == "init_declarator" else None
+        if body is None or body.type != "compound_statement" or args is None or args.type != "argument_list":
+            continue
+        macros = []
+        for c in args.named_children:
+            err = c.next_sibling
+            right = c.child_by_field_name("right") if c.type == "binary_expression" else None
+            op = c.child_by_field_name("operator") if right is not None else None
+            if (
+                right is not None and op is not None and right.type == "identifier"
+                and source[op.start_byte:right.start_byte].strip() == b"*"
+                and err is not None and err.type == "ERROR"
+                and err.children and err.children[0].type == "identifier"
+                and (err.child_count == 1 or err.children[1].type == ",")
+            ):
+                macros.append((right.start_byte, right.end_byte))
+        if macros:
+            found.extend((m, node.start_byte) for m in macros)
+    return found
+
+
+def _reads_as_definition(root: Node, macro: tuple[tuple[int, int], int]) -> bool:
+    """Whether a function definition starts where the misread declaration did, outside any error
+    and with a clean header."""
+    start = macro[1]
+    node: Node | None = root.descendant_for_byte_range(start, start + 1)
+    while node is not None and not (node.type == "function_definition" and node.start_byte == start):
+        node = node.parent
+    if node is None or any(c.type == "ERROR" or c.is_missing for c in node.children):
+        return False
+    declarator = node.child_by_field_name("declarator")
+    if declarator is None or declarator.has_error:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+#: ``name[N] __attribute__((aligned(16))) =`` (or ``;``) — a candidate attribute (or an
+#: attribute macro in capitals) between a declarator and its initializer or the end.
+_ATTRIBUTE_BEFORE_INIT = re.compile(
+    rb"(?<=[\]\w])(?:[ \t\r\n]*\b(?=__attribute__)|[ \t]*\b(?=[A-Z]))"  # `__attribute__` may wrap
+    rb"(__attribute__[ \t]*\(\(|[A-Z][A-Z0-9_]*[ \t]*\()"
+)
+_INIT_NEXT = re.compile(rb"[ \t\r\n]*(?:=(?!=)|;)")
+
+
+def _attributes_before_initializer(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Attributes between a declarator and its initializer: ``float acc[8]
+    __attribute__((aligned(32))) = { 0 };``. The grammar reads an attribute in front of a
+    declarator but not here; the declaration breaks and its error runs on over what follows (a
+    whole file of functions). The same holds before the ``;`` of a declaration without an
+    initializer (``int8_t buf[64] __attribute__((aligned(16)));``) — there only
+    ``__attribute__`` itself, as a macro before ``;`` can be a parameter list (``int f
+    OF((int a));``). A candidate counts only where the grammar failed on it and ``=`` or ``;``
+    follows; that offset is kept so the second parse can be checked to read a declaration
+    there."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _ATTRIBUTE_BEFORE_INIT.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.start(1) + 1)
+        failed = False
+        while node is not None:
+            if node.type == "ERROR" or (node.parent is not None and node.has_error):
+                failed = True  # an error, or a broken node below the file's root
+            if node.type in ("comment", "preproc_arg", "string_literal"):
+                failed = False
+                break
+            node = node.parent
+        if not failed:
+            continue
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        end = closed[0] + 1
+        if source[m.start(1):m.start(1) + 13] == b"__attribute__":
+            if not source.startswith(b")", end):
+                continue
+            end += 1  # `__attribute__((…))` closes twice
+        equals = _INIT_NEXT.match(source, end)
+        if equals is None:
+            continue
+        if source[equals.end() - 1] == 0x3B and not source.startswith(b"__attribute__", m.start(1)):
+            continue  # `int f OF((int a));`: before `;` a macro can be a parameter list
+        found.append(((m.start(1), end), equals.end() - 1))
+    return found
+
+
+def _reads_as_initialised(root: Node, attribute: tuple[tuple[int, int], int]) -> bool:
+    """Whether the ``=`` after a blanked attribute now belongs to an initialised declarator of a
+    declaration (or the ``;`` ends one) outside any error, with no error of its own in its
+    header."""
+    at = attribute[1]
+    node: Node | None = root.descendant_for_byte_range(at, at + 1)
+    if node is None or node.parent is None:
+        return False
+    if node.type == "=":
+        if node.parent.type != "init_declarator":
+            return False
+        decl = node.parent.parent
+    elif node.type == ";":
+        decl = node.parent
+    else:
+        return False
+    if decl is None or decl.type != "declaration" or any(
+        c.type == "ERROR" or c.is_missing for c in decl.children
+    ):
+        return False
+    up: Node | None = decl
+    while up is not None:
+        if up.type == "ERROR":
+            return False
+        up = up.parent
+    return True
+
+
+#: ``TYPE MACRO(args) name(`` — a candidate macro with arguments between a return type and the
+#: function's name: ``CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``.
+_MACRO_BEFORE_NAME = re.compile(rb"(?<=\w)[ \t\r\n]+\b([A-Z][A-Z0-9_]*)[ \t]*\(")
+_NAME_AND_PARAMS = re.compile(rb"[ \t\r\n]*([A-Za-z_]\w*)[ \t\r\n]*\(")
+
+
+def _macros_before_name(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Macros with arguments between a return type and the function's name, ``CURL_EXTERN
+    CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…);`` — how a
+    library marks a function deprecated. The grammar reads the macro as a call and the
+    declaration breaks. A candidate counts only outside a function body, where the grammar failed
+    on it, with a name and ``(`` right after its closing parenthesis; the name's offset is kept so
+    the second parse can be checked to read a function of that name there."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _MACRO_BEFORE_NAME.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.start(1) + 1)
+        failed = False
+        while node is not None and node.type not in ("compound_statement", "comment", "preproc_arg"):
+            failed = failed or node.type == "ERROR" or (node.parent is not None and node.has_error)
+            node = node.parent
+        if node is not None or not failed:
+            continue
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        name = _NAME_AND_PARAMS.match(source, closed[0] + 1)
+        if name is None or name.group(1) in _NOT_NAMES:
+            continue
+        found.append(((m.start(1), closed[0] + 1), name.start(1)))
+    return found
+
+
+_NOT_NAMES = frozenset({b"if", b"while", b"for", b"switch", b"return", b"sizeof", b"defined"})
+
+
+def _reads_as_named_function(root: Node, macro: tuple[tuple[int, int], int]) -> bool:
+    """Whether the name after a blanked macro now names a function declarator of a declaration or
+    definition outside any error."""
+    at = macro[1]
+    node: Node | None = root.descendant_for_byte_range(at, at + 1)
+    if node is None or node.type != "identifier" or node.parent is None:
+        return False
+    if node.parent.type != "function_declarator" or node.parent.child_by_field_name("declarator") != node:
+        return False
+    while node is not None and node.type not in ("declaration", "function_definition"):
+        node = node.parent
+    if node is None:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+_BLOCK_COMMENT = re.compile(rb"/\*.*?\*/", re.S)
+
+
+def _continued_end(source: bytes, start: int) -> int:
+    """Where a preprocessor directive starting at ``start`` really ends: the end of the first
+    line that doesn't end in ``\\``."""
+    i = start
+    while True:
+        nl = source.find(b"\n", i)
+        if nl < 0:
+            return len(source)
+        if not source[i:nl].rstrip(b" \t\r").endswith(b"\\"):
+            return nl
+        i = nl + 1
+
+
+#: A cut-short macro's block comments, where it starts and where it really ends.
+_CutDefine = tuple[list[tuple[int, int]], int, int]
+
+
+_DEFINE_LINE = re.compile(rb"^[ \t]*#[ \t]*define\b", re.M)
+_COMMENT_BEFORE_CONTINUATION = re.compile(rb"\*/[ \t]*\\\r?\n")
+
+
+def _cut_defines(root: Node, source: bytes) -> list[_CutDefine]:
+    """Macro definitions the grammar ends early. A ``/* … */`` comment right before a line's
+    ``\\`` ends the ``#define`` there (or makes it an error), and the rest of its body reads as
+    file-scope code that breaks what follows (a function after it is lost). A definition counts
+    when such a comment sits in its continued lines and the grammar's node there doesn't run to
+    its last line; its block comments are blanked for a second parse, and its text still comes
+    from the original source."""
+    if not root.has_error or b"*/" not in source:
+        return []
+    found = []
+    for m in _DEFINE_LINE.finditer(source):
+        end = _continued_end(source, m.start())
+        if _COMMENT_BEFORE_CONTINUATION.search(source, m.start(), end + 1) is None:
+            continue
+        hash_at = source.index(b"#", m.start())
+        node: Node | None = root.descendant_for_byte_range(hash_at, hash_at + 1)
+        while node is not None and node.parent is not None and node.parent.start_byte == hash_at:
+            node = node.parent
+        if node is not None and node.end_byte >= end and not node.has_error:
+            continue  # the grammar read it whole
+        comments = [c.span() for c in _BLOCK_COMMENT.finditer(source, hash_at, end)]
+        found.append((comments, hash_at, end))
+    return found
+
+
+def _reads_as_whole_define(root: Node, cut: _CutDefine) -> bool:
+    """Whether the macro definition now runs to its last continued line."""
+    _, start, end = cut
+    node: Node | None = root.descendant_for_byte_range(start, start + 1)
+    while node is not None and node.type not in ("preproc_def", "preproc_function_def"):
+        node = node.parent
+    return (
+        node is not None and node.start_byte == start and node.end_byte >= end
+        and not node.has_error
+    )
+
+
+_ENUM_MACRO = re.compile(rb"[ \t]*([A-Z][A-Z0-9_]*)[ \t]*\(")
+_ENUM_MEMBER_END = re.compile(rb"[ \t\r\n]*[=,}]")
+
+
+def _enumerator_macros(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Macros with arguments after an enum member's name: ``CURLSSLBACKEND_NSS
+    CURL_DEPRECATED(8.3.0, "") = 3,``. The grammar reads the member up to its name and puts the
+    macro and the ``= value`` in errors, so the value is lost. A candidate is a macro in capitals
+    right after an enumerator that the grammar followed with an error, ending before ``=``,
+    ``,`` or ``}``; the member's start is kept so the second parse can be checked."""
+    if not root.has_error:
+        return []
+    found = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type != "enumerator":
+            stack.extend(node.children)
+            continue
+        after = node.next_sibling
+        m = _ENUM_MACRO.match(source, node.end_byte)
+        if after is None or after.type != "ERROR" or m is None:
+            continue
+        closed = _close_paren(source, m.end())
+        if closed is None or _ENUM_MEMBER_END.match(source, closed[0] + 1) is None:
+            continue
+        found.append(((m.start(1), closed[0] + 1), node.start_byte))
+    return found
+
+
+def _reads_as_enumerator(root: Node, macro: tuple[tuple[int, int], int]) -> bool:
+    """Whether the member now parses whole past the blanked macro, in an enum body without an
+    error after it."""
+    (_, end), start = macro
+    node: Node | None = root.descendant_for_byte_range(start, start + 1)
+    while node is not None and node.type != "enumerator":
+        node = node.parent
+    if node is None or node.start_byte != start or node.parent is None:
+        return False
+    after = node.next_sibling
+    return not node.has_error and (after is None or after.type != "ERROR")
+
+
+def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
+    """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
+    move."""
+    out = bytearray(source)
+    for start, end in spans:
+        out[start:end] = bytes(b if b == 0x0A else 0x20 for b in source[start:end])
+    return bytes(out)
+
+
+#: ``#ifdef __cplusplus`` / ``#if defined(__cplusplus)`` holding one line, then ``#endif``: the
+#: two halves of the guard around a C API, ``extern "C" {`` and ``}``.
+_GUARD = (
+    rb'^[ \t]*#[ \t]*if(?:def[ \t]+__cplusplus|[ \t]+defined[ \t]*\(?[ \t]*__cplusplus[ \t]*\)?)'
+    rb'[ \t]*(?://[^\n]*)?\n([ \t]*%s[^\n]*\n)[ \t]*#[ \t]*endif[^\n]*'
+)
+_GUARD_OPEN = re.compile(_GUARD % rb'extern[ \t]+"C"[ \t]*\{', re.M)
+_GUARD_CLOSE = re.compile(_GUARD % rb'\}', re.M)
+
+#: A guard pair's blanked spans and the region it encloses.
+_Guard = tuple[list[tuple[int, int]], tuple[int, int]]
+
+
+def _collapsed_guards(root: Node, source: bytes, grammar: str) -> list[_Guard]:
+    """The ``extern "C"`` guard of a file whose parse collapsed around it. Both ``#ifdef
+    __cplusplus`` blocks are read at once, so ``{`` and ``}`` sit in separate conditionals; when
+    the grammar's recovery fails, the file reads as one error. ``__cplusplus`` is defined exactly
+    when a C++ compiler reads the file, so the guard is resolved as that compiler would: for C++
+    and CUDA only the directive lines go, and ``extern "C" { … }`` stays a block; for C the whole
+    guard goes. Only a file with an error at file scope, and with one guard pair, counts."""
+    if root.type != "ERROR" and not any(c.type == "ERROR" for c in root.children):
+        return []
+    opens, closes = list(_GUARD_OPEN.finditer(source)), list(_GUARD_CLOSE.finditer(source))
+    if len(opens) != 1 or len(closes) != 1 or opens[0].end() > closes[0].start():
+        return []
+    spans = []
+    for m in (opens[0], closes[0]):
+        if grammar == "c":
+            spans.append((m.start(), m.end()))
+        else:
+            spans += [(m.start(), m.start(1)), (m.end(1), m.end())]
+    return [(spans, (opens[0].start(), closes[0].end()))]
+
+
+def _reads_without_collapse(root: Node, region: tuple[int, int]) -> bool:
+    """Whether no file-scope error overlaps a resolved guard's region."""
+    if root.type == "ERROR":
+        return False
+    start, end = region
+    return not any(
+        c.type == "ERROR" and c.start_byte < end and c.end_byte > start for c in root.children
+    )
+
+
+def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
+    """Parse a C-family file. Two macros the grammar can't expand hide what they are written on,
+    and are blanked to spaces for a second parse:
+
+    * a macro between ``class`` and the class name (:func:`_class_macro_words`): the class then
+      reads as written without it;
+    * a macro wrapped around a declaration (:func:`_declaration_wrappers`): ``DEPRECATED(`` and
+      ``, "msg")`` go, and the declaration reads as written;
+    * a macro written as a whole class member (:func:`_member_macros`): the line goes, and the
+      members around it read as written;
+    * an attribute macro after a declaration's parameter list (:func:`_trailing_macros`):
+      ``CURL_PRINTF(1, 2)`` goes, and the declaration reads as written;
+    * a macro in front of a ``struct`` / ``union`` / ``enum`` type (:func:`_tag_type_macros`):
+      ``UNITTEST`` goes, and ``struct stsentry *hsts_check(…)`` reads as written;
+    * a qualifier macro that made a C++ definition read as a variable
+      (:func:`_misread_qualifier_macros`): ``RESTRICT`` goes, and the definition reads as written;
+    * an attribute between a declarator and its initializer
+      (:func:`_attributes_before_initializer`): ``__attribute__((aligned(16)))`` goes, and the
+      declaration reads as written;
+    * a macro with arguments between a return type and the name (:func:`_macros_before_name`):
+      ``CURL_DEPRECATED(…)`` goes, and the function reads as written;
+    * a block comment that ended a ``#define`` early (:func:`_cut_defines`): the comments in its
+      continued body go, and it runs to its last line;
+    * a macro after an enum member's name (:func:`_enumerator_macros`): ``CURL_DEPRECATED(…)``
+      goes, and the member reads with its value;
+
+    and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
+    for the grammar's language would (:func:`_collapsed_guards`).
+
+    Lines and byte offsets don't move, so names and text are still read from the original
+    ``source``. A blank is kept only where what it hid now parses whole (a class with its body,
+    a declaration without an error); if one doesn't, the others are tried once more alone."""
+    root = parse_source(grammar, source, timeout_micros).root_node
+    words = _class_macro_words(root, source)
+    wrappers = _declaration_wrappers(root, source)
+    guards = _collapsed_guards(root, source, grammar)
+    members = _member_macros(root, source)
+    trailing = _trailing_macros(root, source)
+    tagged = _tag_type_macros(root, source)
+    qualifiers = _misread_qualifier_macros(root, source) if grammar != "c" else []
+    attributes = _attributes_before_initializer(root, source)
+    named = _macros_before_name(root, source)
+    defines = _cut_defines(root, source)
+    enumerators = _enumerator_macros(root, source)
+    for _ in range(2):  # blank all; if some still break, blank only the others once
+        if not (
+            words or wrappers or guards or members or trailing or tagged or qualifiers or attributes
+            or named or defines or enumerators
+        ):
+            return root
+        spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
+        spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
+        spans += [t[0] for t in tagged] + [q[0] for q in qualifiers] + [a[0] for a in attributes]
+        spans += [n[0] for n in named] + [c for d in defines for c in d[0]]
+        spans += [e[0] for e in enumerators]
+        reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
+        whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
+        whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
+        whole_guards = [g for g in guards if _reads_without_collapse(reparsed, g[1])]
+        whole_members = [s for s in members if _reads_as_members(reparsed, s)]
+        whole_trailing = [t for t in trailing if _reads_with_trailing_macro_gone(reparsed, t)]
+        whole_tagged = [t for t in tagged if _reads_with_tag_type(reparsed, t)]
+        whole_qualifiers = [q for q in qualifiers if _reads_as_definition(reparsed, q)]
+        whole_attributes = [a for a in attributes if _reads_as_initialised(reparsed, a)]
+        whole_named = [n for n in named if _reads_as_named_function(reparsed, n)]
+        whole_defines = [d for d in defines if _reads_as_whole_define(reparsed, d)]
+        whole_enumerators = [e for e in enumerators if _reads_as_enumerator(reparsed, e)]
+        if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
+                whole_tagged, whole_qualifiers, whole_attributes, whole_named, whole_defines,
+                whole_enumerators) == (
+                    words, wrappers, guards, members, trailing, tagged, qualifiers, attributes,
+                    named, defines, enumerators):
+            return reparsed
+        words, wrappers, guards = whole_words, whole_wrappers, whole_guards
+        members, trailing, tagged = whole_members, whole_trailing, whole_tagged
+        qualifiers, attributes, named = whole_qualifiers, whole_attributes, whole_named
+        defines, enumerators = whole_defines, whole_enumerators
+    return root
+
+
 def typedef_type(node: Node, source: bytes) -> tuple[Node, str, str | None] | None:
     """``typedef struct [tag] { … } name;`` (also ``union`` / ``enum``) → the specifier, the
     typedef name and the tag (``None`` when anonymous). ``None`` when the typedef doesn't
@@ -83,6 +940,21 @@ def typedef_type(node: Node, source: bytes) -> tuple[Node, str, str | None] | No
         return None
     tag = spec.child_by_field_name("name")
     return spec, node_text(names[0], source), node_text(tag, source) if tag is not None else None
+
+
+def defined_type(node: Node) -> Node | None:
+    """The named struct / class / union / enum a ``declaration`` defines along with its
+    variables (``struct point { int x, y; } origin;``), or ``None``. An anonymous one has no
+    name to give a class."""
+    if node.type != "declaration":
+        return None
+    spec = node.child_by_field_name("type")
+    if (
+        spec is None or spec.type not in _NESTED_TYPE_SPECS or not _defines(spec)
+        or spec.child_by_field_name("name") is None
+    ):
+        return None
+    return spec
 
 
 #: The two C++ type-alias declarations. ``using namespace …`` / ``using Ns::name`` are a
@@ -130,11 +1002,13 @@ _NAME_NODES = ("field_identifier", "identifier", "type_identifier")
 
 def _declarator_name(node: Node | None, source: bytes) -> str | None:
     """Innermost declared name, unwrapping pointer/reference/array/init/function
-    declarators (``* kName`` → ``kName``, ``(*Callback)(int)`` → ``Callback``)."""
+    declarators (``* kName`` → ``kName``, ``(*Callback)(int)`` → ``Callback``). A keyword is
+    never one: the grammar misread a macro."""
     if node is None:
         return None
     if node.type in _NAME_NODES:
-        return node_text(node, source)
+        text = node_text(node, source)
+        return text if text not in KEYWORDS else None
     inner = node.child_by_field_name("declarator") or next(
         (c for c in node.named_children
          if c.type in _NAME_NODES or c.type.endswith("declarator")),
@@ -152,10 +1026,13 @@ def type_alias_statement(
 
     Only these two node types are aliases: ``using namespace std;`` and ``using std::swap;``
     are a ``using_declaration`` (an import, not a declaration) and never reach here."""
+    declarator = node.child_by_field_name("declarator")
     name = (
         _declarator_name(node.child_by_field_name("name"), source)
         if node.type == "alias_declaration"
-        else _declarator_name(node.child_by_field_name("declarator"), source)
+        # `typedef voidpf (*open_func) OF((voidpf opaque));` would be named after the macro.
+        else None if is_macro_call_declarator(declarator)
+        else _declarator_name(declarator, source)
     )
     return member_statement(
         node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids, name=name
@@ -205,10 +1082,20 @@ def build_class(
         visibility = "public" if is_public_default else "private"
         for member in body.named_children:
             member = _unwrap_template(member)
-            if has_declaration_error(member):
+            read = read_member(member, source)
+            if read is None:
                 continue  # corrupt declaration header — skip rather than emit fabricated data
             if member.type == "access_specifier":
                 visibility = node_text(member, source)
+                continue
+            if member.type in MACRO_TYPES:
+                # A `#define` written inside the class body.
+                if capture:
+                    statements.append(
+                        macro_statement(
+                            member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
+                        )
+                    )
                 continue
             if member.type in TYPE_ALIAS_TYPES:
                 # A member typedef/alias (`typedef int MemberHandle;`) declares a name on
@@ -239,6 +1126,17 @@ def build_class(
                     nested_classes.extend(sub_classes)
                     methods.extend(sub_methods)
                     statements.extend(sub_statements)
+                declarator = member.child_by_field_name("declarator")
+                if capture and member.type == "field_declaration" and declarator is not None:
+                    # `struct node { … } root;` also declares a member, named even when the
+                    # type is anonymous (`union { … } u;`).
+                    statements.append(
+                        member_statement(
+                            member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
+                            name=_declarator_name(declarator, source),
+                            decorators=decorators_of(member, source, read),
+                        )
+                    )
             elif member.type in _MEMBER_FN_TYPES:
                 declarator = member.child_by_field_name("declarator")
                 if function_declarator_of(declarator) is None or is_function_pointer(declarator):
@@ -251,6 +1149,7 @@ def build_class(
                             member_statement(
                                 member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
                                 name=_declarator_name(member.child_by_field_name("declarator"), source),
+                                decorators=decorators_of(member, source, read),
                             )
                         )
                     continue
@@ -258,7 +1157,7 @@ def build_class(
                     member, source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, visibility=visibility,
                     seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=resolve,
+                    capture=capture, limit=limit, resolve=resolve, read=read,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
@@ -283,6 +1182,7 @@ def build_class(
         startLine=start,
         endLine=end,
         alias=alias,
+        decorators=_head_decorators(node, source),
     )
     return [cls, *nested_classes], methods, statements
 
@@ -334,6 +1234,9 @@ def build_enum(
         if capture
         else []
     )
+    members = [c for c in body.named_children if c.type == "enumerator"]
+    for member, statement in zip(members, statements, strict=False):
+        statement.decorators = enumerator_decorators(member, source)
     return cls, statements
 
 

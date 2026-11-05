@@ -362,6 +362,133 @@ def test_a_member_function_with_a_parenthesized_name_is_still_a_method(tmp_path)
     assert [f.name for f in record.functions] == ["f"]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_type_defined_with_a_variable_is_a_class(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "g.c",
+        "struct point { int x; int y; } origin;\n"
+        "static struct config { int level; } cfg = {1};\n"
+        "struct { int a; } anon_var;\n"
+        "union u { int a; float b; } uv;\n"
+        "enum color { RED, GREEN } c;\n"
+        "void f(void) { struct local { int a; } l; }\n",
+    )
+    assert [(c.name, c.type) for c in record.classes] == [
+        ("point", "struct"), ("config", "struct"), ("u", "union"), ("color", "enum"),
+    ]
+    assert [(s.nodeType, s.name, s.parentId) for s in record.statements if s.parentId != "g.c#f@6"] == [
+        ("field_declaration", "x", "g.c#point"),
+        ("field_declaration", "y", "g.c#point"),
+        ("declaration", "origin", "g.c"),
+        ("field_declaration", "level", "g.c#config"),
+        ("declaration", "cfg", "g.c"),
+        ("declaration", "anon_var", "g.c"),
+        ("field_declaration", "a", "g.c#u"),
+        ("field_declaration", "b", "g.c#u"),
+        ("declaration", "uv", "g.c"),
+        ("enumerator", "RED", "g.c#color"),
+        ("enumerator", "GREEN", "g.c#color"),
+        ("declaration", "c", "g.c"),
+    ]
+
+
+def test_a_member_declared_with_its_nested_type_is_a_field(tmp_path) -> None:
+    record = _parse(
+        CppParser(),
+        tmp_path,
+        "trie.h",
+        "struct trie {\n"
+        "  struct node { int v; } root;\n"
+        "  union { int i; float f; } u;\n"
+        "  struct leaf { int w; };\n"
+        "};\n",
+    )
+    assert [c.name for c in record.classes] == ["trie", "node", "leaf"]
+    assert [(s.name, s.parentId) for s in record.statements] == [
+        ("v", "trie.h#trie.node"), ("root", "trie.h#trie"), ("u", "trie.h#trie"),
+        ("w", "trie.h#trie.leaf"),
+    ]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_class_defined_with_a_variable_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "lib/reg.hpp": "struct registry { int count() const { return 0; } } global_registry;\n",
+            "app/main.cpp": (
+                '#include "../lib/reg.hpp"\nint main() { registry r; return r.count(); }\n'
+            ),
+        },
+    )
+    assert _calls(_capture(repo, jobs)["app/main.cpp"], "main") == {"count": "lib/reg.hpp"}
+
+
+#: A C API guarded for C++ includers, followed by C++-only sections: the grammar reads both
+#: `#ifdef __cplusplus` blocks, can't match `{` with `}`, and the whole file reads as one error.
+GUARDED_API = """#ifndef API_H
+#define API_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct api_ctx;
+struct api_params { int n; };
+API_EXPORT struct api_ctx * api_init(struct api_params params);
+static inline int api_version(void) { return 3; }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+#ifdef __cplusplus
+struct api_usage {
+    std::map<int, int> mem;
+};
+API_EXPORT struct api_usage api_get_usage(const char * path);
+#endif
+
+#ifdef __cplusplus
+namespace api {
+struct ctx_deleter {
+    void operator()(api_ctx * c) { api_free(c); }
+};
+}
+#endif
+
+#endif
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_collapsed_extern_c_guard_is_resolved_as_the_compiler_would(tmp_path, parser) -> None:
+    record = _parse(parser, tmp_path, "api.h", GUARDED_API)
+    assert [c.name for c in record.classes][:1] == ["api_params"]
+    assert [f.name for f in record.functions][:1] == ["api_version"]
+    assert "api_init" in [s.name for s in record.statements if s.nodeType == "declaration"]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_resolved_guard_keeps_c_linkage_for_cpp(tmp_path, jobs) -> None:
+    # The header is C++ (its namespace proves it); a C file can call a function in its
+    # `extern "C"` block, so the block must stay one.
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/api.h": GUARDED_API,
+            "app/main.c": '#include "../lib/api.h"\nint main(void) { return api_version(); }\n',
+            "app/tool.cpp": '#include "../lib/api.h"\nint tool() { return api_version(); }\n',
+        },
+    )
+    files = _capture(repo, jobs)
+    assert files["lib/api.h"]["language"] == "cpp"
+    assert _calls(files["app/main.c"], "main") == {"api_version": "lib/api.h"}
+    assert _calls(files["app/tool.cpp"], "tool") == {"api_version": "lib/api.h"}
+
+
 # -- a C header adapting itself for C++ includers stays C ---------------------------------------
 
 
@@ -414,6 +541,364 @@ def test_the_index_parse_honours_the_parse_timeout(tmp_path) -> None:
 # -- macros -------------------------------------------------------------------------------------
 
 
+_SPLIT_CASE = """\
+int step{i}(int mode)
+{{
+    int local{i} = mode;
+    switch (mode) {{
+#ifdef FAST
+    case 1: {{
+#else
+    case 2: {{
+#endif
+        local{i} = helper(local{i});
+        break;
+    }}
+    }}
+    return local{i};
+}}
+"""
+#: Four functions whose `case … {` a conditional splits: the grammar gives up on the whole file
+#: (its root is an error) and the functions' locals read as file-scope declarations.
+ROOT_ERROR = (
+    "int helper(int a) { return a; }\n"
+    + "".join(_SPLIT_CASE.format(i=i) for i in range(4))
+    + "int after(int b) { return step0(b); }\n"
+)
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_file_whose_parse_is_one_error_is_read_from_the_second_parse(tmp_path, parser) -> None:
+    rec = _parse(parser, tmp_path, "steps.c", ROOT_ERROR)
+    assert sorted((f.name, f.startLine, f.endLine) for f in rec.functions) == [
+        ("after", 62, 62), ("helper", 1, 1),
+        ("step0", 2, 16), ("step1", 17, 31), ("step2", 32, 46), ("step3", 47, 61),
+    ]
+    file_scope = [s.name for s in rec.statements if s.nodeType == "declaration" and s.parentId == "steps.c"]
+    assert file_scope == []  # the locals belong to their functions
+    assert {s.name: s.parentId for s in rec.statements if s.name == "local1"} == {
+        "local1": "steps.c#step1@17",
+    }
+
+
+def test_a_call_into_a_function_the_second_parse_recovered_resolves(tmp_path) -> None:
+    repo = _repo(tmp_path / "r", {
+        "steps.c": ROOT_ERROR,
+        "main.c": "int step2(int mode);\nint main(void) { return step2(1); }\n",
+    })
+    records = _capture(repo, 1)
+    assert _calls(records["main.c"], "main") == {"step2": "steps.c"}
+    assert _calls(records["steps.c"], "after") == {"step0": "steps.c"}
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_qualifier_macro_after_a_star_is_not_the_parameter_name(tmp_path, parser) -> None:
+    # `float * GGML_RESTRICT s`: the grammar takes the macro for the name and leaves `s` in an
+    # error. No `T * A B` is valid, so `s` is the name — in definitions, in prototypes (which a
+    # macro in front of the type no longer blocks) and in the variables a body can't call.
+    src = (
+        "API void q(const float * GGML_RESTRICT x, block * RESTRICT y, int k);\n"
+        "static void dot(int n, float ** FAR s, size_t bs) { use(n, s); }\n"
+    )
+    rec = _parse(parser, tmp_path, "q.c", src)
+    fns = {f.name: f for f in rec.functions}
+    assert [(p.name, p.type) for p in fns["dot"].params] == [
+        ("n", "int"), ("s", "float"), ("bs", "size_t"),
+    ]
+    decl = next(s for s in rec.statements if s.nodeType == "declaration" and s.name == "q")
+    assert [d.name for d in decl.decorators] == ["API"]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_after_a_keyword_return_type_is_read_past(tmp_path, parser) -> None:
+    # `int ZEXPORT f(…)`: after a type made of keywords only the declarator can follow, so the
+    # word the grammar leaves in an error there is a calling-convention or export macro. With a
+    # type name in front (`uLong ZEXPORT f`) which word is the type is still unknown.
+    src = (
+        "extern int ZEXPORT unzGoTo(unzFile file, int pos);\n"
+        "unsigned long WINAPI tick(void);\n"
+        "int ZEXPORT unzOpen(const char *path) { return helper(1); }\n"
+        "const char * ZEXPORT zlibVersion(void) { return 0; }\n"
+        "uLong ZEXPORT adler32(uLong adler) { return 0; }\n"
+        "static void helper(int a) { }\n"
+    )
+    rec = _parse(parser, tmp_path, "z.c", src)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"unzOpen", "zlibVersion", "adler32", "helper"}
+    assert (fns["unzOpen"].returnType, [d.name for d in fns["unzOpen"].decorators]) == (
+        "int", ["ZEXPORT"],
+    )
+    assert [p.name for p in fns["unzOpen"].params] == ["path"]
+    assert [d.name for d in fns["zlibVersion"].decorators] == ["ZEXPORT"]
+    assert (fns["adler32"].returnType, fns["adler32"].decorators) == (None, [])
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [d.name for d in decls["unzGoTo"].decorators] == ["ZEXPORT"]
+    assert [d.name for d in decls["tick"].decorators] == ["WINAPI"]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_an_attribute_macro_after_a_prototype_is_its_decorator(tmp_path, parser) -> None:
+    # `CURL_PRINTF(1, 2)` expands to `__attribute__((format(printf, 1, 2)))`, which the grammar
+    # reads there; the macro broke the whole prototype. It is blanked for a second parse and
+    # becomes the decorator, with its arguments. A K&R definition and a call in a body are not
+    # touched.
+    src = (
+        "void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);\n"
+        "CURL_EXTERN int curl_mprintf(const char *format, ...)\n"
+        "  CURL_TEMP_PRINTF(1, 2);\n"
+        "int f(void) WARN_UNUSED_RESULT;\n"
+        "int body(int x) { if (x) LOG(x); return x; }\n"
+        "// a note (in parentheses)\n"
+        'DEPRECATED(API void old(int a), "use new");\n'
+    )
+    rec = _parse(parser, tmp_path, "m.h", src)
+    assert "old" in {s.name for s in rec.statements if s.nodeType == "declaration"}
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [(d.name, d.args) for d in decls["errorf"].decorators] == [("CURL_PRINTF", ["1", "2"])]
+    assert decls["errorf"].text == "void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);"
+    assert [d.name for d in decls["curl_mprintf"].decorators] == [
+        "CURL_EXTERN", "CURL_TEMP_PRINTF",
+    ]
+    assert [(d.name, d.args) for d in decls["f"].decorators] == [("WARN_UNUSED_RESULT", [])]
+    assert [f.name for f in rec.functions] == ["body"]
+
+
+def test_an_attribute_macro_after_a_member_is_not_a_field(tmp_path) -> None:
+    # In a class the grammar read `WARN_UNUSED_RESULT` as a field's name; the member is a method.
+    src = (
+        "struct S {\n"
+        "    int f(int a) WARN_UNUSED_RESULT;\n"
+        "    virtual void g() = 0;\n"
+        "    void h() const;\n"
+        "    int n;\n"
+        "};\n"
+    )
+    rec = _parse(CppParser(), tmp_path, "s.h", src)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"f", "g", "h"}
+    assert [d.name for d in fns["f"].decorators] == ["WARN_UNUSED_RESULT"]
+    assert fns["g"].decorators == [] and fns["h"].decorators == []
+    assert [s.name for s in rec.statements if s.nodeType == "field_declaration"] == ["n"]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_before_a_struct_return_type_is_its_decorator(tmp_path, parser) -> None:
+    # C splits `UNITTEST struct stsentry *f(…)` into `UNITTEST struct` and `stsentry *f(…)`,
+    # losing the keyword and the macro; C++ reads the macro as the type with `struct stsentry`
+    # in an error. A tag type can't follow a type, so the word in front is the macro.
+    src = (
+        "static UNITTEST struct stsentry *hsts_check(struct hsts *h, int n)\n{\n  return 0;\n}\n"
+        "CURL_EXTERN struct curl_slist *curl_slist_append(struct curl_slist *list,\n"
+        "                                                 const char *data);\n"
+        "API enum color pick(int a);\n"
+        "struct point *origin(void);\n"
+    )
+    rec = _parse(parser, tmp_path, "s.c", src)
+    fn = rec.functions[0]
+    assert (fn.name, fn.returnType, [d.name for d in fn.decorators]) == (
+        "hsts_check", "struct stsentry", ["UNITTEST"],
+    )
+    assert fn.isStatic is True
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [d.name for d in decls["curl_slist_append"].decorators] == ["CURL_EXTERN"]
+    assert [d.name for d in decls["pick"].decorators] == ["API"]
+    assert decls["origin"].decorators == []
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_an_attribute_before_an_initializer_is_read_past(tmp_path, parser) -> None:
+    # The grammar reads `__attribute__` in front of a declarator, not between it and `=`: the
+    # declaration broke and its error ran on over the functions after it. It is blanked for a
+    # second parse; on a file-scope variable it is the decorator.
+    src = (
+        "static const float lut[4] __attribute__((aligned(VLEN))) = { 1.f, 2.f, 3.f, 4.f };\n"
+        "static char buf[64] __attribute__((aligned(16)));\n"
+        "int after(int a) { return a; }\n"
+        "void kernel(void) {\n"
+        "    float acc[8] __attribute__((aligned(32))) = { 0.0f };\n"
+        "    if (acc[0] == lut[0]) use(acc);  /* x __attribute__((y)) = z */\n"
+        "}\n"
+        "int last(int b) { return after(b); }\n"
+    )
+    rec = _parse(parser, tmp_path, "k.c", src)
+    assert [f.name for f in rec.functions] == ["after", "kernel", "last"]
+    lut = next(s for s in rec.statements if s.name == "lut")
+    assert [(d.name, d.args) for d in lut.decorators] == [("aligned", ["VLEN"])]
+    assert lut.text.startswith("static const float lut[4] __attribute__((aligned(VLEN))) = {")
+    buf = next(s for s in rec.statements if s.name == "buf")
+    assert [(d.name, d.args) for d in buf.decorators] == [("aligned", ["16"])]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_more_attribute_macro_shapes_are_read_past(tmp_path, parser) -> None:
+    # Several attribute macros after a prototype; a deprecation macro with arguments between the
+    # return type and the name; an attribute on its own line before an initializer. A lower-case
+    # call after a parameter list is a function's name, never an attribute.
+    src = (
+        "CURLcode addf(struct dynbuf *s, const char *fmt, ...)\n"
+        "  WARN_UNUSED_RESULT CURL_PRINTF(2, 3);\n"
+        'CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()")\n'
+        "curl_formadd(struct curl_httppost **post, ...);\n"
+        "static const float one[8]\n    __attribute__((aligned(32))) = { 1.f };\n"
+        "int after(int a) { return a; }\n"
+        "int DEPRECATED_X(1) g(int b);\n"
+    )
+    rec = _parse(parser, tmp_path, "d.h", src)
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [(d.name, d.args) for d in decls["addf"].decorators] == [
+        ("WARN_UNUSED_RESULT", []), ("CURL_PRINTF", ["2", "3"]),
+    ]
+    assert [(d.name, d.args) for d in decls["curl_formadd"].decorators] == [
+        ("CURL_DEPRECATED", ["7.56.0", '"Use curl_mime_init()"']),
+    ]
+    assert [(d.name, d.args) for d in decls["one"].decorators] == [("aligned", ["32"])]
+    assert [f.name for f in rec.functions] == ["after"]
+    assert "DEPRECATED_X" not in decls  # not a prototype named after the macro
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_comment_before_a_line_continuation_does_not_end_a_define(tmp_path, parser) -> None:
+    # The grammar ends a `#define` at a `/* … */` right before a line's `\`; the rest of the body
+    # read as file-scope code and broke the function after it. The comments are blanked for a
+    # second parse; the macro's text keeps them.
+    src = (
+        "#define DECODE(p, len) do {                 \\\n"
+        "    if ((p)[0] < 254) {                      \\\n"
+        "        (len) = 1; /* one byte */            \\\n"
+        "    } else {                                 \\\n"
+        "        (len) = 5; /* five bytes */          \\\n"
+        "    }                                        \\\n"
+        "} while(0)\n"
+        "\n"
+        "int encode(unsigned char *p, unsigned int len) {\n"
+        "    return helper(p, len);\n"
+        "}\n"
+        "int helper(unsigned char *p, unsigned int len) { return len; }\n"
+    )
+    rec = _parse(parser, tmp_path, "z.c", src)
+    assert [f.name for f in rec.functions] == ["encode", "helper"]
+    macro = next(s for s in rec.statements if s.nodeType == "preproc_function_def")
+    assert (macro.name, macro.startLine, macro.endLine) == ("DECODE", 1, 7)
+    assert "/* five bytes */" in macro.text
+
+
+def test_stacked_macros_and_qualified_types_after_a_macro_are_read(tmp_path) -> None:
+    # Words before keyword types are all macros; a qualified or template type can't be a macro,
+    # so the word before it is one. C++ joins `MACRO type name(` into `type::name` with an
+    # inserted `::`: that is a free function named `name` (it was a method `type::name`
+    # returning the macro), with the type as `returnType` only when it is qualified.
+    src = (
+        "static __device__ __forceinline__ unsigned int vcmp(unsigned int a) { return a; }\n"
+        "static __dpct_inline__ sycl::half hmax(const sycl::half a) { return a; }\n"
+        "static ESIMD_INLINE sycl::esimd::simd<float, 16> unpack(int n) { return n; }\n"
+        "static A B float twice(int n) { return n; }\n"
+        "GGML_API ggml_backend_t backend_init(int device) { return 0; }\n"
+        "GGML_API ggml_backend_t backend_reg(void);\n"
+    )
+    rec = _parse(CppParser(), tmp_path, "g.hpp", src)
+    got = [(f.name, f.type, f.returnType, [d.name for d in f.decorators]) for f in rec.functions]
+    assert got == [
+        ("vcmp", "function", "unsigned int", ["__device__", "__forceinline__"]),
+        ("hmax", "function", "sycl::half", ["__dpct_inline__"]),
+        ("unpack", "function", "sycl::esimd::simd<float, 16>", ["ESIMD_INLINE"]),
+        ("twice", "function", "float", ["A", "B"]),
+        ("backend_init", "function", None, []),
+    ]
+    assert "backend_reg" in {s.name for s in rec.statements if s.nodeType == "declaration"}
+
+
+def test_a_call_to_a_function_the_grammar_joined_to_its_type_resolves(tmp_path) -> None:
+    repo = _repo(tmp_path / "r", {
+        "b.h": "GGML_API ggml_backend_t backend_init(int device);\n",
+        "b.cpp": '#include "b.h"\nGGML_API ggml_backend_t backend_init(int device) { return 0; }\n',
+        "m.cpp": '#include "b.h"\nint main() { backend_init(0); return 0; }\n',
+    })
+    assert _calls(_capture(repo, 1)["m.cpp"], "main") == {"backend_init": "b.cpp"}
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_deprecation_macro_on_an_enum_member_is_its_decorator(tmp_path, parser) -> None:
+    # `B_NSS CURL_DEPRECATED(8.3.0, "") = 3,`: the grammar put the macro and the value in errors,
+    # so the member lost its value. The macro is blanked for a second parse and is the
+    # member's decorator; the member keeps its `= value`.
+    src = (
+        "typedef enum {\n"
+        "  B_NONE = 0,\n"
+        '  B_NSS          CURL_DEPRECATED(8.3.0, "") = 3,\n'
+        "  B_OBS = 4,\n"
+        '  B_COPY         CURL_DEPRECATED(7.56.0, "Use curl_mime_name()"),\n'
+        "  B_LAST\n"
+        "} backend;\n"
+    )
+    rec = _parse(parser, tmp_path, "e.h", src)
+    members = {s.name: s for s in rec.statements if s.semanticType == "enum_member"}
+    assert list(members) == ["B_NONE", "B_NSS", "B_OBS", "B_COPY", "B_LAST"]
+    assert members["B_NSS"].text.endswith("= 3")
+    assert [(d.name, d.args) for d in members["B_NSS"].decorators] == [
+        ("CURL_DEPRECATED", ["8.3.0", '""']),
+    ]
+    assert [(d.name, d.args) for d in members["B_COPY"].decorators] == [
+        ("CURL_DEPRECATED", ["7.56.0", '"Use curl_mime_name()"']),
+    ]
+    assert members["B_OBS"].decorators == [] and members["B_LAST"].decorators == []
+
+
+def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
+    rec = _parse(
+        CParser(), tmp_path, "gz.c",
+        "int ZEXPORT gzclose(file)\n    gzFile file;\n{\n    return helper(file);\n}\n",
+    )
+    assert [(f.name, f.returnType, [d.name for d in f.decorators]) for f in rec.functions] == [
+        ("gzclose", "int", ["ZEXPORT"]),
+    ]
+
+
+def test_a_cpp_definition_misread_as_a_variable_by_a_qualifier_macro_is_read(tmp_path) -> None:
+    # With no parameter of an unambiguous type, C++ reads `run(Model * RESTRICT m)` as a
+    # variable initialised with `Model * RESTRICT` and the body as a stray block. The macro is
+    # blanked for a second parse, which reads the definition (a template one too).
+    src = (
+        "struct Model { int go(); };\n"
+        "int run(Model * RESTRICT m) { return m->go(); }\n"
+        "void unpack(tile_t * RESTRICT tile, const void * RESTRICT p) { use(tile); }\n"
+        "int run2(Model * RESTRICT m, int k) { return k; }\n"
+        "template<typename T>\nvoid fill(T * RESTRICT out) { out[0] = 0; }\n"
+        "int scale = width * HEIGHT;\n"
+    )
+    rec = _parse(CppParser(), tmp_path, "r.cpp", src)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"go", "run", "unpack", "run2", "fill"}
+    assert [(p.name, p.type) for p in fns["unpack"].params] == [("tile", "tile_t"), ("p", "void")]
+    assert [p.name for p in fns["run2"].params] == ["m", "k"]
+    assert "scale" in {s.name for s in rec.statements if s.nodeType == "declaration"}
+
+
+def test_a_receiver_written_with_a_qualifier_macro_is_typed(tmp_path) -> None:
+    repo = _repo(tmp_path / "r", {
+        "m.cpp": "struct Model { int go(); };\n"
+                 "int Model::go() { return 1; }\n"
+                 "int run(const Model * RESTRICT m) { return m->go(); }\n",
+    })
+    assert _calls(_capture(repo, 1)["m.cpp"], "run") == {"go": "m.cpp"}
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_line_in_a_struct_body_is_read_past(tmp_path, parser) -> None:
+    # `LOCKEDINT_MTX_DECLARE(mtx)` expands to a member (or nothing) and has no `;`; the grammar
+    # reads it as the type of the next field, which loses its own name and type.
+    src = (
+        "typedef struct counter_s {\n"
+        "\tLOCKEDINT_MTX_DECLARE(mtx)\n"
+        "\tlocked_u64_t accumbytes;\n"
+        "\tunsigned interval;\n"
+        "} counter_t;\n"
+    )
+    rec = _parse(parser, tmp_path, "counter.h", src)
+    assert [c.name for c in rec.classes] == ["counter_t"]
+    fields = [s for s in rec.statements if s.nodeType == "field_declaration"]
+    assert [s.name for s in fields] == ["accumbytes", "interval"]
+
+
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
 def test_file_scope_macros_are_statements_but_include_guards_are_not(tmp_path, parser) -> None:
     record = _parse(
@@ -452,7 +937,233 @@ def test_macros_follow_the_statement_gate(tmp_path) -> None:
     assert record.statements == []
 
 
-# -- calls into headers -------------------------------------------------------------------------
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_is_a_statement_wherever_it_is_defined(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "m.c" if parser.name == "c" else "m.cpp",
+        "#define TOP 1\n"
+        "int f(int x) {\n"
+        "#define LOCAL(a) ((a) + 1)\n"
+        "    return LOCAL(x);\n"
+        "}\n"
+        "struct s {\n"
+        "#define FIELD_MAX 8\n"
+        "    int v[FIELD_MAX];\n"
+        "};\n"
+        "#define TWICE(a) \\\n"
+        "    ((a) * 2)\n",
+    )
+    owner = {f.id: f.name for f in record.functions} | {c.id: c.name for c in record.classes}
+    owner[record.id] = "<file>"
+    macros = [
+        (s.nodeType, s.name, s.startLine, s.endLine, owner[s.parentId])
+        for s in record.statements if s.nodeType.startswith("preproc")
+    ]
+    assert sorted(macros, key=lambda m: m[2]) == [
+        ("preproc_def", "TOP", 1, 1, "<file>"),
+        ("preproc_function_def", "LOCAL", 3, 3, "f"),
+        ("preproc_def", "FIELD_MAX", 7, 7, "s"),
+        ("preproc_function_def", "TWICE", 10, 11, "<file>"),
+    ]
+    # A call to a macro stays unresolved: a macro is never a function.
+    assert [(c.name, c.path) for c in record.functions[0].calls] == [("LOCAL", None)]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_folded_into_a_keyword_type_is_not_the_return_type(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "t.c" if parser.name == "c" else "t.cpp",
+        "unsigned long ZEXPORT crc(int c) { return c; }\n"
+        "TARGET_ATTR\nlong long popcount(void *s) { return 0; }\n"
+        "unsigned long long plain(void) { return 0; }\n",
+    )
+    assert {f.name: f.returnType for f in record.functions} == {
+        "crc": "unsigned long",
+        "popcount": "long long",
+        "plain": "unsigned long long",
+    }
+
+
+def test_a_declaration_with_a_broken_declarator_is_not_named_after_a_parameter(tmp_path) -> None:
+    # Old zlib declares prototypes through a macro: `OF((args))` expands to `(args)`.
+    record = _parse(
+        CParser(), tmp_path, "zlib.h",
+        "int deflate OF((int strm, int flush));\n"
+        "int deflateEnd(int strm);\n"
+        # A type before the name, with a macro in front: the name is the word before `(`.
+        "API_FUNC size_type table_len(table *t);\n"
+        # An error in the initializer or after the name leaves the name intact.
+        "struct item items[] = {\n  {1},\n#ifdef EXTRA\n  {2},\n#endif\n};\n"
+        "oid_t mech_oid ALIGN8 = { 9, 0 };\n",
+    )
+    assert [s.name for s in record.statements if s.nodeType == "declaration"] == [
+        "deflateEnd", "table_len", "items", "mech_oid",
+    ]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_function_named_after_a_macro_before_its_name_gets_its_real_name(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "z.c" if parser.name == "c" else "z.cpp",
+        "voidpf INTERNAL zalloc(void *opaque, unsigned n) { return 0; }\n"
+        "int plain(int x) { return x; }\n"
+        # A macro between `*` and the name leaves the name intact.
+        "const char * EXPORT version(void) { return 0; }\n",
+    )
+    # `zalloc`: the grammar reads `INTERNAL` as the name, and the word right before `(` — the
+    # real name — is recovered from the error; `returnType` is then unknown.
+    assert [(f.name, f.returnType) for f in record.functions] == [
+        ("zalloc", None), ("plain", "int"), ("version", "char"),
+    ]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_in_front_of_the_type_keeps_the_declaration(tmp_path, parser) -> None:
+    # `API` is a macro the grammar takes for the type; the real type lands in an error. When
+    # that is a type keyword (`int`), the type and the macro are certain: `returnType` is kept
+    # and the macro is a decorator. After a type name (`API node *`), which word is the macro
+    # can't be told: neither is recorded.
+    record = _parse(
+        parser,
+        tmp_path,
+        "api.c" if parser.name == "c" else "api.cpp",
+        "API int size_of(list *l) { return 0; }\n"
+        "API node *first(list *l) { return 0; }\n"
+        "static INLINE int fast(int x) { return x; }\n"
+        "API_FUNC size_type table_len(table *t);\n"
+        "API void reset(list *l);\n"
+        "static ATOMIC int counter = 0;\n"
+        # Two declarators (a calling convention before the name): no name to show, skipped.
+        "IMPORT errno_t __cdecl reopen(FILE **f);\n"
+        "int use(list *l) { return size_of(l) + fast(1); }\n",
+    )
+    assert [
+        (f.name, f.returnType, f.isStatic, [p.name for p in f.params], [d.name for d in f.decorators])
+        for f in record.functions
+    ] == [
+        ("size_of", "int", None, ["l"], ["API"]),
+        ("first", None, None, ["l"], []),
+        ("fast", "int", True, ["x"], ["INLINE"]),
+        ("use", "int", None, ["l"], []),
+    ]
+    assert [(c.name, c.path) for c in record.functions[-1].calls] == [
+        ("size_of", record.path), ("fast", record.path),
+    ]
+    assert [
+        (s.name, [d.name for d in s.decorators])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [("table_len", []), ("reset", ["API"]), ("counter", ["ATOMIC"])]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_folded_into_unsigned_keeps_the_declaration(tmp_path, parser) -> None:
+    # `LUALIB_API unsigned int f` reads as the type `LUALIB_API unsigned` with `int` in an error.
+    record = _parse(
+        parser,
+        tmp_path,
+        "seed.c",
+        "LUALIB_API unsigned int make_seed(lua_State *L) { return 0; }\n"
+        "local unsigned char *h2b(const char *hex) { return 0; }\n"
+        "API signed char sign_of(int x);\n"
+        # A type name, not a keyword, in the error: which word is the macro can't be told.
+        "API unsigned seed_t other(void);\n",
+    )
+    assert [
+        (f.name, f.returnType, [p.name for p in f.params], [d.name for d in f.decorators])
+        for f in record.functions
+    ] == [
+        ("make_seed", "unsigned int", ["L"], ["LUALIB_API"]),
+        ("h2b", "unsigned char", ["hex"], ["local"]),
+    ]
+    assert [
+        (s.name, [d.name for d in s.decorators])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [("sign_of", ["API"])]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_wrapped_around_a_declaration_is_read_past(tmp_path, parser) -> None:
+    # The grammar can't read a declaration as a macro argument; its error used to run on over
+    # the clean declarations after the wrapper.
+    record = _parse(
+        parser,
+        tmp_path,
+        "api.h",
+        "LLAMA_API int a1(int x);\n"
+        'DEPRECATED(LLAMA_API int load(const char * p, int q), "use open");\n'
+        "LLAMA_API int a2(int x);\n"
+        "LLAMA_API struct model * a3(const char * p);\n"
+        "DEPRECATED(LLAMA_API int32_t n_vocab(const struct vocab * v), // classification\n"
+        '    "use vocab_n");\n'
+        "GGML_DEPRECATED(\n"
+        "    GGML_API void add1(struct tensor * a),\n"
+        '    "use add");\n'
+        "LLAMA_API int a4(void);\n"
+        # Inside a body, a call is a call.
+        'int f(void) { CHECK(g(1), "msg"); return 0; }\n',
+    )
+    assert [
+        (s.name, [(d.name, d.args) for d in s.decorators if d.name.endswith("DEPRECATED")])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [
+        ("a1", []),
+        ("load", [("DEPRECATED", ['"use open"'])]),
+        ("a2", []),
+        ("a3", []),
+        ("n_vocab", [("DEPRECATED", ['"use vocab_n"'])]),
+        ("add1", [("GGML_DEPRECATED", ['"use add"'])]),
+        ("a4", []),
+    ]
+    assert [(f.name, [c.name for c in f.calls]) for f in record.functions] == [("f", ["CHECK", "g"])]
+    assert [s.startLine for s in record.statements if s.name == "add1"] == [8]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_macro_prefixed_function_is_a_call_target_in_other_files(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/api.h": "API int size_of(list *l);\nAPI_FUNC size_type table_len(table *t);\n",
+            "lib/api.c": (
+                '#include "api.h"\n'
+                "API int size_of(list *l) { return 0; }\n"
+                "API_FUNC size_type table_len(table *t) { return 0; }\n"
+            ),
+            "app/main.c": (
+                '#include "api.h"\nint main(void) { return size_of(0) + table_len(0); }\n'
+            ),
+        },
+    )
+    main = _capture(repo, jobs)["app/main.c"]
+    assert _calls(main, "main") == {"size_of": "lib/api.c", "table_len": "lib/api.c"}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_row_of_macro_calls_is_not_a_function(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "ops.h": (
+                "#define GEN(name) int name(int x) { return x; }\n"
+                # A type written through a macro is still a type: this is a real function.
+                "STACK_OF(cert) *certs(void) { return 0; }\n"
+                # The row and the function after it read as one function named `GEN`; the
+                # real function's name is lost in it, so nothing is emitted for either.
+                "GEN(add)\nGEN(sub)\n"
+                "static inline int real_fn(int x) { return x; }\n"
+            ),
+            "use.c": '#include "ops.h"\nint use(void) { return GEN(1) + certs() != 0; }\n',
+        },
+    )
+    records = _capture(repo, jobs)
+    assert [f["name"] for f in records["ops.h"]["functions"]] == ["certs"]
+    assert _calls(records["use.c"], "use") == {"GEN": None, "certs": "ops.h"}
 
 
 @pytest.mark.parametrize("jobs", [1, 2])
@@ -478,6 +1189,64 @@ def test_a_call_resolves_into_a_header_only_when_the_file_includes_it(tmp_path, 
     assert _calls(records["src/cli.c"], "cli") == {"sdslen": None}
     assert _calls(records["src/none.c"], "none") == {"sdslen": None}
     assert _calls(records["src/user.c"], "user") == {"util_max": "src/util.c"}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_call_to_an_inline_member_resolves_where_its_header_is_seen(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "lib/cache.hpp": (
+                "class Cache {\n"
+                "public:\n"
+                "  int hits() const { return n_; }\n"
+                "  void touch() { n_ = hits() + 1; }\n"
+                "  static Cache *global() { return nullptr; }\n"
+                "  int n_ = 0;\n"
+                "};\n"
+                "class LruCache : public Cache { public: void evict() { touch(); } };\n"
+            ),
+            "app/main.cpp": (
+                '#include "../lib/cache.hpp"\n'
+                "int report(Cache &c) { c.touch(); return c.hits() + Cache::global()->n_; }\n"
+            ),
+            # Built against a copy cog doesn't see: `<cache.hpp>` names no repo file.
+            "app/other.cpp": "#include <cache.hpp>\nint other(Cache &c) { return c.hits(); }\n",
+        },
+    )
+    records = _capture(repo, jobs)
+    assert _calls(records["app/main.cpp"], "report") == {
+        "touch": "lib/cache.hpp", "hits": "lib/cache.hpp", "global": "lib/cache.hpp",
+    }
+    assert _calls(records["lib/cache.hpp"], "touch") == {"hits": "lib/cache.hpp"}
+    assert _calls(records["lib/cache.hpp"], "evict") == {"touch": "lib/cache.hpp"}  # inherited
+    assert _calls(records["app/other.cpp"], "other") == {"hits": None}
+
+
+def test_a_variable_named_like_a_class_is_typed_not_read_as_the_class(tmp_path) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "lib/arena.hpp": "struct arena { int parse() const; };\n",
+            "lib/arena.cpp": '#include "arena.hpp"\nint arena::parse() const { return 0; }\n',
+            "lib/parser.hpp": "class parser { public: int parse() { return 1; } };\n",
+            "app/main.cpp": (
+                '#include "../lib/arena.hpp"\n#include "../lib/parser.hpp"\n'
+                "int run(const arena & parser) { return parser.parse(); }\n"
+                "int run_auto() { static const auto parser = make(); return parser.parse(); }\n"
+                "int run_cast(void *p) {\n"
+                "  const auto * parser = static_cast<const arena *>(p); return parser->parse();\n"
+                "}\n"
+                "int run_struct() { struct arena parser; return parser.parse(); }\n"
+            ),
+        },
+    )
+    records = _capture(repo, 1)
+    assert _calls(records["app/main.cpp"], "run") == {"parse": "lib/arena.cpp"}
+    assert _calls(records["app/main.cpp"], "run_cast") == {"parse": "lib/arena.cpp"}
+    assert _calls(records["app/main.cpp"], "run_struct") == {"parse": "lib/arena.cpp"}
+    # Its type unknown, the local still isn't the class.
+    assert _calls(records["app/main.cpp"], "run_auto") == {"make": None, "parse": None}
 
 
 def test_the_include_closure_crosses_languages_and_cycles(tmp_path) -> None:
@@ -545,8 +1314,88 @@ def test_prototypes_are_declaration_statements_not_functions(tmp_path, parser) -
         ("declaration", "list_free"),
         ("declaration", "list_parenthesized"),
         ("declaration", "forward"),
+        ("declaration", "lua_gettop"),
     ]
     assert record.functions == []
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_parenthesized_name_after_a_macro_and_a_keyword_type_is_recovered(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "lapi.c",
+        "LUA_API void (lua_settop) (lua_State *L, int idx);\n"
+        "LUA_API unsigned int (lua_rawlen) (lua_State *L, int idx);\n"
+        # A type name, not a keyword, in front: it may be a type and a name-building macro.
+        "LUALIB_API lua_Integer (luaL_len) (lua_State *L, int idx);\n"
+        "LUA_API int (lua_gettop) (lua_State *L) { return 0; }\n"
+        "LUA_API lua_Number (lua_tonumber) (lua_State *L) { return 0; }\n",
+    )
+    assert [
+        (s.name, [d.name for d in s.decorators])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [("lua_settop", ["LUA_API"]), ("lua_rawlen", ["LUA_API"])]
+    assert [
+        (f.name, f.returnType, [d.name for d in f.decorators], [p.name for p in f.params])
+        for f in record.functions
+    ] == [("lua_gettop", "int", ["LUA_API"], ["L"])]
+
+
+def test_a_parenthesized_member_name_after_a_macro_is_recovered(tmp_path) -> None:
+    record = _parse(
+        CppParser(),
+        tmp_path,
+        "k.h",
+        "class K {\n"
+        "  API int (f) (int a);\n"
+        "  API unsigned long (g) (int a) { return 0; }\n"
+        "  API size_type (h) (int a);\n"
+        "};\n",
+    )
+    assert [
+        (f.name, f.returnType, [d.name for d in f.decorators]) for f in record.functions
+    ] == [("f", "int", ["API"]), ("g", "unsigned long", ["API"])]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_definition_with_a_parenthesized_name_is_named_without_them(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/lib.c": (
+                "int (plain)(int a) { return a; }\n"
+                "LUALIB_API lua_State *(luaL_newstate) (void) { return 0; }\n"
+                # A pointer to a function is a variable, not a definition.
+                "int (*hook)(int) = 0;\n"
+            ),
+            "app/main.c": "int main(void) { return plain(1) + (luaL_newstate() != 0); }\n",
+        },
+    )
+    files = _capture(repo, jobs)
+    assert [f["name"] for f in files["lib/lib.c"]["functions"]] == ["plain", "luaL_newstate"]
+    assert _calls(files["app/main.c"], "main") == {
+        "plain": "lib/lib.c", "luaL_newstate": "lib/lib.c",
+    }
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_parenthesized_name_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/lapi.h": "LUA_API int (lua_gettop) (lua_State *L);\n",
+            "lib/lapi.c": (
+                '#include "lapi.h"\n'
+                "LUA_API int (lua_gettop) (lua_State *L) { return 0; }\n"
+                "int lua_top1(lua_State *L) { return lua_gettop(L) + 1; }\n"
+            ),
+            "app/main.c": '#include "lapi.h"\nint main(void) { return lua_gettop(0); }\n',
+        },
+    )
+    files = _capture(repo, jobs)
+    assert _calls(files["app/main.c"], "main") == {"lua_gettop": "lib/lapi.c"}
+    assert _calls(files["lib/lapi.c"], "lua_top1") == {"lua_gettop": "lib/lapi.c"}
 
 
 def test_prototypes_follow_the_statement_gate(tmp_path) -> None:
@@ -573,6 +1422,32 @@ def test_a_static_free_function_is_static(tmp_path, parser) -> None:
         "fast": True,
         "api": None,
     }
+
+
+def test_a_static_member_function_is_static_where_static_is_written(tmp_path) -> None:
+    record = _parse(
+        CppParser(),
+        tmp_path,
+        "pool.cpp",
+        "class Pool {\n"
+        "public:\n"
+        "    static Pool& instance();\n"
+        "    static int count() { return 0; }\n"
+        "    template <typename U> static U conv(U u) { return u; }\n"
+        "    int size() const;\n"
+        "};\n"
+        "Pool& Pool::instance() { static Pool p; return p; }\n"
+        "int Pool::size() const { return 0; }\n",
+    )
+    assert [(f.name, f.startLine, f.isStatic) for f in record.functions] == [
+        ("instance", 3, True),
+        ("count", 4, True),
+        ("conv", 5, True),
+        ("size", 6, None),
+        # C++ forbids `static` on an out-of-class definition, so it is not known there.
+        ("instance", 8, None),
+        ("size", 9, None),
+    ]
 
 
 # -- typedef'd types ----------------------------------------------------------------------------
@@ -671,3 +1546,301 @@ def test_a_lambda_or_loop_variable_call_is_not_linked_in_cpp(tmp_path) -> None:
         },
     )
     assert _calls(_capture(repo, 1)["main.cpp"], "main") == {"each": None, "step": None}
+
+
+def test_struct_with_a_macro_before_its_name_is_captured(tmp_path) -> None:
+    # `struct API Tensor { … };` reads as a function named `Tensor` until the macro is
+    # blanked and the file read again.
+    rec = _parse(CParser(), tmp_path, "t.c", "struct API Tensor { int rank; };\nunion API U { int a; };\n")
+    assert {c.name: c.type for c in rec.classes} == {"Tensor": "struct", "U": "union"}
+    assert "rank" in {s.name for s in rec.statements}
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_attributes_and_certain_macros_are_decorators(tmp_path, parser) -> None:
+    # Attributes the grammar parses become decorators with their arguments, in source order,
+    # also one after the parameter list. A macro folded after `unsigned long` is certain too.
+    record = _parse(
+        parser,
+        tmp_path,
+        "attr.c" if parser.name == "c" else "attr.cpp",
+        "static __attribute__((noinline, format(printf, 2, 3))) int logf2(const char *f, int a);\n"
+        "void die(const char *m) __attribute__((noreturn));\n"
+        "unsigned long ZEXPORT crc(unsigned long c) { return c; }\n"
+        "uLong ZEXPORT adler(uLong a) { return a; }\n",
+    )
+    decorators = {
+        s.name: [(d.name, d.args) for d in s.decorators]
+        for s in [*record.statements, *record.functions] if s.name
+    }
+    assert decorators["logf2"] == [("noinline", []), ("format", ["printf", "2", "3"])]
+    assert decorators["die"] == [("noreturn", [])]
+    assert decorators["crc"] == [("ZEXPORT", [])]
+    assert decorators["adler"] == []  # `uLong` or `ZEXPORT`: either could be the macro
+
+
+def test_a_prototype_wrapped_in_a_parameter_macro_is_not_named_after_it(tmp_path) -> None:
+    # Old-style headers wrap the parameter list in a macro: `int f OF((int a));`. With unnamed
+    # parameters it reads as a function named `OF` whose one parameter has no type. Skipped:
+    # no statement named after the macro, and no decorator taken from the real name.
+    record = _parse(
+        CParser(), tmp_path, "of.h",
+        "local int gz_init OF((gz_statep));\n"
+        "long call_seek OF((const def *p, int o));\n"
+        "typedef voidpf (ZCALLBACK *open_func) OF((voidpf opaque, int mode));\n"
+        "int kept(int a);\n",
+    )
+    assert [s.name for s in record.statements if s.nodeType == "declaration"] == ["kept"]
+    # The typedef stays a statement (its text is the API), without a name taken from `OF`.
+    assert [s.name for s in record.statements if s.nodeType == "type_definition"] == [None]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_keyword_is_never_a_declared_name(tmp_path, parser) -> None:
+    # A macro the grammar can't place runs into the next statement: `LOCALS` (no `;`) then
+    # `if (a == 1) {…}` reads as a variable `if`, `OF((void))` as one named `void`. The
+    # statements stay (their text is the code), without a name.
+    record = _parse(
+        parser,
+        tmp_path,
+        "kw.c" if parser.name == "c" else "kw.cpp",
+        "void makefixed OF((void));\n"
+        "void f(int a) {\n"
+        "    LOCALS\n"
+        "    if (a == 1) { g(); }\n"
+        "    int count = 1;\n"
+        "}\n",
+    )
+    names = {s.name for s in record.statements if s.nodeType == "declaration"}
+    assert names & {"if", "void", "int"} == set()
+    assert "count" in names
+
+
+def test_a_word_reserved_only_in_cpp_is_a_name_in_c(tmp_path) -> None:
+    record = _parse(CParser(), tmp_path, "new.c", "void f(void) { int new = 1; char *typename = 0; }\n")
+    assert {"new", "typename"} <= {s.name for s in record.statements}
+
+
+#: A function whose braces two `#ifdef` blocks split: one opens a brace (`} else {`), a later one
+#: closes it. The compiler sees both or neither; the grammar reads both and can't match them.
+SPLIT_BRACES = """static void dump(int kind, int a) {
+  switch (kind) {
+  case 1: {
+    if (a) {
+      put(1);
+    } else {
+#ifdef USE_DEC
+      const char *lit = literal();
+      if (lit) {
+        put_lit(lit);
+      } else {
+#endif
+        double d = value();
+        if (d != d) {
+          put(2);
+        } else {
+          put(3);
+        }
+      }
+#ifdef USE_DEC
+    }
+#endif
+    break;
+  }
+  default:
+    put(4);
+  }
+}
+
+#ifdef _WIN32
+int platform(void) { return 1; }
+#else
+int platform(void) { return 2; }
+#endif
+
+void after_one(int y) { use(y); }
+void after_two(int z) { dump(z, 1); }
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_function_whose_braces_a_conditional_splits_ends_where_it_ends(tmp_path, parser) -> None:
+    # Read once more with each conditional resolved to its first branch, the function ends at
+    # its own `}`: the functions after it are captured, their calls no longer credited to it.
+    # Those come from that second reading, so of `platform` only the first branch's is there
+    # (before, neither was: both sat inside `dump`).
+    record = _parse(parser, tmp_path, "split.c" if parser.name == "c" else "split.cpp", SPLIT_BRACES)
+    fns = [(f.name, f.startLine, f.endLine) for f in record.functions]
+    assert fns == [("dump", 1, 28), ("platform", 31, 31), ("after_one", 36, 36), ("after_two", 37, 37)]
+    dump = record.functions[0]
+    assert {c.name for c in dump.calls} == {"put", "literal", "put_lit", "value"}
+    assert [(c.name, c.path) for c in record.functions[-1].calls] == [("dump", record.path)]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_function_after_split_braces_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {"src/split.c": SPLIT_BRACES, "src/use.c": "void go(void) { after_one(1); }\n"},
+    )
+    assert _calls(_capture(repo, jobs)["src/use.c"], "go") == {"after_one": "src/split.c"}
+
+
+def test_a_conditional_outside_a_split_function_keeps_both_branches(tmp_path) -> None:
+    # Only the span a split function wrongly covered is read from the second parse: a function
+    # defined in both branches elsewhere in the file keeps both definitions.
+    text = (
+        "#ifdef _WIN32\nint platform(void) { return 1; }\n#else\nint platform(void) { return 2; }\n#endif\n"
+        + SPLIT_BRACES.split("#ifdef _WIN32")[0]
+    )
+    record = _parse(CParser(), tmp_path, "both.c", text)
+    assert [f.name for f in record.functions] == ["platform", "platform", "dump"]
+    assert record.functions[2].endLine == 33
+
+
+#: curl's shape: an `else if` written inside an `#ifndef` can't be attached by the grammar. In a
+#: file this small the function stays a function and its body is repaired; in curl's `http.c` the
+#: error reaches file scope (see `LOST_FILE`).
+LOST_TO_A_CONDITIONAL = """#include "setup.h"
+
+#ifndef DISABLE_HTTP
+
+struct auth { int avail; int picked; };
+
+static int has_bearer(int c) { return c; }
+
+static int pick(struct auth *a, int creds)
+{
+  if(a->avail & 1)
+    a->picked = 1;
+#ifndef DISABLE_BEARER
+  else if((a->avail & 2) && has_bearer(creds))
+    a->picked = 2;
+#endif
+  else
+    a->picked = 0;
+  return a->picked;
+}
+
+#ifdef _WIN32
+static int platform(void) { return 1; }
+#else
+static int platform_posix(void) { return 2; }
+#endif
+
+#define HTTP_MAX 8
+
+int http_done(struct auth *a) { return pick(a, platform()); }
+
+#endif
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_what_a_conditional_lost_at_file_scope_is_captured(tmp_path, parser) -> None:
+    record = _parse(parser, tmp_path, "http.c", LOST_TO_A_CONDITIONAL)
+    assert [c.name for c in record.classes] == ["auth"]
+    # Only the lost region is read from the second parse: the `#ifdef _WIN32` after it parses
+    # normally and keeps both branches.
+    assert [f.name for f in record.functions] == [
+        "has_bearer", "pick", "platform", "platform_posix", "http_done",
+    ]
+    pick = record.functions[1]
+    assert (pick.startLine, pick.endLine) == (9, 20)
+    assert [(c.name, c.path) for c in pick.calls] == [("has_bearer", "http.c")]
+    assert [s.name for s in record.statements if s.nodeType == "preproc_def"] == ["HTTP_MAX"]
+
+
+#: ggml-hexagon's shape: a split brace in a function inside a file-wide `#ifndef` — the error
+#: reaches file scope and swallows the function itself, so no function body is there to repair.
+LOST_FILE = """#ifndef NO_HEX
+static int first(void) { return 0; }
+
+static int mode_from_str(const char * s) {
+    for (int i = 0; i < 3; i++) {
+#if defined(_MSC_VER)
+        if (_stricmp(s, names[i]) == 0) {
+#else
+        if (strcasecmp(s, names[i]) == 0) {
+#endif
+            return i;
+        }
+    }
+    return -1;
+}
+
+struct session { int n; };
+
+int hex_last(void) { return first(); }
+#endif
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_file_lost_to_a_split_brace_is_captured(tmp_path, parser) -> None:
+    record = _parse(parser, tmp_path, "hex.c", LOST_FILE)
+    assert [c.name for c in record.classes] == ["session"]
+    assert [(f.name, f.startLine, f.endLine) for f in record.functions] == [
+        ("first", 2, 2), ("mode_from_str", 4, 15), ("hex_last", 19, 19),
+    ]
+    assert [c.name for c in record.functions[1].calls] == ["_stricmp"]  # the first branch
+    assert [(c.name, c.path) for c in record.functions[2].calls] == [("first", "hex.c")]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_what_the_second_parse_also_misreads_is_not_supplied(tmp_path, parser) -> None:
+    # The grammar can't read an attribute between a declarator and its initializer: in the
+    # second parse too, `lut`'s head reads as a declaration with its `{` lost in an error. It
+    # stays lost rather than becoming a prototype named `lut`.
+    text = LOST_FILE.replace(
+        "struct session { int n; };\n",
+        "static int lut(int i) {\n"
+        "    static const int t[2] __attribute__((aligned(128))) = { 1, 2 };\n"
+        "    return t[i];\n"
+        "}\n\n"
+        "struct session { int n; };\n",
+    )
+    record = _parse(parser, tmp_path, "hex.c", text)
+    assert [f.name for f in record.functions] == ["first", "mode_from_str", "hex_last"]
+    assert [
+        s.name for s in record.statements if s.nodeType == "declaration" and s.parentId == "hex.c"
+    ] == []
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_function_lost_to_a_conditional_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/http.c": LOST_TO_A_CONDITIONAL,
+            "lib/hex.c": LOST_FILE,
+            "lib/http.h": "int http_done(struct auth *a);\nint hex_last(void);\n",
+            "app/main.c": (
+                '#include "../lib/http.h"\n'
+                "int main(void) { return http_done(0) + hex_last(); }\n"
+            ),
+        },
+    )
+    assert _calls(_capture(repo, jobs)["app/main.c"], "main") == {
+        "http_done": "lib/http.c", "hex_last": "lib/hex.c",
+    }
+
+
+def test_a_class_after_split_braces_is_captured(tmp_path) -> None:
+    # Everything in the span the split function covered comes from the second parse: a class
+    # with its methods, inside its namespace, as well as functions.
+    text = SPLIT_BRACES.split("#ifdef _WIN32")[0] + (
+        "namespace ui {\n"
+        "    struct spinner {\n"
+        "        spinner() { start(); }\n"
+        "        ~spinner() { stop(); }\n"
+        "    };\n"
+        "    static void show(int m) { log(m); }\n"
+        "}\n"
+    )
+    record = _parse(CppParser(), tmp_path, "ui.cpp", text)
+    assert [(c.name, c.startLine, c.endLine) for c in record.classes] == [("spinner", 31, 34)]
+    assert [(f.name, f.type) for f in record.functions] == [
+        ("dump", "function"), ("spinner", "constructor"), ("~spinner", "method"),
+        ("show", "function"),
+    ]

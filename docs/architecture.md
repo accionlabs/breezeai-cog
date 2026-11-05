@@ -263,7 +263,8 @@ Additive detectors can add their own facts to it by registering them (`register_
 
 A parser reads its own language's index, and after it the indexes of the languages it lists in
 `related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
-resolves, and C reads the C++ index for the functions defined in `extern "C"`.
+resolves, and C reads the C++ index for the functions defined in `extern "C"`. CUDA reads the
+C++ and C indexes, so a `.cu` file's includes and calls resolve into both.
 
 > **Decision —** a parser reads related languages' indexes only after its own, and binds a name
 > from them only when they agree on one file.
@@ -958,7 +959,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. The one exception is TypeScript's `handler_locator`, which re-parses a file only when a record names a handler with no location — in practice a few route files per repo. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation macro before a function's name, `void DEPRECATED(…) f(…);`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |
@@ -1069,7 +1070,7 @@ src/breezeai_cog/
 │  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
 │  │  php_route_common.py, php_data_access_common.py, php_http_common.py
 │  │                               helpers shared by several frameworks or libraries
-│  ├─ cfamily_common/              the extraction and index C and C++ share
+│  ├─ cfamily_common/              the extraction and index C, C++ and CUDA share
 │  ├─ <lang>/                      language parsers
 │  ├─ <lang>_<framework>/          framework parsers
 │  └─ <lang>_<library>/            detector-only packages: a library's additive detectors
@@ -1097,7 +1098,7 @@ flowchart TD
 Dependencies point **one way**: entry points → services → core → parsers → schemas. Parsers
 never import from `core/`, `services/` or `server/`. Code shared between framework parsers
 should live in a shared module (like `vertx_common.py`) rather than one framework importing
-from another. The same holds between languages: C and C++ share their extraction through
+from another. The same holds between languages: C, C++ and CUDA share their extraction through
 `cfamily_common/`, which each subclasses with its own grammar, index and evidence.
 
 **Change zones.** How much review a change needs depends on where it lands:
@@ -1107,7 +1108,7 @@ from another. The same holds between languages: C and C++ share their extraction
 | **Parser-local** | `parsers/<lang>_<framework>/`, `parsers/<lang>_<library>/`, its test file | That parser only (a library package's detectors: see *Additive detector*) |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
-| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C and C++), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.

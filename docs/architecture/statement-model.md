@@ -178,6 +178,22 @@ String q = "SELECT id, total FROM orders WHERE id = ?";
 ```
 → `nodeType: local_variable_declaration`, `semanticType: query_statement`, `name: q`.
 
+### Languages that skip the name match
+
+The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `session`, `repo`).
+Some languages have no naming convention to rely on, so they skip those steps and record such
+calls only through evidence-based detectors (an import, a declared type):
+
+| Language | Skips | Recorded instead by |
+|---|---|---|
+| PHP | HTTP and ORM | `php/http_calls.py`, `php/data_access.py` |
+| Go | ORM | `go_database/access.py` (the receiver's declared type) |
+| C, C++ | HTTP and ORM | nothing yet, so they have none |
+
+In C++, `web_http.post("/v1/orders", handler)` registers a server route and `sessions.get(id)` reads
+a map; a name match would record both as outbound HTTP calls. Raw SQL detection still applies to
+every language, because it needs SQL structure, not a name.
+
 ### Several calls in one statement
 
 A statement holds a **single** `semanticType`. When one statement contains several classified
