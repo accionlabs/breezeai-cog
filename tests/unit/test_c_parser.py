@@ -729,6 +729,33 @@ def test_an_attribute_before_an_initializer_is_read_past(tmp_path, parser) -> No
     assert [(d.name, d.args) for d in buf.decorators] == [("aligned", ["16"])]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_more_attribute_macro_shapes_are_read_past(tmp_path, parser) -> None:
+    # Several attribute macros after a prototype; a deprecation macro with arguments between the
+    # return type and the name; an attribute on its own line before an initializer. A lower-case
+    # call after a parameter list is a function's name, never an attribute.
+    src = (
+        "CURLcode addf(struct dynbuf *s, const char *fmt, ...)\n"
+        "  WARN_UNUSED_RESULT CURL_PRINTF(2, 3);\n"
+        'CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()")\n'
+        "curl_formadd(struct curl_httppost **post, ...);\n"
+        "static const float one[8]\n    __attribute__((aligned(32))) = { 1.f };\n"
+        "int after(int a) { return a; }\n"
+        "int DEPRECATED_X(1) g(int b);\n"
+    )
+    rec = _parse(parser, tmp_path, "d.h", src)
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [(d.name, d.args) for d in decls["addf"].decorators] == [
+        ("WARN_UNUSED_RESULT", []), ("CURL_PRINTF", ["2", "3"]),
+    ]
+    assert [(d.name, d.args) for d in decls["curl_formadd"].decorators] == [
+        ("CURL_DEPRECATED", ["7.56.0", '"Use curl_mime_init()"']),
+    ]
+    assert [(d.name, d.args) for d in decls["one"].decorators] == [("aligned", ["32"])]
+    assert [f.name for f in rec.functions] == ["after"]
+    assert "DEPRECATED_X" not in decls  # not a prototype named after the macro
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",

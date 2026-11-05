@@ -521,8 +521,8 @@ C++.
 > is blanked in the shared second parse; on a file-scope variable it is the decorator (`aligned`
 > with `VLEN`). The grammar reads `__attribute__` in front of a declarator but not there: the
 > declaration breaks and its error runs on over what follows, often the whole file. A candidate
-> is `__attribute__((…))`, or before `=` an attribute macro in capitals, right after a name or
-> `]`, where the grammar failed on it; before `;` only `__attribute__` itself counts, since a
+> is `__attribute__((…))` (also on the next line), or before `=` an attribute macro in capitals,
+> right after a name or `]`, where the grammar failed on it; before `;` only `__attribute__` itself counts, since a
 > macro there can be a parameter list (`int f OF((int a));`). The blank is kept only where a
 > declaration then reads whole through that `=` or `;`.
 > **Why:** aligned buffers are written this way in SIMD and DSP code: llama.cpp's Hexagon
@@ -607,18 +607,30 @@ C++.
 > of their 600 public prototypes. The notice is what an agent needs to know about a deprecated
 > function. **Cost:** such a file is parsed twice (sharing the class-head parse).
 
-> **Decision —** an attribute macro after a declaration's parameter list (`void errorf(const
-> char *fmt, ...) CURL_PRINTF(1, 2);`, `int f(void) WARN_UNUSED_RESULT;`) is blanked in the same
-> second parse, and becomes the declaration's decorator with its arguments. Such a macro
-> expands to `__attribute__((…))`, which the grammar reads there, but as a macro it breaks the
-> prototype (or, in a class, becomes a field named after the macro). A candidate is `NAME(…)`,
-> or a bare word in capitals, between a `)` and `;`, outside a function body, where the grammar
-> failed on it or cut the declaration before it short; the blank is kept only where the
-> declaration then parses whole through that `;`. A K&R definition (`int f(a) int a;`) is not a
-> candidate. The macro is read from the original source, between the declarator and the `;`.
+> **Decision —** attribute macros after a declaration's parameter list (`void errorf(const
+> char *fmt, ...) CURL_PRINTF(1, 2);`, `int f(void) WARN_UNUSED_RESULT CURL_PRINTF(1, 2);`) are
+> blanked in the same second parse, and become the declaration's decorators with their
+> arguments. Such a macro expands to `__attribute__((…))`, which the grammar reads there, but as
+> a macro it breaks the prototype (or, in a class, becomes a field named after the macro). A
+> candidate is a run of macros — `NAME(…)` in capitals or `__`-prefixed (`__printflike(1, 2)`),
+> or a bare word in capitals — between the `)` of a real parameter list and `;`, outside a
+> function body, where the grammar failed on it or cut the declaration before it short; the
+> blank is kept only where the declaration then parses whole through that `;`. A lower-case word
+> there is a K&R parameter or a function's name (`int MACRO(1) g(int b);`), never an attribute.
+> The macros are read from the original source, between the declarator and the `;`.
 > **Why:** printf-format and unused-result macros are common on C library prototypes: curl lost
 > about 60 of its internal and public prototypes this way. **Cost:** such a file is parsed twice
 > (sharing the class-head parse).
+
+> **Decision —** a macro with arguments between a return type and the function's name
+> (`CURL_EXTERN void CURL_DEPRECATED(7.56.0, "Use curl_mime_free()") curl_formfree(…);`) is
+> blanked in the same second parse and becomes the function's decorator with its arguments —
+> how a library marks a function deprecated, and with which replacement. A candidate is a macro
+> in capitals with arguments, after a word and right before a name and `(`, outside a function
+> body, where the grammar failed on it; the blank is kept only where that name then names a
+> function outside any error.
+> **Why:** curl's deprecated form and socket APIs were lost. **Cost:** such a file is parsed
+> twice (sharing the class-head parse).
 
 > **Decision —** a macro written as a whole member of a class or struct body
 > (`OPENVINO_MATCHER_PASS_RTTI("…")`, jemalloc's `LOCKEDINT_MTX_DECLARE(mtx)`) is blanked in the

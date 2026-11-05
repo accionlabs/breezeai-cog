@@ -337,23 +337,50 @@ def _reads_as_members(root: Node, span: tuple[int, int]) -> bool:
     return True
 
 
-#: ``) NAME(args);`` or ``) NAME;`` — a candidate attribute macro after a declaration's
-#: parameter list: ``void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);``.
-_TRAILING_MACRO = re.compile(rb"\)[ \t\r\n]*(?:([A-Za-z_]\w*)[ \t]*\(|([A-Z][A-Z0-9_]*)[ \t\r\n]*;)")
-_SEMICOLON_NEXT = re.compile(rb"[ \t\r\n]*;")
+#: ``) NAME`` — the start of a candidate run of attribute macros after a declaration's parameter
+#: list: ``void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);``.
+_TRAILING_MACRO = re.compile(rb"\)[ \t\r\n]*(?=[A-Za-z_])")
+#: One attribute macro: a call in capitals (or ``__``-prefixed, ``__printflike(1, 2)``), or a bare
+#: word in capitals. A lower-case call there is a function's name, not an attribute.
+_MACRO_CALL = re.compile(rb"([A-Z][A-Z0-9_]*|__\w+)[ \t]*\(")
+_MACRO_WORD = re.compile(rb"[A-Z][A-Z0-9_]*\b")
 _DECLARATION_TYPES = ("declaration", "field_declaration")
 
-#: A trailing macro's blanked span, and the offsets of the ``)`` before it and the ``;`` after.
+#: A trailing macro run's blanked span, and the offsets of the ``)`` before it and the ``;`` after.
 _Trailing = tuple[tuple[int, int], int, int]
+
+
+def _macro_run(source: bytes, at: int) -> tuple[int, int] | None:
+    """The end of a run of attribute macros starting at ``at`` and the offset of the ``;`` right
+    after it (``WARN_UNUSED_RESULT CURL_PRINTF(2, 3);``), or ``None``."""
+    end = at
+    while True:
+        if (call := _MACRO_CALL.match(source, end)) is not None:
+            closed = _close_paren(source, call.end())
+            if closed is None:
+                return None
+            end = closed[0] + 1
+        elif (word := _MACRO_WORD.match(source, end)) is not None:
+            end = word.end()
+        else:
+            return None
+        nxt = end
+        while nxt < len(source) and source[nxt] in b" \t\r\n":
+            nxt += 1
+        if source.startswith(b";", nxt):
+            return end, nxt
+        if nxt == end:
+            return None  # two macros need space between them
+        end = nxt
 
 
 def _trailing_macros(root: Node, source: bytes) -> list[_Trailing]:
     """Attribute macros after a declaration's parameter list: ``void errorf(const char *fmt,
-    ...) CURL_PRINTF(1, 2);``, ``CURLcode f(void) WARN_UNUSED_RESULT;``. They expand to
-    ``__attribute__((…))``, which the grammar reads there, but a macro breaks the declaration. A
-    candidate counts only where the grammar failed on it or cut the declaration before it short,
-    outside a function body; a bare word
-    only in capitals (``int f(a) int a;`` is a K&R definition)."""
+    ...) CURL_PRINTF(1, 2);``, ``CURLcode f(void) WARN_UNUSED_RESULT;``, or several in a row.
+    They expand to ``__attribute__((…))``, which the grammar reads there, but a macro breaks the
+    declaration. A candidate counts only where the grammar failed on it or cut the declaration
+    before it short, outside a function body. Each macro is in capitals (or ``__``-prefixed): a
+    lower-case word there is a K&R parameter (``int f(a) int a;``) or a function's name."""
     if not root.has_error:
         return []
     found = []
@@ -363,9 +390,11 @@ def _trailing_macros(root: Node, source: bytes) -> list[_Trailing]:
             paren.parent.type != "parameter_list"
         ):
             continue  # not the end of a parameter list (a comment, a macro body, a call)
-        word = 1 if m.group(1) is not None else 2
+        run = _macro_run(source, m.end())
+        if run is None:
+            continue
         failed, in_body = False, False
-        for at in (m.start(), m.start(word)):  # the `)` (a declaration cut short) and the macro
+        for at in (m.start(), m.end()):  # the `)` (a declaration cut short) and the macro
             node: Node | None = root.descendant_for_byte_range(at, at + 1)
             while node is not None and node.type != "compound_statement":
                 if node.type == "ERROR" or (node.type in _DECLARATION_TYPES and node.has_error):
@@ -374,16 +403,7 @@ def _trailing_macros(root: Node, source: bytes) -> list[_Trailing]:
             in_body = in_body or node is not None
         if in_body or not failed:
             continue
-        end = m.end(2)
-        if word == 1:
-            closed = _close_paren(source, m.end())
-            if closed is None:
-                continue
-            end = closed[0] + 1
-        semicolon = _SEMICOLON_NEXT.match(source, end)
-        if semicolon is None:
-            continue
-        found.append(((m.start(word), end), m.start(), semicolon.end() - 1))
+        found.append(((m.end(), run[0]), m.start(), run[1]))
     return found
 
 
@@ -531,7 +551,10 @@ def _reads_as_definition(root: Node, macro: tuple[tuple[int, int], int]) -> bool
 
 #: ``name[N] __attribute__((aligned(16))) =`` (or ``;``) — a candidate attribute (or an
 #: attribute macro in capitals) between a declarator and its initializer or the end.
-_ATTRIBUTE_BEFORE_INIT = re.compile(rb"(?<=[\]\w])[ \t]*\b(__attribute__[ \t]*\(\(|[A-Z][A-Z0-9_]*[ \t]*\()")
+_ATTRIBUTE_BEFORE_INIT = re.compile(
+    rb"(?<=[\]\w])(?:[ \t\r\n]*\b(?=__attribute__)|[ \t]*\b(?=[A-Z]))"  # `__attribute__` may wrap
+    rb"(__attribute__[ \t]*\(\(|[A-Z][A-Z0-9_]*[ \t]*\()"
+)
 _INIT_NEXT = re.compile(rb"[ \t\r\n]*(?:=(?!=)|;)")
 
 
@@ -602,6 +625,63 @@ def _reads_as_initialised(root: Node, attribute: tuple[tuple[int, int], int]) ->
         if up.type == "ERROR":
             return False
         up = up.parent
+    return True
+
+
+#: ``TYPE MACRO(args) name(`` — a candidate macro with arguments between a return type and the
+#: function's name: ``CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``.
+_MACRO_BEFORE_NAME = re.compile(rb"(?<=\w)[ \t\r\n]+\b([A-Z][A-Z0-9_]*)[ \t]*\(")
+_NAME_AND_PARAMS = re.compile(rb"[ \t\r\n]*([A-Za-z_]\w*)[ \t\r\n]*\(")
+
+
+def _macros_before_name(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Macros with arguments between a return type and the function's name, ``CURL_EXTERN
+    CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…);`` — how a
+    library marks a function deprecated. The grammar reads the macro as a call and the
+    declaration breaks. A candidate counts only outside a function body, where the grammar failed
+    on it, with a name and ``(`` right after its closing parenthesis; the name's offset is kept so
+    the second parse can be checked to read a function of that name there."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _MACRO_BEFORE_NAME.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.start(1) + 1)
+        failed = False
+        while node is not None and node.type not in ("compound_statement", "comment", "preproc_arg"):
+            failed = failed or node.type == "ERROR" or (node.parent is not None and node.has_error)
+            node = node.parent
+        if node is not None or not failed:
+            continue
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        name = _NAME_AND_PARAMS.match(source, closed[0] + 1)
+        if name is None or name.group(1) in _NOT_NAMES:
+            continue
+        found.append(((m.start(1), closed[0] + 1), name.start(1)))
+    return found
+
+
+_NOT_NAMES = frozenset({b"if", b"while", b"for", b"switch", b"return", b"sizeof", b"defined"})
+
+
+def _reads_as_named_function(root: Node, macro: tuple[tuple[int, int], int]) -> bool:
+    """Whether the name after a blanked macro now names a function declarator of a declaration or
+    definition outside any error."""
+    at = macro[1]
+    node: Node | None = root.descendant_for_byte_range(at, at + 1)
+    if node is None or node.type != "identifier" or node.parent is None:
+        return False
+    if node.parent.type != "function_declarator" or node.parent.child_by_field_name("declarator") != node:
+        return False
+    while node is not None and node.type not in ("declaration", "function_definition"):
+        node = node.parent
+    if node is None:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
     return True
 
 
@@ -677,6 +757,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     * an attribute between a declarator and its initializer
       (:func:`_attributes_before_initializer`): ``__attribute__((aligned(16)))`` goes, and the
       declaration reads as written;
+    * a macro with arguments between a return type and the name (:func:`_macros_before_name`):
+      ``CURL_DEPRECATED(…)`` goes, and the function reads as written;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -693,14 +775,17 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     tagged = _tag_type_macros(root, source)
     qualifiers = _misread_qualifier_macros(root, source) if grammar != "c" else []
     attributes = _attributes_before_initializer(root, source)
+    named = _macros_before_name(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
         if not (
             words or wrappers or guards or members or trailing or tagged or qualifiers or attributes
+            or named
         ):
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
         spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
         spans += [t[0] for t in tagged] + [q[0] for q in qualifiers] + [a[0] for a in attributes]
+        spans += [n[0] for n in named]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
@@ -710,13 +795,15 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
         whole_tagged = [t for t in tagged if _reads_with_tag_type(reparsed, t)]
         whole_qualifiers = [q for q in qualifiers if _reads_as_definition(reparsed, q)]
         whole_attributes = [a for a in attributes if _reads_as_initialised(reparsed, a)]
+        whole_named = [n for n in named if _reads_as_named_function(reparsed, n)]
         if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
-                whole_tagged, whole_qualifiers, whole_attributes) == (
-                    words, wrappers, guards, members, trailing, tagged, qualifiers, attributes):
+                whole_tagged, whole_qualifiers, whole_attributes, whole_named) == (
+                    words, wrappers, guards, members, trailing, tagged, qualifiers, attributes,
+                    named):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
         members, trailing, tagged = whole_members, whole_trailing, whole_tagged
-        qualifiers, attributes = whole_qualifiers, whole_attributes
+        qualifiers, attributes, named = whole_qualifiers, whole_attributes, whole_named
     return root
 
 

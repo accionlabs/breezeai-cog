@@ -824,8 +824,10 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
         ):
             found.append((err.start_byte, [Decorator(name=node_text(err.children[0], source))]))
         pointer = inner
-    if (trailing := trailing_decorator(node, source)) is not None:
-        found.append((node.end_byte, [trailing]))
+    if trailing := trailing_decorator(node, source):
+        found.append((node.end_byte, trailing))
+    if before := _macros_before_declarator(node, source):
+        found.append((before[0], before[1]))
     found.extend((at, [d]) for at, d in _tag_type_macro(node, source))
     found.extend((at, [d]) for at, d in _initializer_attributes(node, source))
     return [d for _, ds in sorted(found, key=lambda f: f[0]) for d in ds]
@@ -909,24 +911,73 @@ def _split_args(text: bytes) -> list[str]:
     return [a.strip().decode("utf-8", "replace") for a in out if a.strip()]
 
 
-def trailing_decorator(node: Node, source: bytes) -> Decorator | None:
-    """The attribute macro after a declaration's parameter list, ``void errorf(const char *fmt,
-    ...) CURL_PRINTF(1, 2);``, with its arguments. It was blanked before parsing
-    (``classes.parse_cfamily``), so it is the text between the declarator and the ``;`` that no
-    node covers."""
-    if node.type not in ("declaration", "field_declaration") or not node.children:
+def _macro_items(text: bytes) -> list[Decorator]:
+    """A run of macros, ``WARN_UNUSED_RESULT CURL_PRINTF(2, 3)``, as decorators with their
+    arguments; empty when the text is anything else."""
+    out: list[Decorator] = []
+    i, n = 0, len(text)
+    while True:
+        while i < n and text[i] in b" \t\r\n":
+            i += 1
+        if i == n:
+            return out
+        m = _MACRO_NAME.match(text, i)
+        if m is None:
+            return []
+        i = m.end()
+        while i < n and text[i] in b" \t":
+            i += 1
+        args: list[str] = []
+        if i < n and text[i] == 0x28:  # `(`
+            depth, j = 0, i
+            while j < n:
+                depth += (text[j] == 0x28) - (text[j] == 0x29)
+                j += 1
+                if depth == 0:
+                    break
+            if depth:
+                return []
+            args, i = _split_args(text[i + 1:j - 1]), j
+        out.append(Decorator(name=m.group().decode(), args=args))
+
+
+def _macros_before_declarator(node: Node, source: bytes) -> tuple[int, list[Decorator]] | None:
+    """The macro with arguments between a return type and the name, ``CURLFORMcode
+    CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``. It was blanked before
+    parsing (``classes.parse_cfamily``), so it is the text right before the declarator that no
+    node covers; only a macro with arguments counts."""
+    if node.type not in ("declaration", "function_definition", "field_declaration"):
         return None
+    declarator = node.child_by_field_name("declarator")
+    if declarator is None:
+        return None
+    before = [c for c in node.children if c.end_byte <= declarator.start_byte]
+    if not before:
+        return None
+    start = before[-1].end_byte
+    items = _macro_items(source[start:declarator.start_byte])
+    if not items or any(not d.args for d in items):
+        return None
+    return start, items
+
+
+_MACRO_NAME = re.compile(rb"[A-Za-z_]\w*")
+
+
+def trailing_decorator(node: Node, source: bytes) -> list[Decorator]:
+    """The attribute macros after a declaration's parameter list, ``void errorf(const char *fmt,
+    ...) CURL_PRINTF(1, 2);`` or several in a row, with their arguments. They were blanked before
+    parsing (``classes.parse_cfamily``), so they are the text between the declarator and the
+    ``;`` that no node covers."""
+    if node.type not in ("declaration", "field_declaration") or not node.children:
+        return []
     declarator = node.child_by_field_name("declarator")
     last = node.children[-1]
     if declarator is None or last.type != ";" or function_declarator_of(declarator) is None:
-        return None
+        return []
     if any(declarator.end_byte <= c.start_byte < last.start_byte for c in node.children):
-        return None
-    m = _TRAILING_TEXT.fullmatch(source, declarator.end_byte, last.start_byte)
-    if m is None:
-        return None
-    args = _split_args(m.group(2)) if m.group(2) is not None else []
-    return Decorator(name=m.group(1).decode(), args=args)
+        return []
+    return _macro_items(source[declarator.end_byte:last.start_byte])
 
 
 def is_declared_static(node: Node, source: bytes) -> bool:
