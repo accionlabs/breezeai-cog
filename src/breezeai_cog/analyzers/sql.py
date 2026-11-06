@@ -76,12 +76,14 @@ _QQUOTE_CLOSERS = {"[": "]", "{": "}", "(": ")", "<": ">"}
 
 def _scan_line(line: str, state: list[Any]) -> list[Any]:
     """Advance the string/comment scanner across one physical line and return the
-    resulting ``[in_str, in_block, q_end]`` state. Tracks normal ``'…'`` strings (with
-    ``''`` escapes), Oracle ``q'X…X'`` alternative quoting, and ``/* … */`` block
-    comments — all of which can span lines — while treating ``--`` as a line comment.
-    This is what lets a multi-line ``COMMENT … IS '…'`` survive directive stripping and
-    prevents a stray apostrophe in a comment from flipping string state."""
-    in_str, in_block, q_end = state
+    resulting ``[in_str, in_block, q_end, last]`` state, ``last`` being the line's last
+    non-blank character outside strings and comments (``None`` if it has none). Tracks
+    normal ``'…'`` strings (with ``''`` escapes), Oracle ``q'X…X'`` alternative quoting,
+    and ``/* … */`` block comments — all of which can span lines — while treating ``--`` as
+    a line comment. This is what lets a multi-line ``COMMENT … IS '…'`` survive directive
+    stripping and prevents a stray apostrophe in a comment from flipping string state."""
+    in_str, in_block, q_end = state[:3]
+    last: str | None = None
     i, n = 0, len(line)
     while i < n:
         if in_block:
@@ -93,13 +95,13 @@ def _scan_line(line: str, state: list[Any]) -> list[Any]:
             j = line.find(q_end, i)
             if j == -1:
                 break
-            i, q_end = j + len(q_end), None
+            i, q_end, last = j + len(q_end), None, "'"
         elif in_str:
             if line[i] == "'":
                 if i + 1 < n and line[i + 1] == "'":
                     i += 2  # '' -> escaped quote, stay in string
                 else:
-                    in_str, i = False, i + 1
+                    in_str, i, last = False, i + 1, "'"
             else:
                 i += 1
         else:
@@ -117,24 +119,71 @@ def _scan_line(line: str, state: list[Any]) -> list[Any]:
                 delim = line[i + 2] if i + 2 < n else "'"
                 q_end, i = _QQUOTE_CLOSERS.get(delim, delim) + "'", i + 3
             elif line[i] == "'":
-                in_str, i = True, i + 1
+                in_str, i, last = True, i + 1, "'"
             else:
+                if not line[i].isspace():
+                    last = line[i]
                 i += 1
-    return [in_str, in_block, q_end]
+    return [in_str, in_block, q_end, last]
+
+
+# A statement SQL*Plus reads as a PL/SQL block: it ends only at a line holding just ``/``.
+_PLSQL_UNIT = re.compile(
+    r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?"
+    r"(?:PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE)\b|DECLARE\b|BEGIN\b)",
+    re.IGNORECASE,
+)
+
+# An unindented SQL*Plus directive that cannot begin a line of PL/SQL, so after a line ending
+# in ``;`` it ends a PL/SQL unit left without its ``/``. ``SET`` counts only with a SQL*Plus
+# option not followed by ``=`` (``SET col = …`` in an UPDATE, ``SET TRANSACTION`` and
+# ``EXECUTE IMMEDIATE`` stay PL/SQL).
+_SQLPLUS_UNIT_END = re.compile(
+    r"(?:prompt|pro|spool|rem(?:ark)?|whenever|show)(?:\s|$)"
+    r"|set\s+(?:define|echo|feedback|feed|serveroutput|serverout|verify|ver|termout|term|"
+    r"heading|head|pagesize|pages|linesize|lines|timing|scan|sqlblanklines|trimspool|trimout|"
+    r"long|escape|concat|newpage|wrap|colsep|autocommit|arraysize|numwidth|sqlprefix|tab)\b"
+    r"(?!\s*=)",
+    re.IGNORECASE,
+)
 
 
 def _strip_sqlplus(text: str) -> str:
-    """Remove SQL*Plus client directive lines so the remainder is pure SQL. A directive
-    line is dropped only when the scanner is not currently inside a string or block
-    comment, so continuation lines of a multi-line literal are preserved."""
+    """Remove SQL*Plus client directive lines so the remainder is pure SQL. As in SQL*Plus,
+    a directive is recognised only *between* statements: never inside a string or block
+    comment, a SQL statement not yet ended by ``;``, or a PL/SQL block (which runs to its
+    ``/`` line). So ``SET col = …`` in an UPDATE and ``EXECUTE IMMEDIATE`` in a procedure
+    body stay. A PL/SQL unit left without its ``/`` is taken to end where an unindented
+    ``CREATE``, or an unindented directive that cannot be PL/SQL (``_SQLPLUS_UNIT_END``),
+    follows a line ending in ``;``; that directive is dropped."""
     out: list[str] = []
-    state = [False, False, None]  # [in_str, in_block, q_end]
+    state: list[Any] = [False, False, None, None]  # [in_str, in_block, q_end, last]
+    in_stmt = in_plsql = False
+    ended_semicolon = True
     for line in text.splitlines():
         inside = state[0] or state[1] or state[2] is not None
-        if not inside and (line.strip() == "/" or _SQLPLUS_DIRECTIVE.match(line)):
-            continue  # SQL*Plus directive or run-buffer terminator — not SQL, and not
-            # scanned for state (a directive cannot legally open a SQL string).
+        if not inside:
+            if line.strip() == "/":
+                in_stmt = in_plsql = False
+                ended_semicolon = True
+                continue  # run-buffer terminator — not SQL
+            if not in_stmt and _SQLPLUS_DIRECTIVE.match(line):
+                continue  # SQL*Plus directive between statements — not SQL
+            if in_plsql and ended_semicolon:
+                if _SQLPLUS_UNIT_END.match(line):
+                    in_stmt = in_plsql = False
+                    continue  # unit left without its ``/`` ends; the directive is not SQL
+                if re.match(r"CREATE\s", line, re.IGNORECASE):
+                    in_stmt = in_plsql = False
+        starts = not inside and not in_stmt
         state = _scan_line(line, state)
+        last = state[3]
+        if starts and last is not None:
+            in_stmt, in_plsql = True, bool(_PLSQL_UNIT.match(line))
+        if last is not None:
+            ended_semicolon = last == ";"
+            if ended_semicolon and not in_plsql and not (state[0] or state[1] or state[2] is not None):
+                in_stmt = False
         out.append(line)
     return "\n".join(out)
 
@@ -186,8 +235,15 @@ def _column(col: exp.ColumnDef, ordinal: int, dialect: str) -> dict[str, Any]:
 
 
 def _foreign_key(fk: exp.ForeignKey, table_name: str, cname: str | None = None) -> dict[str, Any]:
-    cols = [i.name for i in fk.expressions]
-    ref = fk.args.get("reference")
+    return _reference_record(fk.args.get("reference"), [i.name for i in fk.expressions], table_name, cname)
+
+
+def _reference_record(
+    ref: exp.Expression | None, cols: list[str], table_name: str, cname: str | None
+) -> dict[str, Any]:
+    """FOREIGN_KEY record for ``cols`` referencing ``ref`` (a ``REFERENCES t [(c, …)]``).
+    A reference that names no columns targets the referenced table's primary key, which is
+    not known here, so ``refColumns`` stays empty."""
     ref_table = ref_schema = None
     ref_cols: list[str] = []
     if isinstance(ref, exp.Reference):
@@ -257,6 +313,14 @@ def _table(create: exp.Create, dialect: str) -> dict[str, Any]:
         if isinstance(d, exp.ColumnDef):
             ordinal += 1
             columns.append(_column(d, ordinal, dialect))
+            # A column-level ``REFERENCES t (c)`` is a foreign key on that column. Whether
+            # MySQL/MariaDB create one depends on the server version (MariaDB and MySQL up to
+            # 8.x parse and ignore it; MySQL 9.0 enforces it) and the script does not say which,
+            # so on those dialects it is left out: missing, never wrong.
+            if dialect not in ("mysql", "mariadb"):
+                for cc in d.args.get("constraints") or []:
+                    if isinstance(cc, exp.ColumnConstraint) and isinstance(cc.kind, exp.Reference):
+                        constraints.append(_reference_record(cc.kind, [d.name], name, cc.name or None))
             continue
         cname = d.name if isinstance(d, exp.Constraint) and d.name else None
         rec = _extract_constraint(d, name, cname)
@@ -403,6 +467,19 @@ def _view(create: exp.Create, dialect: str, raw: str) -> dict[str, Any]:
 _TRAILING_TERMINATOR = re.compile(r"\s*;\s*$")
 
 
+# SQLite table options after the column list: ``WITHOUT ROWID`` and/or ``STRICT``.
+_SQLITE_WITHOUT_ROWID = re.compile(
+    r"(\))(\s*(?:WITHOUT\s+ROWID|STRICT)(?:\s*,\s*(?:WITHOUT\s+ROWID|STRICT))*)(?=\s*(?:;|$))", re.IGNORECASE
+)
+# A CREATE of an object we capture: sqlglot returning a bare Command for one means it was not
+# understood, and the object would vanish without a trace unless it is counted as failed.
+_CAPTURED_CREATE = re.compile(
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED|UNIQUE|MATERIALIZED)\s+)*"
+    r"(TABLE|VIEW|INDEX)\b",
+    re.IGNORECASE,
+)
+
+
 def _raw_statement(stmt: str) -> str:
     """Verbatim statement text from one ``;``-delimited chunk: *leading* whitespace and
     comments are dropped so the text starts at the ``CREATE`` keyword, and trailing
@@ -413,8 +490,8 @@ def _raw_statement(stmt: str) -> str:
 
 def _sqlglot_statements(
     text: str, read: str, sample_errors: list[str]
-) -> Iterator[tuple[str, exp.Expr | None]]:
-    """Yield ``(raw_chunk, expression)`` per statement of a Postgres / MySQL / SQLite file.
+) -> Iterator[tuple[str, exp.Expr | None, str | None]]:
+    """Yield ``(raw_chunk, expression, error)`` per statement of a Postgres / MySQL / SQLite file.
 
     The file is tokenized once with sqlglot's own dialect tokenizer and cut at its ``;``
     tokens, then each chunk's tokens are parsed on their own. Because the tokenizer is the
@@ -425,8 +502,9 @@ def _sqlglot_statements(
     position also means a view that sqlglot degrades to a generic ``Command`` simply has no
     view record; it can never hand its text to a later view of the same bare name.
 
-    A chunk that fails to parse yields ``None`` (counted as failed by the caller, first few
-    errors sampled). If the tokenizer itself rejects the file (e.g. an unterminated string)
+    A chunk that fails to parse yields ``None`` and sqlglot's message as ``error``; the caller
+    samples that message only if it counts the chunk as failed, so a chunk it reads by other
+    means (a PostgreSQL program, a sequence) leaves no error behind. If the tokenizer itself rejects the file (e.g. an unterminated string)
     the old naive ``;`` split + ``parse_one`` per piece is used so partial files still yield
     whatever parses; ``raw_chunk`` is then that naive piece.
     """
@@ -440,11 +518,9 @@ def _sqlglot_statements(
             if not raw.strip():
                 continue
             try:
-                yield raw, sqlglot.parse_one(raw, read=read)
+                yield raw, sqlglot.parse_one(raw, read=read), None
             except Exception as exc2:
-                if len(sample_errors) < 5:
-                    sample_errors.append(str(exc2))
-                yield raw, None
+                yield raw, None, str(exc2)
         return
 
     parser = dialect.parser()
@@ -461,12 +537,444 @@ def _sqlglot_statements(
         if chunk_tokens:  # a blank run between two ``;`` (or trailing whitespace) is not a statement
             try:
                 parsed = parser.parse(chunk_tokens, text)
-                yield raw, parsed[0] if parsed else None
             except Exception as exc:
-                if len(sample_errors) < 5:
-                    sample_errors.append(str(exc))
-                yield raw, None
+                yield raw, None, str(exc)
+            else:
+                yield raw, parsed[0] if parsed else None, None
         chunk_tokens = []
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL stored programs: CREATE [OR REPLACE] PROCEDURE | FUNCTION. sqlglot parses some
+# headers and degrades others to a generic ``Command``, so — like the T-SQL and Oracle paths —
+# the header is read from the statement text into the shared program record. The statement
+# chunk comes from sqlglot's tokenizer, which keeps a ``$$ … $$`` or ``'…'`` body whole.
+# ---------------------------------------------------------------------------
+
+_PG_ID = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
+_PG_PROG = re.compile(
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\s+"
+    r"(?:(" + _PG_ID + r")\s*\.\s*)?(" + _PG_ID + r")\s*\(",
+    re.IGNORECASE,
+)
+# Type names of more than one word, which an unnamed parameter can consist of entirely.
+_PG_MULTIWORD_TYPE = (
+    r"double\s+precision"
+    r"|(?:national\s+)?(?:character|char)\s+varying(?:\s*\(\s*\d+\s*\))?"
+    r"|national\s+(?:character|char)(?:\s*\(\s*\d+\s*\))?"
+    r"|bit\s+varying(?:\s*\(\s*\d+\s*\))?"
+    r"|(?:timestamp|time)(?:\s*\(\s*\d+\s*\))?\s+with(?:out)?\s+time\s+zone"
+    r"|interval\s+(?:year|month|day|hour|minute|second)"
+    r"(?:\s+to\s+(?:month|hour|minute|second))?(?:\s*\(\s*\d+\s*\))?"
+)
+_PG_TYPE = (
+    r"(?:" + _PG_MULTIWORD_TYPE + r"|" + _PG_ID + r"(?:\s*\.\s*" + _PG_ID + r")?(?:\s*\([^()]*\))?)"
+    r"(?:\s*\[\s*\d*\s*\])*(?:\s*%\s*TYPE)?"
+)
+_PG_TYPE_ONLY = re.compile(_PG_TYPE, re.IGNORECASE)
+_PG_PARAM_MODE = re.compile(r"^(INOUT|IN|OUT|VARIADIC)\s+", re.IGNORECASE)
+_PG_PARAM_DEFAULT = re.compile(r"\s+DEFAULT\s+|\s*=\s*", re.IGNORECASE)
+_PG_RETURNS_TABLE = re.compile(r"\s*RETURNS\s+TABLE\s*\(", re.IGNORECASE)
+_PG_RETURNS = re.compile(r"\s*RETURNS\s+(SETOF\s+)?(" + _PG_TYPE + r")", re.IGNORECASE)
+# VARIADIC is an input parameter; the shared record has no separate value for it.
+_PG_DIRECTION = {"IN": "IN", "OUT": "OUT", "INOUT": "IN OUT", "VARIADIC": "IN"}
+
+
+def _pg_unquote(ident: str) -> str:
+    """A PostgreSQL identifier as written: ``"Quoted"`` loses its quotes (``""`` unescaped)."""
+    if len(ident) >= 2 and ident[0] == ident[-1] == '"':
+        return ident[1:-1].replace('""', '"')
+    return ident
+
+
+def _pg_type_text(text: str) -> str:
+    """A type as the other program records spell it: whitespace collapsed, upper-cased —
+    unless it carries a quoted identifier, whose case is significant."""
+    text = re.sub(r"\s+", " ", text.strip())
+    return text if '"' in text else text.upper()
+
+
+def _pg_skip_quoted(text: str, i: int) -> int:
+    """Index just past the ``'…'`` / ``"…"`` starting at ``i`` (doubled quote is an escape),
+    or -1 if it is never closed."""
+    q, j = text[i], i + 1
+    while True:
+        j = text.find(q, j)
+        if j < 0:
+            return -1
+        if not text.startswith(q * 2, j):
+            return j + 1
+        j += 2
+
+
+def _pg_close_paren(text: str, open_pos: int) -> int:
+    """Index of the ``)`` closing the ``(`` at ``open_pos``, skipping strings and quoted
+    identifiers (a default ``')'`` must not end the list); -1 if unbalanced."""
+    depth, i = 0, open_pos
+    while 0 <= i < len(text):
+        ch = text[i]
+        if ch in "'\"":
+            i = _pg_skip_quoted(text, i)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _pg_split_params(seg: str) -> list[str]:
+    """Split a parameter list on top-level commas, outside parentheses and quotes."""
+    items: list[str] = []
+    depth = start = i = 0
+    while 0 <= i < len(seg):
+        ch = seg[i]
+        if ch in "'\"":
+            i = _pg_skip_quoted(seg, i)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            items.append(seg[start:i].strip())
+            start = i + 1
+        i += 1
+    items.append(seg[start:].strip())
+    return [it for it in items if it]
+
+
+def _pg_param(item: str) -> dict[str, Any] | None:
+    """``[mode] [name] type [DEFAULT | = expr]`` → ``{name, direction, dataType}``. The name is
+    optional in PostgreSQL, so an unnamed parameter has ``name: None``. ``None`` when the
+    parameter does not read as one; the caller then fails the whole program rather than
+    record a signature with a parameter missing."""
+    mode = "IN"
+    if mm := _PG_PARAM_MODE.match(item):
+        mode = mm.group(1).upper()
+        item = item[mm.end() :]
+    if dm := _PG_PARAM_DEFAULT.search(item):
+        item = item[: dm.start()]
+    item = item.strip()
+    name: str | None = None
+    if not _PG_TYPE_ONLY.fullmatch(item):
+        nm = re.match(_PG_ID, item)
+        if nm is None or not _PG_TYPE_ONLY.fullmatch(item[nm.end() :].strip()):
+            return None
+        name, item = _pg_unquote(nm.group()), item[nm.end() :]
+    return {"name": name, "direction": _PG_DIRECTION[mode], "dataType": _pg_type_text(item)}
+
+
+def _pg_body_is_whole(rest: str) -> bool:
+    """Whether the text after the parameter list holds the complete program body. A ``$tag$``
+    or ``'…'`` body must be closed (it is not when the tokenizer fell back to the naive ``;``
+    split); a SQL-standard ``BEGIN ATOMIC … END`` body is cut at its first inner ``;`` by the
+    statement splitter, so it never is."""
+    if dm := re.search(r"\bAS\s+(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)", rest, re.IGNORECASE):
+        return rest.find(dm.group(1), dm.end()) >= 0
+    if sm := re.search(r"\bAS\s+'", rest, re.IGNORECASE):
+        return _pg_skip_quoted(rest, sm.end() - 1) >= 0
+    return not re.search(r"\bBEGIN\s+ATOMIC\b", rest, re.IGNORECASE)
+
+
+def _pg_return_type(rest: str) -> str | None:
+    """A function's ``RETURNS`` clause: ``TABLE(…)`` keeps its column list as written."""
+    if tm := _PG_RETURNS_TABLE.match(rest):
+        end = _pg_close_paren(rest, tm.end() - 1)
+        if end < 0:
+            return None
+        return "TABLE(" + re.sub(r"\s+", " ", rest[tm.end() : end].strip()) + ")"
+    if rm := _PG_RETURNS.match(rest):
+        return ("SETOF " if rm.group(1) else "") + _pg_type_text(rm.group(2))
+    return None
+
+
+def _parse_pg_program(raw: str) -> dict[str, Any] | None:
+    """Parse a PostgreSQL ``CREATE [OR REPLACE] PROCEDURE|FUNCTION`` statement into the
+    program record the T-SQL and Oracle paths produce. Returns ``None`` when the statement is
+    not one; raises ``ValueError`` when it is but its body is not complete in ``raw`` — a
+    truncated body is never stored."""
+    stmt = _raw_statement(raw)
+    m = _PG_PROG.match(stmt)
+    if not m:
+        return None
+    proc_type = m.group(1).lower()
+    open_pos = m.end() - 1
+    close = _pg_close_paren(stmt, open_pos)
+    if close < 0:
+        raise ValueError(f"unbalanced parameter list in CREATE {proc_type.upper()}")
+    rest = stmt[close + 1 :]
+    if not _pg_body_is_whole(rest):
+        raise ValueError(f"CREATE {proc_type.upper()} body is incomplete or BEGIN ATOMIC (not supported)")
+
+    schema = _pg_unquote(m.group(2)) if m.group(2) else None
+    name = _pg_unquote(m.group(3))
+    parameters: list[dict[str, Any]] = []
+    for item in _pg_split_params(stmt[open_pos + 1 : close]):
+        param = _pg_param(item)
+        if param is None:
+            # Dropping it would shift every later parameter into its place: a wrong signature.
+            raise ValueError(f"parameter not understood in CREATE {proc_type.upper()} {name}: {item[:60]}")
+        parameters.append(param)
+    return {
+        "name": name,
+        "schema": schema,
+        "fullName": f"{schema}.{name}" if schema else name,
+        "procedureType": proc_type,
+        "parameters": parameters,
+        "returnType": _pg_return_type(rest) if proc_type == "function" else None,
+        # Full program body — the complete CREATE statement, as on the T-SQL and Oracle paths.
+        "body": stmt,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CREATE SEQUENCE on the sqlglot path (PostgreSQL, MariaDB): read from the statement text
+# into the Oracle sequence record. Only options written in the statement are filled in.
+# ---------------------------------------------------------------------------
+
+_SEQ_ID = r'(?:"(?:[^"]|"")+"|`(?:[^`]|``)+`|[A-Za-z_][A-Za-z0-9_$]*)'
+_SEQ_HEAD = re.compile(
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?SEQUENCE\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?(?:(" + _SEQ_ID + r")\s*\.\s*)?(" + _SEQ_ID + r")(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _unquote_any(ident: str) -> str:
+    """An identifier as written, without its ``"…"`` or backtick quotes (doubled quote unescaped)."""
+    if len(ident) >= 2 and ident[0] == ident[-1] and ident[0] in '"`':
+        return ident[1:-1].replace(ident[0] * 2, ident[0])
+    return ident
+
+
+def _parse_sequence(raw: str) -> dict[str, Any] | None:
+    """``CREATE [OR REPLACE] [TEMP|UNLOGGED] SEQUENCE [IF NOT EXISTS] [schema.]name [options]``
+    for PostgreSQL and MariaDB (``INCREMENT [BY|=] n``, ``START [WITH|=] n``, ``[NO]MINVALUE``,
+    ``NO MAXVALUE``, ``CACHE n``/``NOCACHE``, ``[NO] CYCLE``). ``order`` is an Oracle option with
+    no counterpart here, so it stays ``None``."""
+    m = _SEQ_HEAD.match(_raw_statement(raw))
+    if not m:
+        return None
+    schema = _unquote_any(m.group(1)) if m.group(1) else None
+    name = _unquote_any(m.group(2))
+    opts = m.group(3) or ""
+
+    def num(pat: str) -> int | None:
+        mm = re.search(pat, opts, re.IGNORECASE)
+        return int(mm.group(1)) if mm else None
+
+    def bound(word: str) -> int | None:
+        if re.search(rf"\bNO\s*{word}\b", opts, re.IGNORECASE):
+            return None
+        return num(rf"\b{word}\s*=?\s*(-?\d+)")
+
+    if re.search(r"\bNO\s*CYCLE\b", opts, re.IGNORECASE):
+        cycle = False
+    else:
+        cycle = bool(re.search(r"\bCYCLE\b", opts, re.IGNORECASE))
+    return {
+        "name": name,
+        "schema": schema,
+        "fullName": f"{schema}.{name}" if schema else name,
+        "startWith": num(r"\bSTART\s*(?:WITH\b|=)?\s*(-?\d+)"),
+        "incrementBy": num(r"\bINCREMENT\s*(?:BY\b|=)?\s*(-?\d+)"),
+        "minValue": bound("MINVALUE"),
+        "maxValue": bound("MAXVALUE"),
+        "cache": 0 if re.search(r"\bNOCACHE\b", opts, re.IGNORECASE) else num(r"\bCACHE\s*=?\s*(\d+)"),
+        "cycle": cycle,
+        "order": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# MySQL / MariaDB stored programs. A compound body (BEGIN … END) holds its own ``;``, so the
+# mysql client — and every real script — switches the terminator with ``DELIMITER $$``. The
+# file is scanned the way the client reads it: statements end at the active delimiter outside
+# strings and comments, and ``DELIMITER x`` at a statement start changes it. Program statements
+# are taken out here; DELIMITER lines are blanked and custom terminators rewritten to ``;``, so
+# the remaining text goes through sqlglot unchanged (same offsets, verbatim view slices).
+# ---------------------------------------------------------------------------
+
+_MY_ID = r"(?:`(?:[^`]|``)+`|\"(?:[^\"]|\"\")+\"|[A-Za-z0-9_$]+)"
+_MY_USER = r"(?:`[^`]*`|'[^']*'|\"[^\"]*\"|[\w.$%-]+)"
+_MY_PROG_KIND = re.compile(
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?"
+    r"(?:DEFINER\s*=\s*(?:CURRENT_USER(?:\s*\(\s*\))?|" + _MY_USER + r"(?:\s*@\s*" + _MY_USER + r")?)\s+)?"
+    r"(?:SQL\s+SECURITY\s+\w+\s+)?(?:AGGREGATE\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b",
+    re.IGNORECASE,
+)
+_MY_PROG_NAME = re.compile(
+    r"\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(" + _MY_ID + r")\s*\.\s*)?(" + _MY_ID + r")\s*\(", re.IGNORECASE
+)
+_MY_PARAM = re.compile(r"^(?:(INOUT|IN|OUT)\s+)?(" + _MY_ID + r")\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_MY_RETURNS = re.compile(
+    r"\s*RETURNS\s+([A-Za-z]+(?:\s+(?:PRECISION|VARYING))?(?:\s*\([^)]*\))?(?:\s+(?:UNSIGNED|SIGNED|ZEROFILL))*)",
+    re.IGNORECASE,
+)
+_MY_DELIMITER_CMD = re.compile(r"DELIMITER[ \t]+(\S+)[^\n]*(?:\n|$)", re.IGNORECASE)
+_MY_DIRECTION = {"IN": "IN", "OUT": "OUT", "INOUT": "IN OUT"}
+
+
+def _my_skip_quoted(text: str, i: int) -> int:
+    """Index just past the quoted run starting at ``i``: ``'…'``/``"…"`` honour backslash and
+    doubled-quote escapes, backticks only the doubled one. ``len(text)`` if never closed."""
+    q, j, n = text[i], i + 1, len(text)
+    while j < n:
+        ch = text[j]
+        if ch == "\\" and q != "`":
+            j += 2
+        elif ch == q:
+            if text.startswith(q * 2, j):
+                j += 2
+            else:
+                return j + 1
+        else:
+            j += 1
+    return n
+
+
+def _my_statements(text: str) -> tuple[list[tuple[int, int, int, str]], list[tuple[int, int]]]:
+    """Split a MySQL script as the mysql client does. Returns ``(statements, directives)``:
+    each statement is ``(start, end, term_end, delimiter)`` — its text is ``text[start:end]``,
+    its terminator ``text[end:term_end]`` (empty at end of file) — and each DELIMITER command
+    line is a ``(start, end)`` span."""
+    stmts: list[tuple[int, int, int, str]] = []
+    directives: list[tuple[int, int]] = []
+    delim, i, n = ";", 0, len(text)
+    start, at_start = 0, True
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch == "#" or (text.startswith("--", i) and (i + 2 >= n or text[i + 2].isspace())):
+            j = text.find("\n", i)
+            i = n if j < 0 else j + 1
+            continue
+        if at_start and (dm := _MY_DELIMITER_CMD.match(text, i)):
+            directives.append((i, dm.end()))
+            delim, i, start = dm.group(1), dm.end(), dm.end()
+            continue
+        if ch in "'\"`":
+            i, at_start = _my_skip_quoted(text, i), False
+            continue
+        if text.startswith(delim, i):
+            if not at_start:
+                stmts.append((start, i, i + len(delim), delim))
+            i = start = i + len(delim)
+            at_start = True
+            continue
+        at_start = False
+        i += 1
+    if not at_start:
+        stmts.append((start, n, n, delim))
+    return stmts, directives
+
+
+def _my_strip_leading(stmt: str) -> str:
+    """Drop leading whitespace and ``--``/``#``/``/* */`` comments, and trailing whitespace."""
+    prev = None
+    while prev != stmt:
+        prev = stmt
+        stmt = re.sub(r"^(?:\s+|(?:--(?=\s)|#)[^\n]*\n?|/\*.*?\*/)", "", stmt, flags=re.DOTALL)
+    return stmt.rstrip()
+
+
+def _my_type_text(text: str) -> str:
+    """A type as the other program records spell it: whitespace collapsed, upper-cased —
+    unless it quotes something (``ENUM('a','B')``, a quoted charset), which keeps its case."""
+    text = re.sub(r"\s+", " ", text.strip())
+    return text if any(q in text for q in "'\"`") else text.upper()
+
+
+def _parse_mysql_program(stmt: str, kind: str, kind_end: int) -> dict[str, Any] | None:
+    """A MySQL/MariaDB ``CREATE … PROCEDURE|FUNCTION`` (``stmt`` without its terminator) as the
+    shared program record, or ``None`` when its header does not read as one (a loadable
+    ``CREATE FUNCTION … SONAME`` has no parameter list)."""
+    m = _MY_PROG_NAME.match(stmt, kind_end)
+    if not m:
+        return None
+    open_pos = m.end() - 1
+    close = _pg_close_paren(stmt, open_pos)
+    if close < 0:
+        return None
+    parameters: list[dict[str, Any]] = []
+    for item in _pg_split_params(stmt[open_pos + 1 : close]):
+        pm = _MY_PARAM.match(item)
+        if pm is None:
+            return None
+        parameters.append(
+            {
+                "name": _unquote_any(pm.group(2)),
+                "direction": _MY_DIRECTION[(pm.group(1) or "IN").upper()],
+                "dataType": _my_type_text(pm.group(3)),
+            }
+        )
+    return_type: str | None = None
+    if kind == "function" and (rm := _MY_RETURNS.match(stmt, close + 1)):
+        return_type = _my_type_text(rm.group(1))
+    schema = _unquote_any(m.group(1)) if m.group(1) else None
+    name = _unquote_any(m.group(2))
+    return {
+        "name": name,
+        "schema": schema,
+        "fullName": f"{schema}.{name}" if schema else name,
+        "procedureType": kind,
+        "parameters": parameters,
+        "returnType": return_type,
+        # Full program body — the complete CREATE statement, as on the other dialects' paths.
+        "body": stmt,
+    }
+
+
+def _extract_mysql_programs(text: str) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Take the stored programs out of a MySQL/MariaDB script. Returns ``(rest, programs,
+    errors)``: ``rest`` is ``text`` with DELIMITER lines and every PROCEDURE / FUNCTION /
+    TRIGGER / EVENT statement blanked (same length, newlines kept) and custom terminators
+    rewritten to ``;``; ``errors`` names each program that could not be stored whole.
+
+    A compound (``BEGIN``) body under the default ``;`` delimiter was cut at its first inner
+    ``;`` — the script is not runnable as written — so it is reported, never stored truncated.
+    Triggers and events are blanked without a record: they are not extracted on this path."""
+    stmts, directives = _my_statements(text)
+    chars = list(text)
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, b):
+            if chars[k] != "\n":
+                chars[k] = " "
+
+    for a, b in directives:
+        blank(a, b)
+    programs: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for start, end, term_end, delim in stmts:
+        stmt = _my_strip_leading(text[start:end])
+        km = _MY_PROG_KIND.match(stmt)
+        if km:
+            blank(start, term_end)
+            kind = km.group(1).lower()
+            if kind not in ("procedure", "function"):
+                continue
+            if delim == ";" and re.search(r"\bBEGIN\b", stmt[km.end() :], re.IGNORECASE):
+                errors.append(f"CREATE {kind.upper()} with a BEGIN … END body needs a DELIMITER")
+                continue
+            program = _parse_mysql_program(stmt, kind, km.end())
+            if program is not None:
+                programs.append(program)
+            continue
+        if delim != ";" and term_end > end:
+            chars[end] = ";"
+            blank(end + 1, term_end)
+    return "".join(chars), programs, errors
 
 
 def _index(create: exp.Create, dialect: str) -> dict[str, Any]:
@@ -499,32 +1007,68 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     # stay intact instead of being shredded by the naive `;` split), extracts tables/views/
     # indexes via sqlglot after stripping SQL Server storage clauses (_preprocess_tsql), AND
     # extracts stored programs (procedures/functions/triggers) via hand-rolled headers.
-    # SQL*Plus stripping is Oracle/generic-only — it would clobber T-SQL SET/PRINT/EXEC — so
-    # it is intentionally NOT applied on this branch.
+    # SQL*Plus stripping is Oracle-only — it would clobber T-SQL SET/PRINT/EXEC — so it is
+    # intentionally NOT applied on this branch.
     if dialect == "transactsql":
         return {"dialect": dialect, **_parse_tsql_ddl(text)}
-
-    text = _strip_sqlplus(text)
 
     # Oracle: sqlglot can't parse real Oracle dumps — physical-storage clauses on tables
     # (USING INDEX / STORAGE / PCTFREE / TABLESPACE / SEGMENT CREATION) make it raise a
     # ParseError, and PL/SQL program bodies degrade to a generic Command. So route the
     # whole Oracle dialect through the ported hand-rolled parser (see _parse_oracle_ddl).
+    # SQL*Plus directives belong to Oracle scripts only. Elsewhere their keywords start real
+    # SQL lines — ``SET`` in an UPDATE, ``EXECUTE`` in a PostgreSQL trigger or a ``$$`` body —
+    # and the scanner does not know ``$$`` quoting, so stripping would delete those lines.
     if dialect == "oracle":
-        return {"dialect": dialect, **_parse_oracle_ddl(text)}
+        return {"dialect": dialect, **_parse_oracle_ddl(_strip_sqlplus(text))}
 
     read = _SQLGLOT.get(dialect, "postgres")
+    if dialect == "sqlite":
+        # sqlglot degrades a CREATE TABLE ending in ``WITHOUT ROWID`` to a bare Command. The
+        # table options are storage/typing modes, not captured, so blank them in place (same
+        # length, so every later slice of ``text`` keeps its offsets).
+        text = _SQLITE_WITHOUT_ROWID.sub(lambda m: m.group(1) + " " * len(m.group(2)), text)
+
+    procedures: list[dict[str, Any]] = []
+    sequences: list[dict[str, Any]] = []
+    ok = failed = 0
+    sample_errors: list[str] = []
+    if dialect in ("mysql", "mariadb"):
+        text, procedures, program_errors = _extract_mysql_programs(text)
+        ok, failed = len(procedures), len(program_errors)
+        sample_errors.extend(program_errors[:5])
 
     tables: list[dict] = []
     views: list[dict] = []
     all_indexes: list[dict] = []
     alters: list[exp.Alter] = []
-    ok = failed = 0
-    sample_errors: list[str] = []
 
-    for raw, stmt in _sqlglot_statements(text, read, sample_errors):
+    for raw, stmt, parse_error in _sqlglot_statements(text, read, sample_errors):
+        if dialect == "postgresql":
+            try:
+                program = _parse_pg_program(raw)
+            except ValueError as exc:
+                failed += 1
+                if len(sample_errors) < 5:
+                    sample_errors.append(str(exc))
+                continue
+            if program is not None:
+                procedures.append(program)
+                ok += 1
+                continue
+        if (sequence := _parse_sequence(raw)) is not None:
+            sequences.append(sequence)
+            ok += 1
+            continue
         if stmt is None:
             failed += 1
+            if parse_error and len(sample_errors) < 5:
+                sample_errors.append(parse_error)
+            continue
+        if isinstance(stmt, exp.Command) and (cm := _CAPTURED_CREATE.match(_raw_statement(raw))):
+            failed += 1
+            if len(sample_errors) < 5:
+                sample_errors.append(f"CREATE {cm.group(1).upper()} not understood: {_raw_statement(raw)[:80]}")
             continue
         try:
             if isinstance(stmt, exp.Create):
@@ -556,16 +1100,17 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     for table in tables:
         _wire_columns(table)
 
-    # Non-Oracle dialects: stored programs / sequences are not extracted by the sqlglot
-    # path (unchanged from before). Oracle returns early above via _parse_oracle_ddl.
+    # Stored programs: PostgreSQL via _parse_pg_program, MySQL/MariaDB via
+    # _extract_mysql_programs; sequences via _parse_sequence. SQLite has neither. Oracle and
+    # T-SQL return early above with their own.
     return {
         "dialect": dialect,
         "tables": tables,
         "views": views,
-        "procedures": [],
+        "procedures": procedures,
         "allIndexes": all_indexes,
         "indexes": [i for i in all_indexes if i["tableName"] is None],
-        "sequences": [],
+        "sequences": sequences,
         "parseStats": {"ok": ok, "failed": failed, "sampleErrors": sample_errors},
     }
 
@@ -635,7 +1180,8 @@ _TSQL_PROG_FULL = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TSQL_SEQ = re.compile(
-    r"^\s*CREATE\s+SEQUENCE\s+(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")\b(.*)",
+    # ``(?![\w@#$])``, not ``\b``: after a ``[bracketed]`` name there is no word boundary.
+    r"^\s*CREATE\s+SEQUENCE\s+(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")(?![\w@#$])(.*)",
     re.IGNORECASE | re.DOTALL,
 )
 # User-defined TABLE type (TVP schema): CREATE TYPE [s].[n] AS TABLE ( col defs… ). Captures
