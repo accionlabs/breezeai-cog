@@ -55,13 +55,22 @@ def test_upload_tuning_env_and_bounds(env) -> None:
     env.setenv("BREEZEAI_COG_UPLOAD_MAX_RETRIES", "0")
     s = _settings()
     assert s.upload_timeout == 120.0 and s.upload_parallelism == 4 and s.upload_max_retries == 0
-    # bounds: parallelism >= 1, retries >= 0, timeout > 0
+    # bounds: parallelism >= 1, retries >= 0
     with pytest.raises(ValidationError):
         _settings(upload_parallelism=0)
     with pytest.raises(ValidationError):
         _settings(upload_max_retries=-1)
+
+
+def test_upload_timeout_minimum(env) -> None:
+    assert _settings(upload_timeout=1.0).upload_timeout == 1.0
+
     with pytest.raises(ValidationError):
-        _settings(upload_timeout=0)
+        _settings(upload_timeout=0.5)
+
+    env.setenv("BREEZEAI_COG_UPLOAD_TIMEOUT", "0.5")
+    with pytest.raises(ValidationError):
+        _settings()
 
 
 def test_env_prefix(env) -> None:
