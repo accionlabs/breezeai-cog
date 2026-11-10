@@ -16,6 +16,7 @@ from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
+from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import JavaIndex, build_fqcn_index, extract_imports
@@ -42,6 +43,15 @@ class JavaParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        # The ORM this file's imports name, for the shared db-call classifier — set by _extract
+        # once the imports are read, reset in a finally so a reused worker never leaks it.
+        token = begin_datastore_vendor()
+        try:
+            return self._extract(root, ctx)
+        finally:
+            end_datastore_vendor(token)
+
+    def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
@@ -52,6 +62,7 @@ class JavaParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn
         )
+        set_datastore_vendor(external)
         resolve = make_resolver(  # calls[].path (Tiers 1+2 + receiver-type Phase 2)
             bindings, defined_names(root, source), path, type_map(root, source)
         )

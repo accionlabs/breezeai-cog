@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.contract import is_entry_point
 
 EP = {"route", "eventbus_consumer", "timer"}
@@ -198,3 +200,139 @@ def test_optional_or_unreadable_authenticate_leaves_auth_unknown(analyze_files) 
 def test_required_block_inside_an_optional_one_asserts_auth(analyze_files) -> None:
     got = _auth(analyze_files, 'authenticate("jwt", optional = true)', 'authenticate("admin")')
     assert got == {"/feed": None, "/inner": True}
+
+
+# ── Path constants from another file ────────────────────────────────────────────────────────
+PATHS = "src/main/kotlin/com/acme/Paths.kt"
+ROUTES = "src/main/kotlin/com/acme/Routes.kt"
+ROUTING = "import io.ktor.server.routing.*\n"
+
+
+def _routes(files: dict[str, str], analyze_files) -> list[tuple[str | None, str | None]]:
+    return [(r.method, r.endpoint) for r in _eps(analyze_files(files)) if r.path == ROUTES]
+
+
+def _kt(package: str, imports: str, body: str) -> str:
+    return f"package {package}\n{imports}{body}\n"
+
+
+def test_object_and_top_level_constants_from_another_file_resolve(analyze_files) -> None:
+    files = {
+        PATHS: _kt("com.acme", "", 'object Paths { const val USERS = "/users" }\n'
+                                   'const val API = "/api"'),
+        ROUTES: _kt("com.acme", ROUTING + "import com.acme.Paths\nimport com.acme.API\n",
+                    """fun Route.users() {
+    get(Paths.USERS) { }
+    route(API) {
+        get("/items") { }
+    }
+}"""),
+    }
+    assert _routes(files, analyze_files) == [("GET", "/users"), ("GET", "/api/items")]
+
+
+def test_constant_of_the_same_package_resolves_without_an_import(analyze_files) -> None:
+    files = {
+        PATHS: _kt("com.acme", "", 'object Paths {\n  const val USERS = "/users"\n}\n'
+                                   'class Holder {\n  companion object {\n'
+                                   '    const val ADMIN = "/admin"\n  }\n}'),
+        ROUTES: _kt("com.acme", ROUTING,
+                    "fun Route.r() {\n    get(Paths.USERS) { }\n    get(Holder.ADMIN) { }\n}"),
+    }
+    assert _routes(files, analyze_files) == [("GET", "/users"), ("GET", "/admin")]
+
+
+def test_imported_member_alias_and_interpolation_resolve(analyze_files) -> None:
+    files = {
+        PATHS: _kt("com.acme.paths", "", 'object Paths { const val USERS = "/users" }\n'
+                                         'const val API = "/api"'),
+        ROUTES: _kt("com.acme", ROUTING + "import com.acme.paths.Paths.USERS\n"
+                    "import com.acme.paths.Paths as P\nimport com.acme.paths.API\n",
+                    """fun Route.r() {
+    get(USERS) { }
+    get(P.USERS) { }
+    get("$API/orders") { }
+}"""),
+    }
+    assert _routes(files, analyze_files) == [
+        ("GET", "/users"), ("GET", "/users"), ("GET", "/api/orders")]
+
+
+def test_constant_with_two_values_across_files_leaves_the_endpoint_empty(analyze_files) -> None:
+    files = {
+        PATHS: _kt("com.acme", "", 'const val API = "/api"'),
+        "src/other/kotlin/com/acme/Paths.kt": _kt("com.acme", "", 'const val API = "/v2"'),
+        ROUTES: _kt("com.acme", ROUTING + "import com.acme.API\n",
+                    'fun Route.r() {\n    get(API) { }\n}'),
+    }
+    assert _routes(files, analyze_files) == [("GET", None)]
+
+
+def test_constant_not_visible_from_the_file_is_not_used(analyze_files) -> None:
+    files = {
+        "src/main/kotlin/com/other/Paths.kt": _kt(
+            "com.other", "", 'object Paths { const val USERS = "/users" }\nconst val API = "/api"'),
+        "src/main/kotlin/com/star/Star.kt": _kt("com.star", "", 'const val STAR = "/star"'),
+        ROUTES: _kt("com.acme", ROUTING + "import com.star.*\n", """fun Route.r() {
+    get(API) { }
+    get(Paths.USERS) { }
+    get(STAR) { }
+}"""),
+    }
+    # Not imported, not in this package; a star import is not followed: unknown, never guessed.
+    assert _routes(files, analyze_files) == [("GET", None), ("GET", None), ("GET", None)]
+
+
+def test_only_a_resolvable_val_of_an_object_or_top_level_is_shared(analyze_files) -> None:
+    files = {
+        PATHS: _kt("com.acme", "import com.acme.base.BASE\n", """var MUTABLE = "/m"
+const val BUILT = "$BASE/users"
+class Instance {
+  val inst = "/i"
+}
+fun f() { val local = "/l" }"""),
+        "src/main/kotlin/com/acme/base/Base.kt": _kt("com.acme.base", "", 'const val BASE = "/b"'),
+        ROUTES: _kt("com.acme", ROUTING, """fun Route.r() {
+    get(MUTABLE) { }
+    get(BUILT) { }
+    get(Instance.inst) { }
+    get(local) { }
+}"""),
+    }
+    # A var can change; a constant built from another file's constant, an instance property
+    # and a local are not shared: all unknown.
+    assert _routes(files, analyze_files) == [("GET", None)] * 4
+
+
+def test_a_constant_of_this_file_shadows_an_import(analyze_files) -> None:
+    files = {
+        PATHS: _kt("com.acme.paths", "", 'const val API = "/api"'),
+        ROUTES: _kt("com.acme", ROUTING + "import com.acme.paths.API\n", """const val API = "/local"
+fun Route.r() {
+    get(API) { }
+}"""),
+    }
+    assert _routes(files, analyze_files) == [("GET", "/local")]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_cross_file_constant_resolves_for_any_jobs(tmp_path, jobs) -> None:
+    import gzip
+    import json
+
+    from breezeai_cog import analyze_repo
+
+    repo = tmp_path / "repo"
+    for rel, src in {
+        PATHS: _kt("com.acme", "", 'object Paths { const val USERS = "/users" }'),
+        ROUTES: _kt("com.acme", ROUTING + "import com.acme.Paths\n",
+                    "fun Route.r() {\n    get(Paths.USERS) { }\n}"),
+    }.items():
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(src)
+    result = analyze_repo(repo, capture_statements=True, out=tmp_path / "out", jobs=jobs)
+    lines = gzip.open(result.out_path, "rt", encoding="utf-8").read().splitlines()
+    rec = next(json.loads(line) for line in lines if f'"{ROUTES}"' in line)
+    assert [s["endpoint"] for s in rec["statements"] if s.get("semanticType") == "route"] == [
+        "/users"]

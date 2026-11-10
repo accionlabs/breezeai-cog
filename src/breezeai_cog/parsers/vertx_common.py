@@ -21,7 +21,7 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..schemas import Function, SemanticType
+from ..schemas import SemanticType
 from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
@@ -101,13 +101,28 @@ _ROUTER_TYPED = re.compile(rb"\b(?:RouteMatcher|Router)\s+(\w+)\s*[=;,)]")
 _ROUTER_ASSIGNED = re.compile(rb"\b(\w+)\s*=\s*(?:new\s+RouteMatcher\s*\(|Router\.router\s*\()")
 
 
+#: A string literal (kept) or a comment (dropped), for :func:`_without_comments`.
+_STRING_OR_COMMENT = re.compile(
+    rb'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|//[^\n]*|/\*.*?\*/', re.DOTALL)
+
+
+def _without_comments(source: bytes) -> bytes:
+    """Java / Groovy source with its ``//`` and ``/* */`` comments blanked; string literals are
+    kept, so a ``"http://…"`` is not read as the start of a comment."""
+    return _STRING_OR_COMMENT.sub(
+        lambda m: m.group(0) if m.group(0)[:1] in (b'"', b"'") else b" ", source)
+
+
 def router_vars(source: bytes) -> frozenset[str]:
-    """Names declared as a ``Router`` / ``RouteMatcher`` in this file, so a route call on
-    ``routes`` or ``a`` counts by its declared type, not only by the receiver's name."""
+    """Names declared as a ``Router`` / ``RouteMatcher`` in this file (outside comments), so a
+    route call on ``routes`` or ``a`` counts by its declared type, not only by the receiver's
+    name. The set is file-wide, not scoped: :func:`classify_call` therefore also requires a
+    ``/`` in the path of a route found only through it (``Map r`` elsewhere, ``r.get("key")``)."""
     if b"Router" not in source and b"RouteMatcher" not in source:
         return frozenset()
+    code = _without_comments(source)
     return frozenset(n.decode() for rx in (_ROUTER_TYPED, _ROUTER_ASSIGNED)
-                     for n in rx.findall(source))
+                     for n in rx.findall(code))
 
 
 def is_bus_receiver(obj: str) -> bool:
@@ -148,7 +163,12 @@ def classify_call(
     starts with a placeholder. The receiver check (or ``route_scope``) is the real signal.
     """
     obj_l = obj.lower()
-    is_router = is_route_receiver(obj_l) or router_name(obj) in routers
+    is_router = is_route_receiver(obj_l)
+    if not is_router and router_name(obj) in routers:
+        # A router only by a file-wide declared type: the same name may be another variable in
+        # another method (`Map<String, String> r` … `r.get("customerId")`). Real route paths
+        # contain a `/`; a lookup key does not.
+        is_router = bool(path) and "/" in (path or "")
 
     if method in EVENTBUS and is_bus_receiver(obj):
         # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
@@ -338,51 +358,8 @@ def join_path(base: str, local: str) -> str:
 #: several (``.handler(BodyHandler.create()).handler(this::create)``); the last one is the
 #: handler, the earlier ones run before it.
 HANDLER_CALLS = frozenset({"handler", "blockingHandler"})
-#: Inline handlers: a Java lambda, a Groovy closure.
-_INLINE = frozenset({"lambda_expression", "closure"})
-#: Method references: Java ``this::h``, Groovy ``this::h`` / ``this.&h``.
-_METHOD_REFS = frozenset({"method_reference", "method_reference_expression",
-                          "method_pointer_expression"})
 #: Semantic types whose handler is an entry point's handler (outbound reply callbacks are not).
 HANDLER_SEMANTICS = frozenset({"route", "eventbus_consumer", "timer"})
-
-
-def handler_info(
-    arg: Node | None, source: bytes, methods: dict[str, int | None]
-) -> tuple[str | None, int | None]:
-    """(handler, handlerLine) for a handler argument (contract §5).
-
-    - Inline lambda / closure / anonymous ``new Handler<>() {…}``: no name; its line.
-    - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
-    - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
-    - ``this`` (the class itself implements ``Handler``): ``handle``, its line in this file.
-    - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
-    if arg is None:
-        return None, None
-    if arg.type in _INLINE or (arg.type == "object_creation_expression"
-                               and any(c.type == "class_body" for c in arg.named_children)):
-        return None, arg.start_point[0] + 1
-    if arg.type in _METHOD_REFS:
-        text = node_text(arg, source)
-        sep = "::" if "::" in text else ".&"
-        receiver, _, name = text.rpartition(sep)
-        name = name.strip()
-        if not name.isidentifier():
-            return None, None
-        return name, methods.get(name) if receiver.strip() == "this" else None
-    if arg.type == "this" or (arg.type == "identifier" and node_text(arg, source) == "this"):
-        return "handle", methods.get("handle")
-    if arg.type == "identifier":
-        return node_text(arg, source), None
-    return None, None
-
-
-def method_lines(functions: Iterable[Function]) -> dict[str, int | None]:
-    """Method name → declaration line for the file's methods (a name declared twice → None)."""
-    out: dict[str, int | None] = {}
-    for f in functions:
-        out[f.name] = f.startLine if f.name not in out else None
-    return out
 
 
 def vertx_emit(

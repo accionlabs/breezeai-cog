@@ -3,9 +3,12 @@
 Parser: `src/breezeai_cog/parsers/typescript_react/` · Rules:
 [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_react.py`
 
+Routes are the additive `react-routes` detector: a router file another parser owns (one importing
+a `@nestjs/…` DTO in a monorepo) keeps its routes.
+
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `<Route path element={<X/>}>` / `{ path, element: <X/> }` | Binding | `route`, `routeKind: page`, `endpoint` = full path, `handler` = `X` | One component reached by URL |
+| `<Route path element={<X/>}>` / `{ path, element: <X/> }` | Binding | `route`, `routeKind: page`, `endpoint` = full path, `handler` = `X`; a route-config entry has `nodeType: object`, its source as `text` | One component reached by URL |
 | `{ path, Component: X }` | Binding | as above, `handler` = `X` | Same, by component reference |
 | Element wrapped in elements (`<Suspense><X/></Suspense>`, providers, error boundaries) | Binding | `handler` = the innermost page component `X` | Wrappers are not handlers |
 | `const X = lazy(() => import(…))` used as the element | Binding | `handler` = `X` | One component, loaded lazily |

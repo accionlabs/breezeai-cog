@@ -458,6 +458,7 @@ def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
     try:
         for csproj in repo_root.rglob("*.csproj"):
             d = repo_relative(csproj.parent, repo_root)
+            d = "" if d == "." else d  # the repo root is "" everywhere in the index
             if d in live_dirs:  # a scanned .cs file lives under this project dir
                 roots.add(d)
     except OSError:

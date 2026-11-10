@@ -162,7 +162,7 @@ It is still an entry point. Record it with:
 |---|---|
 | `handler` | **empty** — never an invented name (`anonymous`, `<lambda>`, `handler`) and never the route's variable or file name |
 | `handlerLine` | the line where the function starts (`12`) |
-| `handlerPath` | empty — an inline handler is always in the record's own file |
+| `handlerPath` | empty — an inline handler is in the record's own file, except on a property of an imported object (`Query: queries`, [GraphQL in TypeScript](../entry-point-roles/graphql-typescript.md)), where it is that object's file |
 
 A function is **named** when the source gives it a name: a declaration (`function getUser`), a
 method, or a function assigned to a variable or property (`const getUser = async () => …`). Only

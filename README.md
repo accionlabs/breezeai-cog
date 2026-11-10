@@ -22,11 +22,11 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 
 | Language | Extensions | Framework / detector support |
 |---|---|---|
-| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
+| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, AngularJS 1.x (ngRoute and ui-router routes, controller/component/directive registrations, `$resource`; additive), Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
 | PHP | `.php .phtml` | Laravel, CodeIgniter 4, Slim, Symfony; WordPress hooks, Laravel Event/Bus and Symfony EventDispatcher/Messenger (additive) |
 | Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
-| Java | `.java` | Spring Boot, JAX-RS, Vert.x |
+| Java | `.java` `struts.xml` | Spring Boot (incl. `@Scheduled` / `@Schedules` and `TaskScheduler` / `ScheduledTaskRegistrar` timers, Kafka / RabbitMQ / JMS / SQS listeners and Spring Cloud Stream `@StreamListener`, Spring Security URL rules as route guards), JAX-RS, Struts2 (`struts.xml` actions and its includes, Convention-plugin `@Action` / `@Namespace` annotations and un-annotated Convention actions; 2.0 – 7.x), Vert.x 2 – 4 (routes, sub-routers, EventBus, service proxies, timers; Vert.x 2 registration tables, address helpers and `HttpClient` calls; additive, so also in Spring / JAX-RS classes) |
 | C# | `.cs .asmx .svc` `.cshtml .razor .aspx .ascx .master` ‡ | ASP.NET (MVC / Web API / Minimal API / Web Forms), Razor Pages (`.cshtml`), Blazor (`.razor`), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |
@@ -35,6 +35,8 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Apex | `.cls .trigger` | REST resources (`@RestResource`), Lightning (`@AuraEnabled`), SOAP `webservice`, triggers (record changes, Platform Events, Change Data Capture), scheduled Apex (`System.schedule`); SOQL / SOSL / DML, HTTP callouts and `EventBus.publish` |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | C | `.c .h` (`.h` shared with C++: each header goes to the language that includes it) | — ; calls between C and C++ resolve (C → C++ only through `extern "C"`) |
+| CUDA | `.cu .cuh` | — ; kernels and `__device__` functions are functions, a `<<<…>>>` launch is a call; calls into C and C++ resolve |
+| JSP | `.jsp .jspx .jspf .tag .tagx` ‡ | JSP 1.0 – Jakarta Pages 4.0, standard and XML syntax: directly served pages as `page` routes, links and Struts tags as navigation; directives, standard actions, JSTL / custom tags, EL and deferred EL; `<%! %>` methods as Functions and scriptlet code as Java statements (JDBC in a scriptlet is a db call); includes, preludes / codas, tag files, `.tld` descriptors and `page import` classes as `importFiles`; declared legacy encodings decoded |
 | Groovy † | `.groovy` | Vert.x |
 | HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
 | GraphQL | `.graphql .gql .graphqls` | Schema-first SDL — types, fields, operations and resolvers |
@@ -47,11 +49,11 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
 ‡ **Markup/view files are skipped by default.** `.html .htm .cshtml .razor .aspx .ascx .master
-.vue` are gated behind `--capture-templates`, because markup produces a large number of low-value
+.vue .jsp .jspx .jspf .tag .tagx` are gated behind `--capture-templates`, because markup produces a large number of low-value
 nodes that bury the business logic when reading the graph. They are reported under their own
 `template` skip reason, not `ignored`, and `.repoinclude` does not re-include them. Turn the flag
 on for Razor Pages / Blazor (`@page` routes and `@code` methods live in the markup) and for Vue
-SFC `<script>` blocks. Full details: [Template Capture](docs/template-capture.md).
+SFC `<script>` blocks and JSP pages. Full details: [Template Capture](docs/template-capture.md).
 
 † **Groovy is best-effort / second-tier.** It reliably captures the package / import /
 class / interface / enum / trait / method / field skeleton, but the grammar

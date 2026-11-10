@@ -203,23 +203,6 @@ def _implements(node: Node, src: bytes) -> list[str]:
     return _named_types(ii, src) if ii is not None else []
 
 
-def _selection_fields(op: Node) -> list[Node]:
-    """Top-level invoked ``field`` nodes of an operation (``selection_set -> selection ->
-    field``; a bare ``field`` child is also tolerated)."""
-    sel = child_of_type(op, "selection_set")
-    if sel is None:
-        return []
-    fields: list[Node] = []
-    for child in sel.named_children:
-        if child.type == "field":
-            fields.append(child)
-        elif child.type == "selection":
-            f = child_of_type(child, "field")
-            if f is not None:
-                fields.append(f)
-    return fields
-
-
 def _fragment_name(n: Node, src: bytes) -> str | None:
     fn = child_of_type(n, "fragment_name")
     return _name(fn, src) if fn is not None else None
@@ -481,7 +464,9 @@ def extract_graphql(
         kind = _OP_KINDS.get(node_text(ot, source)) if ot is not None else "query"
         op_name = _name(n, source)
         method = (kind or "query").upper()
-        fields = _selection_fields(n)
+        # A root fragment spread is followed into a fragment of this document; one from another
+        # file is not visible, so its call keeps an empty endpoint — never the operation name.
+        fields = root_fields(n, fragments)
         if not fields:
             statements.append(
                 mk(
@@ -490,7 +475,6 @@ def extract_graphql(
                     nodeType=nt("operation_definition"),
                     semanticType="api_call",
                     name=op_name,
-                    endpoint=op_name,
                     method=method,
                     routeKind=kind,
                     handler=op_name,
@@ -498,22 +482,19 @@ def extract_graphql(
                 )
             )
             return
-        for field in fields:
-            name = _name(field, source)
-            if name is None:
-                continue
+        for anchor, field in fields:
             statements.append(
                 mk(
-                    field,
+                    anchor,
                     fid,
-                    nodeType=nt("field"),
+                    nodeType=nt(anchor.type),
                     semanticType="api_call",
                     name=op_name,
-                    endpoint=name,  # invoked server field (joins to a route)
+                    endpoint=_name(field, source),  # invoked server field (joins to a route)
                     method=method,
                     routeKind=kind,
                     handler=op_name,
-                    text=node_text(field, source)[:limit],
+                    text=node_text(anchor, source)[:limit],
                 )
             )
 
@@ -547,5 +528,9 @@ def extract_graphql(
         for c in n.named_children:
             walk(c)
 
+    # Imported here: operations.py reads the SDL helpers of this module.
+    from .operations import fragment_definitions, root_fields
+
+    fragments = fragment_definitions(root)
     walk(root)
     return classes, statements

@@ -27,6 +27,11 @@ ROOT_ATTRS = {
 #: type (field resolvers). The argument decides which; see ``extend_target`` in routes.py.
 EXTEND_ATTR = "ExtendObjectType"
 
+#: Source-generator style (v14): ``[ObjectType<Session>] static partial class SessionType`` adds
+#: its methods as fields of ``Session``, exactly as ``[ExtendObjectType<Session>]`` does. Only the
+#: generic form names the type; the plain ``[ObjectType]`` declares a type of its own.
+OBJECT_TYPE_ATTR = "ObjectType"
+
 #: Marks the parameter that carries the object being resolved — only meaningful on a data type.
 PARENT_ATTR = "Parent"
 
@@ -71,6 +76,10 @@ OPERATION_TYPE_NAMES = "OperationTypeNames"
 
 #: Declarative subscription: the method resolves an event pushed to a topic.
 SUBSCRIBE_ATTR = "Subscribe"
+
+#: ``[Subscribe(With = nameof(M))]``: ``M`` (in the same class) supplies the event stream. It is
+#: not a field of the schema, so it is never an operation.
+SUBSCRIBE_WITH = "With"
 
 #: Names the pub/sub topic a subscription consumes. Bare (no argument) means "the field name",
 #: which is HotChocolate's own default — enforced, so it resolves rather than guesses.
@@ -118,6 +127,7 @@ ARG_MARKER_ATTRS = frozenset({"GraphQLName", "GraphQLType", "DefaultValue"})
 MARKERS: tuple[bytes, ...] = (
     b"[QueryType]", b"[MutationType]", b"[SubscriptionType]",
     b"[ExtendObjectType",
+    b"[ObjectType<",            # the source-generator form; the plain [ObjectType] is not one
     b"[Subscribe",              # covers [Subscribe] and [SubscribeAndResolve]
     b"IObjectTypeDescriptor",
     b"[ReferenceResolver]", b"[NodeResolver]",   # an entity / node resolver on its own type

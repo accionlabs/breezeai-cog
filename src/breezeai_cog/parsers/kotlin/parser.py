@@ -29,7 +29,12 @@ from ...schemas.enums import ClassType
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..callresolve import CallResolver, make_resolver, noop_resolver
-from ..statements_common import emit_enum_members
+from ..statements_common import (
+    begin_datastore_vendor,
+    emit_enum_members,
+    end_datastore_vendor,
+    set_datastore_vendor,
+)
 from ..treesitter import line_span, node_text, parse_source
 from .functions import defined_names, type_map
 from .imports import KotlinIndex, build_fqcn_index, extract_imports
@@ -233,6 +238,15 @@ class KotlinParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        # The ORM this file's imports name, for the shared db-call classifier — set by _extract
+        # once the imports are read, reset in a finally so a reused worker never leaks it.
+        token = begin_datastore_vendor()
+        try:
+            return self._extract(root, ctx)
+        finally:
+            end_datastore_vendor(token)
+
+    def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
@@ -241,6 +255,7 @@ class KotlinParser(BaseParser):
         idx = ctx.resolution_index
         fqcn = idx.fqcn if isinstance(idx, KotlinIndex) else idx
         internal, external, _, bindings = extract_imports(root, source, path, ctx.repo_root, fqcn)
+        set_datastore_vendor(external)
         resolve = make_resolver(
             bindings, defined_names(root, source), path, type_map(root, source)
         )

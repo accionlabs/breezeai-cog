@@ -151,6 +151,23 @@ flowchart TD
   D -- no --> N[no meaning]
 ```
 
+`dataAccessHint` names the product, in order of evidence:
+1. **A distinctive method:** `insertOne` → `mongodb`.
+2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
+   it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
+   verb in another language (`stream().findFirst()`) needs a data-access receiver too. A
+   receiver whose declared type is the product's client counts for that product's generic verbs:
+   in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
+   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call.
+3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
+   entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
+   `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the
+   `NHibernate` namespace → `hibernate`, `Microsoft.EntityFrameworkCore` → `entity_framework`
+   (Java, Kotlin, Groovy, Scala, C#, VB). A `jakarta.persistence` annotation or exception is not
+   enough: other ORMs (Ebean) use them too.
+4. **Otherwise `orm`:** data access whose product the file doesn't show. A service that
+   receives its repository by injection usually imports only that interface, so it stays `orm`.
+
 The order matters: API is checked first (so Django's `objects.get` is not mistaken for an HTTP
 GET only because of its name), and raw queries before ORM calls (so `createNativeQuery("SELECT …")`
 is a `query_statement`). If no call matches but the statement contains a string with real SQL
@@ -160,6 +177,22 @@ structure, it becomes a `query_statement`:
 String q = "SELECT id, total FROM orders WHERE id = ?";
 ```
 → `nodeType: local_variable_declaration`, `semanticType: query_statement`, `name: q`.
+
+### Languages that skip the name match
+
+The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `session`, `repo`).
+Some languages have no naming convention to rely on, so they skip those steps and record such
+calls only through evidence-based detectors (an import, a declared type):
+
+| Language | Skips | Recorded instead by |
+|---|---|---|
+| PHP | HTTP and ORM | `php/http_calls.py`, `php/data_access.py` |
+| Go | ORM | `go_database/access.py` (the receiver's declared type) |
+| C, C++ | HTTP and ORM | nothing yet, so they have none |
+
+In C++, `web_http.post("/v1/orders", handler)` registers a server route and `sessions.get(id)` reads
+a map; a name match would record both as outbound HTTP calls. Raw SQL detection still applies to
+every language, because it needs SQL structure, not a name.
 
 ### Several calls in one statement
 
