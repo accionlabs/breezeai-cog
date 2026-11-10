@@ -47,9 +47,9 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
-from .java_syntax import (handler_class, imports_and_package, invocations, java_string,
-                          local_value)
-from .legacy import forwarder_sites, forwarder_spans, http_client_calls, registration_tables
+from .java_syntax import (calls_and_creations, handler_class, imports_and_package,
+                          invocations, java_string, local_value)
+from .legacy import forwarder_sites, http_client_calls, registration_tables
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
@@ -484,7 +484,7 @@ def detect_vertx(
     if _may_have_wrapper(source):
         aliases, suppress = _wrapper_aliases(root, source)
     methods = method_lines(record.functions)
-    calls = invocations(root)
+    calls, creations = calls_and_creations(root)
     mounts, mount_routes = (
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
@@ -494,15 +494,15 @@ def detect_vertx(
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
     # Vert.x 2 idioms (legacy.py): registration tables, address forwarders, HttpClient calls.
-    if b"org.vertx" in source:  # registration tables and forwarders are Vert.x 2 idioms
+    handled: set[tuple[int, int]] = set()
+    if b"org.vertx" in source:
         tables, replaced = registration_tables(calls, source, consts, index, path)
-        suppress |= replaced | forwarder_spans(root, source)
-    else:
-        tables = []
-    sites, handled = forwarder_sites(root, source, path, record, consts, index, suppress)
-    found.extend(tables)
-    found.extend(sites)
-    found.extend(http_client_calls(root, source, record, consts))
+        suppress |= replaced
+        sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
+                                         index, suppress)
+        found.extend(tables)
+        found.extend(sites)
+        found.extend(http_client_calls(root, calls, source, record, consts))
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null

@@ -11,16 +11,25 @@ from ..treesitter import node_text
 
 def invocations(root: Node) -> list[Node]:
     """Every ``method_invocation`` under ``root``, in source order."""
-    out: list[Node] = []
+    return calls_and_creations(root)[0]
+
+
+def calls_and_creations(root: Node) -> tuple[list[Node], list[Node]]:
+    """Every ``method_invocation`` and every ``object_creation_expression`` under ``root``, each
+    in source order, from one walk."""
+    calls: list[Node] = []
+    creations: list[Node] = []
 
     def walk(n: Node) -> None:
         if n.type == "method_invocation":
-            out.append(n)
+            calls.append(n)
+        elif n.type == "object_creation_expression":
+            creations.append(n)
         for c in n.named_children:
             walk(c)
 
     walk(root)
-    return out
+    return calls, creations
 
 
 def java_string(node: Node, source: bytes) -> str | None:

@@ -161,11 +161,14 @@ def test_address_through_a_helper_or_constructor_is_resolved_at_each_call_site(
     EventBusUtil.send(container, vertx, new JsonObject(), TARGET, 5000L);
     register("orders/info", new InfoHandler());
     new MessageHandler(vertx, container, "orders/view");""")}
-    # The helpers' own calls (address = a parameter) are not records.
+    # Each call site is a record with its own address. The helpers in other files keep their
+    # own record (address unknown); the in-file `register` wrapper is plumbing, as before.
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_consumer", "orders/info", "handle", "InfoHandler.java"),
         ("Caller.java", "eventbus_consumer", "orders/view", "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
+        ("EventBusUtil.java", "eventbus_send", None, None, None),
+        ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
     ]
 
 
@@ -178,6 +181,8 @@ def test_forwarded_argument_that_is_not_a_constant_leaves_the_address_empty(
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_consumer", None, "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", None, None, None),
+        ("EventBusUtil.java", "eventbus_send", None, None, None),
+        ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
     ]
 
 
@@ -268,10 +273,13 @@ def test_helper_overload_relaying_to_the_real_helper_is_followed(analyze_files) 
     files = {**RELAY_UTIL, **_caller("""
     EventBusUtil.send(container, vertx, new JsonObject(), TARGET, null);
     EventBusUtil.send(container, vertx, new JsonObject(), "orders/direct", null, 10L);""")}
-    # Both overloads resolve at the caller; the relay inside EventBusUtil is plumbing.
+    # Both overloads resolve at the caller. The relay inside EventBusUtil and the real
+    # helper's own send keep their records (address unknown).
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
         ("Caller.java", "eventbus_send", "orders/direct", None, None),
+        ("EventBusUtil.java", "eventbus_send", None, None, None),
+        ("EventBusUtil.java", "eventbus_send", None, None, None),
         ("EventBusUtil.java", "eventbus_send", "orders/fixed", None, None),
     ]
 
@@ -297,8 +305,9 @@ def _call(imports: str) -> str:
 
 
 def _sends(analyze_files, files):
+    """The callers' sends (the helper ``a.Util``'s own send is always a record)."""
     return [(s.path.rsplit("/", 1)[-1], s.endpoint) for s in analyze_files(files)
-            if s.semanticType == "eventbus_send"]
+            if s.semanticType == "eventbus_send" and not s.path.endswith("a/Util.java")]
 
 
 def test_same_named_class_of_another_package_is_not_a_forwarder(analyze_files) -> None:
@@ -391,3 +400,28 @@ def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:
     # Registration tables are a Vert.x 2 rule: the loop's consumer stays, the put is no record.
     assert [(s.semanticType, s.endpoint) for s in st if s.semanticType == "eventbus_consumer"] \
         == [("eventbus_consumer", None)]
+
+
+# ── a helper keeps its own record ───────────────────────────────────────────────────────────
+
+def test_helper_never_called_keeps_its_own_record(analyze_files) -> None:
+    assert _bus(analyze_files(dict(UTIL))) == [
+        ("EventBusUtil.java", "eventbus_send", None, None, None)]
+
+
+def test_helper_called_only_from_a_file_without_vertx_keeps_its_own_record(analyze_files) -> None:
+    files = {**UTIL, f"{SRC}Plain.java": "package com.acme;\npublic class Plain { void go() {"
+             ' EventBusUtil.send(null, null, null, "orders/plain", 5L); } }\n'}
+    # The detector does not read Plain.java (no Vert.x marker): the helper's send is the record.
+    assert _bus(analyze_files(files)) == [
+        ("EventBusUtil.java", "eventbus_send", None, None, None)]
+
+
+def test_helper_declared_with_two_shapes_keeps_both_records(analyze_files) -> None:
+    other = "src/other/java/com/acme/"
+    files = dict(UTIL)
+    files[f"{other}EventBusUtil.java"] = files[f"{SRC}EventBusUtil.java"].replace(
+        "JsonObject msg, String address", "String address, JsonObject msg")
+    assert _bus(analyze_files(files)) == [
+        ("EventBusUtil.java", "eventbus_send", None, None, None),
+        ("EventBusUtil.java", "eventbus_send", None, None, None)]

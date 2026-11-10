@@ -23,8 +23,11 @@ later ``registerHandler(address, this)``). Only that self-registration is follow
 field: a class sending through a stored address (an event-bus proxy, one ``request(address, …)``
 per method) keeps each send where it is, since the construction is not a send. The ``vertx.address-forwarders`` fact lists them
 repo-wide by fully-qualified ``pkg.Class.method/arity`` (``pkg.Class.<init>/arity``); each call
-site is then the record, with its own argument folded (unfoldable → ``endpoint`` empty) and the
-forwarder's own call suppressed (its address is a parameter). A call site's class is resolved
+site is then a record too, with its own argument folded (unfoldable → ``endpoint`` empty). The
+forwarder's own call keeps its record (address unknown): it is the call that sends or registers,
+and a helper whose call sites the detector does not read (never called, called from a file
+without a Vert.x marker, or declared with two shapes) would otherwise leave no record at all. A
+call site's class is resolved
 as Java resolves it (:class:`_Names`): a same-named class of another package is never taken
 for a forwarder. Shapes only, never names.
 
@@ -49,8 +52,7 @@ from ..index_common import record_distinct
 from ..java_variables_common import typed_vars
 from ..treesitter import node_text
 from ..vertx_common import EVENTBUS, is_bus_receiver, render_address, vertx_emit
-from .java_syntax import (handler_class, imports_and_package, invocations, java_string,
-                          local_value)
+from .java_syntax import handler_class, imports_and_package, java_string, local_value
 
 #: EventBus methods that register a consumer (Vert.x 2 ``registerHandler`` family, 3.x names).
 _CONSUMERS = frozenset(m for m, s in EVENTBUS.items() if s == "eventbus_consumer")
@@ -180,32 +182,16 @@ def _params(decl: Node, source: bytes) -> list[str] | None:
     return names
 
 
-def _assigned(body: Node, source: bytes) -> dict[str, list[Node]]:
-    """Plain name (``this.`` dropped) → the right-hand sides assigned to it in ``body``."""
-    out: dict[str, list[Node]] = {}
-
-    def walk(n: Node) -> None:
-        if n.type == "assignment_expression":
-            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
-            if left is not None and right is not None:
-                out.setdefault(_plain(_name(left, source)), []).append(right)
-        for c in n.named_children:
-            walk(c)
-
-    walk(body)
-    return out
-
-
-def _bus_calls(body: Node, source: bytes) -> list[tuple[Node, SemanticType, list[Node]]]:
-    out = []
-    for call in invocations(body):
-        method = _name(call.child_by_field_name("name"), source)
-        obj = call.child_by_field_name("object")
-        args = _args(call)
-        if method in EVENTBUS and obj is not None and is_bus_receiver(_name(obj, source)) \
-                and args:
-            out.append((call, EVENTBUS[method], args))
-    return out
+def _bus_call(call: Node, source: bytes) -> tuple[SemanticType, list[Node]] | None:
+    """(semanticType, arguments) of an EventBus call with arguments, else None."""
+    method = _name(call.child_by_field_name("name"), source)
+    if method not in EVENTBUS:
+        return None
+    obj = call.child_by_field_name("object")
+    args = _args(call)
+    if obj is None or not is_bus_receiver(_name(obj, source)) or not args:
+        return None
+    return EVENTBUS[method], args
 
 
 def _handler_ref(semantic: SemanticType, args: list[Node], names: list[str],
@@ -295,95 +281,139 @@ def _callee(call: Node, here: str, names: _Names, source: bytes
     return None
 
 
-def _forwarders(root: Node, source: bytes) -> tuple[
-        list[tuple[str, Forwarder]], list[Relay], set[tuple[int, int]]]:
-    """This file's address forwarders by ``Class.method/arity``, its relays (calls passing a
-    parameter on to another method of a class, resolved repo-wide), and the spans of the
-    forwarders' own EventBus calls (whose address is a parameter)."""
+class _Decl:
+    """A method or constructor of a scanned class: its calls and the names assigned in it."""
+
+    __slots__ = ("node", "calls", "assigned")
+
+    def __init__(self, node: Node) -> None:
+        self.node = node
+        self.calls: list[Node] = []
+        self.assigned: dict[str, list[Node]] = {}
+
+
+class _Class:
+    """A scanned class: its fully-qualified name, its members and every name assigned anywhere
+    in its body (nested classes included)."""
+
+    __slots__ = ("name", "body", "decls", "assigned")
+
+    def __init__(self, name: str, body: Node) -> None:
+        self.name = name
+        self.body = body
+        self.decls: list[_Decl] = []
+        self.assigned: dict[str, list[Node]] = {}
+
+
+def _scan(root: Node, source: bytes, names_of: _Names) -> list[_Class]:
+    """One walk of the file: each class reached outside a method (a top-level one, or a member
+    of a scanned class, named with its outer classes) with its methods and constructors, each
+    method's calls (those in its anonymous / local classes too) and the assignments of each
+    method and class (``this.`` dropped)."""
+    classes: list[_Class] = []
+
+    def walk(n: Node, stack: tuple[_Class, ...], chain: tuple[str, ...],
+             decl: _Decl | None) -> None:
+        kind = n.type
+        if kind == "class_declaration" and decl is None \
+                and (not stack or n.parent == stack[-1].body):
+            simple = _name(n.child_by_field_name("name"), source)
+            body = n.child_by_field_name("body")
+            if simple and body is not None:
+                inner = (*chain, simple) if stack else (simple,)
+                cls = _Class(names_of.qualify(*inner), body)
+                classes.append(cls)
+                for c in n.named_children:
+                    walk(c, (*stack, cls), inner, None)
+                return
+        elif kind in ("method_declaration", "constructor_declaration") and decl is None:
+            decl = _Decl(n)
+            if stack and n.parent == stack[-1].body:
+                stack[-1].decls.append(decl)
+            # else a method of a class not scanned (an interface's, an enum's): read for its
+            # class's assignments only, and a class inside it is not scanned
+        elif kind == "method_invocation" and decl is not None:
+            decl.calls.append(n)
+        elif kind == "assignment_expression" and stack:
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            if left is not None and right is not None:
+                name = _plain(_name(left, source))
+                for cls in stack:
+                    cls.assigned.setdefault(name, []).append(right)
+                if decl is not None:
+                    decl.assigned.setdefault(name, []).append(right)
+        for c in n.named_children:
+            walk(c, stack, chain, decl)
+
+    walk(root, (), (), None)
+    return classes
+
+
+def _forwarders(root: Node, source: bytes) -> tuple[list[tuple[str, Forwarder]], list[Relay]]:
+    """This file's address forwarders by ``Class.method/arity`` and its relays (calls passing a
+    parameter on to another method of a class, resolved repo-wide). One walk (:func:`_scan`);
+    each method's calls and assignments are then read from what it collected."""
     found: list[tuple[str, Forwarder]] = []
     relays: list[Relay] = []
-    spans: set[tuple[int, int]] = set()
     names_of = _Names(root, source)
-
-    def visit(cls: Node, outer: tuple[str, ...]) -> None:
-        simple = _name(cls.child_by_field_name("name"), source)
-        body = cls.child_by_field_name("body")
-        if not simple or body is None:
-            return
-        chain = (*outer, simple)
-        cname = names_of.qualify(*chain)
-        decls = [m for m in body.named_children
-                 if m.type in ("method_declaration", "constructor_declaration")]
-        ctors = [d for d in decls if d.type == "constructor_declaration"]
+    for cls in _scan(root, source, names_of):
+        params = {id(d): _params(d.node, source) for d in cls.decls}
         # Fields set from a constructor parameter, and assigned nowhere else in the class.
-        everywhere = _assigned(body, source)
         ctor_fields: dict[str, list[tuple[Node, int]]] = {}
-        for ctor in ctors:
-            names = _params(ctor, source)
-            cbody = ctor.child_by_field_name("body")
-            if names is None or cbody is None:
+        for d in cls.decls:
+            names = params[id(d)]
+            if d.node.type != "constructor_declaration" or names is None \
+                    or d.node.child_by_field_name("body") is None:
                 continue
-            for field, values in _assigned(cbody, source).items():
+            for field, values in d.assigned.items():
                 if len(values) == 1 and values[0].type == "identifier" \
                         and _name(values[0], source) in names:
                     ctor_fields.setdefault(field, []).append(
-                        (ctor, names.index(_name(values[0], source))))
-        stable = {f: v for f, v in ctor_fields.items() if len(everywhere.get(f, ())) == len(v)}
-        for decl in decls:
-            names = _params(decl, source)
-            dbody = decl.child_by_field_name("body")
-            if names is None or dbody is None:
+                        (d.node, names.index(_name(values[0], source))))
+        stable = {f: v for f, v in ctor_fields.items()
+                  if len(cls.assigned.get(f, ())) == len(v)}
+        for d in cls.decls:
+            names = params[id(d)]
+            if names is None or d.node.child_by_field_name("body") is None:
                 continue
-            reassigned = _assigned(dbody, source)
-            mname = "<init>" if decl.type == "constructor_declaration" \
-                else _name(decl.child_by_field_name("name"), source)
-            key = f"{cname}.{mname}/{len(names)}"
-            for call in invocations(dbody):
-                callee = _callee(call, cname, names_of, source)
+            reassigned = d.assigned
+            ctor = d.node.type == "constructor_declaration"
+            mname = "<init>" if ctor else _name(d.node.child_by_field_name("name"), source)
+            key = f"{cls.name}.{mname}/{len(names)}"
+            for call in d.calls:
+                args = _args(call)
                 mapping = tuple(
-                    (i, names.index(_name(a, source))) for i, a in enumerate(_args(call))
+                    (i, names.index(_name(a, source))) for i, a in enumerate(args)
                     if a.type == "identifier" and _name(a, source) in names
                     and _name(a, source) not in reassigned)
-                if callee is not None and mapping \
-                        and not (callee[1] and f"{callee[0][0]}.{callee[2]}" == key):
+                callee = _callee(call, cls.name, names_of, source) if mapping else None
+                if callee is not None and not (callee[1] and f"{callee[0][0]}.{callee[2]}" == key):
                     relays.append((key, callee[0], callee[1], callee[2], mapping))
-            for call, semantic, args in _bus_calls(dbody, source):
+                bus = _bus_call(call, source)
+                if bus is None:
+                    continue
+                semantic, args = bus
                 addr = _name(args[0], source)
                 if args[0].type == "identifier" and addr in names and addr not in reassigned:
                     hidx, self_ = _handler_ref(semantic, args, names, source)
-                    found.append((f"{cname}.{mname}/{len(names)}",
-                                  (semantic, names.index(addr), hidx, self_)))
-                    spans.add((call.start_byte, call.end_byte))
+                    found.append((key, (semantic, names.index(addr), hidx, self_)))
                 elif args[0].type in ("identifier", "field_access") and addr not in names \
-                        and _plain(addr) in stable and decl.type == "method_declaration" \
+                        and _plain(addr) in stable and not ctor \
                         and semantic == "eventbus_consumer" and len(args) >= 2 \
                         and _plain(_name(args[1], source)) == "this":
                     # A class registering itself on the address its constructor was given: the
                     # construction is the registration. A send / publish through the field
                     # stays at its own call site (one per method of a proxy).
-                    self_ = True
-                    for ctor, index in stable[_plain(addr)]:
-                        arity = len(_params(ctor, source) or [])
-                        found.append((f"{cname}.<init>/{arity}", (semantic, index, -1, self_)))
-                    spans.add((call.start_byte, call.end_byte))
-        for member in body.named_children:  # nested classes
-            if member.type == "class_declaration":
-                visit(member, chain)
-
-    def walk(n: Node) -> None:
-        for c in n.named_children:
-            if c.type == "class_declaration":
-                visit(c, ())
-            elif c.type not in ("method_declaration", "constructor_declaration"):
-                walk(c)
-
-    walk(root)
-    return found, relays, spans
+                    for node, index in stable[_plain(addr)]:
+                        arity = len(_params(node, source) or [])
+                        found.append((f"{cls.name}.<init>/{arity}",
+                                      (semantic, index, -1, True)))
+    return found, relays
 
 
 def _collect_forwarders(root: Node, source: bytes, rel: str, repo_root: Path | None
                         ) -> tuple[list[tuple[str, Forwarder]], list[Relay]] | None:
-    found, relays, _ = _forwarders(root, source)
+    found, relays = _forwarders(root, source)
     return (found, relays) if found or relays else None
 
 
@@ -428,12 +458,6 @@ register_fact(FactSpec(
 ))
 
 
-def forwarder_spans(root: Node, source: bytes) -> set[tuple[int, int]]:
-    """Spans of this file's forwarders' own EventBus calls (suppressed: the address is a
-    parameter, resolved at each call site instead)."""
-    return _forwarders(root, source)[2]
-
-
 def _enclosing_classes(node: Node, source: bytes, names: _Names) -> list[str]:
     """Fully-qualified names of the classes around ``node``, innermost first."""
     chain: list[str] = []
@@ -446,43 +470,31 @@ def _enclosing_classes(node: Node, source: bytes, names: _Names) -> list[str]:
 
 
 def forwarder_sites(
-    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str],
-    index: object | None, skip: set[tuple[int, int]],
+    root: Node, calls: list[Node], creations: list[Node], source: bytes, path: str, record: FileRecord,
+    consts: dict[str, str], index: object | None, skip: set[tuple[int, int]],
 ) -> tuple[list[Emit], set[tuple[int, int]]]:
     """The records of every call to a known forwarder in this file — a method call on the
     class itself, on a class name (static) or on a variable declared with the class's type,
-    or ``new Class(…)`` — and their spans (so they are not classified again)."""
+    or ``new Class(…)`` — and their spans (so they are not classified again). ``calls`` and
+    ``creations`` are the file's method invocations and object creations (one walk, shared
+    with the rest of the Vert.x detection)."""
     table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
     if not table:
         return [], set()
+    # Cheap first checks: the method name / arity, and the constructed type's simple name.
+    members = {k.rsplit(".", 1)[-1] for k in table}
     classes = {_class_of(k) for k in table}
+    simple = {c.rsplit(".", 1)[-1] for c in classes}
     names_of = _Names(root, source, index)
-    typed = typed_vars(root, source, {c.rsplit(".", 1)[-1] for c in classes})
+    typed = typed_vars(root, source, simple)
     methods = method_lines(record.functions)
     found: list[Emit] = []
     spans: set[tuple[int, int]] = set()
 
-    def relayed(node: Node, arg: Node) -> bool:
-        """``arg`` is a parameter of the enclosing method, itself a known forwarder: this call
-        is that forwarder's plumbing, recorded at its callers instead."""
-        decl = node.parent
-        while decl is not None and decl.type not in ("method_declaration",
-                                                     "constructor_declaration"):
-            decl = decl.parent
-        names = _params(decl, source) if decl is not None else None
-        owners = _enclosing_classes(decl, source, names_of) if decl is not None else []
-        if decl is None or names is None or not owners or arg.type != "identifier" \
-                or _name(arg, source) not in names:
-            return False
-        mname = "<init>" if decl.type == "constructor_declaration" \
-            else _name(decl.child_by_field_name("name"), source)
-        return f"{owners[0]}.{mname}/{len(names)}" in table
-
     def emit(node: Node, cls: str, fwd: Forwarder, args: list[Node]) -> None:
+        # A relay's own call (an overload passing its address parameter on) is a record too,
+        # its address unknown: like the helper's own call, it is kept whoever calls it.
         semantic, addr, hidx, self_ = fwd
-        if addr < len(args) and relayed(node, args[addr]):
-            spans.add((node.start_byte, node.end_byte))
-            return
         endpoint = _known(args[addr], source, consts) if addr < len(args) else None
         handler: str | None = None
         line: int | None = None
@@ -500,38 +512,46 @@ def forwarder_sites(
                                 handler_path=handler_path))
         spans.add((node.start_byte, node.end_byte))
 
-    def walk(n: Node) -> None:
-        span = (n.start_byte, n.end_byte)
-        if span not in skip:
-            if n.type == "method_invocation":
-                args = _args(n)
-                method = _name(n.child_by_field_name("name"), source)
-                obj = n.child_by_field_name("object")
-                owners: list[str] = []
-                if obj is None or _name(obj, source) == "this":
-                    owners = _enclosing_classes(n, source, names_of)
-                elif obj.type in ("identifier", "field_access"):
-                    text = _plain(_name(obj, source))
-                    written = typed.get(text) or (
-                        text if text.rsplit(".", 1)[-1][:1].isupper() else None)
-                    resolved = names_of.resolve(written, classes) if written else None
-                    owners = [resolved] if resolved else []
-                cls = next((c for c in owners if f"{c}.{method}/{len(args)}" in table), None)
-                if cls is not None:
-                    emit(n, cls, table[f"{cls}.{method}/{len(args)}"], args)
-            elif n.type == "object_creation_expression" \
-                    and not any(c.type == "class_body" for c in n.named_children):
-                typ = n.child_by_field_name("type")
-                written = _name(typ, source) if typ is not None else ""
-                resolved = names_of.resolve(written, classes) if written else None
-                args = _args(n)
-                fwd = table.get(f"{resolved}.<init>/{len(args)}") if resolved else None
-                if resolved is not None and fwd is not None:
-                    emit(n, resolved, fwd, args)
-        for c in n.named_children:
-            walk(c)
+    def call_site(n: Node) -> None:
+        args = _args(n)
+        method = _name(n.child_by_field_name("name"), source)
+        if f"{method}/{len(args)}" not in members:
+            return
+        obj = n.child_by_field_name("object")
+        owners: list[str] = []
+        if obj is None or _name(obj, source) == "this":
+            owners = _enclosing_classes(n, source, names_of)
+        elif obj.type in ("identifier", "field_access"):
+            text = _plain(_name(obj, source))
+            written = typed.get(text) or (
+                text if text.rsplit(".", 1)[-1][:1].isupper() else None)
+            resolved = names_of.resolve(written, classes) if written else None
+            owners = [resolved] if resolved else []
+        cls = next((c for c in owners if f"{c}.{method}/{len(args)}" in table), None)
+        if cls is not None:
+            emit(n, cls, table[f"{cls}.{method}/{len(args)}"], args)
 
-    walk(root)
+    def creation_site(n: Node) -> None:
+        if any(c.type == "class_body" for c in n.named_children):
+            return
+        typ = n.child_by_field_name("type")
+        written = _name(typ, source) if typ is not None else ""
+        if written.split("<", 1)[0].rsplit(".", 1)[-1] not in simple:
+            return
+        resolved = names_of.resolve(written, classes) if written else None
+        args = _args(n)
+        fwd = table.get(f"{resolved}.<init>/{len(args)}") if resolved else None
+        if resolved is not None and fwd is not None:
+            emit(n, resolved, fwd, args)
+
+    # In source order (a node before the nodes inside it), as one walk would visit them.
+    for n in sorted((*calls, *creations), key=lambda n: (n.start_byte, -n.end_byte)):
+        if (n.start_byte, n.end_byte) in skip:
+            continue
+        if n.type == "method_invocation":
+            call_site(n)
+        else:
+            creation_site(n)
     return found, spans
 
 
@@ -555,7 +575,7 @@ def _vertx2_http_client(root: Node, source: bytes) -> bool:
 
 
 def http_client_calls(
-    root: Node, source: bytes, record: FileRecord, consts: dict[str, str],
+    root: Node, calls: list[Node], source: bytes, record: FileRecord, consts: dict[str, str],
 ) -> list[Emit]:
     """An ``api_call`` for each request made on a Vert.x 2 ``HttpClient`` (module docstring)."""
     if b"org.vertx.java.core.http" not in source or not _vertx2_http_client(root, source):
@@ -565,7 +585,7 @@ def http_client_calls(
                  if f.returnType and f.returnType.split("<", 1)[0].rsplit(".", 1)[-1]
                  == "HttpClient"}
     found: list[Emit] = []
-    for call in invocations(root):
+    for call in calls:
         method = _name(call.child_by_field_name("name"), source)
         if method not in _HTTP_CLIENT and method != "request":
             continue
