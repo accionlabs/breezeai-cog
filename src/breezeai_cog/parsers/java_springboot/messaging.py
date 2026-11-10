@@ -44,6 +44,9 @@ _LISTENERS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "RabbitListener": ("rabbitmq", "MESSAGE", ("queues", "")),
     "JmsListener": ("jms", "MESSAGE", ("destination",)),
     "SqsListener": ("aws-sqs", "MESSAGE", ("", "value", "queueNames")),
+    # Spring Cloud Stream: the value names a *binding*; its destination is configured
+    # (:func:`_stream_destinations`). The binder (Kafka, RabbitMQ …) is not read: ``spring``.
+    "StreamListener": ("spring", "EVENT", ("", "value", "target")),
 }
 #: class-level listener annotation → the method annotation that marks its handlers
 _CLASS_HANDLERS = {"KafkaListener": "KafkaHandler", "RabbitListener": "RabbitHandler"}
@@ -111,6 +114,27 @@ def _annotation_addresses(
             values += _element_values(kid)
     out = [_address(v, source, consts, props) for v in values]
     return out or [None]
+
+
+def _stream_destinations(bindings: list[str | None], props: dict[str, str | None]
+                         ) -> list[str | None]:
+    """``@StreamListener`` binding names → their destinations: the module's
+    ``spring.cloud.stream.bindings.<name>.destination`` (comma-separated: several), else the
+    binding name itself (Spring Cloud Stream's default). A destination set to a value that does
+    not resolve → None: the address is unknown, never the binding name."""
+    out: list[str | None] = []
+    for name in bindings:
+        key = f"spring.cloud.stream.bindings.{name}.destination"
+        if name is None or key not in props:
+            out.append(name)
+            continue
+        value = props[key]
+        if value is not None and ("${" in value or "#{" in value):
+            value = resolve_placeholders(value, props)
+        parts = [p.strip() for p in value.split(",")] \
+            if value is not None and "${" not in value and "#{" not in value else []
+        out += [p for p in parts if p] or [None]
+    return out
 
 
 def _annotations(decl: Node) -> list[Node]:
@@ -187,8 +211,10 @@ def detect_spring_listeners(
                 name = _ann_name(ann, source)
                 if name in _LISTENERS:
                     fw, method, attrs = _LISTENERS[name]
-                    emit(fn, ann, fw, method,
-                         _annotation_addresses(ann, source, attrs, consts, props))
+                    addresses = _annotation_addresses(ann, source, attrs, consts, props)
+                    if name == "StreamListener":
+                        addresses = _stream_destinations(addresses, props)
+                    emit(fn, ann, fw, method, addresses)
                 elif class_level is not None and name == class_level[4]:
                     c_ann, fw, method, addresses, _ = class_level
                     emit(fn, c_ann, fw, method, addresses)

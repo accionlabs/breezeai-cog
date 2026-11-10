@@ -17,6 +17,7 @@ from ..java_spring_config import module_of, resolve_placeholders
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
+from ..java_spring_security import security_rules
 from ..java_web_guards import module_guards
 from ..treesitter import parse_source
 from .config_facts import context_paths, module_properties
@@ -25,7 +26,8 @@ from .messaging import detect_spring_listeners, detect_spring_sends, has_messagi
 from .scheduling import (detect_spring_scheduled, detect_spring_scheduler_calls,
                          has_scheduled, has_scheduler_calls)
 from .queries import detect_spring_queries
-from .routes import apply_context_path, apply_global_guards, detect_spring_routes
+from .routes import (apply_context_path, apply_global_guards, apply_security_rules,
+                     detect_spring_routes)
 
 
 #: A WebFlux.fn router (``org.springframework.web.reactive.function.server``), as opposed to
@@ -63,6 +65,10 @@ class SpringBootParser(JavaParser):
                 guards = module_guards(idx)
                 if module is not None and module in guards:
                     apply_global_guards(routes, guards[module])
+                # Spring Security URL rules run first, in the security filter chain.
+                rules = security_rules(idx).get(module) if module is not None else None
+                if rules:
+                    apply_security_rules(routes, rules)
                 # server.servlet.context-path of this file's module prefixes every HTTP route.
                 # A module without one, in a repo where another module sets one, may be served
                 # by that module's application: its address is unknown.

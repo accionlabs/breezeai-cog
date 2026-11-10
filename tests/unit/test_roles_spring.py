@@ -567,3 +567,134 @@ def test_registrar_task_object_is_binding(analyze_files) -> None:
     got = sorted((r.handler, r.endpoint or "") for r in _eps(st))
     # The interval held in a variable is unknown → empty, never the variable's name.
     assert got == [("nightly", "0 0 2 * * *"), ("poll", "300000"), ("sync", "")]
+
+
+# ── Spring Cloud Stream ─────────────────────────────────────────────────────────────────────
+STREAM = "import org.springframework.cloud.stream.annotation.StreamListener;"
+
+
+def test_stream_listener_is_a_consumer_on_its_binding(analyze_files) -> None:
+    st = analyze_files(_java("L", STREAM, """public class L {
+  static final String PAYMENTS = "payments";
+  @StreamListener("orders")
+  public void handle(String msg) {}
+  @StreamListener(target = PAYMENTS)
+  public void pay(String msg) {}
+}"""))
+    got = sorted((r.semanticType, r.routeKind, r.method, r.endpoint, r.handler, r.framework)
+                 for r in _eps(st))
+    assert got == [("eventbus_consumer", "message", "EVENT", "orders", "handle", "spring"),
+                   ("eventbus_consumer", "message", "EVENT", "payments", "pay", "spring")]
+
+
+def test_stream_listener_takes_the_configured_destination_of_its_binding(analyze_files) -> None:
+    files = _java("L", STREAM, """public class L {
+  @StreamListener("input")
+  public void a(String msg) {}
+  @StreamListener("multi")
+  public void b(String msg) {}
+  @StreamListener("unset")
+  public void c(String msg) {}
+}""")
+    files["src/main/resources/application.properties"] = (
+        "spring.cloud.stream.bindings.input.destination=orders-topic\n"
+        "spring.cloud.stream.bindings.multi.destination=t1, t2\n"
+        "spring.cloud.stream.bindings.unset.destination=${missing.topic}\n")
+    got = sorted((r.handler, r.endpoint or "") for r in _eps(analyze_files(files)))
+    # The binding name is only the address when no destination is configured; an unresolved
+    # destination is unknown, never the binding name.
+    assert got == [("a", "orders-topic"), ("b", "t1"), ("b", "t2"), ("c", "")]
+
+
+# ── Spring Security URL rules ───────────────────────────────────────────────────────────────
+SECURITY = "src/main/java/a/SecurityConfig.java"
+
+
+def _guarded(analyze_files, configure: str, controller: str) -> dict[tuple[str, str], tuple]:
+    files = _java("C", WEB, controller)
+    files[SECURITY] = ("package a;\nimport org.springframework.http.HttpMethod;\n"
+                       "import org.springframework.security.config.annotation.web.builders.*;\n"
+                       f"public class SecurityConfig {{\n{configure}\n}}\n")
+    return {(r.method, r.endpoint): (r.guards, r.authRequired)
+            for r in _eps(analyze_files(files)) if r.semanticType == "route"}
+
+
+ADMIN = """@RestController
+@RequestMapping("/admin")
+public class C {
+  @GetMapping("/users") public String users() { return ""; }
+  @GetMapping("/public") public String pub() { return ""; }
+  @GetMapping("/{id}") public String one() { return ""; }
+  @PostMapping("/users") public String create() { return ""; }
+}"""
+
+
+def test_ant_matcher_rule_is_the_guard_of_the_routes_it_matches(analyze_files) -> None:
+    got = _guarded(analyze_files, """  protected void configure(HttpSecurity http) throws Exception {
+    http.authorizeRequests().antMatchers("/admin/public").permitAll()
+        .antMatchers("/admin/**").hasRole("ADMIN");
+  }""", ADMIN)
+    assert got[("GET", "/admin/users")] == (["hasRole(ADMIN)"], True)
+    assert got[("GET", "/admin/public")] == (None, None)  # the first matching rule: permitAll
+    # `/admin/{id}` may be `/admin/public`: which rule applies is unsure → no guard.
+    assert got[("GET", "/admin/{id}")] == (None, None)
+
+
+def test_request_matchers_lambda_style_with_a_method_and_any_request(analyze_files) -> None:
+    got = _guarded(analyze_files, """  SecurityFilterChain chain(HttpSecurity http) throws Exception {
+    http.authorizeHttpRequests(auth -> auth
+        .requestMatchers(HttpMethod.POST, "/admin/**").hasAnyRole("ADMIN", "OPS")
+        .anyRequest().authenticated());
+    return http.build();
+  }""", ADMIN)
+    assert got[("POST", "/admin/users")] == (["hasAnyRole(ADMIN,OPS)"], True)
+    assert got[("GET", "/admin/users")] == (["authenticated()"], True)
+
+
+def test_rule_that_might_match_first_leaves_no_guard(analyze_files) -> None:
+    got = _guarded(analyze_files, """  protected void configure(HttpSecurity http) throws Exception {
+    http.authorizeRequests().antMatchers("/admin/new").permitAll()
+        .antMatchers("/admin/**").hasRole("ADMIN");
+  }""", ADMIN)
+    # `/admin/{id}` may be `/admin/new` (open) or not (admin-only): unsure → no guard.
+    assert got[("GET", "/admin/{id}")] == (None, None)
+    assert got[("GET", "/admin/users")] == (["hasRole(ADMIN)"], True)
+
+
+def test_route_matched_by_no_rule_or_an_unreadable_one_gets_no_guard(analyze_files) -> None:
+    got = _guarded(analyze_files, """  protected void configure(HttpSecurity http) throws Exception {
+    http.authorizeRequests().antMatchers("/other/**").hasRole("X")
+        .regexMatchers("/adm.*").hasRole("ADMIN")
+        .antMatchers("/admin/**").hasRole("ADMIN");
+  }""", ADMIN)
+    # No rule before the regex matches; the regex might: no guard rather than a guess.
+    assert {v for v in got.values()} == {(None, None)}
+
+
+def test_two_security_chains_in_a_module_give_no_guards(analyze_files) -> None:
+    got = _guarded(analyze_files, """  SecurityFilterChain api(HttpSecurity http) throws Exception {
+    http.authorizeHttpRequests(a -> a.anyRequest().authenticated());
+    return http.build();
+  }
+  SecurityFilterChain web(HttpSecurity http) throws Exception {
+    http.authorizeHttpRequests(a -> a.anyRequest().permitAll());
+    return http.build();
+  }""", ADMIN)
+    # Which chain serves a route depends on bean order: unsure.
+    assert {v for v in got.values()} == {(None, None)}
+
+
+def test_ignored_paths_bypass_security(analyze_files) -> None:
+    got = _guarded(analyze_files, """  WebSecurityCustomizer ignore() {
+    return web -> web.ignoring().antMatchers("/admin/public");
+  }
+  protected void configure(HttpSecurity http) throws Exception {
+    http.authorizeRequests().anyRequest().authenticated();
+  }""", ADMIN)
+    assert got[("GET", "/admin/public")] == (None, None)
+    assert got[("GET", "/admin/users")] == (["authenticated()"], True)
+
+
+def test_no_security_config_gives_no_guard(analyze_files) -> None:
+    st = analyze_files(_java("C", WEB, ADMIN))
+    assert {(r.guards, r.authRequired) for r in _eps(st)} == {(None, None)}
