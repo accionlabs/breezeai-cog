@@ -293,6 +293,80 @@ def test_service_method_leads_to_the_implementing_class(analyze_files) -> None:
         "listOrders", "src/main/java/a/OrderServiceImpl.java", 3)
 
 
+def _binder(imports: str, register: str) -> dict[str, str]:
+    """A verticle in package ``a`` with extra ``imports`` whose ``start()`` runs ``register``."""
+    return {SRC: IMPORTS + imports + f"""public class Api extends AbstractVerticle {{
+  public void start() {{
+    {register}
+  }}
+}}
+"""}
+
+
+def _service(path: str, package: str, body: str) -> dict[str, str]:
+    return {path: f"package {package};\nimport io.vertx.codegen.annotations.ProxyGen;\n{body}\n"}
+
+
+_ORDERS = "@ProxyGen\npublic interface OrderService { void listOrders(); void getOrder(String id); }"
+
+
+def test_service_interface_through_a_wildcard_import_is_one_binding_per_method(
+        analyze_files) -> None:
+    files = _binder("import com.acme.service.*;\n",
+                    'new ServiceBinder(vertx).setAddress("order.service")'
+                    ".register(OrderService.class, null);")
+    files |= _service("src/main/java/com/acme/service/OrderService.java", "com.acme.service",
+                      _ORDERS)
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("order.service", "listOrders"), ("order.service", "getOrder")]
+
+
+def test_nested_service_interface_is_one_binding_per_method(analyze_files) -> None:
+    files = _binder("import com.acme.service.*;\n",
+                    'new ServiceBinder(vertx).setAddress("billing.service")'
+                    ".register(Api2.Billing.class, null);")
+    files |= _service("src/main/java/com/acme/service/Api2.java", "com.acme.service",
+                      "public class Api2 { @ProxyGen public interface Billing { void charge(); } }")
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("billing.service", "charge")]
+
+
+def test_service_interface_in_two_wildcard_packages_has_no_handler(analyze_files) -> None:
+    files = _binder("import com.acme.one.*;\nimport com.acme.two.*;\n",
+                    'new ServiceBinder(vertx).setAddress("order.service")'
+                    ".register(OrderService.class, null);")
+    files |= _service("src/main/java/com/acme/one/OrderService.java", "com.acme.one", _ORDERS)
+    files |= _service("src/main/java/com/acme/two/OrderService.java", "com.acme.two",
+                      "@ProxyGen\npublic interface OrderService { void other(); }")
+    # Which interface the name means is unsure: the address only, no handler.
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("order.service", None)]
+
+
+def test_wildcard_service_shadowed_by_a_same_package_type_has_no_handler(analyze_files) -> None:
+    files = _binder("import com.acme.service.*;\n",
+                    'new ServiceBinder(vertx).setAddress("order.service")'
+                    ".register(OrderService.class, null);")
+    files |= _service("src/main/java/com/acme/service/OrderService.java", "com.acme.service",
+                      _ORDERS)
+    # Java resolves `OrderService` to package a's own type first, which is no service interface.
+    files["src/main/java/a/OrderService.java"] = "package a;\npublic class OrderService {}\n"
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("order.service", None)]
+
+
+def test_router_variable_known_by_its_type_is_binding(analyze_files) -> None:
+    files = _verticle(
+        "    Router api = Router.router(vertx);\n"
+        '    api.get("/orders").handler(this::handle);\n'
+        "    io.vertx.ext.web.client.WebClient webClient = null;\n"
+        '    webClient.get("/remote").send(ar -> {});'
+    )
+    got = [(r.semanticType, r.method, r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    # `api` is a Router by its declaration; a WebClient `get` is an outbound call, never a route.
+    assert got == [("route", "GET", "/orders", "handle")]
+
+
 _IMPORTS = "package a;\nimport io.vertx.core.*;\nimport io.vertx.ext.web.Router;\n"
 _USER_API = (_IMPORTS + "public class UserApi {\n"
              "  public static Router router(Vertx vertx) {\n"

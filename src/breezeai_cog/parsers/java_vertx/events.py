@@ -464,22 +464,86 @@ def _local_value(at: Node, name: str, source: bytes) -> Node | None:
     return found[0] if len(found) == 1 else None
 
 
+def _imports_and_package(root: Node, source: bytes) -> tuple[list[str], list[str], str]:
+    """This file's single-type imports, on-demand (``.*``) import packages and its package."""
+    singles: list[str] = []
+    wildcards: list[str] = []
+    package = ""
+    for node in root.named_children:
+        if node.type == "import_declaration":
+            text = node_text(node, source).removeprefix("import").strip().rstrip(";").strip()
+            if text.startswith("static "):
+                continue
+            if text.endswith(".*"):
+                wildcards.append(text[:-2].strip())
+            else:
+                singles.append(text)
+        elif node.type == "package_declaration":
+            nm = next((c for c in node.named_children
+                       if c.type in ("scoped_identifier", "identifier")), None)
+            package = node_text(nm, source) if nm is not None else ""
+    return singles, wildcards, package
+
+
 def _qualified(type_name: str, root: Node, source: bytes) -> str:
     """A type as written in this file → its fully-qualified name: a single-type import that
     names it, else this file's package (a dotted name is taken as written)."""
     if "." in type_name:
         return type_name
-    package = ""
-    for node in root.named_children:
-        if node.type == "import_declaration":
-            text = node_text(node, source).removeprefix("import").strip().rstrip(";").strip()
-            if text.endswith("." + type_name) and not text.startswith("static "):
-                return text
-        elif node.type == "package_declaration":
-            nm = next((c for c in node.named_children
-                       if c.type in ("scoped_identifier", "identifier")), None)
-            package = node_text(nm, source) if nm is not None else ""
+    singles, _, package = _imports_and_package(root, source)
+    single = next((i for i in singles if i.endswith("." + type_name)), None)
+    if single is not None:
+        return single
     return f"{package}.{type_name}" if package else type_name
+
+
+def _enclosing_types(node: Node, source: bytes) -> list[str]:
+    """Names of the type declarations around ``node``, outermost first."""
+    names: list[str] = []
+    parent = node.parent
+    while parent is not None:
+        if parent.type in ("class_declaration", "interface_declaration", "enum_declaration",
+                           "record_declaration"):
+            nm = parent.child_by_field_name("name")
+            if nm is not None:
+                names.insert(0, node_text(nm, source))
+        parent = parent.parent
+    return names
+
+
+def _service_fqn(type_name: str, call: Node, root: Node, source: bytes,
+                 index: object | None) -> str:
+    """The service interface a ``register(X.class, …)`` names → its fully-qualified name.
+
+    A single-type import, or a name already known as written, resolves as in :func:`_qualified`.
+    Otherwise the candidates are the name (its first segment, for ``Outer.Inner``) under each
+    type enclosing the call, this file's package and each on-demand import; the one candidate
+    known as a service interface (the ``vertx.service-interfaces`` fact) is kept. None or
+    several known, or a wildcard match shadowed by a same-package type of that name (Java
+    resolves the package's own type first), keep :func:`_qualified`'s answer: honest-null."""
+    plain = _qualified(type_name, root, source)
+    if service_methods(index, plain) or service_methods(index, type_name):
+        return plain if service_methods(index, plain) else type_name
+    head, _, rest = type_name.partition(".")
+    singles, wildcards, package = _imports_and_package(root, source)
+    if any(i.endswith("." + head) for i in singles):
+        single = next(i for i in singles if i.endswith("." + head))
+        nested = f"{single}.{rest}" if rest else single
+        return nested if service_methods(index, nested) else plain
+    tail = f"{head}.{rest}" if rest else head
+    prefix = f"{package}." if package else ""
+    outers = _enclosing_types(call, source)
+    scoped = [f"{prefix}{'.'.join(outers[:i])}.{tail}" for i in range(len(outers), 0, -1)]
+    own = f"{prefix}{tail}"
+    on_demand = [f"{w}.{tail}" for w in wildcards]
+    known = list(dict.fromkeys(c for c in (*scoped, own, *on_demand) if service_methods(index, c)))
+    if len(known) != 1:
+        return plain
+    if known[0] in on_demand and known[0] not in scoped and known[0] != own:
+        fqcn = getattr(index, "fqcn", None) or {}
+        if f"{prefix}{head}" in fqcn:  # a same-package type of that name shadows the import
+            return plain
+    return known[0]
 
 
 def detect_vertx(
@@ -546,7 +610,8 @@ def detect_vertx(
         if semantic == "eventbus_consumer" and call_name is not None \
                 and node_text(call_name, source) == "setAddress":
             iface = _registered_interface(call, source)
-            names = service_methods(index, _qualified(iface, root, source)) if iface else ()
+            names = service_methods(index, _service_fqn(iface, call, root, source, index)) \
+                if iface else ()
             handlers = list(names) or [handler]
             # The code that runs is the implementing class's method (usually another file).
             impl = _registered_impl(call, source) if names else None
