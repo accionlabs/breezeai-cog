@@ -2,6 +2,8 @@
 
 Parser: `src/breezeai_cog/parsers/vertx_common.py` (shared rules), `java_vertx/`, `groovy_vertx/` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_vertx.py`
 
+In Java the detection is the additive `vertx` detector (`java_vertx/detector.py`): it runs in whichever Java parser owns the file, so a Spring `@Component` or JAX-RS resource that uses Vert.x gets these records too (each with `framework: vertx`).
+
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | `router.get("/x").handler(h)` / `router.post(...)` / … on a `Router` | Binding | `route`, HTTP verb, `routeKind: route`, path, `handler` = `h` (anonymous lambda: `handlerLine` only) | One handler, inbound API |

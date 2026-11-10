@@ -442,3 +442,63 @@ public class LoadHandler implements Handler<Message<Object>> {
     assert (c.semanticType, c.endpoint, c.handler, c.handlerLine, c.handlerPath) == (
         "eventbus_consumer", "p3.wizard.load", "handle", 8, "src/main/java/p3/LoadHandler.java",
     )
+
+
+@pytest.mark.parametrize("mount", [
+    '    router.mountSubRouter("/api", api);',
+    '    router.route("/api/*").subRouter(api);',
+])
+def test_route_on_a_mounted_sub_router_has_the_mount_prefix(analyze_files, mount) -> None:
+    st = analyze_files(_verticle(
+        "    Router router = Router.router(vertx);\n"
+        "    Router api = Router.router(vertx);\n"
+        '    router.get("/health").handler(this::handle);\n'
+        '    api.get("/items").handler(this::handle);\n' + mount))
+    got = [(r.method, r.endpoint, r.handler) for r in _eps(st)]
+    assert got == [("GET", "/health", "handle"), ("GET", "/api/items", "handle")]
+
+
+_SPRING = "src/main/java/a/Jobs.java"
+
+
+def test_vertx_timer_and_consumer_in_a_spring_component_are_captured(analyze_files) -> None:
+    st = analyze_files({_SPRING: """package a;
+import io.vertx.core.Vertx;
+import org.springframework.stereotype.Component;
+@Component
+public class Jobs {
+  void start(Vertx vertx) { vertx.setPeriodic(5000, id -> refresh()); }
+  void bus(Vertx vertx) { vertx.eventBus().consumer("jobs.done", m -> refresh()); }
+  void refresh() {}
+}
+"""})
+    got = [(r.semanticType, r.method, r.endpoint, r.framework) for r in _eps(st)]
+    assert got == [("timer", "PERIODIC", "5000", "vertx"),
+                   ("eventbus_consumer", None, "jobs.done", "vertx")]
+
+
+def test_vertx_route_in_a_spring_controller_is_captured_beside_its_spring_route(
+        analyze_files) -> None:
+    st = analyze_files({_SPRING: """package a;
+import io.vertx.core.Vertx;
+import io.vertx.ext.web.Router;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Jobs {
+  @GetMapping("/spring") public String s() { return ""; }
+  void routes(Vertx vertx) { Router r = Router.router(vertx); r.get("/vx").handler(c -> {}); }
+}
+"""})
+    got = sorted((r.endpoint, r.framework) for r in _eps(st))
+    assert got == [("/spring", "spring"), ("/vx", "vertx")]
+
+
+def test_spring_file_without_vertx_gets_no_vertx_record(analyze_files) -> None:
+    st = analyze_files({_SPRING: """package a;
+import org.springframework.stereotype.Component;
+@Component
+public class Jobs {
+  void start(Object scheduler) { scheduler.setPeriodic(5000, null); }
+}
+"""})
+    assert [s for s in st if s.framework == "vertx"] == []

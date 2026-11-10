@@ -1,7 +1,10 @@
 """VertxParser — a Java framework parser. Selected (one parser per file) over JavaParser
-when ``claims`` finds a Vert.x import; reuses ``JavaParser.extract`` (single parse),
-then detects Vert.x event/messaging/route statements. Like all route/event detection,
-gated by statement capture.
+when ``claims`` finds a Vert.x import; reuses ``JavaParser`` whole (single parse).
+
+The Vert.x event/messaging/route detection itself is the additive ``vertx`` detector
+(``detector.py``), so it also runs when another Java framework parser owns the file (a Spring
+``@Component`` calling ``vertx.setPeriodic``). Like all route/event detection, it is gated by
+statement capture.
 
 Both Vert.x package roots are recognised: ``io.vertx`` (Vert.x 3.x+) and ``org.vertx.java``
 (Vert.x 2.x). Without the 2.x root a 2.x verticle fell through to the plain ``JavaParser``
@@ -9,15 +12,7 @@ and its EventBus wiring was never detected (``framework=null``)."""
 
 from __future__ import annotations
 
-from ...schemas import FileRecord
-from ..base import ParseContext
-from ..emits import apply
-from ..constfold import resolve_all
-from ..java.constants import collect_constants
-from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
-from ..treesitter import parse_source
-from .events import detect_vertx
 
 
 class VertxParser(JavaParser):
@@ -27,16 +22,3 @@ class VertxParser(JavaParser):
 
     def claims(self, path: str, source: bytes) -> bool:
         return b"io.vertx" in source or b"org.vertx" in source
-
-    def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)  # inherited Java extraction (one parse)
-        if ctx.capture_statements:  # events/routes are statements — gated by statement capture
-            idx = ctx.resolution_index
-            cross = idx.consts if isinstance(idx, JavaIndex) else {}  # repo-wide constants
-            consts = resolve_all(collect_constants(root, ctx.source), base=cross)
-            found = detect_vertx(root, ctx.source, ctx.path, record, consts, idx)
-            if found:
-                apply(record, found, ctx.source, ctx.path)
-                record.framework = "vertx"
-        return record
