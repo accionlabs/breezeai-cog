@@ -642,9 +642,12 @@ C++.
 > how a library marks a function deprecated, and with which replacement. A candidate is a macro
 > in capitals with arguments, after a word and right before a name and `(`, outside a function
 > body, where the grammar failed on it; the blank is kept only where that name then names a
-> function outside any error.
-> **Why:** curl's deprecated form and socket APIs were lost. **Cost:** such a file is parsed
-> twice (sharing the class-head parse).
+> function outside any error. After a pointer return type's `*` the same holds, and
+> `__attribute__((…))` there counts too (`const char * JEMALLOC_FORMAT_ARG(3) emitter_gen_fmt(…)`,
+> `void * __attribute__((always_inline)) f(…)`): its attributes become the decorators.
+> **Why:** curl's deprecated form and socket APIs were lost. After a `*` it was worse than a
+> loss: the grammar read the macro as the function's name (`JEMALLOC_FORMAT_ARG`), a wrong value.
+> **Cost:** such a file is parsed twice (sharing the class-head parse).
 
 > **Decision —** a `#define` that a block comment ended early is read whole. The grammar ends a
 > macro definition at a `/* … */` right before a line's `\` (or turns it into an error), and the
