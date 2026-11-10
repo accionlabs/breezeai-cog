@@ -23,38 +23,15 @@ The parallel pool needs a real `__main__`: run through the CLI or a script file,
 
 ## Deep context
 
-A complete engineering context set lives in **`context/`** (`.md`). The baseline commit it describes is recorded in [`context/00-index.md`](context/00-index.md).
+A complete engineering context set lives in **`context/`** (`.md`). The baseline commit it describes, headline counts, and full documentation routing table are in [`context/00-index.md`](context/00-index.md).
 
-**When answering any question about this repo — explaining, exploring, or troubleshooting — read [`context/00-index.md`](context/00-index.md) first, automatically, without asking permission.** Then read the relevant file(s) below and answer or diagnose from those:
-
-| File | What it holds | Question / When to read |
-|---|---|---|
-| [`context/00-index.md`](context/00-index.md) | Master index, baseline commit, file counts, and documentation router | Read first automatically before answering any repo question |
-| [`context/01-overview.md`](context/01-overview.md) | Purpose, runtime stack, external dependencies, request flow diagram | Stack, versions, runtime architecture diagram |
-| [`context/02-setup-and-run.md`](context/02-setup-and-run.md) | Installation, uv commands, entrypoints, local ports, dev workflows | Setup, installation, run commands, entrypoints, ports |
-| [`context/03-configuration.md`](context/03-configuration.md) | Complete inventory of environment variables and Settings fields | Environment variables, settings, S3/SCM config |
-| [`context/04-architecture-and-conventions.md`](context/04-architecture-and-conventions.md) | Layering, conventions, router mechanics, parser recipes | Architecture, conventions, layering, how to add a parser |
-| [`context/05-data-model.md`](context/05-data-model.md) | NDJSON capture contract, Pydantic models, JSON Schema generation | Capture contract, Pydantic schemas, `SCHEMA_VERSION`, JSON schema |
-| [`context/06-domain-core-model.md`](context/06-domain-core-model.md) | Parse pipeline, language detection, AST traversal, parser anatomy | Parse pipeline, language detection, grammar loading, AST visitors |
-| [`context/07-api-surface.md`](context/07-api-surface.md) | CLI command options and FastAPI HTTP route definitions | CLI commands (`breezeai-cog ...`) and HTTP route surface |
-| [`context/08-services-and-business-logic.md`](context/08-services-and-business-logic.md) | AnalysisService, upload service, batch processing, diffs | Services: analysis, upload, batch processing, diffs |
-| [`context/09-integrations-and-async.md`](context/09-integrations-and-async.md) | Backend upload, SCM clients, S3 infra, Node 22 requirement | Integrations: backend upload, SCM clients, S3 storage, Node 22 |
-| [`context/10-cross-cutting.md`](context/10-cross-cutting.md) | structlog logging, worker isolation, skips, error handling | Cross-cutting: structlog, error handling, worker isolation, skips |
-| [`context/11-operations.md`](context/11-operations.md) | Docker multi-stage build, CI PR title validation, k8s deploy | Operations: Dockerfile, CI, Kubernetes deployment |
-| [`context/12-testing.md`](context/12-testing.md) | Test suite layout, running pytest, fixtures, coverage posture | Test suite layout, running pytest, fixtures, coverage |
-| [`context/13-glossary-and-open-questions.md`](context/13-glossary-and-open-questions.md) | Domain glossary, naming conventions, known foot-guns | Domain glossary, naming conventions, open questions |
-| [`context/14-symbol-reference.md`](context/14-symbol-reference.md) | Router to 8 per-subsystem symbol reference shards | Class / function / parser behavior — "what does X do?", "where is X" |
-| [`context/15-diagnosis-playbook.md`](context/15-diagnosis-playbook.md) | Router + global symptom-to-suspect table and 3 diagnosis shards | Bug, error, "why is X failing", "how do I fix" |
-
-Files 14 and 15 are **sharded**. Each is a short router listing its shards; read the router, then read **only the one shard** that covers the question — never the whole reference.
-
-- **Do not open source files for Q&A or diagnosis.** Answer from `context/`.
-- **Read/edit source only when explicitly asked to implement or execute a change.** Then use file 14's shards to locate the symbol and `context/04-architecture-and-conventions.md` for the recipe.
-- **Anchors (`file:line`) are accurate as of the baseline commit recorded in `context/00-index.md`.** When executing a change, locate the symbol **by name** in that file rather than trusting the line number blindly.
-- If the context is insufficient, or the relevant claim is marked **UNVERIFIED**, say so and ask before falling back to reading source.
-- **Reading `context/` is pre-approved.** Never pause to confirm it.
+- **When to route:** For questions about this repository not answered directly in this file (architecture, data models, APIs, services, symbol definitions, or troubleshooting), read [`context/00-index.md`](context/00-index.md) first to route to the appropriate context document. Reading `context/` is pre-approved; do not pause to confirm.
+- **Answer from context:** Do not open source files for Q&A or diagnosis. Answer or diagnose from `context/`.
+- **Sharded references:** Files 14 ([`context/14-symbol-reference.md`](context/14-symbol-reference.md)) and 15 ([`context/15-diagnosis-playbook.md`](context/15-diagnosis-playbook.md)) are sharded routers. Read the router first, then read **only the one shard** that covers the question — never the whole reference.
+- **Editing source:** Read or edit source code only when explicitly asked to implement or execute a change. Use file 14's shards to locate the symbol by name and [`context/04-architecture-and-conventions.md`](context/04-architecture-and-conventions.md) for the recipe.
+- **Anchor drift:** Anchors (`file:line`) are accurate as of the baseline commit recorded in `context/00-index.md`. When executing a change, locate the symbol **by name** in that file rather than trusting the line number blindly.
+- **Unverified context:** If context is insufficient, or the relevant claim is marked **UNVERIFIED**, say so and ask before falling back to reading source.
 - Every `context/` file describes the baseline commit only; it carries no history.
-
 
 ## Read first
 

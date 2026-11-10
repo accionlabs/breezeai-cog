@@ -3,14 +3,14 @@ title: "breezeai-cog — Context Index"
 date: 2026-10-30
 ---
 
-Scope: Master index. READ FIRST. Route every question to the right file.
+Scope: Master index and documentation router. Route repo questions not answered in AGENTS.md to the right context file.
 
 Generated from commit `a6d5cf1` (branch `docs/cog-deep-context`, origin `development`).
 To update: re-run `/deep-context-python` from the repo root.
 
 ## What is this repo
 
-Python 3.11+ source-to-NDJSON code-ontology generator. Two interfaces: a **Typer CLI** (`breezeai-cog repo-to-json-tree`) and a **FastAPI HTTP service** (`breezeai-cog serve`). Parses a source repository into a gzipped NDJSON "capture contract" file that the `breezeai-backend` code-ontology endpoints ingest. Supports ~73 languages/frameworks via tree-sitter. Schema version: **2.3**.
+Python 3.11+ source-to-NDJSON code-ontology generator. Two interfaces: a **Typer CLI** (`breezeai-cog repo-to-json-tree`) and a **FastAPI HTTP service** (`breezeai-cog serve`). Parses a source repository into a gzipped NDJSON "capture contract" file that the `breezeai-backend` code-ontology endpoints ingest. Supports ~73 languages/frameworks via tree-sitter. Schema version: **2.4**.
 
 ## Routing table
 
