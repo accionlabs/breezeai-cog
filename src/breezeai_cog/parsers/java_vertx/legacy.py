@@ -19,7 +19,9 @@ never reach ``registerHandler`` is not one; nor is a class merely extending a ha
 **Address forwarders.** A method or constructor that passes one of its parameters straight on
 as the address of an EventBus call (``send(…, String address, …)`` →
 ``sendWithTimeout(address, …)``, or a constructor storing ``this.address = address`` for a
-later ``registerHandler(address, this)``). The ``vertx.address-forwarders`` fact lists them
+later ``registerHandler(address, this)``). Only that self-registration is followed through a
+field: a class sending through a stored address (an event-bus proxy, one ``request(address, …)``
+per method) keeps each send where it is, since the construction is not a send. The ``vertx.address-forwarders`` fact lists them
 repo-wide by fully-qualified ``pkg.Class.method/arity`` (``pkg.Class.<init>/arity``); each call
 site is then the record, with its own argument folded (unfoldable → ``endpoint`` empty) and the
 forwarder's own call suppressed (its address is a parameter). A call site's class is resolved
@@ -354,9 +356,13 @@ def _forwarders(root: Node, source: bytes) -> tuple[
                                   (semantic, names.index(addr), hidx, self_)))
                     spans.add((call.start_byte, call.end_byte))
                 elif args[0].type in ("identifier", "field_access") and addr not in names \
-                        and _plain(addr) in stable and decl.type == "method_declaration":
-                    self_ = semantic == "eventbus_consumer" and len(args) >= 2 \
-                        and _name(args[1], source) == "this"
+                        and _plain(addr) in stable and decl.type == "method_declaration" \
+                        and semantic == "eventbus_consumer" and len(args) >= 2 \
+                        and _plain(_name(args[1], source)) == "this":
+                    # A class registering itself on the address its constructor was given: the
+                    # construction is the registration. A send / publish through the field
+                    # stays at its own call site (one per method of a proxy).
+                    self_ = True
                     for ctor, index in stable[_plain(addr)]:
                         arity = len(_params(ctor, source) or [])
                         found.append((f"{cname}.<init>/{arity}", (semantic, index, -1, self_)))
@@ -418,7 +424,7 @@ def _resolve_forwarders(values: list[tuple[list[tuple[str, Forwarder]], list[Rel
 
 
 register_fact(FactSpec(
-    name=FORWARDERS, language="java", gate=(b"org.vertx", b"io.vertx"),
+    name=FORWARDERS, language="java", gate=(b"org.vertx",),  # Vert.x 2 only: 3.x+ output unchanged
     collect=_collect_forwarders, resolve=_resolve_forwarders,
 ))
 

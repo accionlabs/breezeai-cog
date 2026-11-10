@@ -571,8 +571,11 @@ def detect_vertx(
     routers = router_vars(source)
     # Vert.x 2 idioms (legacy.py): registration tables, address forwarders, HttpClient calls.
     from .legacy import forwarder_sites, forwarder_spans, http_client_calls, registration_tables
-    tables, replaced = registration_tables(calls, source, consts, index, path)
-    suppress |= replaced | forwarder_spans(root, source)
+    if b"org.vertx" in source:  # registration tables and forwarders are Vert.x 2 idioms
+        tables, replaced = registration_tables(calls, source, consts, index, path)
+        suppress |= replaced | forwarder_spans(root, source)
+    else:
+        tables = []
     sites, handled = forwarder_sites(root, source, path, record, consts, index, suppress)
     found.extend(tables)
     found.extend(sites)

@@ -334,3 +334,60 @@ public class Client extends AbstractVerticle {
 """})
     # The Vert.x 2 rule reads only `org.vertx.java.core.http.HttpClient`: no vertx api_call.
     assert [s for s in st if s.semanticType == "api_call" and s.framework == "vertx"] == []
+
+
+# ── event-bus proxies and Vert.x 3+ ─────────────────────────────────────────────────────────
+
+def _proxy(imports: str) -> dict[str, str]:
+    return _java("OrderProxy", """public class OrderProxy {
+  private final Vertx vertx;
+  private final String address;
+  public OrderProxy(Vertx vertx, String address) { this.vertx = vertx; this.address = address; }
+  public void listOrders() { vertx.eventBus().send(address, new JsonObject()); }
+  public void getOrder() { vertx.eventBus().send(address, new JsonObject()); }
+  public static OrderProxy create(Vertx vertx) { return new OrderProxy(vertx, "orders"); }
+}""", imports)
+
+
+V3 = """import io.vertx.core.Vertx;
+import io.vertx.core.json.JsonObject;
+import io.vertx.core.AbstractVerticle;
+"""
+
+
+def test_send_through_a_constructor_set_address_stays_at_each_send(analyze_files) -> None:
+    for imports in (V2, V3):
+        files = _proxy(imports)
+        lines = next(iter(files.values())).splitlines()
+        sends = [i + 1 for i, text in enumerate(lines) if "eventBus().send(" in text]
+        # A proxy: one send per method through the address its constructor stored. The
+        # construction is not a send, so the sends are not collapsed onto `new OrderProxy(…)`.
+        assert sorted((s.semanticType, s.startLine, s.endpoint) for s in analyze_files(files)
+                      if s.semanticType == "eventbus_send") == [
+            ("eventbus_send", line, None) for line in sends], imports
+
+
+def test_vertx3_helper_passing_its_address_on_is_not_followed(analyze_files) -> None:
+    st = analyze_files(_java("Bus", """public class Bus extends AbstractVerticle {
+  void listen(String address) { vertx.eventBus().consumer(address, m -> { }); }
+  void ping(String address) { vertx.eventBus().send(address, "x"); }
+  public void start() { listen("orders.created"); ping("orders.ping"); }
+}""", V3))
+    # Forwarders are a Vert.x 2 rule: a 3.x+ helper keeps its own record (in the helper,
+    # address unknown); its call sites are no records.
+    assert sorted((s.semanticType, s.parentId.rsplit("#", 1)[-1].split("@")[0], s.endpoint) for s in st
+                  if s.semanticType in ("eventbus_consumer", "eventbus_send")) == [
+        ("eventbus_consumer", "listen", None), ("eventbus_send", "ping", None)]
+
+
+def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:
+    st = analyze_files(_java("Server", """public class Server extends AbstractVerticle {
+  static Map<String, Object> handlers = new HashMap<>();
+  static { handlers.put("orders/a", new Object()); }
+  public void start() {
+    for (String k : handlers.keySet()) { vertx.eventBus().consumer(k, m -> { }); }
+  }
+}""", V3))
+    # Registration tables are a Vert.x 2 rule: the loop's consumer stays, the put is no record.
+    assert [(s.semanticType, s.endpoint) for s in st if s.semanticType == "eventbus_consumer"] \
+        == [("eventbus_consumer", None)]
