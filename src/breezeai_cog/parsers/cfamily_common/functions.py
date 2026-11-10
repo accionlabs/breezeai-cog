@@ -954,19 +954,24 @@ def _initializer_attributes(node: Node, source: bytes) -> list[tuple[int, Decora
         return []
     start, end = inner.end_byte, stop.start_byte
     m = _ATTRIBUTE_TEXT.fullmatch(source, start, end)
-    items = _split_args(m.group(1)) if m is not None else []
     if m is None:
         bare = _TRAILING_TEXT.fullmatch(source, start, end)
         if bare is None or bare.group(2) is None:
             return []
         args = _split_args(bare.group(2))
         return [(start, Decorator(name=bare.group(1).decode(), args=args))]
+    return [(start, d) for d in _attribute_items(m.group(1))]
+
+
+def _attribute_items(text: bytes) -> list[Decorator]:
+    """The attributes inside ``__attribute__((…))``: ``aligned(VLEN), used`` → ``aligned`` with
+    ``VLEN``, ``used``."""
     out = []
-    for item in items:
+    for item in _split_args(text):
         im = _ATTRIBUTE_ITEM.fullmatch(item.encode())
         if im is not None:
             args = _split_args(im.group(2)) if im.group(2) is not None else []
-            out.append((start, Decorator(name=im.group(1).decode(), args=args)))
+            out.append(Decorator(name=im.group(1).decode(), args=args))
     return out
 
 
@@ -1020,22 +1025,33 @@ def _macro_items(text: bytes) -> list[Decorator]:
 
 def _macros_before_declarator(node: Node, source: bytes) -> tuple[int, list[Decorator]] | None:
     """The macro with arguments between a return type and the name, ``CURLFORMcode
-    CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``. It was blanked before
-    parsing (``classes.parse_cfamily``), so it is the text right before the declarator that no
-    node covers; only a macro with arguments counts."""
+    CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``, or after the return type's
+    ``*``: ``const char * JEMALLOC_FORMAT_ARG(3) emitter_gen_fmt(…)``, ``void *
+    __attribute__((always_inline)) f(…)``. It was blanked before parsing
+    (``classes.parse_cfamily``), so it is the text right before the declarator (or the pointer's
+    inner declarator) that no node covers; only a macro with arguments, or ``__attribute__``,
+    counts."""
     if node.type not in ("declaration", "function_definition", "field_declaration"):
         return None
     declarator = node.child_by_field_name("declarator")
-    if declarator is None:
-        return None
-    before = [c for c in node.children if c.end_byte <= declarator.start_byte]
-    if not before:
-        return None
-    start = before[-1].end_byte
-    items = _macro_items(source[start:declarator.start_byte])
-    if not items or any(not d.args for d in items):
-        return None
-    return start, items
+    holder: Node = node
+    while declarator is not None:
+        before = [c for c in holder.children if c.end_byte <= declarator.start_byte]
+        if before and (items := _blanked_macros(source[before[-1].end_byte:declarator.start_byte])):
+            return before[-1].end_byte, items
+        if declarator.type != "pointer_declarator":
+            return None
+        holder, declarator = declarator, declarator.child_by_field_name("declarator")
+    return None
+
+
+def _blanked_macros(text: bytes) -> list[Decorator]:
+    """Blanked text before a name as decorators: ``__attribute__((a, b(x)))`` → ``a``, ``b``
+    with ``x``; otherwise a run of macros, each with arguments. Empty when it is anything else."""
+    if (m := _ATTRIBUTE_TEXT.fullmatch(text)) is not None:
+        return _attribute_items(m.group(1))
+    items = _macro_items(text)
+    return items if items and all(d.args for d in items) else []
 
 
 def enumerator_decorators(member: Node, source: bytes) -> list[Decorator]:

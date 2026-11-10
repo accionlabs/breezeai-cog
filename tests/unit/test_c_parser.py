@@ -757,6 +757,32 @@ def test_more_attribute_macro_shapes_are_read_past(tmp_path, parser) -> None:
 
 
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_after_the_return_types_star_is_read_past(tmp_path, parser) -> None:
+    # A macro with arguments, or `__attribute__((…))`, after a pointer return type's `*`: the
+    # grammar read the macro as the function's name (or lost the function). It is the decorator.
+    src = (
+        "static inline const char * FORMAT_ARG(3)\n"
+        "gen_fmt(char *out, int width) { return out; }\n"
+        "static inline void * __attribute__((always_inline)) l2scp(int offset) { return 0; }\n"
+        'char *DEPRECATED_X(1, "use g") old_f(int o);\n'
+        "int after(int a) { return a * SCALE(2); }\n"
+    )
+    rec = _parse(parser, tmp_path, "p.c", src)
+    got = [(f.name, f.returnType, f.isStatic, [(d.name, d.args) for d in f.decorators])
+           for f in rec.functions]
+    assert got == [
+        ("gen_fmt", "char", True, [("FORMAT_ARG", ["3"])]),
+        ("l2scp", "void", True, [("always_inline", [])]),
+        ("after", "int", None, []),
+    ]
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [(d.name, d.args) for d in decls["old_f"].decorators] == [
+        ("DEPRECATED_X", ["1", '"use g"']),
+    ]
+    assert not {"FORMAT_ARG", "DEPRECATED_X", "__attribute__"} & set(decls)
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
 def test_a_comment_before_a_line_continuation_does_not_end_a_define(tmp_path, parser) -> None:
     # The grammar ends a `#define` at a `/* … */` right before a line's `\`; the rest of the body
     # read as file-scope code and broke the function after it. The comments are blanked for a

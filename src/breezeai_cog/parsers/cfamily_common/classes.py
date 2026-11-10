@@ -630,16 +630,21 @@ def _reads_as_initialised(root: Node, attribute: tuple[tuple[int, int], int]) ->
 
 
 #: ``TYPE MACRO(args) name(`` — a candidate macro with arguments between a return type and the
-#: function's name: ``CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``.
-_MACRO_BEFORE_NAME = re.compile(rb"(?<=\w)[ \t\r\n]+\b([A-Z][A-Z0-9_]*)[ \t]*\(")
+#: function's name: ``CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…)``;
+#: also after a pointer's ``*`` (``const char * JEMALLOC_FORMAT_ARG(3) emitter_gen_fmt(…)``), and
+#: ``__attribute__((…))`` there (``void * __attribute__((always_inline)) f(…)``).
+_MACRO_BEFORE_NAME = re.compile(
+    rb"(?:(?<=\w)[ \t\r\n]+|(?<=\*)[ \t\r\n]*)\b([A-Z][A-Z0-9_]*|__attribute__)[ \t]*\("
+)
 _NAME_AND_PARAMS = re.compile(rb"[ \t\r\n]*([A-Za-z_]\w*)[ \t\r\n]*\(")
 
 
 def _macros_before_name(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
     """Macros with arguments between a return type and the function's name, ``CURL_EXTERN
     CURLFORMcode CURL_DEPRECATED(7.56.0, "Use curl_mime_init()") curl_formadd(…);`` — how a
-    library marks a function deprecated. The grammar reads the macro as a call and the
-    declaration breaks. A candidate counts only outside a function body, where the grammar failed
+    library marks a function deprecated — or after the return type's ``*``, ``const char *
+    JEMALLOC_FORMAT_ARG(3) emitter_gen_fmt(…)``, where ``__attribute__((…))`` breaks it too. The
+    grammar reads the macro as a call, or as the function's name, and the declaration breaks. A candidate counts only outside a function body, where the grammar failed
     on it, with a name and ``(`` right after its closing parenthesis; the name's offset is kept so
     the second parse can be checked to read a function of that name there."""
     if not root.has_error:
