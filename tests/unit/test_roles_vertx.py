@@ -502,3 +502,64 @@ public class Jobs {
 }
 """})
     assert [s for s in st if s.framework == "vertx"] == []
+
+
+_LEGACY = "src/main/java/a/Legacy.java"
+
+
+def test_router_by_type_only_needs_a_slash_path(analyze_files) -> None:
+    st = analyze_files({_LEGACY: """package a;
+import java.util.Map;
+import org.vertx.java.core.http.RouteMatcher;
+import org.vertx.java.platform.Verticle;
+public class Legacy extends Verticle {
+  static final String KEY = "customerId";
+  public void start() {
+    RouteMatcher r = new RouteMatcher();
+    r.get("/ok", h);
+    RouteMatcher routes = new RouteMatcher();
+    routes.get("/docdef/:id", h);
+  }
+  String lookup(Map<String, String> r) {
+    r.get(KEY);
+    return r.get("customerId");
+  }
+}
+"""})
+    # `r` is a RouteMatcher in start() and a Map in lookup(): a lookup key is no route.
+    got = [(r.method, r.endpoint) for r in st if r.semanticType == "route"]
+    assert got == [("GET", "/ok"), ("GET", "/docdef/:id")]
+
+
+def test_router_declared_only_in_a_comment_is_not_a_router(analyze_files) -> None:
+    st = analyze_files({_LEGACY: """package a;
+import java.util.Map;
+import org.vertx.java.platform.Verticle;
+public class Legacy extends Verticle {
+  // RouteMatcher c = new RouteMatcher();
+  /** Example: {@code RouteMatcher d = new RouteMatcher();} */
+  String other(Map<String, String> c, Map<String, String> d) {
+    String home = "http://example.org";
+    return c.get("/x") + d.get("/y");
+  }
+}
+"""})
+    assert [s for s in st if s.semanticType == "route"] == []
+
+
+def test_name_matched_router_keeps_routes_without_a_slash(analyze_files) -> None:
+    st = analyze_files(_verticle(
+        "    Router router = Router.router(vertx);\n"
+        '    router.get("health").handler(this::handle);'))
+    # Matched by its name, as before: the path rule only applies to routers known by type.
+    assert [(r.method, r.endpoint) for r in _eps(st)] == [("GET", "health")]
+
+
+def test_groovy_router_by_type_only_needs_a_slash_path(analyze_files) -> None:
+    st = analyze_files({"src/main/groovy/a/Http.groovy": """package a
+import org.vertx.groovy.core.http.RouteMatcher
+def m = new RouteMatcher()
+m.get('/ok') { req -> }
+def lookup(Map m) { m.get('customerId') }
+"""})
+    assert [(r.method, r.endpoint) for r in st if r.semanticType == "route"] == [("GET", "/ok")]

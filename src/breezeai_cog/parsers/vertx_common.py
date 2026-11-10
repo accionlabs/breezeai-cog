@@ -101,13 +101,28 @@ _ROUTER_TYPED = re.compile(rb"\b(?:RouteMatcher|Router)\s+(\w+)\s*[=;,)]")
 _ROUTER_ASSIGNED = re.compile(rb"\b(\w+)\s*=\s*(?:new\s+RouteMatcher\s*\(|Router\.router\s*\()")
 
 
+#: A string literal (kept) or a comment (dropped), for :func:`_without_comments`.
+_STRING_OR_COMMENT = re.compile(
+    rb'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|//[^\n]*|/\*.*?\*/', re.DOTALL)
+
+
+def _without_comments(source: bytes) -> bytes:
+    """Java / Groovy source with its ``//`` and ``/* */`` comments blanked; string literals are
+    kept, so a ``"http://…"`` is not read as the start of a comment."""
+    return _STRING_OR_COMMENT.sub(
+        lambda m: m.group(0) if m.group(0)[:1] in (b'"', b"'") else b" ", source)
+
+
 def router_vars(source: bytes) -> frozenset[str]:
-    """Names declared as a ``Router`` / ``RouteMatcher`` in this file, so a route call on
-    ``routes`` or ``a`` counts by its declared type, not only by the receiver's name."""
+    """Names declared as a ``Router`` / ``RouteMatcher`` in this file (outside comments), so a
+    route call on ``routes`` or ``a`` counts by its declared type, not only by the receiver's
+    name. The set is file-wide, not scoped: :func:`classify_call` therefore also requires a
+    ``/`` in the path of a route found only through it (``Map r`` elsewhere, ``r.get("key")``)."""
     if b"Router" not in source and b"RouteMatcher" not in source:
         return frozenset()
+    code = _without_comments(source)
     return frozenset(n.decode() for rx in (_ROUTER_TYPED, _ROUTER_ASSIGNED)
-                     for n in rx.findall(source))
+                     for n in rx.findall(code))
 
 
 def is_bus_receiver(obj: str) -> bool:
@@ -148,7 +163,12 @@ def classify_call(
     starts with a placeholder. The receiver check (or ``route_scope``) is the real signal.
     """
     obj_l = obj.lower()
-    is_router = is_route_receiver(obj_l) or router_name(obj) in routers
+    is_router = is_route_receiver(obj_l)
+    if not is_router and router_name(obj) in routers:
+        # A router only by a file-wide declared type: the same name may be another variable in
+        # another method (`Map<String, String> r` … `r.get("customerId")`). Real route paths
+        # contain a `/`; a lookup key does not.
+        is_router = bool(path) and "/" in (path or "")
 
     if method in EVENTBUS and is_bus_receiver(obj):
         # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
