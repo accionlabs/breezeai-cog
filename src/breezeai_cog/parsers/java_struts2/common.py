@@ -39,10 +39,12 @@ DEFAULT_SUFFIX = "Action"
 _XML_CONSTANT = re.compile(
     rb"""<constant\s+(?:name\s*=\s*["']([^"']+)["']\s+value\s*=\s*["']([^"']*)["']"""
     rb"""|value\s*=\s*["']([^"']*)["']\s+name\s*=\s*["']([^"']+)["'])""")
-#: ``k=v`` / ``k: v`` / ``k v`` in a ``.properties`` file.
-_PROPERTY = re.compile(rb"^[ \t]*([\w.-]+)[ \t]*[=: \t][ \t]*(.*?)[ \t]*$", re.MULTILINE)
-#: The root element of a Struts2 configuration (never Struts 1's ``<struts-config>``).
-STRUTS_ROOT = re.compile(rb"<struts[\s>]")
+#: ``k=v`` / ``k: v`` / ``k v`` in a ``.properties`` file; a Windows line ending (``\r``) is not
+#: part of the value.
+_PROPERTY = re.compile(rb"^[ \t]*([\w.-]+)[ \t]*[=: \t][ \t]*(.*?)[ \t\r]*$", re.MULTILINE)
+#: The root element of a Struts2 configuration, self-closing too (never Struts 1's
+#: ``<struts-config>``).
+STRUTS_ROOT = re.compile(rb"<struts[\s/>]")
 #: Where a constant is set, lowest precedence first.
 XML_LEVEL, PROPERTIES_LEVEL, WEB_XML_LEVEL = 0, 1, 2
 #: The Struts2 dispatcher filters (2.0's ``FilterDispatcher`` to 7.x), by class simple name.

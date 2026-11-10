@@ -22,6 +22,7 @@ from ...schemas import FileRecord
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from ..treesitter import node_text
+from ..handler_sites import handler_info, method_lines
 from ..vertx_common import (
     vertx_emit,
     HANDLER_CALLS,
@@ -35,9 +36,7 @@ from ..vertx_common import (
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
-    handler_info,
     join_path,
-    method_lines,
     render_address,
     router_vars,
     service_builder_vars,

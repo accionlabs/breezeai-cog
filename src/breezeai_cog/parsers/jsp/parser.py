@@ -330,9 +330,17 @@ class _Page:
         return rel if (self.repo_root / rel).is_file() else None
 
     def add_resource(self, ref: str) -> None:
+        """An included / forwarded / imported resource: an in-repo file is a file link; a literal
+        path that is not in the repo (a resource of another module or a library jar) is an
+        external import, as written. A dynamic path, a URL or one leaving the tree is neither."""
         found = self.resource(ref)
         if found is not None:
             self.files.setdefault(found, None)
+            return
+        ref = ref.strip().split("?", 1)[0].split("#", 1)[0]
+        if ref and not any(m in ref for m in ("${", "#{", "<%")) \
+                and not _EXTERNAL_URL.match(ref) and ".." not in ref.split("/"):
+            self.external.setdefault(ref, None)
 
     def add_class(self, name: str) -> None:
         name = re.sub(r"<.*>|\[\]", "", name).strip()
@@ -605,6 +613,13 @@ class _Page:
         target = url.split("?", 1)[0].split("#", 1)[0]
         suffix = self._suffix()
         kinds = (*_ACTION_SUFFIXES, *_PAGE_SUFFIXES, *((suffix,) if suffix else ()))
+        # A Struts dynamic method call (`login!save.action`) addresses the action `login`, as
+        # the Struts tags write it: the `!method` part is dropped.
+        name = target.rsplit("/", 1)[-1]
+        if "!" in name and target.lower().endswith(
+                (*_ACTION_SUFFIXES, *((suffix,) if suffix else ()))):
+            stem, ext = posixpath.splitext(name)
+            target = target[: len(target) - len(name)] + stem.split("!", 1)[0] + ext
         if not target.lower().endswith(kinds):
             # No extension: a link only when it names an action of this module.
             if not target or any(d in target for d in _DYNAMIC):

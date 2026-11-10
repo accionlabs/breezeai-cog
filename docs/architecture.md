@@ -295,8 +295,8 @@ flowchart TD
   F[OrderVerticle.java] --> C[all parsers that own .java]
   C --> J["java · priority 0<br/>claims: always"]
   C --> S["java_springboot · priority 10<br/>claims: 'org.springframework' in source"]
-  C --> V["java_vertx · priority 10<br/>claims: 'io.vertx' or 'org.vertx' in source"]
-  C --> X["java_jaxrs · priority 10"]
+  C --> V["java_vertx · priority 5<br/>claims: 'io.vertx' or 'org.vertx' in source"]
+  C --> X["java_jaxrs · priority 10<br/>claims: 'javax.ws.rs' or 'jakarta.ws.rs' in source"]
   J & S & V & X --> W{highest priority<br/>among those that claim}
   W --> R[java_vertx parses the file]
 ```
@@ -313,6 +313,11 @@ Rules:
   [additive detector](#6-the-parser-model), not a parser, so it never competes for a file: a
   NestJS controller that also calls `app.get(...)` is owned by NestJS, and the `express`
   detector still adds the route.
+- A framework that is also a library other frameworks' files call keeps its parser for the
+  files that are only its own, at a **lower** priority than those frameworks, and does its
+  detection in an additive detector. Vert.x: `java_vertx` (5) owns a plain verticle, a Spring
+  `@Component` that calls `vertx.setPeriodic(...)` is owned by Spring Boot (10), and the
+  `vertx` detector adds the timer in both.
 
 > **Decision —** one parser per file; no combining of parsers.
 > **Why:** each file is parsed once, and there is no question of merging two parsers'
@@ -445,10 +450,10 @@ public class OrderVerticle extends AbstractVerticle {
 |---|---|
 | Scan | `.java` is owned by the Java parser and the file is small → candidate, language `java`. |
 | Index | The Java index records `com.acme.OrderVerticle` → this file, and the constant `ORDERS` → `"orders.created"`. |
-| Select | `java_vertx` claims the file (`io.vertx` is in the source) and has priority 10 → it wins over `java` (0). |
+| Select | `java_vertx` claims the file (`io.vertx` is in the source) and has priority 5 → it wins over `java` (0). No other framework claims it. |
 | Parse | One tree-sitter parse with the `java` grammar. |
 | Extract (Java) | 1 class, 2 methods, the imports, `calls[]` (with `audit` resolved to this file), and the structural statements. |
-| Detect (Vert.x) | Finds the route, the publish and the consumer. Enriches the matching statements, and folds `ORDERS` to `"orders.created"`. |
+| Detect (Vert.x) | The additive `vertx` detector, run at the end of the Java extraction, finds the route, the publish and the consumer. It enriches the matching statements, and folds `ORDERS` to `"orders.created"`. |
 | Comments | The comment above `audit` is bound to `audit` (the declaration that follows it). |
 
 **What comes out** (abridged from a real run)
@@ -509,9 +514,9 @@ classDiagram
     extract(root, ctx) FileRecord
   }
   class VertxParser {
-    priority = 10
+    priority = 5
     claims(): "io.vertx" in source
-    parse_file(): extract() + detect_vertx()
+    detection: the additive vertx detector
   }
   class SpringBootParser {
     priority = 10
@@ -669,6 +674,8 @@ the file:
   │                  80   graphql-client   csharp_graphql_client/…ions.py    ✔       │
   │                                                                                  │
   │  java            10   quartz           java_quartz/jobs.py               ✔       │
+  │                  20   struts2          java_struts2/annotations.py       ✔       │
+  │                  90   vertx            java_vertx/detector.py            ✔       │
   │                                                                                  │
   │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
   │                  20   go-gin           go_gin/routes.py                  ✔       │
@@ -1066,7 +1073,7 @@ src/breezeai_cog/
 │  ├─ handler_sites.py, aws_deploy.py  facts shared by several languages; where a handler is declared
 │  ├─ detection/                   shared api / db / query classifiers
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
-│  │  java_spring_config.py, java_web_guards.py, java_security_guards.py,
+│  │  java_spring_config.py, java_web_guards.py, java_security_guards.py, java_variables_common.py,
 │  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
 │  │  php_route_common.py, php_data_access_common.py, php_http_common.py
 │  │                               helpers shared by several frameworks or libraries
@@ -1121,7 +1128,7 @@ from another. The same holds between languages: C, C++ and CUDA share their extr
 
 | Topic | Limitation |
 |---|---|
-| Equal-priority claims | Two unrelated frameworks with the same priority can both claim a file (e.g. Spring Boot and Vert.x, both 10). The winner then depends on registration order, silently. |
+| Equal-priority claims | Two unrelated frameworks with the same priority can both claim a file (e.g. Spring Boot and JAX-RS, both 10). The winner then depends on registration order, silently. |
 | Runtime values | Routes or addresses built at runtime (from config, environment, reflection) stay empty. |
 | Type information | tree-sitter has no type checker, so overloads and inferred types are only partly resolved. |
 | One repository at a time | Links between repositories (a client in one repo calling a service in another) are not made by cog. |

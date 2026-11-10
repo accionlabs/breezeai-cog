@@ -14,6 +14,7 @@ from ...emit import file_id as _file_id
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..emits import apply
+from ..kotlin.imports import KotlinIndex
 from ..kotlin.parser import KotlinParser
 from ..treesitter import parse_source
 from .routes import detect_ktor_routes
@@ -34,8 +35,10 @@ class KtorParser(KotlinParser):
         record.framework = "ktor"
 
         if ctx.capture_statements:
+            idx = ctx.resolution_index
             routes = detect_ktor_routes(
                 root, ctx.source, ctx.path, _file_id(ctx.path), ctx.statement_text_limit,
+                repo_consts=idx.consts if isinstance(idx, KotlinIndex) else None,
             )
             apply(record, routes, ctx.source, ctx.path)
 

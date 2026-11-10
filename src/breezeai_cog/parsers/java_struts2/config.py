@@ -30,6 +30,8 @@ builds, so it keeps its ``metadata``; it only adds the routes, ``framework`` and
 
 from __future__ import annotations
 
+import re
+
 import posixpath
 from pathlib import Path
 
@@ -236,13 +238,35 @@ def _bare_redirect(target: Target, declared: ActionTable, suffix: str | None) ->
     return Target(action_endpoint(serving, name, suffix), target.file)
 
 
+#: ``<include file="…"/>`` in a Struts configuration.
+_INCLUDE = re.compile(rb"""<include\s+file\s*=\s*["']([^"']+)["']""")
+#: How many configuration files one ``struts.xml`` include chain is followed through.
+_MAX_INCLUDES = 200
+
+
+def _configuration(repo_root: Path, main: str) -> list[str]:
+    """The files of one Struts configuration: ``main`` and every file its ``<include>`` chain
+    reaches (cycles and missing files skipped), in a stable order."""
+    seen = [main]
+    queue = [main]
+    while queue and len(seen) < _MAX_INCLUDES:
+        current = queue.pop(0)
+        for ref in _INCLUDE.findall(_read(repo_root / current)):
+            rel = _sibling(repo_root, current, ref.decode("utf-8", "replace"))
+            if rel is not None and rel not in seen:
+                seen.append(rel)
+                queue.append(rel)
+    return seen
+
+
 def _suffix(repo_root: Path, path: str, source: bytes) -> tuple[str | None, bool]:
     """``(suffix, bare)``: the action suffix for this configuration's actions, from
     ``struts.action.extension`` as
-    Struts resolves it (:class:`.common.Layered`): ``<constant>`` in this file and in the
-    classpath root's ``struts.xml`` (the nearest one at or above it), overridden by
-    ``struts.properties`` there, overridden by the Struts filter's init-param in the web
-    application's ``web.xml``."""
+    Struts resolves it (:class:`.common.Layered`): ``<constant>`` in this file, in the
+    classpath root's ``struts.xml`` (the nearest one at or above it) and in every file its
+    ``<include>`` chain reaches — a constant applies to the whole configuration, and two files
+    setting different values leave it unknown — overridden by ``struts.properties`` there,
+    overridden by the Struts filter's init-param in the web application's ``web.xml``."""
     layered = Layered()
     layered.add("", XML_LEVEL, xml_constants(source))
     here = (repo_root / path).parent
@@ -251,8 +275,10 @@ def _suffix(repo_root: Path, path: str, source: bytes) -> tuple[str | None, bool
         main = directory / "struts.xml"
         if main.is_file():
             classpath = directory
-            if main != repo_root / path:
-                layered.add("", XML_LEVEL, xml_constants(_read(main)))
+            main_rel = main.relative_to(repo_root).as_posix()
+            for rel in _configuration(repo_root, main_rel):
+                if rel != path:
+                    layered.add("", XML_LEVEL, xml_constants(_read(repo_root / rel)))
             break
         if directory == repo_root:
             break

@@ -237,6 +237,14 @@ def _struts2_xml(n: int) -> str:
     return f'<?xml version="1.0"?>\n<struts>\n{packages}</struts>\n'
 
 
+def _kotlin_ktor(n: int) -> str:
+    consts = "".join(f'  const val P{i} = "/p{i}"\n' for i in range(n))
+    routes = "".join(f"    get(Paths.P{i}) {{ }}\n    get(TOP{i}) {{ }}\n" for i in range(n))
+    tops = "".join(f'const val TOP{i} = "/t{i}"\n' for i in range(n))
+    return ("package com.acme\nimport io.ktor.server.routing.*\n"
+            f"object Paths {{\n{consts}}}\n{tops}fun Route.r() {{\n{routes}}}\n")
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -253,6 +261,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "jsp": ("page.jsp", _jsp),
     "java-struts2": ("OrderAction.java", _struts2),
     "struts2-xml": ("struts.xml", _struts2_xml),
+    "kotlin-ktor": ("Routes.kt", _kotlin_ktor),
 }
 
 
@@ -329,3 +338,33 @@ def _referrer_walk_lines(n: int) -> int:
 def test_ownership_referrer_walk_is_linear_in_headers() -> None:
     small, large = _referrer_walk_lines(SIZE), _referrer_walk_lines(2 * SIZE)
     assert large / small < MAX_RATIO, f"{small} → {large} lines: the walk is no longer linear"
+
+
+def _index_lines(n: int) -> int:
+    """Python lines executed collecting one Kotlin file's importable constants (index pass)."""
+    from breezeai_cog.parsers.kotlin.constants import importable_constants
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    source = _kotlin_ktor(n).encode()
+    root = parse_source("kotlin", source, 0).root_node
+    count = 0
+
+    def trace(frame, event, arg):
+        nonlocal count
+        if event == "line":
+            count += 1
+        return trace
+
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        importable_constants(root, source, "com.acme")
+    finally:
+        sys.settrace(previous)
+    return count
+
+
+def test_kotlin_constant_index_is_linear_in_file_size() -> None:
+    _index_lines(5)
+    ratio = _index_lines(2 * SIZE) / _index_lines(SIZE)
+    assert ratio < MAX_RATIO, f"kotlin constant index: doubling multiplied work by {ratio:.2f}"
