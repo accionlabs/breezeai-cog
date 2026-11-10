@@ -29,6 +29,8 @@ contract: an address is resolved or empty, never a code name).
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from tree_sitter import Node
 
 from ...schemas import FileRecord, Function
@@ -203,8 +205,14 @@ def _base_type(type_node: Node | None, source: bytes) -> str:
 
 
 def _template_vars(root: Node, source: bytes) -> dict[str, str]:
-    """Variable / field / parameter name → template type, for names declared once in the file
-    with a broker template type (a name declared with two types is dropped: unsure)."""
+    """Variable / field / parameter name → broker template type (see :func:`typed_vars`)."""
+    return typed_vars(root, source, _TEMPLATES)
+
+
+def typed_vars(root: Node, source: bytes, types: Collection[str]) -> dict[str, str]:
+    """Variable / field / parameter name → declared type, for names declared in the file with a
+    type in ``types`` (simple name, generics dropped). A name declared with two different types
+    anywhere in the file is dropped: which one a call uses is unsure."""
     out: dict[str, str | None] = {}
 
     def walk(n: Node) -> None:
@@ -226,7 +234,7 @@ def _template_vars(root: Node, source: bytes) -> dict[str, str]:
             walk(c)
 
     walk(root)
-    return {k: v for k, v in out.items() if v in _TEMPLATES}
+    return {k: v for k, v in out.items() if v is not None and v in types}
 
 
 def _send_address(method: str, args: list[Node], source: bytes, consts: dict[str, str],

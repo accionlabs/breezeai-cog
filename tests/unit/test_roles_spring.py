@@ -433,3 +433,137 @@ def test_scheduled_interval_with_a_time_unit_is_in_milliseconds(analyze_files) -
         "d": None,            # not a whole number of milliseconds
         "e": "0 * * * *",     # timeUnit does not apply to cron
     }
+
+
+def test_scheduled_inside_a_schedules_container_is_binding(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        "import org.springframework.scheduling.annotation.Scheduled;\n"
+        "import org.springframework.scheduling.annotation.Schedules;",
+        """public class J {
+  @Schedules({ @Scheduled(cron = "0 0 2 * * *"), @Scheduled(fixedRate = 60000) })
+  public void cleanup() {}
+  @Schedules(@Scheduled(fixedDelay = 5))
+  public void single() {}
+  @Schedules(value = { @Scheduled(cron = "0 0 4 * * *") })
+  public void named() {}
+  @Scheduled(cron = "0 0 3 * * *")
+  @Scheduled(fixedDelay = 5000)
+  public void twice() {}
+}""",
+    ))
+    got = sorted((r.handler, r.endpoint, r.method, r.framework) for r in _eps(st))
+    assert got == [
+        ("cleanup", "0 0 2 * * *", "PERIODIC", "spring"),
+        ("cleanup", "60000", "PERIODIC", "spring"),
+        ("named", "0 0 4 * * *", "PERIODIC", "spring"),
+        ("single", "5", "PERIODIC", "spring"),
+        ("twice", "0 0 3 * * *", "PERIODIC", "spring"),
+        ("twice", "5000", "PERIODIC", "spring"),
+    ]
+
+
+SCHEDULER = """import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.config.ScheduledTaskRegistrar;
+import org.springframework.scheduling.annotation.SchedulingConfigurer;
+import java.time.Duration;"""
+
+
+def test_task_scheduler_and_registrar_calls_are_bindings(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        SCHEDULER,
+        """public class J implements SchedulingConfigurer {
+  private TaskScheduler scheduler;
+  public void start() { scheduler.scheduleAtFixedRate(this::poll, Duration.ofSeconds(30)); }
+  public void again() { this.scheduler.scheduleWithFixedDelay(this::poll, 2_000L); }
+  public void configureTasks(ScheduledTaskRegistrar r) {
+    r.addFixedRateTask(this::report, 10000);
+    r.addCronTask(this::nightly, "0 0 2 * * *");
+  }
+  void poll() {}
+  void report() {}
+  void nightly() {}
+}""",
+    ))
+    got = sorted((r.handler, r.endpoint) for r in _eps(st))
+    assert got == [("nightly", "0 0 2 * * *"), ("poll", "2000"), ("poll", "30000"),
+                   ("report", "10000")]
+    assert {(r.framework, r.method) for r in _eps(st)} == {("spring", "PERIODIC")}
+
+
+def test_jdk_scheduled_executor_is_not_a_spring_timer(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        "import java.util.concurrent.ScheduledExecutorService;\n"
+        "import java.util.concurrent.TimeUnit;\n"
+        "import org.springframework.stereotype.Component;",
+        """@Component
+public class J {
+  private ScheduledExecutorService exec;
+  public void start() { exec.scheduleAtFixedRate(this::poll, 0, 30, TimeUnit.SECONDS); }
+  void poll() {}
+}""",
+    ))
+    assert _eps(st) == []
+
+
+def test_scheduler_period_that_is_not_a_literal_is_empty(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        SCHEDULER,
+        """public class J {
+  private TaskScheduler scheduler;
+  static final long EVERY_MS = 10000;
+  public void start(Duration every, long seconds) {
+    scheduler.scheduleAtFixedRate(this::poll, every);
+    scheduler.scheduleAtFixedRate(this::poll, EVERY_MS);
+    scheduler.scheduleAtFixedRate(this::poll, Duration.ofSeconds(seconds));
+    scheduler.scheduleAtFixedRate(() -> poll(), Duration.ofMillis(500));
+  }
+  void poll() {}
+}""",
+    ))
+    got = sorted(((r.endpoint or ""), r.handler or "") for r in _eps(st))
+    # A runtime period or a numeric constant is unknown → empty; a lambda task has no handler
+    # name, only its line.
+    assert got == [("", "poll"), ("", "poll"), ("", "poll"), ("500", "")]
+
+
+def test_scheduler_name_declared_with_two_types_is_not_read(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        SCHEDULER + "\nimport java.util.concurrent.ScheduledExecutorService;",
+        """public class J {
+  private TaskScheduler scheduler;
+  public void start() { scheduler.scheduleAtFixedRate(this::poll, Duration.ofSeconds(30)); }
+  public void other(ScheduledExecutorService scheduler) {
+    scheduler.scheduleAtFixedRate(this::poll, 0, 30, java.util.concurrent.TimeUnit.SECONDS);
+  }
+  void poll() {}
+}""",
+    ))
+    # Which object a `scheduler.…` call uses is unsure: no timer from either call.
+    assert _eps(st) == []
+
+
+def test_registrar_task_object_is_binding(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        SCHEDULER + "\nimport org.springframework.scheduling.config.*;",
+        """public class J implements SchedulingConfigurer {
+  public void configureTasks(ScheduledTaskRegistrar registrar) {
+    Duration interval = Duration.ofHours(hours());
+    registrar.addFixedDelayTask(new FixedDelayTask(this::sync, interval, Duration.ZERO));
+    registrar.addFixedRateTask(new FixedRateTask(this::poll, Duration.ofMinutes(5), Duration.ZERO));
+    registrar.addCronTask(new CronTask(this::nightly, "0 0 2 * * *"));
+  }
+  long hours() { return 24; }
+  void sync() {}
+  void poll() {}
+  void nightly() {}
+}""",
+    ))
+    got = sorted((r.handler, r.endpoint or "") for r in _eps(st))
+    # The interval held in a variable is unknown → empty, never the variable's name.
+    assert got == [("nightly", "0 0 2 * * *"), ("poll", "300000"), ("sync", "")]
