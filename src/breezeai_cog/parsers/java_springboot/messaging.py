@@ -35,7 +35,7 @@ from ...schemas import FileRecord, Function
 from ..emits import Emit
 from ..java_spring_config import resolve_placeholders
 from ..java.constants import fold_arg
-from ..java.variables import typed_vars
+from ..java_variables_common import typed_vars
 from ..treesitter import first_line, node_text
 
 #: listener annotation → (framework, method, address attributes; "" = the positional value)

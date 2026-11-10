@@ -17,7 +17,7 @@ from ..java_spring_config import module_of, resolve_placeholders
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
-from ..java_spring_security import security_rules
+from .security import security_rules
 from ..java_web_guards import module_guards
 from ..treesitter import parse_source
 from .config_facts import context_paths, module_properties

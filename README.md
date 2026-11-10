@@ -26,7 +26,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Python | `.py` | FastAPI |
 | PHP | `.php .phtml` | Laravel, CodeIgniter 4, Slim, Symfony; WordPress hooks, Laravel Event/Bus and Symfony EventDispatcher/Messenger (additive) |
 | Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
-| Java | `.java` `struts.xml` | Spring Boot, JAX-RS, Struts2 (`struts.xml` actions and its includes, Convention-plugin `@Action` / `@Namespace` annotations and un-annotated Convention actions; 2.0 – 7.x), Vert.x |
+| Java | `.java` `struts.xml` | Spring Boot (incl. `@Scheduled` / `@Schedules` and `TaskScheduler` / `ScheduledTaskRegistrar` timers, Kafka / RabbitMQ / JMS / SQS listeners and Spring Cloud Stream `@StreamListener`, Spring Security URL rules as route guards), JAX-RS, Struts2 (`struts.xml` actions and its includes, Convention-plugin `@Action` / `@Namespace` annotations and un-annotated Convention actions; 2.0 – 7.x), Vert.x 2 – 4 (routes, sub-routers, EventBus, service proxies, timers; Vert.x 2 registration tables, address helpers and `HttpClient` calls; additive, so also in Spring / JAX-RS classes) |
 | C# | `.cs .asmx .svc` `.cshtml .razor .aspx .ascx .master` ‡ | ASP.NET (MVC / Web API / Minimal API / Web Forms), Razor Pages (`.cshtml`), Blazor (`.razor`), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |

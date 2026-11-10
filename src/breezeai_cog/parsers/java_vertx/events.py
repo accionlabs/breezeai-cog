@@ -47,9 +47,9 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
-from ..handler_sites import handler_location, locate_method
 from .service_interfaces import service_methods
 from ..treesitter import node_text
+from ..handler_sites import handler_info, handler_location, locate_method, method_lines
 from ..vertx_common import (
     vertx_emit,
     EVENTBUS,
@@ -64,10 +64,8 @@ from ..vertx_common import (
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
-    handler_info,
     is_bus_receiver,
     join_path,
-    method_lines,
     render_address,
     router_vars,
     service_builder_vars,

@@ -15,7 +15,7 @@ from ...schemas import Decorator, FileRecord, Function
 from ..emits import Emit
 from ..java.functions import method_nodes, payload_type
 from ..java_security_guards import security_guards
-from ..java_spring_security import Rule, route_rule
+from .security import Rule, route_rule
 from ..java_web_guards import ModuleGuards, spring_global_guards
 
 _METHOD_MAPPINGS = {

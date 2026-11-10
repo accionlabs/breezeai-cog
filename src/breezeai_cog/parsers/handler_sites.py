@@ -39,13 +39,13 @@ caller's namespace). A partial class split over files is fine: each method keeps
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
-from ..schemas import FileRecord, Statement
+from ..schemas import FileRecord, Function, Statement
 from .additive import FactSpec, frameworks_locating_handlers, index_fact, register_fact
 from .treesitter import node_text
 
@@ -184,3 +184,49 @@ for _language in _FACT_LANGUAGES:
         name=fact_name(_language), language=_language, gate=(b"class",),
         collect=_collector(_language), resolve=_resolve,
     ))
+
+
+# ── a handler given as an argument (Java / Groovy) ───────────────────────────────────────────
+#: Inline handlers: a Java lambda, a Groovy closure.
+_INLINE = frozenset({"lambda_expression", "closure"})
+#: Method references: Java ``this::h``, Groovy ``this::h`` / ``this.&h``.
+_METHOD_REFS = frozenset({"method_reference", "method_reference_expression",
+                          "method_pointer_expression"})
+
+
+def handler_info(
+    arg: Node | None, source: bytes, methods: dict[str, int | None]
+) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) for a handler argument (contract §5).
+
+    - Inline lambda / closure / anonymous ``new Handler<>() {…}``: no name; its line.
+    - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
+    - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
+    - ``this`` (the class itself implements ``Handler``): ``handle``, its line in this file.
+    - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
+    if arg is None:
+        return None, None
+    if arg.type in _INLINE or (arg.type == "object_creation_expression"
+                               and any(c.type == "class_body" for c in arg.named_children)):
+        return None, arg.start_point[0] + 1
+    if arg.type in _METHOD_REFS:
+        text = node_text(arg, source)
+        sep = "::" if "::" in text else ".&"
+        receiver, _, name = text.rpartition(sep)
+        name = name.strip()
+        if not name.isidentifier():
+            return None, None
+        return name, methods.get(name) if receiver.strip() == "this" else None
+    if arg.type == "this" or (arg.type == "identifier" and node_text(arg, source) == "this"):
+        return "handle", methods.get("handle")
+    if arg.type == "identifier":
+        return node_text(arg, source), None
+    return None, None
+
+
+def method_lines(functions: Iterable[Function]) -> dict[str, int | None]:
+    """Method name → declaration line for the file's methods (a name declared twice → None)."""
+    out: dict[str, int | None] = {}
+    for f in functions:
+        out[f.name] = f.startLine if f.name not in out else None
+    return out

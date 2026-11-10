@@ -29,12 +29,12 @@ from typing import Any, NamedTuple
 
 from tree_sitter import Node
 
-from .additive import FactSpec, index_fact, register_fact
-from .constfold import resolve_all
-from .java.constants import collect_constants, fold_arg
-from .java_security_guards import _ESCAPES, _SIGNED_IN
-from .java_spring_config import module_of
-from .treesitter import node_text
+from ..additive import FactSpec, index_fact, register_fact
+from ..constfold import resolve_all
+from ..java.constants import collect_constants, fold_arg
+from ..java_security_guards import _ESCAPES, _SIGNED_IN
+from ..java_spring_config import module_of
+from ..treesitter import node_text
 
 FACT = "spring.security-rules"
 

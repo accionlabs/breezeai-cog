@@ -10,7 +10,7 @@ from collections.abc import Collection
 
 from tree_sitter import Node
 
-from ..treesitter import node_text
+from .treesitter import node_text
 
 
 def base_type(type_node: Node | None, source: bytes) -> str:

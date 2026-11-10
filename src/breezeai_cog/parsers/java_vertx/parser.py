@@ -17,7 +17,9 @@ from ..java.parser import JavaParser
 
 class VertxParser(JavaParser):
     name = "java-vertx"
-    priority = 10
+    # Below the other Java framework parsers (10): a file that is also a Spring / JAX-RS class
+    # is theirs, and its Vert.x records still come from the additive `vertx` detector.
+    priority = 5
     frameworks = ["vertx"]
 
     def claims(self, path: str, source: bytes) -> bool:

@@ -281,3 +281,56 @@ def test_relay_that_does_not_pass_the_address_on_is_not_a_forwarder(analyze_file
     got = [r for r in _bus(analyze_files(files)) if r[0] == "Caller.java"]
     # `other` passes its parameter as the message, not the address: the call is no EventBus call.
     assert got == []
+
+
+# ── forwarders are classes, not simple names ────────────────────────────────────────────────
+
+_FWD = ("package a;\nimport org.vertx.java.core.Vertx;\npublic class Util {\n"
+        "  public static void send(Vertx v, String address) { v.eventBus().send(address, null); }\n}\n")
+_LOGGER = ("package b;\npublic class Util {\n"
+           "  public static void send(Object log, String text) { System.out.println(text); }\n}\n")
+
+
+def _call(imports: str) -> str:
+    return (f"package b;\n{imports}import org.vertx.java.platform.Verticle;\n"
+            'public class Caller extends Verticle { public void start() { Util.send(vertx, "x/y"); } }\n')
+
+
+def _sends(analyze_files, files):
+    return [(s.path.rsplit("/", 1)[-1], s.endpoint) for s in analyze_files(files)
+            if s.semanticType == "eventbus_send"]
+
+
+def test_same_named_class_of_another_package_is_not_a_forwarder(analyze_files) -> None:
+    files = {"src/main/java/a/Util.java": _FWD, "src/main/java/b/Util.java": _LOGGER,
+             "src/main/java/b/Caller.java": _call("")}
+    # `Util` in package b is b.Util, a logger: no event-bus send.
+    assert _sends(analyze_files, files) == []
+
+
+def test_forwarder_reached_through_an_import_is_followed(analyze_files) -> None:
+    for imports in ("import a.Util;\n", "import a.*;\n"):
+        files = {"src/main/java/a/Util.java": _FWD, "src/main/java/b/Caller.java": _call(imports)}
+        assert _sends(analyze_files, files) == [("Caller.java", "x/y")]
+
+
+def test_same_package_class_shadows_a_wildcard_forwarder(analyze_files) -> None:
+    files = {"src/main/java/a/Util.java": _FWD, "src/main/java/b/Util.java": _LOGGER,
+             "src/main/java/b/Caller.java": _call("import a.*;\n")}
+    # Java resolves `Util` to the package's own b.Util before any on-demand import.
+    assert _sends(analyze_files, files) == []
+
+
+def test_vertx3_http_client_is_left_to_the_shared_detection(analyze_files) -> None:
+    st = analyze_files({f"{SRC}Client.java": """package com.acme;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.http.HttpClient;
+public class Client extends AbstractVerticle {
+  public void start() {
+    HttpClient client = vertx.createHttpClient();
+    client.getNow("/1.0/data/ORDERS/42", response -> { });
+  }
+}
+"""})
+    # The Vert.x 2 rule reads only `org.vertx.java.core.http.HttpClient`: no vertx api_call.
+    assert [s for s in st if s.semanticType == "api_call" and s.framework == "vertx"] == []

@@ -639,7 +639,7 @@ def test_url_tag_inside_an_attribute_is_navigation(analyze_files) -> None:
     assert kinds == {3: "synthetic", 4: "synthetic", 5: "element"}
 
 
-# ── QA findings: included constants, plain Convention classes, CRLF properties ─────────────
+# ── Included constants, plain Convention classes, properties line endings ─────────────────
 
 def _routes(st):
     return sorted((s.path.rsplit("/", 1)[-1], s.method, s.endpoint, s.handler)

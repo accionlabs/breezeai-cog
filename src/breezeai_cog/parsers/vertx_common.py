@@ -21,7 +21,7 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..schemas import Function, SemanticType
+from ..schemas import SemanticType
 from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
@@ -358,51 +358,8 @@ def join_path(base: str, local: str) -> str:
 #: several (``.handler(BodyHandler.create()).handler(this::create)``); the last one is the
 #: handler, the earlier ones run before it.
 HANDLER_CALLS = frozenset({"handler", "blockingHandler"})
-#: Inline handlers: a Java lambda, a Groovy closure.
-_INLINE = frozenset({"lambda_expression", "closure"})
-#: Method references: Java ``this::h``, Groovy ``this::h`` / ``this.&h``.
-_METHOD_REFS = frozenset({"method_reference", "method_reference_expression",
-                          "method_pointer_expression"})
 #: Semantic types whose handler is an entry point's handler (outbound reply callbacks are not).
 HANDLER_SEMANTICS = frozenset({"route", "eventbus_consumer", "timer"})
-
-
-def handler_info(
-    arg: Node | None, source: bytes, methods: dict[str, int | None]
-) -> tuple[str | None, int | None]:
-    """(handler, handlerLine) for a handler argument (contract §5).
-
-    - Inline lambda / closure / anonymous ``new Handler<>() {…}``: no name; its line.
-    - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
-    - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
-    - ``this`` (the class itself implements ``Handler``): ``handle``, its line in this file.
-    - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
-    if arg is None:
-        return None, None
-    if arg.type in _INLINE or (arg.type == "object_creation_expression"
-                               and any(c.type == "class_body" for c in arg.named_children)):
-        return None, arg.start_point[0] + 1
-    if arg.type in _METHOD_REFS:
-        text = node_text(arg, source)
-        sep = "::" if "::" in text else ".&"
-        receiver, _, name = text.rpartition(sep)
-        name = name.strip()
-        if not name.isidentifier():
-            return None, None
-        return name, methods.get(name) if receiver.strip() == "this" else None
-    if arg.type == "this" or (arg.type == "identifier" and node_text(arg, source) == "this"):
-        return "handle", methods.get("handle")
-    if arg.type == "identifier":
-        return node_text(arg, source), None
-    return None, None
-
-
-def method_lines(functions: Iterable[Function]) -> dict[str, int | None]:
-    """Method name → declaration line for the file's methods (a name declared twice → None)."""
-    out: dict[str, int | None] = {}
-    for f in functions:
-        out[f.name] = f.startLine if f.name not in out else None
-    return out
 
 
 def vertx_emit(

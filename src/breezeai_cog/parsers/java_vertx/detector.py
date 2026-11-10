@@ -32,9 +32,9 @@ def _detect(dc: DetectContext) -> Detection | None:
 
 register_detector(Detector(
     name="vertx",
-    # Two markers (3.x and 2.x), so the detector guards itself. Fixture files are not skipped:
-    # the java-vertx parser never skipped them.
-    gate=Gate("java", order=90, guard=None),
+    # Two markers (3.x and 2.x), so the detector guards itself. An entry-point emitter, so
+    # fixture / test files are skipped.
+    gate=Gate("java", order=90, guard=None, skip_fixtures=True),
     detect=_detect, frameworks=("vertx",),
     label_priority=1,  # a Vert.x file is labelled vertx whatever other library it uses
 ))

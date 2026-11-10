@@ -563,3 +563,12 @@ m.get('/ok') { req -> }
 def lookup(Map m) { m.get('customerId') }
 """})
     assert [(r.method, r.endpoint) for r in st if r.semanticType == "route"] == [("GET", "/ok")]
+
+
+def test_vertx_records_in_a_fixture_file_are_skipped(analyze_files) -> None:
+    body = (IMPORTS + "public class Api extends AbstractVerticle {\n  public void start() {\n"
+            '    Router router = Router.router(vertx);\n    router.get("/x").handler(c -> {});\n'
+            '    vertx.eventBus().consumer("a.b", m -> {});\n  }\n}\n')
+    st = analyze_files({"src/test/java/fixtures/a/Api.java": body})
+    # A fixture is parsed for structure, never as a source of entry points.
+    assert _eps(st) == []

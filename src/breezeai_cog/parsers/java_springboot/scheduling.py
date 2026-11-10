@@ -41,8 +41,8 @@ from tree_sitter import Node
 from ...schemas import FileRecord, Function
 from ..emits import Emit
 from ..treesitter import first_line, node_text
-from ..vertx_common import handler_info, method_lines
-from ..java.variables import typed_vars
+from ..handler_sites import handler_info, method_lines
+from ..java_variables_common import typed_vars
 from .messaging import _address, _ann_name, _annotations, _classes
 
 #: Schedule attributes, in the order the first present one is taken as the address.
