@@ -44,14 +44,13 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
-from ..handler_sites import handler_location, locate_method
+from ..handler_sites import handler_info, handler_location, locate_method, method_lines
 from ..index_common import record_distinct
 from ..java_variables_common import typed_vars
 from ..treesitter import node_text
-from ..handler_sites import handler_info, method_lines
 from ..vertx_common import EVENTBUS, is_bus_receiver, render_address, vertx_emit
-from .events import (_handler_class, _imports_and_package, _invocations, _java_string,
-                     _local_value)
+from .java_syntax import (handler_class, imports_and_package, invocations, java_string,
+                          local_value)
 
 #: EventBus methods that register a consumer (Vert.x 2 ``registerHandler`` family, 3.x names).
 _CONSUMERS = frozenset(m for m, s in EVENTBUS.items() if s == "eventbus_consumer")
@@ -86,7 +85,7 @@ def _args(call: Node) -> list[Node]:
 
 def _known(node: Node, source: bytes, consts: dict[str, str]) -> str | None:
     """An address / URI argument folded to a constant, else None (never a ``{name}``)."""
-    value = render_address(node, source, consts, _java_string)
+    value = render_address(node, source, consts, java_string)
     return value if value is not None and "{" not in value else None
 
 
@@ -122,7 +121,7 @@ def _table_of(addr: Node, source: bytes) -> str | None:
         by_keys = _loop_over(addr, var, source, "keySet")
         if by_keys is not None:
             return by_keys
-        node = _local_value(addr, var, source)
+        node = local_value(addr, var, source)
     if node is None or node.type != "method_invocation" or _args(node) \
             or _name(node.child_by_field_name("name"), source) != "getKey":
         return None
@@ -159,7 +158,7 @@ def registration_tables(
         replaced |= {(c.start_byte, c.end_byte) for c in registrations}
         for put in puts:
             key, value = _args(put)
-            impl = _handler_class(value, source)
+            impl = handler_class(value, source)
             line, handler_path = _located(index, impl, path)
             found.append(vertx_emit(put, "eventbus_consumer", None, _known(key, source, consts),
                                     None, "handle" if impl else None, line,
@@ -199,7 +198,7 @@ def _assigned(body: Node, source: bytes) -> dict[str, list[Node]]:
 
 def _bus_calls(body: Node, source: bytes) -> list[tuple[Node, SemanticType, list[Node]]]:
     out = []
-    for call in _invocations(body):
+    for call in invocations(body):
         method = _name(call.child_by_field_name("name"), source)
         obj = call.child_by_field_name("object")
         args = _args(call)
@@ -227,7 +226,7 @@ class _Names:
     one ``known`` class among the on-demand (``.*``) imports. Anything else → None."""
 
     def __init__(self, root: Node, source: bytes, types: object | None = None) -> None:
-        self.singles, self.wildcards, self.package = _imports_and_package(root, source)
+        self.singles, self.wildcards, self.package = imports_and_package(root, source)
         self.types: dict[str, Any] = getattr(types, "fqcn", None) or {}
 
     def qualify(self, *chain: str) -> str:
@@ -339,7 +338,7 @@ def _forwarders(root: Node, source: bytes) -> tuple[
             mname = "<init>" if decl.type == "constructor_declaration" \
                 else _name(decl.child_by_field_name("name"), source)
             key = f"{cname}.{mname}/{len(names)}"
-            for call in _invocations(dbody):
+            for call in invocations(dbody):
                 callee = _callee(call, cname, names_of, source)
                 mapping = tuple(
                     (i, names.index(_name(a, source))) for i, a in enumerate(_args(call))
@@ -493,7 +492,7 @@ def forwarder_sites(
             if hidx >= 0 and hidx < len(args):
                 handler, line = handler_info(args[hidx], source, methods)
                 if handler is None and line is None:
-                    impl = _handler_class(args[hidx], source)
+                    impl = handler_class(args[hidx], source)
             if impl:
                 handler = "handle"
                 line, handler_path = _located(index, impl, path)
@@ -566,7 +565,7 @@ def http_client_calls(
                  if f.returnType and f.returnType.split("<", 1)[0].rsplit(".", 1)[-1]
                  == "HttpClient"}
     found: list[Emit] = []
-    for call in _invocations(root):
+    for call in invocations(root):
         method = _name(call.child_by_field_name("name"), source)
         if method not in _HTTP_CLIENT and method != "request":
             continue
