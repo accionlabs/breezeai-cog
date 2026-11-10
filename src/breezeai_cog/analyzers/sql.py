@@ -480,12 +480,13 @@ _CAPTURED_CREATE = re.compile(
 )
 
 
-def _raw_statement(stmt: str) -> str:
+def _raw_statement(stmt: str, nested: bool = False) -> str:
     """Verbatim statement text from one ``;``-delimited chunk: *leading* whitespace and
     comments are dropped so the text starts at the ``CREATE`` keyword, and trailing
     whitespace plus a terminating ``;`` are removed. Everything in between — interior and
-    trailing comments, spacing, quoting, hints — is left exactly as written."""
-    return _TRAILING_TERMINATOR.sub("", _strip_leading_noise(stmt)).rstrip()
+    trailing comments, spacing, quoting, hints — is left exactly as written. ``nested`` as
+    in :func:`_strip_leading_noise`."""
+    return _TRAILING_TERMINATOR.sub("", _strip_leading_noise(stmt, nested)).rstrip()
 
 
 def _sqlglot_statements(
@@ -1210,24 +1211,47 @@ def _tsql_unquote(ident: str) -> str:
     return ident
 
 
-def _strip_leading_noise(b: str) -> str:
-    """Drop leading whitespace + line/block comments so the CREATE keyword is at position 0."""
+_BLOCK_COMMENT_TOKEN = re.compile(r"/\*|\*/")
+
+
+def _block_comment_end(text: str, start: int, nested: bool) -> int:
+    """Index just past the ``*/`` closing the ``/*`` at ``start``, or -1 if it is never
+    closed. ``nested`` (T-SQL) counts inner ``/* … */`` pairs, so ``/* a /* b */ c */`` closes
+    at its last ``*/``; otherwise (Oracle, MySQL) the first ``*/`` closes it."""
+    if not nested:
+        end = text.find("*/", start + 2)
+        return -1 if end < 0 else end + 2
+    depth = 1
+    for m in _BLOCK_COMMENT_TOKEN.finditer(text, start + 2):
+        depth += 1 if m.group() == "/*" else -1
+        if depth == 0:
+            return m.end()
+    return -1
+
+
+def _strip_leading_noise(b: str, nested: bool = False) -> str:
+    """Drop leading whitespace + line/block comments so the CREATE keyword is at position 0.
+    ``nested`` reads block comments as T-SQL does (see :func:`_block_comment_end`); an
+    unclosed block comment is left in place."""
     prev = None
     while prev != b:
         prev = b
         b = re.sub(r"^\s+", "", b)
         b = re.sub(r"^--[^\n]*\n?", "", b)
-        b = re.sub(r"^/\*.*?\*/\s*", "", b, flags=re.DOTALL)
+        if b.startswith("/*") and (end := _block_comment_end(b, 0, nested)) >= 0:
+            b = b[end:]
     return b
 
 
 def _split_tsql_semicolons(sql: str) -> list[str]:
     """Split a non-program batch on top-level ``;`` while respecting ``'..'`` strings (``''``
-    escape), ``[..]``/``".."`` identifiers, ``--``/``/* */`` comments, and parentheses."""
+    escape), ``[..]``/``".."`` identifiers, ``--`` comments, ``/* */`` comments (nested, as
+    T-SQL allows), and parentheses."""
     stmts: list[str] = []
     buf: list[str] = []
     i, n = 0, len(sql)
-    in_s = in_b = in_d = lc = bc = False
+    in_s = in_b = in_d = lc = False
+    bc = 0  # block-comment nesting depth
     depth = 0
     while i < n:
         ch = sql[i]
@@ -1242,7 +1266,11 @@ def _split_tsql_semicolons(sql: str) -> list[str]:
             if ch == "*" and nx == "/":
                 buf.append(nx)
                 i += 2
-                bc = False
+                bc -= 1
+            elif ch == "/" and nx == "*":
+                buf.append(nx)
+                i += 2
+                bc += 1
             else:
                 i += 1
         elif in_s:
@@ -1269,7 +1297,7 @@ def _split_tsql_semicolons(sql: str) -> list[str]:
             buf.append(ch)
             i += 1
         elif ch == "/" and nx == "*":
-            bc = True
+            bc = 1
             buf.append(ch)
             buf.append(nx)
             i += 2
@@ -1308,16 +1336,73 @@ def _split_tsql_semicolons(sql: str) -> list[str]:
     return stmts
 
 
+def _tsql_quoted_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` spans of every closed block comment (nested, as T-SQL allows),
+    ``'..'`` string, ``[..]`` identifier and ``".."`` identifier, in order. A ``GO`` line
+    inside one is text, not a batch separator — SSMS and sqlcmd do not split there either.
+    An opener never closed masks nothing, so the rest of the file is not swallowed into one
+    batch. A stray quote that a *later* quote does close is read as a string, as SSMS and
+    sqlcmd read it: every ``GO`` between the two is text, and an object in that stretch is
+    lost with the batch."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    closers = {"'": "'", "[": "]", '"': '"'}
+    while i < n:
+        ch = text[i]
+        if text.startswith("--", i):  # a line comment ends before any GO line
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+        elif text.startswith("/*", i):
+            j = _block_comment_end(text, i, nested=True)
+            if j < 0:
+                i += 2
+            else:
+                spans.append((i, j))
+                i = j
+        elif ch in closers:
+            close, j = closers[ch], i + 1
+            while True:
+                j = text.find(close, j)
+                if j < 0 or not text.startswith(close * 2, j):
+                    break
+                j += 2  # doubled closer is an escape ('' ]] "")
+            if j < 0:
+                i += 1
+            else:
+                spans.append((i, j + 1))
+                i = j + 1
+        else:
+            i += 1
+    return spans
+
+
+def _split_tsql_batches(text: str) -> list[str]:
+    """Split a T-SQL script on its ``GO`` lines, skipping any inside a comment, string or
+    bracketed identifier (see :func:`_tsql_quoted_spans`)."""
+    spans = _tsql_quoted_spans(text)
+    batches: list[str] = []
+    start = k = 0
+    for m in _TSQL_GO.finditer(text):
+        while k < len(spans) and spans[k][1] <= m.start():
+            k += 1
+        if k < len(spans) and spans[k][0] < m.start():
+            continue
+        batches.append(text[start : m.start()])
+        start = m.end()
+    batches.append(text[start:])
+    return batches
+
+
 def _split_tsql_statements(text: str) -> list[str]:
     """T-SQL statement splitter: split into ``GO`` batches; a program batch (PROCEDURE/
     FUNCTION/TRIGGER) is kept WHOLE (its body has inner ``;`` we must not cut on), every other
     batch is split on top-level ``;``. This keeps stored-program bodies intact."""
     out: list[str] = []
-    for batch in _TSQL_GO.split(text):
+    for batch in _split_tsql_batches(text):
         b = batch.strip()
         if not b:
             continue
-        if _TSQL_PROG.match(_strip_leading_noise(b)):
+        if _TSQL_PROG.match(_strip_leading_noise(b, nested=True)):
             out.append(b)
         else:
             out.extend(_split_tsql_semicolons(b))
@@ -1503,7 +1588,7 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
             sample_errors.append(msg[:200])
 
     for stmt in _split_tsql_statements(text):
-        s = _strip_leading_noise(stmt)
+        s = _strip_leading_noise(stmt, nested=True)
         if not s:
             continue
         try:
@@ -1542,7 +1627,7 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
                 tables.append(tbl)
                 ok += 1
             elif kind == "view" and isinstance(node, exp.Create):
-                views.append(_view(node, "transactsql", raw=_raw_statement(s)))
+                views.append(_view(node, "transactsql", raw=_raw_statement(s, nested=True)))
                 ok += 1
             elif kind == "index" and isinstance(node, exp.Create):
                 all_indexes.append(_index(node, "transactsql"))
