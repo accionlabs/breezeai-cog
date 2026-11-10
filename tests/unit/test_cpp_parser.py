@@ -133,24 +133,36 @@ def test_statements_gated_and_detected(tmp_path) -> None:
     assert all(s.parentId in ids for s in rec.statements)
 
 
-def test_api_call_endpoint_concatenation(tmp_path) -> None:
-    src = b'void m(const char* id) { httpClient.get("/users/" + id); }'
+def test_a_receiver_name_never_makes_an_http_or_db_call(tmp_path) -> None:
+    # C++ has no client naming convention: a server registering its own route, a map lookup
+    # and a registry update only look like HTTP / ORM calls by name. Raw SQL is still found.
+    src = (
+        b'void m(Server& web_http, Store& sessions, Registry& models, const char* id) {\n'
+        b'    web_http.post("/v1/orders", handle_orders);\n'
+        b'    httpClient.get("/users/" + id);\n'
+        b'    auto s = sessions.get(id);\n'
+        b'    s.run();\n'
+        b'    models.remove(id);\n'
+        b'    db.exec("SELECT id FROM orders WHERE id = ?");\n'
+        b'}\n'
+    )
     p = tmp_path / "c.cpp"
     p.write_bytes(src)
     ctx = ParseContext(path="c.cpp", abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=True)
     rec = CppParser().parse_file(ctx)
-    assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)
+    kinds = {s.semanticType for s in rec.statements} - {None}
+    assert kinds == {"query_statement"}
 
 
-def test_malformed_declaration_not_fabricated(tmp_path) -> None:
-    # A macro the grammar can't expand (`Q_OBJECT`) makes the enclosing member declaration
-    # an ERROR node. Such a corrupt-header member must be SKIPPED, not emitted as a
-    # fabricated method — absent beats wrong. The clean method after it is still recovered.
+def test_member_after_an_unexpanded_macro_keeps_its_name(tmp_path) -> None:
+    # A macro the grammar can't expand (`Q_OBJECT`) runs into the next member, which reads as
+    # a macro in front of its type. The member's name and parameters come from clean syntax and
+    # are kept; `int` is a type keyword, so the type is `int` and `Q_OBJECT` the macro.
     src = (
         b"class Widget {\n"
         b"    Q_OBJECT\n"
-        b"    int brokenSlot(int x);\n"
+        b"    int slotAfterMacro(int x);\n"
         b"    int cleanMethod(int y);\n"
         b"};\n"
     )
@@ -158,9 +170,259 @@ def test_malformed_declaration_not_fabricated(tmp_path) -> None:
     p.write_bytes(src)
     ctx = ParseContext(path="w.cpp", abs_path=p, source=src, repo_root=tmp_path)
     rec = CppParser().parse_file(ctx)
-    assert "Widget" in {c.name for c in rec.classes}  # class skeleton recovered
-    assert "brokenSlot" not in {f.name for f in rec.functions}  # corrupt member not fabricated
-    assert "cleanMethod" in {f.name for f in rec.functions}  # clean member still captured
+    assert "Widget" in {c.name for c in rec.classes}
+    fns = {f.name: f for f in rec.functions}
+    assert fns["slotAfterMacro"].returnType == "int"
+    assert [d.name for d in fns["slotAfterMacro"].decorators] == ["Q_OBJECT"]
+    assert [p.name for p in fns["slotAfterMacro"].params] == ["x"]
+    assert fns["cleanMethod"].returnType == "int"
+
+
+def test_macro_prefixed_members_are_captured(tmp_path) -> None:
+    # An export or inline macro in front of a member's type (`ESIMD_INLINE int row(int g)`)
+    # reads as the type `ESIMD_INLINE` with `int` in an error. The member is kept with its
+    # name, parameters, `static` and calls. After a keyword type the macro and the type are
+    # certain; after a type name (`API static Model *`) neither is recorded.
+    src = (
+        b"class Kernel {\n"
+        b"public:\n"
+        b"    ESIMD_INLINE int row(int g) const { return helper(g); }\n"
+        b"    API static Model *load(int x);\n"
+        b"    API int count;\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "k.cpp", capture=True)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"row", "load"}
+    assert fns["row"].type == "method" and fns["row"].visibility == "public"
+    assert fns["row"].returnType == "int" and [c.name for c in fns["row"].calls] == ["helper"]
+    assert [d.name for d in fns["row"].decorators] == ["ESIMD_INLINE"]
+    assert fns["load"].isStatic is True and [p.name for p in fns["load"].params] == ["x"]
+    assert fns["load"].returnType is None and fns["load"].decorators == []
+    fields = {s.name: s for s in rec.statements if s.nodeType == "field_declaration"}
+    assert [d.name for d in fields["count"].decorators] == ["API"]
+
+
+def test_member_with_a_broken_declarator_is_skipped(tmp_path) -> None:
+    # The macro-prefix reading needs a clean declarator: an error inside the parameter list
+    # or after it still drops the member.
+    src = b"class Odd {\n    API int f(int a b);\n    API int g(int a) b c;\n    int ok();\n};\n"
+    rec = _parse_src(tmp_path, src, "o.cpp")
+    assert {f.name for f in rec.functions} == {"ok"}
+
+
+def test_class_with_an_export_macro_before_its_name_is_captured(tmp_path) -> None:
+    # `class API Model : public Base { … }`: the grammar takes the macro for the class name and
+    # reads the class as a function. The macro is blanked and the file read again, so the
+    # class comes out whole: name, bases, members and lines.
+    src = (
+        b"namespace ns {\n"
+        b"class API Model : public Base {\n"
+        b"public:\n"
+        b"    Model(int n);\n"
+        b"    int size() const;\n"
+        b"private:\n"
+        b"    int n_;\n"
+        b"};\n"
+        b"struct API Tensor { int rank; };\n"
+        b"class API Final final : public A, private B { void run(); };\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, "m.hpp", capture=True)
+    classes = {c.name: c for c in rec.classes}
+    assert set(classes) == {"Model", "Tensor", "Final"}
+    assert classes["Model"].extends == "Base" and classes["Model"].type == "class"
+    assert (classes["Model"].startLine, classes["Model"].endLine) == (2, 8)
+    assert classes["Tensor"].type == "struct"
+    assert classes["Final"].extends == "A" and classes["Final"].implements == ["B"]
+    assert [d.name for d in classes["Model"].decorators] == ["API"]
+    fns = {f.name: f for f in rec.functions}
+    assert fns["Model"].type == "constructor" and [p.name for p in fns["Model"].params] == ["n"]
+    assert fns["size"].visibility == "public" and fns["size"].returnType == "int"
+    assert {s.name for s in rec.statements if s.nodeType == "field_declaration"} == {"n_", "rank"}
+
+
+def test_class_and_member_attributes_are_decorators(tmp_path) -> None:
+    src = (
+        b"class [[deprecated]] D { [[gnu::always_inline]] int d(); };\n"
+        b"struct __declspec(dllexport) E { int e; };\n"
+        b"class Plain { int p(); };\n"
+    )
+    rec = _parse_src(tmp_path, src, "a.cpp")
+    assert {c.name: [d.name for d in c.decorators] for c in rec.classes} == {
+        "D": ["deprecated"], "E": ["dllexport"], "Plain": [],
+    }
+    assert [d.name for d in _fn(rec, "d").decorators] == ["gnu::always_inline"]
+
+
+def test_word_before_a_name_that_is_not_a_hidden_class_is_left_alone(tmp_path) -> None:
+    # Only a class head the grammar misread is read again: a brace-initialized variable, a
+    # forward declaration, a member defined out of class and text in a comment or a string
+    # stay as they are.
+    src = (
+        b"struct Point p{1, 2};\n"
+        b"class API Fwd;\n"
+        b"struct stat Holder::st_ = {};\n"
+        b"// class API InComment { };\n"
+        b'const char *s = "class API InString {";\n'
+        b"class Clean final { int c(); };\n"
+    )
+    rec = _parse_src(tmp_path, src, "w.cpp", capture=True)
+    assert [c.name for c in rec.classes] == ["Clean"]
+    assert {"p", "Fwd", "st_", "s"} <= {s.name for s in rec.statements if s.nodeType == "declaration"}
+
+
+def test_class_that_still_breaks_without_its_export_macro_is_not_read_again(tmp_path) -> None:
+    # `Bad`'s body has another macro the grammar can't place (`MY_OP(…)` with no `;`), so even
+    # without `API` its head lands in an error and its methods would read as free functions.
+    # Its macro is kept: `Bad` stays uncaptured, and `Good` in the same file is still read.
+    src = (
+        b"class API Good : public B { public: int ok(); };\n"
+        b"class API Bad : public B {\n"
+        b"public:\n"
+        b'    MY_OP("Bad", "", ns::B)\n'
+        b"    Bad() = default;\n"
+        b"    int get() const { return 1; }\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "g.cpp")
+    assert [c.name for c in rec.classes] == ["Good"]
+    assert {f.name for f in rec.functions} == {"ok"}
+
+
+def test_a_macro_written_as_a_whole_member_is_read_past(tmp_path) -> None:
+    # `OPENVINO_MATCHER_PASS_RTTI("…")` has no `;` and no body, so it can't be a member: it is
+    # a macro that expands to members. The grammar runs it into the next member, which loses
+    # the class (`Pass`) or turns the macro and the constructor into one field (`Small`). The
+    # line is blanked and the file read again; the macro itself is not captured.
+    src = (
+        b"namespace ov { namespace pass {\n"
+        b"class Pass : public ov::pass::MatcherPass {\n"
+        b"public:\n"
+        b'    OPENVINO_MATCHER_PASS_RTTI("ov::pass::Pass")  // the type name\n'
+        b"    Pass();\n"
+        b"};\n"
+        b"} }\n"
+        b"class Small : public Base {\n"
+        b"public:\n"
+        b'    MY_RTTI("x")\n'
+        b"    explicit Small(int n,\n"
+        b"                   bool f = false);\n"
+        b"    int n;\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "p.h", capture=True)
+    classes = {c.name: c for c in rec.classes}
+    assert set(classes) == {"Pass", "Small"}
+    assert classes["Pass"].extends == "ov::pass::MatcherPass"
+    assert (classes["Pass"].startLine, classes["Pass"].endLine) == (2, 6)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"Pass", "Small"}
+    assert fns["Pass"].type == "constructor" and fns["Pass"].visibility == "public"
+    assert [p.name for p in fns["Small"].params] == ["n", "f"]
+    assert {s.name for s in rec.statements if s.nodeType == "field_declaration"} == {"n"}
+
+
+def test_a_member_split_over_two_lines_is_not_read_as_a_macro(tmp_path) -> None:
+    # A constructor or method whose head and rest are on separate lines (`: x(a) {}`, `{ }`,
+    # `= default;`, `const;`), a macro followed by more on its line, and a line that is not a
+    # whole member are left to the grammar.
+    src = (
+        b"class Clean {\n"
+        b"public:\n"
+        b"    Clean(int a)\n"
+        b"        : a_(a) {}\n"
+        b"    Clean(int a, int b)\n"
+        b"    { a_ = a + b; }\n"
+        b"    Clean()\n"
+        b"        = default;\n"
+        b"    int get()\n"
+        b"        const;\n"
+        b"    int a_;\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "c.h", capture=True)
+    assert [c.name for c in rec.classes] == ["Clean"]
+    assert sorted(f.name for f in rec.functions) == ["Clean", "Clean", "Clean", "get"]
+
+
+def test_a_member_macro_whose_class_still_breaks_is_kept(tmp_path) -> None:
+    # Blanking the line must leave the class whole; otherwise the first parse stands.
+    src = (
+        b"class Bad : public B {\n"
+        b"public:\n"
+        b'    MY_OP("Bad")\n'
+        b"    Bad(int a b);\n"
+        b"};\n"
+    )
+    from breezeai_cog.parsers.cfamily_common.classes import _member_macros, parse_cfamily
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    first = parse_source("cpp", src).root_node
+    assert _member_macros(first, src) == [(src.index(b"MY_OP"), src.index(b")\n") + 1)]
+    assert str(parse_cfamily("cpp", src, 0)) == str(first)
+
+
+def test_inherited_call_in_a_class_with_an_export_macro_resolves(tmp_path) -> None:
+    # The index reads the class the same way, so its base class is known and a call to an
+    # inherited method resolves.
+    (tmp_path / "base.h").write_bytes(b"class Base { public: int Shared(); };\n")
+    (tmp_path / "base.cpp").write_bytes(b'#include "base.h"\nint Base::Shared() { return 1; }\n')
+    (tmp_path / "derived.h").write_bytes(
+        b'#include "base.h"\nclass API Derived : public Base { int Run(); };\n')
+    (tmp_path / "derived.cpp").write_bytes(
+        b'#include "derived.h"\nint Derived::Run() { return Shared(); }\n')
+    rec = _parse_with_index(tmp_path, "derived.cpp")
+    assert next(c for c in _fn(rec, "Run").calls if c.name == "Shared").path == "base.cpp"
+
+
+#: A file the grammar can't parse as a whole (an `#if` splitting a definition from its body):
+#: its root is an ERROR holding every declaration flat.
+SPILL_SRC = (
+    b"int free_fn(int a) { return a; }\n"
+    b"int Other::run() { return free_fn(1); }\n"
+    b"    Widget(list_t init,\n"
+    b"           kind_t kind = kind_t::array)\n"
+    b"    {\n"
+    b"}\n"
+    b"    bool okay() const { return ok_; }\n"
+    b"inline namespace literals\n"
+    b"{\n"
+    b"inline namespace v1\n"
+    b"{\n"
+    b"#if !defined(OLD_CC) || CC_CHECK(4,9,0)\n"
+    b'    inline Widget operator ""_w(const char* s, std::size_t n)\n'
+    b"#else\n"
+    b'    inline Widget operator "" _w(const char* s, std::size_t n)\n'
+    b"{\n"
+)
+
+
+def test_members_spilled_to_file_scope_are_not_free_functions(tmp_path) -> None:
+    # Members of a class whose head was lost in the ERROR read as free functions. A definition
+    # that can only be a member (no return type: a constructor; a `field_identifier` name)
+    # proves it, and then no unqualified definition is trusted: absent beats wrong. A
+    # definition that names its owner (`Other::run`) is kept; a call to a dropped function
+    # doesn't resolve.
+    rec = _parse_src(tmp_path, SPILL_SRC, "spill.cpp")
+    assert [(f.name, f.type) for f in rec.functions] == [("run", "method")]
+    assert [(c.name, c.path) for c in rec.functions[0].calls] == [("free_fn", None)]
+
+
+def test_index_skips_definitions_of_a_file_with_spilled_members(tmp_path) -> None:
+    # The index reads the broken file the same way: a call from another file to one of its
+    # unqualified definitions doesn't resolve to it.
+    (tmp_path / "spill.cpp").write_bytes(SPILL_SRC)
+    (tmp_path / "use.cpp").write_bytes(b"int go() { return free_fn(2); }\n")
+    rec = _parse_with_index(tmp_path, "use.cpp")
+    assert next(c for c in _fn(rec, "go").calls if c.name == "free_fn").path is None
+
+
+def test_file_that_parses_keeps_its_free_functions(tmp_path) -> None:
+    # Without an ERROR root nothing is distrusted, even with a constructor-shaped definition.
+    src = b"Widget::Widget(int n) {}\nint free_fn(int a) { return a; }\n"
+    rec = _parse_src(tmp_path, src, "ok.cpp")
+    assert {f.name for f in rec.functions} == {"Widget", "free_fn"}
 
 
 def test_unresolved_local_include_is_external(tmp_path) -> None:

@@ -25,4 +25,4 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 | `@ResolveReference()` (federation) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the gateway's `_entities` field |
 | `NestFactory.create(...)` / `app.listen(port)` | None | — | Start-up |
 | `HttpService` / `fetch` calls | Outbound | `api_call` | Our code calling out |
-| `ClientProxy.send(...)` / `.emit(...)` | Outbound | `eventbus_send` / `eventbus_publish`, pattern as `endpoint` written exactly like the consumer's | Our code sending a message |
+| `ClientProxy.send(...)` / `.emit(...)`, and the same on `ClientKafka` / `ClientRMQ` / `ClientNats` / `ClientMqtt` / `ClientRedis` / `ClientTCP` imported from `@nestjs/microservices` (`ClientGrpc` has no `send` / `emit`) | Outbound | `eventbus_send` / `eventbus_publish`, pattern as `endpoint` written exactly like the consumer's | Our code sending a message |

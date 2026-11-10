@@ -15,7 +15,7 @@ from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import extract_params, payload_type, return_dto
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.base_paths import app_base_path
+from ..base_paths_common import app_base_path
 from .facts import loopback_base_paths
 
 # LoopBack method decorators -> HTTP verb. ``del`` (not ``delete``) is LoopBack's

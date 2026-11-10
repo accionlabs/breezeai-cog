@@ -47,9 +47,12 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
-from ..handler_sites import handler_location, locate_method
+from .java_syntax import (calls_and_creations, handler_class, imports_and_package,
+                          invocations, java_string, local_value)
+from .legacy import forwarder_sites, http_client_calls, registration_tables
 from .service_interfaces import service_methods
 from ..treesitter import node_text
+from ..handler_sites import handler_info, handler_location, locate_method, method_lines
 from ..vertx_common import (
     vertx_emit,
     EVENTBUS,
@@ -64,21 +67,13 @@ from ..vertx_common import (
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
-    handler_info,
     is_bus_receiver,
     join_path,
-    method_lines,
     render_address,
     router_vars,
     service_builder_vars,
     sub_router_bases,
 )
-
-
-def _java_string(node: Node, source: bytes) -> str | None:
-    """A Java ``string_literal`` node → its text value (Java has no string interpolation)."""
-    frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
-    return node_text(frag, source) if frag is not None else node_text(node, source).strip('"')
 
 
 _NOT_MOUNTED = object()
@@ -91,19 +86,6 @@ def _root_receiver(receiver: Node, source: bytes) -> str:
     while node.type == "method_invocation" and (obj := node.child_by_field_name("object")):
         node = obj
     return node_text(node, source)
-
-
-def _invocations(root: Node) -> list[Node]:
-    out: list[Node] = []
-
-    def walk(n: Node) -> None:
-        if n.type == "method_invocation":
-            out.append(n)
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return out
 
 
 def _method_declarations(root: Node) -> list[Node]:
@@ -170,7 +152,7 @@ def _wrapper_aliases(
         body = decl.child_by_field_name("body")
         if param is None or name_node is None or body is None:
             continue
-        for call in _invocations(body):
+        for call in invocations(body):
             name_n = call.child_by_field_name("name")
             method = node_text(name_n, source) if name_n is not None else ""
             if method not in EVENTBUS:
@@ -205,7 +187,7 @@ def _parts(
     if args is not None and args.named_children:
         first_node = args.named_children[0]
         first_arg = node_text(first_node, source)
-        first_str = render_address(first_node, source, consts, _java_string)
+        first_str = render_address(first_node, source, consts, java_string)
     return method, first_str, first_arg, obj
 
 
@@ -371,7 +353,7 @@ def _factory_key(call: Node, source: bytes) -> tuple[str, bool] | None:
 def _factory_mounts(root: Node, source: bytes, rel: str, repo_root: Path | None) -> list[FactoryMount] | None:
     """The factory calls this file mounts, for the ``vertx.mounted-factories`` fact. A mount on
     a router that is itself mounted here has a prefix cog does not compose here → None."""
-    calls = _invocations(root)
+    calls = invocations(root)
     mounts = _mount_calls(calls, source, {})
     subs = {name for _, arg, _, _, _ in mounts if (name := _mount_arg(arg, source)) is not None}
     out: list[FactoryMount] = []
@@ -416,7 +398,7 @@ def _registered_impl(call: Node, source: bytes) -> str | None:
             impl = args.named_children[1] if args is not None and len(args.named_children) > 1 \
                 else None
             if impl is not None and impl.type == "identifier":
-                impl = _local_value(impl, node_text(impl, source), source)
+                impl = local_value(impl, node_text(impl, source), source)
             if impl is not None and impl.type == "object_creation_expression":
                 typ = impl.child_by_field_name("type")
                 return node_text(typ, source) if typ is not None else None
@@ -425,61 +407,65 @@ def _registered_impl(call: Node, source: bytes) -> str | None:
     return None
 
 
-def _handler_class(arg: Node | None, source: bytes) -> str | None:
-    """The class of a handler given as ``new LoadHandler(…)`` (no anonymous body) — passed
-    directly or through a local assigned once in the enclosing method — else None."""
-    if arg is not None and arg.type == "identifier":
-        arg = _local_value(arg, node_text(arg, source), source)
-    if arg is None or arg.type != "object_creation_expression" \
-            or any(c.type == "class_body" for c in arg.named_children):
-        return None
-    typ = arg.child_by_field_name("type")
-    return node_text(typ, source).split("<", 1)[0] if typ is not None else None
-
-
-def _local_value(at: Node, name: str, source: bytes) -> Node | None:
-    """The value given to ``name`` in the method enclosing ``at`` — a local initializer or an
-    assignment (``impl = new Impl()``, also to a field) — when exactly one is found."""
-    method: Node | None = at
-    while method is not None and method.type not in ("method_declaration",
-                                                     "constructor_declaration"):
-        method = method.parent
-    found: list[Node] = []
-
-    def walk(n: Node) -> None:
-        if n.type == "variable_declarator":
-            nm, value = n.child_by_field_name("name"), n.child_by_field_name("value")
-            if nm is not None and value is not None and node_text(nm, source) == name:
-                found.append(value)
-        elif n.type == "assignment_expression":
-            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
-            if left is not None and right is not None and \
-                    node_text(left, source).removeprefix("this.") == name:
-                found.append(right)
-        for c in n.named_children:
-            walk(c)
-
-    if method is not None:
-        walk(method)
-    return found[0] if len(found) == 1 else None
-
-
 def _qualified(type_name: str, root: Node, source: bytes) -> str:
     """A type as written in this file → its fully-qualified name: a single-type import that
     names it, else this file's package (a dotted name is taken as written)."""
     if "." in type_name:
         return type_name
-    package = ""
-    for node in root.named_children:
-        if node.type == "import_declaration":
-            text = node_text(node, source).removeprefix("import").strip().rstrip(";").strip()
-            if text.endswith("." + type_name) and not text.startswith("static "):
-                return text
-        elif node.type == "package_declaration":
-            nm = next((c for c in node.named_children
-                       if c.type in ("scoped_identifier", "identifier")), None)
-            package = node_text(nm, source) if nm is not None else ""
+    singles, _, package = imports_and_package(root, source)
+    single = next((i for i in singles if i.endswith("." + type_name)), None)
+    if single is not None:
+        return single
     return f"{package}.{type_name}" if package else type_name
+
+
+def _enclosing_types(node: Node, source: bytes) -> list[str]:
+    """Names of the type declarations around ``node``, outermost first."""
+    names: list[str] = []
+    parent = node.parent
+    while parent is not None:
+        if parent.type in ("class_declaration", "interface_declaration", "enum_declaration",
+                           "record_declaration"):
+            nm = parent.child_by_field_name("name")
+            if nm is not None:
+                names.insert(0, node_text(nm, source))
+        parent = parent.parent
+    return names
+
+
+def _service_fqn(type_name: str, call: Node, root: Node, source: bytes,
+                 index: object | None) -> str:
+    """The service interface a ``register(X.class, …)`` names → its fully-qualified name.
+
+    A single-type import, or a name already known as written, resolves as in :func:`_qualified`.
+    Otherwise the candidates are the name (its first segment, for ``Outer.Inner``) under each
+    type enclosing the call, this file's package and each on-demand import; the one candidate
+    known as a service interface (the ``vertx.service-interfaces`` fact) is kept. None or
+    several known, or a wildcard match shadowed by a same-package type of that name (Java
+    resolves the package's own type first), keep :func:`_qualified`'s answer: honest-null."""
+    plain = _qualified(type_name, root, source)
+    if service_methods(index, plain) or service_methods(index, type_name):
+        return plain if service_methods(index, plain) else type_name
+    head, _, rest = type_name.partition(".")
+    singles, wildcards, package = imports_and_package(root, source)
+    if any(i.endswith("." + head) for i in singles):
+        single = next(i for i in singles if i.endswith("." + head))
+        nested = f"{single}.{rest}" if rest else single
+        return nested if service_methods(index, nested) else plain
+    tail = f"{head}.{rest}" if rest else head
+    prefix = f"{package}." if package else ""
+    outers = _enclosing_types(call, source)
+    scoped = [f"{prefix}{'.'.join(outers[:i])}.{tail}" for i in range(len(outers), 0, -1)]
+    own = f"{prefix}{tail}"
+    on_demand = [f"{w}.{tail}" for w in wildcards]
+    known = list(dict.fromkeys(c for c in (*scoped, own, *on_demand) if service_methods(index, c)))
+    if len(known) != 1:
+        return plain
+    if known[0] in on_demand and known[0] not in scoped and known[0] != own:
+        fqcn = getattr(index, "fqcn", None) or {}
+        if f"{prefix}{head}" in fqcn:  # a same-package type of that name shadows the import
+            return plain
+    return known[0]
 
 
 def detect_vertx(
@@ -498,7 +484,7 @@ def detect_vertx(
     if _may_have_wrapper(source):
         aliases, suppress = _wrapper_aliases(root, source)
     methods = method_lines(record.functions)
-    calls = _invocations(root)
+    calls, creations = calls_and_creations(root)
     mounts, mount_routes = (
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
@@ -507,9 +493,21 @@ def detect_vertx(
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
+    # Vert.x 2 idioms (legacy.py): registration tables, address forwarders, HttpClient calls.
+    handled: set[tuple[int, int]] = set()
+    if b"org.vertx" in source:
+        tables, replaced = registration_tables(calls, source, consts, index, path)
+        suppress |= replaced
+        sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
+                                         index, suppress)
+        found.extend(tables)
+        found.extend(sites)
+        found.extend(http_client_calls(root, calls, source, record, consts))
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
+            continue
+        if (call.start_byte, call.end_byte) in handled:  # a call to a forwarder: recorded above
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
@@ -546,14 +544,15 @@ def detect_vertx(
         if semantic == "eventbus_consumer" and call_name is not None \
                 and node_text(call_name, source) == "setAddress":
             iface = _registered_interface(call, source)
-            names = service_methods(index, _qualified(iface, root, source)) if iface else ()
+            names = service_methods(index, _service_fqn(iface, call, root, source, index)) \
+                if iface else ()
             handlers = list(names) or [handler]
             # The code that runs is the implementing class's method (usually another file).
             impl = _registered_impl(call, source) if names else None
         elif handler is None and semantic in HANDLER_SEMANTICS:
             # `registerHandler(addr, new LoadHandler(eb))`: a Vert.x `Handler` has one method,
             # so the code that runs is that class's `handle` (usually another file).
-            impl = _handler_class(_handler_arg(call, source), source)
+            impl = handler_class(_handler_arg(call, source), source)
             if impl:
                 handlers = ["handle"]
 

@@ -71,9 +71,15 @@ def extract_config(path: str, text: str) -> dict[str, Any]:
 #: JSON filenames with a dedicated rich extractor in ``_dispatch`` below. The ``JsonParser``
 #: captures every OTHER non-empty ``.json`` in full, but routes these to their rich extraction
 #: even though they are non-empty. Keep in step with the ``.json`` name-cases in ``_dispatch``.
+#: The names in ``NX_ONLY_JSON_NAMES`` are rich only inside an Nx workspace.
 RICH_JSON_NAMES: frozenset[str] = frozenset(
-    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
+    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json", "nx.json", "project.json",
+     "workspace.json"}
 )
+
+#: Names other tools use too (a .NET Core 1.0 ``project.json``, any tool's ``workspace.json``):
+#: they are Nx files only under a directory holding ``nx.json`` (``parsers.config.nx``).
+NX_ONLY_JSON_NAMES: frozenset[str] = frozenset({"project.json", "workspace.json"})
 
 
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
@@ -85,6 +91,8 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _project_json(text)
     if name == "nx.json":
         return _nx_json(text)
+    if name == "workspace.json":
+        return _workspace_json(text)
     if name in ("pnpm-workspace.yaml", "pnpm-workspace.yml"):
         return _pnpm_workspace(text)
     if name == "mod.json":
@@ -190,35 +198,82 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
 
 
 def _project_json(text: str) -> dict[str, Any]:
-    """Nx (or similar) per-project config — retains the module-boundary values a generic
-    top-level-keys pass would discard: declared inter-project deps, tags, and target names."""
+    """Nx per-project config — retains the module-boundary values a generic top-level-keys pass
+    would discard: declared inter-project deps, tags, and target names. Values are kept as the
+    file writes them; one that is missing or of the wrong type is left empty."""
     d = json.loads(text)
+    name = d.get("name")
     return {
         "kind": "project.json",
         "category": "json",
         "buildTool": "nx",
         "projectInfo": {
-            "name": d.get("name"),
-            "tags": d.get("tags") or [],
-            "implicitDependencies": d.get("implicitDependencies") or [],
-            "targets": list((d.get("targets") or {}).keys()),
+            "name": name if isinstance(name, str) else None,
+            "tags": _strings(d.get("tags")),
+            "implicitDependencies": _strings(d.get("implicitDependencies")),
+            "targets": list(_dict(d.get("targets"))),
         },
     }
 
 
 def _nx_json(text: str) -> dict[str, Any]:
-    """Nx workspace config — keep the declared target defaults and plugins, not just keys."""
+    """Nx workspace config — keep the declared target defaults and plugins, not just keys, and
+    the project map older Nx versions keep here."""
     d = json.loads(text)
-    plugins = [p.get("plugin") if isinstance(p, dict) else p for p in (d.get("plugins") or [])]
+    raw_plugins = d.get("plugins") if isinstance(d.get("plugins"), list) else []
+    plugins = [p.get("plugin") if isinstance(p, dict) else p for p in raw_plugins]
     return {
         "kind": "nx.json",
         "category": "json",
         "buildTool": "nx",
+        "projectInfo": {"projects": _project_map_info(d.get("projects"))},
         "nxConfig": {
-            "targetDefaults": list((d.get("targetDefaults") or {}).keys()),
+            "targetDefaults": list(_dict(d.get("targetDefaults"))),
             "plugins": [p for p in plugins if isinstance(p, str)],
         },
     }
+
+
+def _workspace_json(text: str) -> dict[str, Any]:
+    """Legacy Nx workspace config: its project-name-to-root map."""
+    d = json.loads(text)
+    return {
+        "kind": "workspace.json",
+        "category": "json",
+        "buildTool": "nx",
+        "projectInfo": {"projects": _project_map_info(d.get("projects"))},
+    }
+
+
+def _project_map_info(value: Any) -> dict[str, Any]:
+    """The project map of ``nx.json`` / ``workspace.json`` — ``{name: "apps/web"}`` or
+    ``{name: {root, sourceRoot, projectType, implicitDependencies, targets}}`` — as written."""
+    out: dict[str, Any] = {}
+    for name, spec in _dict(value).items():
+        if isinstance(spec, str):
+            out[name] = {"root": spec}
+            continue
+        if not isinstance(spec, dict):
+            continue
+        info: dict[str, Any] = {
+            key: spec[key] for key in ("root", "sourceRoot", "projectType")
+            if isinstance(spec.get(key), str)
+        }
+        if isinstance(spec.get("implicitDependencies"), list):
+            info["implicitDependencies"] = _strings(spec["implicitDependencies"])
+        if isinstance(spec.get("targets"), dict):
+            info["targets"] = list(spec["targets"])
+        if info:
+            out[name] = info
+    return out
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _strings(value: Any) -> list[str]:
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
 
 def _pnpm_workspace(text: str) -> dict[str, Any]:

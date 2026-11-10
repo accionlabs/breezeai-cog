@@ -1,6 +1,6 @@
 # AWS Lambda and messaging in TypeScript / JavaScript — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/typescript/aws_events.py` (additive detector, every TS / JS file that touches the AWS SDK or Lambda types) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_aws_lambda_typescript.py`
+Parser: `src/breezeai_cog/parsers/typescript_aws/events.py` (additive detector, every TS / JS file that touches the AWS SDK or Lambda types) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_aws_lambda_typescript.py`
 
 A Lambda handler is a binding; its trigger is classified by the handler's type. The queue,
 topic or HTTP path usually lives in deployment config (wiring), so `endpoint` stays empty

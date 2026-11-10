@@ -717,6 +717,27 @@ def test_http_client_calls_are_api_calls(tmp_path) -> None:
     }
 
 
+def test_http_client_held_in_a_var_local_is_a_client(tmp_path) -> None:
+    # `var` declares no type: the client is known from what the local is initialised with.
+    src = b'''using System.Net.Http;
+class Jobs {
+  async Task Run(IHttpClientFactory factory) {
+    var client = new HttpClient();
+    await client.GetAsync("api/orders");
+    var billing = factory.CreateClient("billing");
+    await billing.PostAsJsonAsync("api/invoices", 1);
+    var repo = new Repository();
+    await repo.GetAsync("not/http");
+  }
+}
+'''
+    ctx = ParseContext(path="Jobs.cs", abs_path=None, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    got = {(s.startLine, s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+    assert got == {(5, "GET", "api/orders"), (7, "POST", "api/invoices")}
+
+
 _PREPROC = """#if DEBUG
 using System;
 namespace Tests
@@ -742,3 +763,42 @@ def test_declarations_inside_conditional_compilation_are_captured(tmp_path) -> N
     rec = _parse_repo(tmp_path, {"Gen.cs": _PREPROC}, "Gen.cs")
     assert sorted(c.name for c in rec.classes) == ["Fallback", "Generator", "ReleaseOnly"]
     assert sorted(f.name for f in rec.functions) == ["Dump", "Next", "Run"]
+
+
+def test_attribute_name_keeps_qualified_type_arguments() -> None:
+    src = b"""namespace Demo {
+  [HotChocolate.Types.ExtendObjectType<Demo.Mutation>]
+  [Serializable]
+  [System.Obsolete("x")]
+  public class Extras { }
+}
+"""
+    rec = CSharpParser().parse_file(
+        ParseContext(path="Extras.cs", abs_path=None, source=src, repo_root=None))
+    [cls] = rec.classes
+    assert [d.name for d in cls.decorators] == [
+        "ExtendObjectType<Demo.Mutation>", "Serializable", "Obsolete"]
+
+
+def test_named_attribute_arguments_keep_their_key(tmp_path) -> None:
+    # A positional string is kept unquoted; a named argument as written, so `Roles` and
+    # `Policy` stay told apart and a route name is not read as its path.
+    from breezeai_cog.parsers.dotnet_common import named_arg
+
+    src = b'''class C {
+  [HttpGet("{id}", Name = "GetOrder", Order = 2)]
+  [Authorize(Roles = "Admin", Policy = "P")]
+  [Route("api/{page=1}")]
+  void M() { }
+}
+'''
+    ctx = ParseContext(path="C.cs", abs_path=None, source=src, repo_root=tmp_path)
+    [fn] = CSharpParser().parse_file(ctx).functions
+    assert [(d.name, d.args) for d in fn.decorators] == [
+        ("HttpGet", ["{id}", 'Name = "GetOrder"', "Order = 2"]),
+        ("Authorize", ['Roles = "Admin"', 'Policy = "P"']),
+        ("Route", ["api/{page=1}"]),
+    ]
+    assert named_arg('Name = "GetOrder"') == ("Name", '"GetOrder"')
+    assert named_arg("api/{page=1}") == (None, "api/{page=1}")
+    assert named_arg("a == b") == (None, "a == b")

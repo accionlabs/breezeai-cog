@@ -11,9 +11,11 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import (
+    classify_statement, member_statement, render_concat, resolve_endpoint,
+)
 from ..treesitter import node_text
-from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
+from .mappings import CONTROL_FLOW, EMIT_TYPES, KEYWORDS, MACRO_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
 
@@ -32,7 +34,7 @@ def _name_of(node: Node, source: bytes) -> str | None:
         if nxt is None or nxt is decl:
             break
         decl = nxt
-    if decl is not None and decl.type == "identifier":
+    if decl is not None and decl.type == "identifier" and node_text(decl, source) not in KEYWORDS:
         return node_text(decl, source)
     return None
 
@@ -76,15 +78,31 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
+def macro_statement(
+    node: Node, source: bytes, path: str, *, parent_id: str, limit: int, seen_ids: set[str],
+) -> Statement:
+    """A ``#define`` (``preproc_def`` / ``preproc_function_def``) as a statement named after the
+    macro. Its node ends after the line break that closes the directive, so it ends one line
+    early: on the line of that break, not the start of the next."""
+    name = node.child_by_field_name("name")
+    statement = member_statement(
+        node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
+        name=node_text(name, source) if name is not None else None,
+    )
+    if node.end_point[1] == 0 and node.end_point[0] > node.start_point[0]:
+        statement.endLine = node.end_point[0]
+    return statement
+
+
 def _iter_in_scope(node: Node, descend_all: bool = False) -> Iterator[Node]:
-    """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks into
+    """Yield EMIT_TYPES statement nodes and macro definitions. ``descend_all=True`` (a function body) walks into
     inline lambdas, attributing their statements to this function; ``False`` (file/class
     scope) keeps nested scopes as barriers since they are extracted as their own
     Function/Class."""
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
-        if child.type in EMIT_TYPES:
+        if child.type in EMIT_TYPES or child.type in MACRO_TYPES:
             yield child
         yield from _iter_in_scope(child, descend_all)
 
@@ -104,6 +122,13 @@ def extract_statements(
         return []
     out: list[Statement] = []
     for node in _iter_in_scope(body, descend_all):
+        if node.type in MACRO_TYPES:  # a `#define` written inside the body
+            out.append(
+                macro_statement(
+                    node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
+                )
+            )
+            continue
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,

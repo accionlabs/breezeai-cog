@@ -1,4 +1,4 @@
-"""Hangfire recurring jobs as timer bindings (parsers/csharp/hangfire.py)."""
+"""Hangfire recurring jobs as timer bindings (parsers/csharp_hangfire/jobs.py)."""
 
 from __future__ import annotations
 

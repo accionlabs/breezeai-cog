@@ -293,6 +293,80 @@ def test_service_method_leads_to_the_implementing_class(analyze_files) -> None:
         "listOrders", "src/main/java/a/OrderServiceImpl.java", 3)
 
 
+def _binder(imports: str, register: str) -> dict[str, str]:
+    """A verticle in package ``a`` with extra ``imports`` whose ``start()`` runs ``register``."""
+    return {SRC: IMPORTS + imports + f"""public class Api extends AbstractVerticle {{
+  public void start() {{
+    {register}
+  }}
+}}
+"""}
+
+
+def _service(path: str, package: str, body: str) -> dict[str, str]:
+    return {path: f"package {package};\nimport io.vertx.codegen.annotations.ProxyGen;\n{body}\n"}
+
+
+_ORDERS = "@ProxyGen\npublic interface OrderService { void listOrders(); void getOrder(String id); }"
+
+
+def test_service_interface_through_a_wildcard_import_is_one_binding_per_method(
+        analyze_files) -> None:
+    files = _binder("import com.acme.service.*;\n",
+                    'new ServiceBinder(vertx).setAddress("order.service")'
+                    ".register(OrderService.class, null);")
+    files |= _service("src/main/java/com/acme/service/OrderService.java", "com.acme.service",
+                      _ORDERS)
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("order.service", "listOrders"), ("order.service", "getOrder")]
+
+
+def test_nested_service_interface_is_one_binding_per_method(analyze_files) -> None:
+    files = _binder("import com.acme.service.*;\n",
+                    'new ServiceBinder(vertx).setAddress("billing.service")'
+                    ".register(Api2.Billing.class, null);")
+    files |= _service("src/main/java/com/acme/service/Api2.java", "com.acme.service",
+                      "public class Api2 { @ProxyGen public interface Billing { void charge(); } }")
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("billing.service", "charge")]
+
+
+def test_service_interface_in_two_wildcard_packages_has_no_handler(analyze_files) -> None:
+    files = _binder("import com.acme.one.*;\nimport com.acme.two.*;\n",
+                    'new ServiceBinder(vertx).setAddress("order.service")'
+                    ".register(OrderService.class, null);")
+    files |= _service("src/main/java/com/acme/one/OrderService.java", "com.acme.one", _ORDERS)
+    files |= _service("src/main/java/com/acme/two/OrderService.java", "com.acme.two",
+                      "@ProxyGen\npublic interface OrderService { void other(); }")
+    # Which interface the name means is unsure: the address only, no handler.
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("order.service", None)]
+
+
+def test_wildcard_service_shadowed_by_a_same_package_type_has_no_handler(analyze_files) -> None:
+    files = _binder("import com.acme.service.*;\n",
+                    'new ServiceBinder(vertx).setAddress("order.service")'
+                    ".register(OrderService.class, null);")
+    files |= _service("src/main/java/com/acme/service/OrderService.java", "com.acme.service",
+                      _ORDERS)
+    # Java resolves `OrderService` to package a's own type first, which is no service interface.
+    files["src/main/java/a/OrderService.java"] = "package a;\npublic class OrderService {}\n"
+    got = [(r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    assert got == [("order.service", None)]
+
+
+def test_router_variable_known_by_its_type_is_binding(analyze_files) -> None:
+    files = _verticle(
+        "    Router api = Router.router(vertx);\n"
+        '    api.get("/orders").handler(this::handle);\n'
+        "    io.vertx.ext.web.client.WebClient webClient = null;\n"
+        '    webClient.get("/remote").send(ar -> {});'
+    )
+    got = [(r.semanticType, r.method, r.endpoint, r.handler) for r in _eps(analyze_files(files))]
+    # `api` is a Router by its declaration; a WebClient `get` is an outbound call, never a route.
+    assert got == [("route", "GET", "/orders", "handle")]
+
+
 _IMPORTS = "package a;\nimport io.vertx.core.*;\nimport io.vertx.ext.web.Router;\n"
 _USER_API = (_IMPORTS + "public class UserApi {\n"
              "  public static Router router(Vertx vertx) {\n"
@@ -368,3 +442,133 @@ public class LoadHandler implements Handler<Message<Object>> {
     assert (c.semanticType, c.endpoint, c.handler, c.handlerLine, c.handlerPath) == (
         "eventbus_consumer", "p3.wizard.load", "handle", 8, "src/main/java/p3/LoadHandler.java",
     )
+
+
+@pytest.mark.parametrize("mount", [
+    '    router.mountSubRouter("/api", api);',
+    '    router.route("/api/*").subRouter(api);',
+])
+def test_route_on_a_mounted_sub_router_has_the_mount_prefix(analyze_files, mount) -> None:
+    st = analyze_files(_verticle(
+        "    Router router = Router.router(vertx);\n"
+        "    Router api = Router.router(vertx);\n"
+        '    router.get("/health").handler(this::handle);\n'
+        '    api.get("/items").handler(this::handle);\n' + mount))
+    got = [(r.method, r.endpoint, r.handler) for r in _eps(st)]
+    assert got == [("GET", "/health", "handle"), ("GET", "/api/items", "handle")]
+
+
+_SPRING = "src/main/java/a/Jobs.java"
+
+
+def test_vertx_timer_and_consumer_in_a_spring_component_are_captured(analyze_files) -> None:
+    st = analyze_files({_SPRING: """package a;
+import io.vertx.core.Vertx;
+import org.springframework.stereotype.Component;
+@Component
+public class Jobs {
+  void start(Vertx vertx) { vertx.setPeriodic(5000, id -> refresh()); }
+  void bus(Vertx vertx) { vertx.eventBus().consumer("jobs.done", m -> refresh()); }
+  void refresh() {}
+}
+"""})
+    got = [(r.semanticType, r.method, r.endpoint, r.framework) for r in _eps(st)]
+    assert got == [("timer", "PERIODIC", "5000", "vertx"),
+                   ("eventbus_consumer", None, "jobs.done", "vertx")]
+
+
+def test_vertx_route_in_a_spring_controller_is_captured_beside_its_spring_route(
+        analyze_files) -> None:
+    st = analyze_files({_SPRING: """package a;
+import io.vertx.core.Vertx;
+import io.vertx.ext.web.Router;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Jobs {
+  @GetMapping("/spring") public String s() { return ""; }
+  void routes(Vertx vertx) { Router r = Router.router(vertx); r.get("/vx").handler(c -> {}); }
+}
+"""})
+    got = sorted((r.endpoint, r.framework) for r in _eps(st))
+    assert got == [("/spring", "spring"), ("/vx", "vertx")]
+
+
+def test_spring_file_without_vertx_gets_no_vertx_record(analyze_files) -> None:
+    st = analyze_files({_SPRING: """package a;
+import org.springframework.stereotype.Component;
+@Component
+public class Jobs {
+  void start(Object scheduler) { scheduler.setPeriodic(5000, null); }
+}
+"""})
+    assert [s for s in st if s.framework == "vertx"] == []
+
+
+_LEGACY = "src/main/java/a/Legacy.java"
+
+
+def test_router_by_type_only_needs_a_slash_path(analyze_files) -> None:
+    st = analyze_files({_LEGACY: """package a;
+import java.util.Map;
+import org.vertx.java.core.http.RouteMatcher;
+import org.vertx.java.platform.Verticle;
+public class Legacy extends Verticle {
+  static final String KEY = "customerId";
+  public void start() {
+    RouteMatcher r = new RouteMatcher();
+    r.get("/ok", h);
+    RouteMatcher routes = new RouteMatcher();
+    routes.get("/docdef/:id", h);
+  }
+  String lookup(Map<String, String> r) {
+    r.get(KEY);
+    return r.get("customerId");
+  }
+}
+"""})
+    # `r` is a RouteMatcher in start() and a Map in lookup(): a lookup key is no route.
+    got = [(r.method, r.endpoint) for r in st if r.semanticType == "route"]
+    assert got == [("GET", "/ok"), ("GET", "/docdef/:id")]
+
+
+def test_router_declared_only_in_a_comment_is_not_a_router(analyze_files) -> None:
+    st = analyze_files({_LEGACY: """package a;
+import java.util.Map;
+import org.vertx.java.platform.Verticle;
+public class Legacy extends Verticle {
+  // RouteMatcher c = new RouteMatcher();
+  /** Example: {@code RouteMatcher d = new RouteMatcher();} */
+  String other(Map<String, String> c, Map<String, String> d) {
+    String home = "http://example.org";
+    return c.get("/x") + d.get("/y");
+  }
+}
+"""})
+    assert [s for s in st if s.semanticType == "route"] == []
+
+
+def test_name_matched_router_keeps_routes_without_a_slash(analyze_files) -> None:
+    st = analyze_files(_verticle(
+        "    Router router = Router.router(vertx);\n"
+        '    router.get("health").handler(this::handle);'))
+    # Matched by its name, as before: the path rule only applies to routers known by type.
+    assert [(r.method, r.endpoint) for r in _eps(st)] == [("GET", "health")]
+
+
+def test_groovy_router_by_type_only_needs_a_slash_path(analyze_files) -> None:
+    st = analyze_files({"src/main/groovy/a/Http.groovy": """package a
+import org.vertx.groovy.core.http.RouteMatcher
+def m = new RouteMatcher()
+m.get('/ok') { req -> }
+def lookup(Map m) { m.get('customerId') }
+"""})
+    assert [(r.method, r.endpoint) for r in st if r.semanticType == "route"] == [("GET", "/ok")]
+
+
+def test_vertx_records_in_a_fixture_file_are_skipped(analyze_files) -> None:
+    body = (IMPORTS + "public class Api extends AbstractVerticle {\n  public void start() {\n"
+            '    Router router = Router.router(vertx);\n    router.get("/x").handler(c -> {});\n'
+            '    vertx.eventBus().consumer("a.b", m -> {});\n  }\n}\n')
+    st = analyze_files({"src/test/java/fixtures/a/Api.java": body})
+    # A fixture is parsed for structure, never as a source of entry points.
+    assert _eps(st) == []

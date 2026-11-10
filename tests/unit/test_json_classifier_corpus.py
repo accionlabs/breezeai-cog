@@ -9,6 +9,8 @@ Outcome rule:
 
     capture(path, data)  when  data is a non-empty (dict | list)
                          AND   Path(path).name not in RICH_JSON_NAMES
+                               (``project.json`` / ``workspace.json`` count as rich only
+                               inside an Nx workspace — a ``nx.json`` at or above them)
     else config          (named-rich extractor, or empty/scalar with nothing to capture)
 """
 
@@ -22,7 +24,7 @@ from breezeai_cog.core import registry
 from breezeai_cog.parsers.base import ParseContext
 
 #: JSON filenames the shared extractor handles richly — captured in full otherwise.
-NAME_RICH = {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
+NAME_RICH = {"package.json", "tsconfig.json", "jsconfig.json", "mod.json", "nx.json"}
 
 CONFIG = "config"
 CAPTURE = "structured-json"
@@ -37,6 +39,13 @@ _CASES = [
     pytest.param("jsconfig.json", {"compilerOptions": {"baseUrl": "."}}, CONFIG,
                  id="named:jsconfig.json"),
     pytest.param("mod.json", {"main": "Verticle", "requires": {}}, CONFIG, id="named:mod.json"),
+    pytest.param("nx.json", {"targetDefaults": {"build": {}}}, CONFIG, id="named:nx.json"),
+    # Nx-only names outside an Nx workspace (no nx.json here) are another tool's files
+    pytest.param("legacy-api/project.json",
+                 {"dependencies": {"Microsoft.AspNetCore.Mvc": "1.0.0"}, "frameworks": {}},
+                 CAPTURE, id="data:dotnet-project.json"),
+    pytest.param("workspace.json", {"folders": [{"path": "."}]}, CAPTURE,
+                 id="data:non-nx-workspace.json"),
 
     # ── data (record arrays) ────────────────────────────────────────────────────
     pytest.param("n8n-workflow.json", {"nodes": [{"id": "1"}], "connections": {}}, CAPTURE,

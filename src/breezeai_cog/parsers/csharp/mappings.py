@@ -63,8 +63,10 @@ COMMENT_TYPES = {"comment"}
 
 FRAMEWORKS = [
     "aspnet", "aspnetcore",
-    # AWS Lambda handlers (see lambda_events.py) — transport carried on statement.framework,
+    # AWS Lambda handlers (see csharp_aws/lambda_events.py) — transport carried on statement.framework,
     # mirroring the TypeScript FRAMEWORKS list. event-source triggers vs APIGateway/ALB HTTP.
     "aws-lambda", "aws-s3", "aws-sqs", "aws-sns", "aws-eventbridge",
     "aws-dynamodb", "aws-kinesis", "aws-ses", "aws-apigw",
+    # AWS SDK service calls (see csharp_aws/sdk_calls.py).
+    "aws-ssm", "aws-cognito",
 ]

@@ -14,7 +14,10 @@ from ..treesitter import node_text
 
 def _attribute(node: Node, source: bytes) -> Decorator:
     name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source).rsplit(".", 1)[-1] if name_node is not None else ""
+    # Drop the namespace qualifier, never a dot inside the type arguments:
+    # `Ns.ExtendObjectType<Ns.Book>` → `ExtendObjectType<Ns.Book>`.
+    base, lt, type_args = (node_text(name_node, source) if name_node is not None else "").partition("<")
+    name = base.rsplit(".", 1)[-1] + lt + type_args
     args: list[str] = []
     arglist = next((c for c in node.named_children if c.type == "attribute_argument_list"), None)
     if arglist is not None:
@@ -22,9 +25,12 @@ def _attribute(node: Node, source: bytes) -> Decorator:
             if arg.type != "attribute_argument":
                 continue
             text = node_text(arg, source)
-            inner = next((c for c in arg.named_children if c.type == "string_literal"), None)
-            if inner is not None:
-                text = node_text(inner, source).strip('"')
+            # A positional string is kept unquoted (the route template, the name); a named
+            # argument as written, key and all: `[HttpGet(Name = "GetOrders")]` names the route,
+            # it is not its path.
+            if arg.child_by_field_name("name") is None and len(arg.named_children) == 1 \
+                    and arg.named_children[0].type == "string_literal":
+                text = text.strip('"')
             args.append(text)
     return Decorator(name=name, args=args)
 
