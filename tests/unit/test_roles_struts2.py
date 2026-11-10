@@ -637,3 +637,78 @@ def test_url_tag_inside_an_attribute_is_navigation(analyze_files) -> None:
     kinds = {s.startLine: s.nodeType for s in st if s.routeKind == "navigation"
              and s.path == f"{WEB}/WEB-INF/home.jsp"}
     assert kinds == {3: "synthetic", 4: "synthetic", 5: "element"}
+
+
+# ── QA findings: included constants, plain Convention classes, CRLF properties ─────────────
+
+def _routes(st):
+    return sorted((s.path.rsplit("/", 1)[-1], s.method, s.endpoint, s.handler)
+                  for s in st if s.semanticType == "route" and s.routeKind == "route")
+
+
+ANN = """package x;
+import org.apache.struts2.convention.annotation.Action;
+import org.apache.struts2.convention.annotation.Namespace;
+@Namespace("/a")
+public class Ann { @Action("annot") public String run() { return "s"; } }
+"""
+PLAIN = "package x;\npublic class L { public String execute() { return \"s\"; } }\n"
+
+
+def _included(analyze_files, *included: str):
+    files = {f"{RES}/struts.xml": _xml(
+        "".join(f'<include file="c{i}.xml"/>' for i in range(len(included)))
+        + '<package name="p" namespace="/a" extends="struts-default">'
+        '<action name="login" class="x.L"/></package>\n'),
+        f"{JAVA}/x/Ann.java": ANN, f"{JAVA}/x/L.java": PLAIN}
+    for i, ext in enumerate(included):
+        files[f"{RES}/c{i}.xml"] = _xml("", f'<constant name="struts.action.extension" '
+                                            f'value="{ext}"/>\n')
+    return _routes(analyze_files(files))
+
+
+def test_constant_in_an_included_file_applies_to_the_including_files_actions(
+        analyze_files) -> None:
+    # The XML action and the annotation action of one module agree on the extension.
+    assert _included(analyze_files, "do") == [
+        ("Ann.java", "ANY", "/a/annot.do", "run"), ("struts.xml", "ANY", "/a/login.do", "execute")]
+
+
+def test_included_files_that_disagree_on_the_extension_leave_the_address_empty(
+        analyze_files) -> None:
+    assert _included(analyze_files, "do", "html") == [
+        ("Ann.java", "ANY", None, "run"), ("struts.xml", "ANY", None, "execute")]
+
+
+THING = "package org.app.action;\npublic class ThingAction { public String execute() { return \"x\"; } }\n"
+CHILD = "package org.app.action;\npublic class ChildAction extends ThingAction { }\n"
+
+
+def test_plain_convention_action_without_a_struts_import_is_mapped(analyze_files) -> None:
+    st = analyze_files({**POM, f"{JAVA}/org/app/action/ThingAction.java": THING,
+                        f"{JAVA}/org/app/action/ChildAction.java": CHILD})
+    assert _routes(st) == [("ChildAction.java", "ANY", "/child.action", "execute"),
+                           ("ThingAction.java", "ANY", "/thing.action", "execute")]
+
+
+def test_plain_class_without_the_convention_plugin_is_not_mapped(analyze_files) -> None:
+    assert _routes(analyze_files({f"{JAVA}/org/app/action/ThingAction.java": THING})) == []
+
+
+def test_plain_class_outside_a_convention_locator_is_not_mapped(analyze_files) -> None:
+    assert _routes(analyze_files({**POM, f"{JAVA}/org/app/util/ThingAction.java":
+                                  THING.replace("org.app.action", "org.app.util")})) == []
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_struts_properties_reads_the_same_with_any_line_ending(analyze_files, eol) -> None:
+    props = eol.join(["struts.convention.action.suffix=Controller", "struts.mapper.class=rest",
+                      ""])
+    st = analyze_files({**POM, f"{RES}/struts.xml": "<struts/>\n",
+                        f"{RES}/struts.properties": props,
+                        f"{JAVA}/org/app/action/ThingController.java": (
+                            "package org.app.action;\nimport com.opensymphony.xwork2.ActionSupport;\n"
+                            "public class ThingController extends ActionSupport {\n"
+                            "  public String index() { return \"x\"; }\n}\n")})
+    # A self-closing <struts/> still marks the properties beside it as the module's.
+    assert _routes(st) == [("ThingController.java", "GET", "/thing", "index")]

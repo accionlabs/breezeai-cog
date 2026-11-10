@@ -89,10 +89,14 @@ _REST_MAPPERS = frozenset({"rest", "org.apache.struts2.rest.RestActionMapper"})
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     annotated = _ANNOTATIONS in source
-    if not annotated and not any(b in source for b in _BASES):
-        return None
     index = dc.ctx.resolution_index
     settings = module_settings(index_fact(index, SETTINGS), dc.path)
+    # A Convention action may be a plain class with no Struts import (a POJO with `execute`, or
+    # one extending such a class): in a module whose build declares the Convention plugin, the
+    # class checks below decide. Elsewhere a file without a Struts import holds no action.
+    if not annotated and not any(b in source for b in _BASES) \
+            and settings.get(CONVENTION) != "true":
+        return None
     package = _package(dc.root, source)
     rules = _Rules(settings, index_fact(index, PACKAGE_NAMESPACES) or {}, package)
     rules.web = web_root(dc.ctx.repo_root, posixpath.dirname(dc.path))

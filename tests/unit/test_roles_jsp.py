@@ -93,3 +93,27 @@ def test_conventional_web_root_without_web_inf(analyze_files) -> None:
         ("mvn/src/main/webapp/shop/list.jsp", "/shop/list.jsp"),
         ("nb/web/index.jsp", "/index.jsp"),
     ]
+
+
+def test_include_of_a_file_not_in_the_repo_is_an_external_import(analyze_files, tmp_path) -> None:
+    files = {**WEB_XML, f"{WEB}/user/head.jspf": "x",
+             f"{WEB}/user/list.jsp": ('<%@ include file="head.jspf" %>\n'
+                                      '<%@ include file="nope.jspf" %>\n'
+                                      '<jsp:include page="/common/missing.jsp"/>\n'
+                                      '<jsp:include page="${dyn}"/>\n'
+                                      '<%@ include file="../../../../../outside.jspf" %>\n')}
+    analyze_files(files, templates=True)
+    from breezeai_cog import iter_file_records
+
+    rec = next(r for r in iter_file_records(tmp_path / "repo", capture_templates=True)
+               if r.path.endswith("list.jsp"))
+    assert rec.importFiles == [f"{WEB}/user/head.jspf"]
+    # A dynamic path or one leaving the tree is neither a link nor an import.
+    assert rec.externalImports == ["nope.jspf", "/common/missing.jsp"]
+
+
+def test_dynamic_method_call_link_addresses_the_action(analyze_files) -> None:
+    st = analyze_files({**WEB_XML, f"{WEB}/user/list.jsp": '<a href="login!save.action">s</a>\n'},
+                       templates=True)
+    got = [s.endpoint for s in st if s.semanticType == "route" and s.routeKind == "navigation"]
+    assert got == ["/user/login.action"]
