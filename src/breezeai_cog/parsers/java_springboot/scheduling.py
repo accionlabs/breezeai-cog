@@ -42,7 +42,8 @@ from ...schemas import FileRecord, Function
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 from ..vertx_common import handler_info, method_lines
-from .messaging import _address, _ann_name, _annotations, _classes, typed_vars
+from ..java.variables import typed_vars
+from .messaging import _address, _ann_name, _annotations, _classes
 
 #: Schedule attributes, in the order the first present one is taken as the address.
 _SCHEDULE_ATTRS = ("cron", "fixedRate", "fixedRateString", "fixedDelay", "fixedDelayString")

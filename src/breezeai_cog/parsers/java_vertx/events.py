@@ -571,9 +571,19 @@ def detect_vertx(
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
+    # Vert.x 2 idioms (legacy.py): registration tables, address forwarders, HttpClient calls.
+    from .legacy import forwarder_sites, forwarder_spans, http_client_calls, registration_tables
+    tables, replaced = registration_tables(calls, source, consts, index, path)
+    suppress |= replaced | forwarder_spans(root, source)
+    sites, handled = forwarder_sites(root, source, path, record, consts, index, suppress)
+    found.extend(tables)
+    found.extend(sites)
+    found.extend(http_client_calls(root, source, record, consts))
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
+            continue
+        if (call.start_byte, call.end_byte) in handled:  # a call to a forwarder: recorded above
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
