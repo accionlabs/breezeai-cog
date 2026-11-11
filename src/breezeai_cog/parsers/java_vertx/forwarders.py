@@ -336,7 +336,7 @@ def _resolve_forwarders(values: list[tuple[list[tuple[str, Forwarder]], list[Rel
 
 
 register_fact(FactSpec(
-    name=FORWARDERS, language="java", gate=(b"org.vertx",),  # Vert.x 2 only: 3.x+ output unchanged
+    name=FORWARDERS, language="java", gate=(b"org.vertx", b"io.vertx"),  # Vert.x 2, Vert.x 3+
     collect=_collect_forwarders, resolve=_resolve_forwarders,
 ))
 

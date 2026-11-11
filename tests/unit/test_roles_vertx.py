@@ -137,7 +137,7 @@ def test_event_bus_consumer_records_handler(analyze_files) -> None:
     assert (r.handler, r.handlerLine) == ("handle", 10)
 
 
-def test_address_forwarding_helper_is_wiring(analyze_files) -> None:
+def test_address_forwarding_helper_binds_at_each_call_site(analyze_files) -> None:
     st = analyze_files(
         {
             SRC: IMPORTS
@@ -154,8 +154,11 @@ def test_address_forwarding_helper_is_wiring(analyze_files) -> None:
 """
         }
     )
-    got = sorted((r.semanticType, r.endpoint) for r in _eps(st))
-    assert got == [("eventbus_consumer", "svc.a"), ("eventbus_consumer", "svc.b")]
+    # Each call site binds its own address; the helper's own call keeps its record, its address
+    # unknown (a parameter).
+    got = sorted((r.semanticType, r.endpoint or "") for r in _eps(st))
+    assert got == [("eventbus_consumer", ""), ("eventbus_consumer", "svc.a"),
+                   ("eventbus_consumer", "svc.b")]
 
 
 def test_timer_is_binding(analyze_files) -> None:
