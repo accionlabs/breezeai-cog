@@ -61,6 +61,9 @@ class Method:
     #: not a literal, verbs — empty when not a literal, url path — None for the method name);
     #: None when the method is not an action.
     action: tuple[bool | None, tuple[str, ...], str | None] | None = None
+    #: ``@action(permission_classes=[…])``: the classes it names (``()`` when the list is empty or
+    #: not a literal — nothing certain); None when the action does not set them.
+    permissions: tuple[Guard, ...] | None = None
 
 
 @dataclass
@@ -175,10 +178,22 @@ def _api_view(decorators: list[tuple[Guard, Node]], source: bytes) -> tuple[str,
 
 def _permission_decorator(decorators: list[tuple[Guard, Node]], source: bytes,
                           origins: Origins) -> tuple[Guard, ...] | None:
+    """``@permission_classes([…])``: the classes; ``()`` when it names something that is not a
+    literal list (nothing certain, and not the settings' default either); None when absent."""
     for (written, origin), expr in decorators:
         if short(written) == "permission_classes" and origin.startswith("rest_framework") \
                 and expr.type == "call" and positional(expr):
-            return _names(positional(expr)[0], source, origins)
+            return _names(positional(expr)[0], source, origins) or ()
+    return None
+
+
+def _action_permissions(decorators: list[tuple[Guard, Node]], source: bytes,
+                        origins: Origins) -> tuple[Guard, ...] | None:
+    """``permission_classes=`` of a DRF ``@action(…)`` (see :attr:`Method.permissions`)."""
+    for (written, origin), expr in decorators:
+        if short(written) == "action" and origin.startswith("rest_framework") and expr.type == "call":
+            value = keyword(expr, source, "permission_classes")
+            return None if value is None else _names(value, source, origins) or ()
     return None
 
 
@@ -264,7 +279,8 @@ def _class(cdef: Node, decorated: Node | None, source: bytes, rel: str, local: s
         raw = _decorators(member, source, origins) if member.type == "decorated_definition" else []
         decorators = [g for guard, expr in raw for g in _unwrap_method_decorator(guard, expr, source, origins)]
         view.methods[field_text(fdef, "name", source)] = Method(
-            fdef.start_point[0] + 1, tuple(decorators), _action(raw, source))
+            fdef.start_point[0] + 1, tuple(decorators), _action(raw, source),
+            _action_permissions(raw, source, origins))
     if body is not None:
         _class_attributes(view, body, source, origins)
         text = source[body.start_byte:body.end_byte]
@@ -362,8 +378,11 @@ class ResolvedClass:
     actions: dict[str, Handler] = field(default_factory=dict)
     #: ``@action`` methods: name → (handler, detail, verbs, url path).
     extra: dict[str, tuple[Handler, bool | None, tuple[str, ...], str | None]] = field(default_factory=dict)
+    #: ``@action`` name → the ``permission_classes`` it sets (they replace the view's).
+    action_permissions: dict[str, tuple[Guard, ...]] = field(default_factory=dict)
     #: ``permission_classes`` of the class or the nearest base that sets it; None when none
-    #: does (DRF's default applies) — ``()`` when one sets something that is not a literal list.
+    #: does (DRF's default applies) — ``()`` when one sets something that is not a literal list,
+    #: or the view overrides ``get_permissions()``: then what applies is not known.
     permissions: tuple[Guard, ...] | None = None
     #: ``serializer_class``; None when not set or when ``get_serializer_class`` chooses it.
     serializer: str | None = None
@@ -476,6 +495,8 @@ def _drf_class(views: Mapping[str, FileViews], out: ResolvedClass) -> None:
             if method.action is not None and name not in out.extra:
                 detail, verbs, url_path = method.action
                 out.extra[name] = (Handler(name, file, method.line, method.decorators), detail, verbs, url_path)
+                if method.permissions is not None:
+                    out.action_permissions[name] = method.permissions
         if out.permissions is None and (cls.permissions is not None or cls.permissions_unknown):
             out.permissions = cls.permissions or ()
         if out.serializer is None:
@@ -484,6 +505,9 @@ def _drf_class(views: Mapping[str, FileViews], out: ResolvedClass) -> None:
         lookup_kwarg = lookup_kwarg or cls.lookup_url_kwarg
     if any("get_serializer_class" in cls.methods for _, cls in classes):
         out.serializer = None
+    if any("get_permissions" in cls.methods for _, cls in classes):
+        out.permissions = ()  # the repo chooses the permissions per request
+        out.action_permissions.clear()
     out.lookup = lookup_kwarg or lookup_field or "pk"
     if out.viewset:  # a viewset answers by action: its verbs come from the router or as_view()
         out.verbs = {}

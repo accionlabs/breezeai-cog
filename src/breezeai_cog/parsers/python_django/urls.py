@@ -118,6 +118,9 @@ def handler_route(f: UrlFile, resolved: ResolvedClass, verb: str | None, handler
     if resolved.drf:
         out.framework = drf.FRAMEWORK
         out.permissions = resolved.permissions if resolved.permissions is not None else f.drf_permissions
+        extra = resolved.extra.get(handler.name)
+        if extra is not None and extra[0] == handler and handler.name in resolved.action_permissions:
+            out.permissions = resolved.action_permissions[handler.name]  # an @action's replace the view's
         if handler.inherited and resolved.serializer is not None:
             out.request_dto = resolved.serializer if verb in drf.BODY_METHODS else None
             out.response_dto = resolved.serializer if verb not in drf.NO_RESPONSE_BODY else None

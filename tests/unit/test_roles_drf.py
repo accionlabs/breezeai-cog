@@ -265,3 +265,113 @@ def test_repo_router_made_with_positional_arguments_is_not_read(analyze_files) -
     files = _custom_router("    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n")
     files["project/urls.py"] = files["project/urls.py"].replace("router = ShopRouter()", "router = ShopRouter(False)")
     assert _eps(analyze_files(files)) == []
+
+
+# ── permissions chosen per action or per request ─────────────────────────────────────────
+
+USERS = ("from shop.views import UserViewSet\nrouter = DefaultRouter()\n"
+         "router.register('users', UserViewSet)\nurlpatterns = [path('api/', include(router.urls))]\n")
+
+
+def test_action_permission_classes_replace_the_views(analyze_files) -> None:
+    st = analyze_files(_project(USERS, (
+        "class UserViewSet(viewsets.ModelViewSet):\n"
+        "    permission_classes = [permissions.IsAuthenticated]\n"
+        "    @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])\n"
+        "    def register(self, request):\n        pass\n"
+        "    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAdminUser])\n"
+        "    def audit(self, request):\n        pass\n")))
+    register, audit = _one(st, "POST", "/api/users/register/"), _one(st, "GET", "/api/users/audit/")
+    assert (register.guards, register.authRequired) == (None, None)
+    assert (audit.guards, audit.authRequired) == (["permissions.IsAdminUser"], True)
+    listing = _one(st, "GET", "/api/users/")  # the view's own permissions still apply to its actions
+    assert (listing.guards, listing.authRequired) == (["permissions.IsAuthenticated"], True)
+
+
+def test_action_without_permission_classes_keeps_the_views(analyze_files) -> None:
+    st = analyze_files(_project(USERS, (
+        "class UserViewSet(viewsets.ModelViewSet):\n"
+        "    permission_classes = [permissions.IsAuthenticated]\n"
+        "    @action(detail=False, methods=['post'])\n"
+        "    def register(self, request):\n        pass\n")))
+    r = _one(st, "POST", "/api/users/register/")
+    assert (r.guards, r.authRequired) == (["permissions.IsAuthenticated"], True)
+
+
+def test_action_permission_classes_that_are_not_a_literal_list_claim_nothing(analyze_files) -> None:
+    st = analyze_files(_project(USERS, (
+        "class UserViewSet(viewsets.ModelViewSet):\n"
+        "    permission_classes = [permissions.IsAuthenticated]\n"
+        "    @action(detail=False, methods=['post'], permission_classes=SOME_PERMISSIONS)\n"
+        "    def register(self, request):\n        pass\n")))
+    r = _one(st, "POST", "/api/users/register/")
+    assert (r.guards, r.authRequired) == (None, None)
+
+
+def test_get_permissions_override_leaves_permissions_unknown(analyze_files) -> None:
+    st = analyze_files(_project(USERS, (
+        "class UserViewSet(viewsets.ModelViewSet):\n"
+        "    permission_classes = [permissions.IsAuthenticated]\n"
+        "    def get_permissions(self):\n"
+        "        if self.action == 'create':\n            return [permissions.AllowAny()]\n"
+        "        return super().get_permissions()\n"
+        "    @action(detail=False, methods=['post'], permission_classes=[permissions.IsAdminUser])\n"
+        "    def register(self, request):\n        pass\n"),
+        settings=("REST_FRAMEWORK = {'DEFAULT_PERMISSION_CLASSES': "
+                  "['rest_framework.permissions.IsAuthenticated']}\n")))
+    for method, endpoint in (("POST", "/api/users/"), ("GET", "/api/users/"), ("POST", "/api/users/register/")):
+        r = _one(st, method, endpoint)
+        assert (r.guards, r.authRequired) == (None, None), endpoint
+
+
+def test_get_permissions_on_a_base_of_the_repo_leaves_permissions_unknown(analyze_files) -> None:
+    st = analyze_files(_project(USERS, (
+        "class Dynamic:\n    def get_permissions(self):\n        return []\n"
+        "class UserViewSet(Dynamic, viewsets.ModelViewSet):\n"
+        "    permission_classes = [permissions.IsAuthenticated]\n")))
+    assert _one(st, "GET", "/api/users/").authRequired is None
+
+
+def test_permission_classes_decorator_that_is_not_a_literal_list_claims_nothing(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop.views import ping\nurlpatterns = [path('ping/', ping)]\n",
+        "from rest_framework.decorators import permission_classes\n"
+        "@api_view(['GET'])\n@permission_classes(PERMISSIONS)\ndef ping(request):\n    pass\n",
+        settings=("REST_FRAMEWORK = {'DEFAULT_PERMISSION_CLASSES': "
+                  "['rest_framework.permissions.IsAuthenticated']}\n")))
+    r = _one(st, "GET", "/ping/")
+    assert (r.guards, r.authRequired) == (None, None)
+
+
+# ── an empty router prefix ───────────────────────────────────────────────────────────────
+
+
+def _empty_prefix(router: str = "DefaultRouter()") -> dict[str, str]:
+    return _project(
+        "from shop.views import ItemViewSet\n"
+        f"router = {router}\nrouter.register(r'', ItemViewSet)\n"
+        "urlpatterns = [path('api/', include(router.urls))]\n",
+        "class ItemViewSet(viewsets.ReadOnlyModelViewSet):\n"
+        "    @action(detail=True, methods=['post'])\n    def star(self, request, pk):\n        pass\n"
+        "    @action(detail=False, methods=['get'])\n    def recent(self, request):\n        pass\n")
+
+
+def test_empty_router_prefix_has_no_double_slash(analyze_files) -> None:
+    st = analyze_files(_empty_prefix())
+    _one(st, "GET", "/api/")
+    _one(st, "GET", "/api/<pk>/")
+    _one(st, "POST", "/api/<pk>/star/")
+    _one(st, "GET", "/api/recent/")
+    assert not [s for s in _eps(st) if s.endpoint and "//" in s.endpoint]
+
+
+def test_empty_router_prefix_without_trailing_slash(analyze_files) -> None:
+    st = analyze_files(_empty_prefix("DefaultRouter(trailing_slash=False)"))
+    _one(st, "GET", "/api/")
+    _one(st, "GET", "/api/<pk>")
+
+
+def test_a_prefix_keeps_its_slash(analyze_files) -> None:
+    st = analyze_files(_project(ROUTER, "class OrderViewSet(viewsets.ReadOnlyModelViewSet):\n    pass\n"))
+    _one(st, "GET", "/api/orders/")
+    _one(st, "GET", "/api/orders/<pk>/")

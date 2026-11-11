@@ -43,15 +43,21 @@ def _routes(f: UrlFile, resolved: ResolvedClass, prefix: str | None, slash: str
     for action, handler in resolved.actions.items():
         verb, detail = drf.ACTION_ROUTES[action]
         path = None if prefix is None else (f"{prefix}/{lookup}{slash}" if detail else f"{prefix}{slash}")
-        out.append((handler_route(f, resolved, verb, handler), path))
+        out.append((handler_route(f, resolved, verb, handler), _bare(prefix, path)))
     for name, (method, on_detail, verbs, url_path) in resolved.extra.items():
         segment = url_path if url_path is not None else name
         extra_path = None if prefix is None or on_detail is None else (
             f"{prefix}/{lookup}/{segment}{slash}" if on_detail else f"{prefix}/{segment}{slash}")
         methods: tuple[str | None, ...] = verbs or (None,)
         for extra_verb in methods:
-            out.append((handler_route(f, resolved, extra_verb, method), extra_path))
+            out.append((handler_route(f, resolved, extra_verb, method), _bare(prefix, extra_path)))
     return out
+
+
+def _bare(prefix: str | None, path: str | None) -> str | None:
+    """``path`` as DRF serves it: with an empty prefix the generated route starts with ``/``,
+    which DRF removes (``^/$`` → ``^$``), so ``api/`` + ``""`` is ``/api/``, not ``/api//``."""
+    return path[1:] if prefix == "" and path is not None and path.startswith("/") else path
 
 
 def detect_routers(root: Node, source: bytes, path: str, f: UrlFile) -> list[Emit]:
