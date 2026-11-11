@@ -28,6 +28,3 @@ joins them (`/api` + `/users` → `/api/users`). Converters are kept as written 
 | Flask-Smorest `Blueprint(…)` + `Api(app).register_blueprint(blp, url_prefix=…)` | Wiring | — (a Flask blueprint, registered on the Api's app) | Container, no handler |
 | `app.run()`, `@app.errorhandler`, `@app.teardown_request` | None | — | Start-up and error handling |
 | `requests` / `httpx` call | Outbound | `api_call` | Our code calling out |
-
-Not recorded yet: Flask-RESTful / Flask-RESTX resources (`api.add_resource(Resource, "/x")`) and
-class routes of extension blueprints (Flask-Smorest `@blp.route` on a `MethodView`).
