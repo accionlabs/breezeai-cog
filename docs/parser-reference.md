@@ -460,6 +460,14 @@ register_detector(Detector(
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
   language extras (`bindings` for TypeScript, `types` for Scala).
+- A detector that keys on a receiver's declared type (an SDK client) binds the name **where the
+  call is**, by the language's scope rules — never one `name → type` map per file, where the last
+  class's field wins for every class. For C#, `csharp/scopes.py`: `TypeScopes` records each
+  declaration under its scope in one walk, and `receiver_label` looks a receiver up from the
+  member's locals and parameters (a local of another type shadows the field) to the type's fields
+  and properties, its same-file bases and outer types; `this.x` looks at the type only. The
+  shared call classifiers take names, not nodes, so the C# parser sets their `HttpClient` and
+  datastore names for each body it walks (`csharp/statements.py`, `ReceiverNames`).
 - Add the detector to the inventory in `tests/unit/test_additive.py`.
 
 **Facts from other files.** When the detection needs a fact that lives in *another* file — a

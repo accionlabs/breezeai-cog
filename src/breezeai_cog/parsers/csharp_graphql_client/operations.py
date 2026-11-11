@@ -35,8 +35,8 @@ from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..aspnet_areas import constant_string
-from ..csharp.functions import type_map
-from ..csharp.statements import collect_typed_names
+from ..csharp.scopes import TypeScopes, receiver_label
+from ..csharp.statements import typed
 from ..emits import Emit
 from ..graphql.operations import (
     OPERATION_KINDS, fragment_definitions, operation_request_dto, root_fields,
@@ -48,6 +48,7 @@ _CLIENT_TYPES = {
     "GraphQLHttpClient": "graphql", "IGraphQLClient": "graphql",
     "IGraphQLWebSocketClient": "graphql",
 }
+_CLIENT = typed(_CLIENT_TYPES)
 
 #: Client method → the operation kind it sends when the document can't be read.
 _METHOD_KINDS = {
@@ -111,14 +112,10 @@ def _receiver_and_method(call: Node, source: bytes) -> tuple[Node, str] | None:
     return (receiver, node_text(name, source)) if name is not None else None
 
 
-def _is_client(receiver: Node, source: bytes, clients: dict[str, str]) -> bool:
-    if receiver.type == "identifier":
-        return node_text(receiver, source) in clients
-    if receiver.type == "member_access_expression":
-        obj, name = receiver.child_by_field_name("expression"), receiver.child_by_field_name("name")
-        return obj is not None and obj.type in ("this", "this_expression") and name is not None \
-            and node_text(name, source) in clients
-    return False
+def _is_client(receiver: Node, source: bytes, scopes: TypeScopes) -> bool:
+    """The receiver is a name declared as a GraphQL client where the call is (``_gql``,
+    ``this._gql``)."""
+    return receiver_label(receiver, source, scopes, _CLIENT) is not None
 
 
 def _local_creation(name: str, call: Node, source: bytes) -> Node | None:
@@ -202,13 +199,13 @@ def _operation(document: str, wanted: str | None,
 
 def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
                                 index: object = None) -> list[Emit]:
-    clients = collect_typed_names(root, source, type_map(root, source), _CLIENT_TYPES)
-    if not clients:
+    scopes = TypeScopes(root, source)
+    if not scopes.candidates(_CLIENT):
         return []
     found: list[Emit] = []
     for call in _iter(root, "invocation_expression"):
         parts = _receiver_and_method(call, source)
-        if parts is None or parts[1] not in _METHOD_KINDS or not _is_client(parts[0], source, clients):
+        if parts is None or parts[1] not in _METHOD_KINDS or not _is_client(parts[0], source, scopes):
             continue
         text = first_line(node_text(call, source))[:120]
         resolved = None

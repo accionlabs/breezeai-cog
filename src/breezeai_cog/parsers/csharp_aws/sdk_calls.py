@@ -47,8 +47,8 @@ from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..aspnet_areas import constant_string
 from ..aws_sdk_common import ADDRESS_KEYS, DIRECT_ADDRESS_KEYS, address_name
-from ..csharp.functions import type_map
-from ..csharp.statements import collect_typed_names
+from ..csharp.scopes import Classify, TypeScopes, receiver_label
+from ..csharp.statements import typed
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 
@@ -116,23 +116,20 @@ def _receiver_and_method(call: Node, source: bytes) -> tuple[Node, str] | None:
     return receiver, node_text(name, source)
 
 
-def _service(receiver: Node, source: bytes, clients: dict[str, str]) -> str | None:
-    """The service of a receiver: a name declared as a client type (``_s3``, ``this._s3``), or a
-    client created in place (``new TransferUtility(s3).UploadAsync(…)``)."""
-    if receiver.type == "identifier":
-        return clients.get(node_text(receiver, source))
-    if receiver.type == "member_access_expression":
-        obj = receiver.child_by_field_name("expression")
-        name = receiver.child_by_field_name("name")
-        if obj is not None and obj.type in ("this", "this_expression") and name is not None:
-            return clients.get(node_text(name, source))
-        return None
-    if receiver.type == "parenthesized_expression" and receiver.named_children:
-        return _service(receiver.named_children[0], source, clients)
+_CLIENT = typed(_CLIENT_TYPES)
+
+
+def _service(receiver: Node, source: bytes, scopes: TypeScopes,
+             classify: Classify = _CLIENT) -> str | None:
+    """The service of a receiver: a name declared as a client type where the call is
+    (``_s3``, ``this._s3``), or a client created in place
+    (``new TransferUtility(s3).UploadAsync(…)``)."""
     if receiver.type == "object_creation_expression":
         typ = receiver.child_by_field_name("type")
         return _CLIENT_TYPES.get(node_text(typ, source).rsplit(".", 1)[-1]) if typ else None
-    return None
+    if receiver.type == "parenthesized_expression" and receiver.named_children:
+        return _service(receiver.named_children[0], source, scopes, classify)
+    return receiver_label(receiver, source, scopes, classify)
 
 
 def _initializer_pairs(creation: Node, source: bytes) -> Iterator[tuple[str, Node]]:
@@ -215,7 +212,7 @@ def _handler(call: Node, source: bytes) -> dict[str, object]:
 
 
 def detect_sdk_calls(root: Node, source: bytes, index: object = None) -> list[Emit]:
-    clients = collect_typed_names(root, source, type_map(root, source), _CLIENT_TYPES)
+    scopes = TypeScopes(root, source)
     found: list[Emit] = []
     for call in _iter(root, "invocation_expression"):
         parts = _receiver_and_method(call, source)
@@ -224,7 +221,7 @@ def detect_sdk_calls(root: Node, source: bytes, index: object = None) -> list[Em
         receiver, method = parts
         if method in _NOT_OPERATIONS or not method[:1].isupper():
             continue
-        service = _service(receiver, source, clients)
+        service = _service(receiver, source, scopes)
         if service is None:
             continue
         fields: dict[str, object]

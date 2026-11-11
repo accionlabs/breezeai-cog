@@ -804,3 +804,27 @@ def test_named_attribute_arguments_keep_their_key(tmp_path) -> None:
     assert named_arg("a == b") == (None, "a == b")
     assert named_arg('Name:="GetOrder"') == ("Name", '"GetOrder"')  # VB
     assert named_arg("y := 2") == ("y", "2")
+
+
+def test_client_names_are_bound_in_their_own_class(tmp_path) -> None:
+    # `_ctx` / `_client` are a DynamoDB context and an HttpClient only in the class that declares
+    # them so; the same names in the class before it are its own types.
+    src = b'''using Amazon.DynamoDBv2.DataModel;
+using System.Net.Http;
+public class Repo {
+  private readonly IMyUnitOfWork _ctx;
+  private readonly IMyApi _client;
+  public async Task Save(object o) { await _ctx.SaveAsync(o); await _client.GetAsync("/a"); }
+}
+public class DynRepo {
+  private readonly IDynamoDBContext _ctx;
+  private readonly HttpClient _client;
+  public async Task Save(object o) { await _ctx.SaveAsync(o); await _client.GetAsync("/b"); }
+}
+'''
+    ctx = ParseContext(path="Repos.cs", abs_path=None, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    got = {(s.startLine, s.semanticType, s.dataAccessHint, s.endpoint) for s in rec.statements
+           if s.semanticType in ("db_method_call", "api_call")}
+    assert got == {(11, "db_method_call", "dynamodb", None), (11, "api_call", None, "/b")}

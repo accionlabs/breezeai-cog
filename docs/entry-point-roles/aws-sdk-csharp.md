@@ -3,7 +3,10 @@
 Parser: `src/breezeai_cog/parsers/csharp_aws/sdk_calls.py` (additive detector) · Addresses: `src/breezeai_cog/parsers/aws_sdk_common.py` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_csharp_aws_sdk_calls.py`
 
 A call counts only on a name declared as an AWS client type (`IAmazonSQS`, `AmazonSQSClient`,
-`IAmazonSimpleNotificationService`, …): a field, property, parameter, local or `new`. The verb
+`IAmazonSimpleNotificationService`, …): a field, property, parameter, local or `new`, bound as
+C# binds it where the call is — the member's locals and parameters, then the class's fields and
+properties, its same-file base classes, then outer classes — so a same-named field of another
+type in the next class, or a local that shadows the field, is not a client. The verb
 alone proves nothing — `PublishAsync` is also MediatR's, `ReceiveMessageAsync` any chat client's.
 A queue, topic or bus is written by name (`…amazonaws.com/123456789012/orders` → `orders`), as
 the deploy config's consumers and the senders write it, from a literal or a `const` /
