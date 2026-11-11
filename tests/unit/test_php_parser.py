@@ -192,6 +192,112 @@ Route::prefix('/admin')->group(function () {
     assert sum(statement.semanticType is None for statement in record.statements) == 1
 
 
+def test_php_guzzle_file_client_is_detected_inside_laravel_route_closure() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+use Illuminate\\Support\\Facades\\Route;
+
+$c = new Client();
+
+Route::get('/h', function () use ($c) {
+    $c->get('https://h.example.com');
+});
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+
+    routes = [s for s in record.statements if s.semanticType == "route"]
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/h")]
+    assert [(call.method, call.endpoint, call.text) for call in calls] == [
+        ("GET", "https://h.example.com", "$c->get('https://h.example.com');")
+    ]
+    assert calls[0].parentId == "routes/web.php#<anonymous>@7"
+
+
+def test_php_guzzle_client_detection_supports_short_names_and_fully_qualified_constructors() -> None:
+    source = """<?php
+use GuzzleHttp\\Client as G;
+
+$c = new G();
+$c->post('https://one.example');
+$d = new \\GuzzleHttp\\Client();
+$d->get('https://two.example');
+"""
+    record = _parse(PhpParser(), source)
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(call.method, call.endpoint) for call in calls] == [
+        ("POST", "https://one.example"),
+        ("GET", "https://two.example"),
+    ]
+
+
+def test_php_unrelated_object_get_is_not_an_api_call() -> None:
+    source = """<?php
+class Unrelated {}
+$x = new Unrelated();
+$x->get('https://not-http.example');
+"""
+    record = _parse(PhpParser(), source)
+    assert not any(statement.semanticType == "api_call" for statement in record.statements)
+
+
+def test_php_file_client_is_not_inherited_without_closure_use_capture() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+use Illuminate\\Support\\Facades\\Route;
+$c = new Client();
+Route::get('/h', function () {
+    $c->get('https://h.example.com');
+});
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+    assert not any(statement.semanticType == "api_call" for statement in record.statements)
+
+
+def test_php_arrow_function_parameter_hides_the_file_client() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+$c = new Client();
+$out = array_map(fn($c) => $c->get('https://x.example'), $items);
+$ok = fn() => $c->get('https://y.example');
+"""
+    record = _parse(PhpParser(), source)
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [call.endpoint for call in calls] == ["https://y.example"]
+
+
+def test_php_closure_captures_the_file_client_by_reference() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+$c = new Client();
+$f = function () use (&$c) { $c->post('https://z.example'); };
+$g = function () use ($other, &$c) { $c->put('https://w.example'); };
+"""
+    record = _parse(PhpParser(), source)
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(call.method, call.endpoint) for call in calls] == [
+        ("POST", "https://z.example"), ("PUT", "https://w.example"),
+    ]
+
+
+def test_php_laravel_routes_survive_a_slim_psr7_import() -> None:
+    source = b"<?php use Illuminate\\Support\\Facades\\Route; use Slim\\Psr7\\Response; Route::get('/x', fn() => 1);"
+    assert registry.select("routes/web.php", source).name == "php-laravel"
+    record = _parse(LaravelParser(), source.decode(), path="routes/web.php")
+    assert [(r.method, r.endpoint) for r in record.statements if r.semanticType == "route"] == [("GET", "/x")]
+
+
+def test_php_symfony_routes_survive_an_unrelated_illuminate_import() -> None:
+    source = b"""<?php
+use Illuminate\\Support\\Collection;
+use Symfony\\Component\\Routing\\Annotation\\Route;
+class A { #[Route('/a', methods: ['GET'])] public function a() {} }
+"""
+    assert registry.select("src/Controller/A.php", source).name == "php-symfony"
+    # a bare ``#[Route]`` next to an Illuminate import is a Laravel route-attribute package
+    assert registry.select("app/C.php", b"<?php use Illuminate\\Http\\Request; #[Route('/a')] class C {}").name == "php-laravel"
+
+
 def test_php_laravel_routes_capture_name_and_chained_middleware() -> None:
     source = """<?php
 use Illuminate\\Support\\Facades\\Route;
@@ -480,6 +586,29 @@ class Plugin {
     ]
     assert record.framework == "wordpress"
     assert not any(s.semanticType == "route" for s in record.statements)
+
+
+def test_framework_claims_reject_foreign_framework_namespaces() -> None:
+    illuminate_router = (
+        b"<?php namespace Illuminate\\Routing; "
+        b"$routes->get('/route', 'Controller@method'); "
+        b"use Symfony\\Component\\Routing\\Route;"
+    )
+    assert not CodeIgniterParser().claims("Router.php", illuminate_router)
+    assert not SymfonyParser().claims("Router.php", illuminate_router)
+    assert (
+        registry.select("src/Illuminate/Routing/Router.php", illuminate_router).name
+        == "php-laravel"
+    )
+
+    vendor_slim = b"<?php namespace WordPress\\AiClientDependencies\\Slim\\Http;"
+    assert not SlimParser().claims(
+        "wp-includes/php-ai-client/third-party/Http/Response.php", vendor_slim
+    )
+    assert not SlimParser().claims("tools/php-ai-client/scoper.inc.php", b"$prefix = 'Slim\\';")
+    assert registry.select(
+        "wp-includes/php-ai-client/third-party/Http/Response.php", vendor_slim
+    ).name == "php"
 
 
 def test_codeigniter_query_builder_db_method_calls() -> None:
