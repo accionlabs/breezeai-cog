@@ -49,7 +49,8 @@ from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from .java_syntax import (calls_and_creations, handler_class, imports_and_package,
                           invocations, java_string, local_value)
-from .legacy import forwarder_sites, http_client_calls, registration_tables
+from .forwarders import forwarder_sites
+from .legacy import http_client_calls, registration_tables
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines

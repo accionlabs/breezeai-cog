@@ -1,12 +1,15 @@
 """Plain Java syntax-tree reads shared by the Vert.x detectors (``events.py``, ``legacy.py``):
 method invocations, string literals, a local's assigned value, the class of a ``new X(…)``
-handler, and the file's imports and package. Nothing here is about Vert.x itself."""
+handler, and the file's imports and package — plus the two reads every Vert.x detector shares:
+an address argument folded to a constant, and where a handler class's ``handle`` is."""
 
 from __future__ import annotations
 
 from tree_sitter import Node
 
+from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
+from ..vertx_common import render_address
 
 
 def invocations(root: Node) -> list[Node]:
@@ -96,3 +99,32 @@ def imports_and_package(root: Node, source: bytes) -> tuple[list[str], list[str]
                        if c.type in ("scoped_identifier", "identifier")), None)
             package = node_text(nm, source) if nm is not None else ""
     return singles, wildcards, package
+
+
+def name_of(node: Node | None, source: bytes) -> str:
+    """A node's text; empty for no node."""
+    return node_text(node, source) if node is not None else ""
+
+
+def plain(text: str) -> str:
+    """A name without its ``this.``."""
+    return text.removeprefix("this.").strip()
+
+
+def arguments(call: Node) -> list[Node]:
+    """A call's or creation's argument nodes."""
+    args = call.child_by_field_name("arguments")
+    return list(args.named_children) if args is not None else []
+
+
+def known_address(node: Node, source: bytes, consts: dict[str, str]) -> str | None:
+    """An address / URI argument folded to a constant, else None (never a ``{name}``)."""
+    value = render_address(node, source, consts, java_string)
+    return value if value is not None and "{" not in value else None
+
+
+def handle_location(index: object | None, impl: str | None, path: str
+                    ) -> tuple[int | None, str | None]:
+    """(handlerLine, handlerPath) of class ``impl``'s ``handle`` method, when the repo has it."""
+    found = locate_method(index, "java", impl, "handle") if impl else None
+    return handler_location(found, path)
