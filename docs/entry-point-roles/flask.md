@@ -8,6 +8,7 @@ joins them (`/api` + `/users` → `/api/users`). Converters are kept as written 
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | `@app.route(rule)` / `@bp.route(rule, methods=[…])` on a function | Binding, one per method | `route`, verb (`GET` when `methods` is absent), `routeKind: route`, full path, `handler` = function | One handler, inbound HTTP |
+| A rule without a leading `/` (`@bp.route("")`, `@bp.route("login")`) on a blueprint the code shows | Binding | as above: Flask joins it to the blueprint's prefix (`/api/books` + `""` → `/api/books`). On a receiver the code does not resolve, a rule must start with `/` (Werkzeug's) or it is not a route. A rule that joins to an address without a leading `/` (an app, or a blueprint with no prefix) is one Flask refuses to register: no record | Flask joins the rule to the prefix |
 | `@app.get(rule)` / `.post` / `.put` / `.patch` / `.delete` (Flask 2.0) | Binding | as above, the verb of the decorator | One handler |
 | `app.add_url_rule(rule, endpoint, view_func)` with a function | Binding, one per method | as above; `handler` = the function named by `view_func` | One handler |
 | `app.add_url_rule(rule, view_func=UserAPI.as_view("users"))` — a `MethodView` | Binding, one per HTTP method the class defines | `handler` = the method (`get`, `post`, …) at its line; a class whose methods are not visible (inherited) gives one record with no `method`, `handler` = the class | One handler per method |

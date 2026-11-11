@@ -333,6 +333,50 @@ def test_smorest_blueprint_registered_where_the_code_does_not_show_has_no_addres
     assert [(s.method, s.endpoint, s.handler) for s in _eps(st)] == [("POST", None, "post")]
 
 
+# ── rules without a leading slash ────────────────────────────────────────────────────────
+
+BOOKS = (HEAD + "books_bp = Blueprint('books', __name__)\n"
+         "@books_bp.route('', methods=['GET'])\ndef list_books():\n    return ''\n"
+         "@books_bp.route('login', methods=['POST'])\ndef login():\n    return ''\n"
+         "@books_bp.post('<int:id>')\ndef update(id):\n    return ''\n"
+         "def ping():\n    return ''\n"
+         "books_bp.add_url_rule('ping', view_func=ping)\n")
+
+
+def test_blueprint_rules_without_a_leading_slash_join_the_prefix(analyze_files) -> None:
+    st = analyze_files({"books.py": BOOKS, "app.py": (
+        HEAD + "from books import books_bp\napp = Flask(__name__)\n"
+        "app.register_blueprint(books_bp, url_prefix='/api/books')\n")})
+    assert _one(st, "GET", "/api/books").handler == "list_books"
+    assert _one(st, "POST", "/api/books/login").handler == "login"
+    assert _one(st, "POST", "/api/books/<int:id>").handler == "update"
+    assert _one(st, "GET", "/api/books/ping").handler == "ping"
+
+
+def test_blueprint_rule_without_a_slash_under_an_unknown_prefix_has_no_address(analyze_files) -> None:
+    st = analyze_files({"books.py": BOOKS})  # registered nowhere the code shows
+    assert {(s.method, s.handler, s.endpoint) for s in _eps(st)} == {
+        ("GET", "list_books", None), ("POST", "login", None), ("POST", "update", None),
+        ("GET", "ping", None)}
+
+
+def test_rule_without_a_slash_on_a_receiver_the_code_does_not_resolve_is_not_a_route(analyze_files) -> None:
+    st = analyze_files({"views.py": (
+        "from flask import current_app\nfrom extensions import app\n"
+        "@app.route('login')\ndef login():\n    return ''\n"
+        "@app.get('name')\ndef name():\n    return ''\n")})
+    assert _eps(st) == []
+
+
+def test_rule_without_a_slash_that_joins_to_no_slash_is_not_a_route(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        HEAD + "app = Flask(__name__)\nbp = Blueprint('b', __name__)\napp.register_blueprint(bp)\n"
+        "@app.route('login')\ndef login():\n    return ''\n"  # Werkzeug refuses it
+        "@bp.route('x')\ndef x():\n    return ''\n"
+        "@app.route('/ok')\ndef ok():\n    return ''\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "/ok")]
+
+
 # ── a blueprint reached through a dotted chain ───────────────────────────────────────────
 
 CHAIN = {

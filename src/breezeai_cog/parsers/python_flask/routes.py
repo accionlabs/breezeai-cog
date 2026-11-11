@@ -118,6 +118,12 @@ class _File:
         found = self.wiring.classes.get(ref[1], {}).get(ref[2]) if ref is not None and ref[0] == "ext" else None
         return (ref[2], found, ref[1]) if ref is not None and found is not None else None
 
+    def is_route(self, call: Node, rule: str) -> bool:
+        """Whether a route-shaped call with this ``rule`` registers a route. Flask joins a rule to
+        the prefix of the blueprint it is on, so ``""`` and ``"login"`` are rules there; every
+        other receiver is taken for a route only when the rule starts with ``/`` (Werkzeug's)."""
+        return rule.startswith("/") or self.container(receiver(call)) is not None
+
     def certain(self, guards: list[str]) -> bool:
         return any(self.origins.qualified(g) in CERTAIN_AUTH for g in guards)
 
@@ -138,7 +144,8 @@ def _decorator_name(dec: Node, source: bytes) -> str | None:
 
 
 def _route_call(dec: Node, source: bytes) -> tuple[Node, str, str] | None:
-    """(call, decorator method, rule) of a route decorator ``@x.route("/r")``."""
+    """(call, decorator method, rule as written) of a route decorator ``@x.route("/r")`` — the
+    rule is checked against its receiver by :meth:`_File.is_route`."""
     call = dec.named_children[0] if dec.named_children else None
     fn = call.child_by_field_name("function") if call is not None and call.type == "call" else None
     attr = fn.child_by_field_name("attribute") if fn is not None and fn.type == "attribute" else None
@@ -146,9 +153,7 @@ def _route_call(dec: Node, source: bytes) -> tuple[Node, str, str] | None:
         return None
     args = positional(call)
     rule = literal(args[0], source) if args else None
-    if rule is None or not rule.startswith("/"):  # Werkzeug rules start with "/"
-        return None
-    return call, node_text(attr, source), rule
+    return (call, node_text(attr, source), rule) if rule is not None else None
 
 
 def _call_attribute(call: Node, source: bytes) -> str | None:
@@ -190,6 +195,25 @@ def _route(node: Node, method: str | None, endpoint: str | None, handler: str | 
     ), parent=parent, node_type=node_type, enrich="never" if node_type else "own")
 
 
+#: The address of a rule that Flask would refuse to register (no leading ``/``).
+_INVALID = "<invalid>"
+
+
+def _address(prefix: str | None, rule: str) -> str | None:
+    """The address of ``rule`` under ``prefix`` (Flask's join); None when the prefix is not
+    known; :data:`_INVALID` when the joined address does not start with ``/``, which Werkzeug
+    rejects — a route the app never serves."""
+    if prefix is None:
+        return None
+    joined = join(prefix, rule)
+    return joined if joined.startswith("/") else _INVALID
+
+
+def _is_route_decorator(f: _File, dec: Node) -> bool:
+    found = _route_call(dec, f.source)
+    return found is not None and f.is_route(found[0], found[2])
+
+
 def _decorated(f: _File, decorated: Node, fdef: Node, class_name: str | None) -> list[Emit]:
     source = f.source
     name = field_text(fdef, "name", source)
@@ -201,14 +225,16 @@ def _decorated(f: _File, decorated: Node, fdef: Node, class_name: str | None) ->
         if found is None:
             continue
         call, verb, rule = found
-        served = f.served(receiver(call))
+        served = f.served(receiver(call)) if f.is_route(call, rule) else None
         if served is None:
             continue
         prefix, inherited = served
+        endpoint = _address(prefix, rule)
+        if endpoint is _INVALID:
+            continue
         # Only the decorators below the route wrap the view it registers.
-        below = [n for d in decorators[i + 1:]
-                 if _route_call(d, source) is None and (n := _decorator_name(d, source)) is not None]
-        endpoint = join(prefix, rule) if prefix is not None else None
+        below = [n for d in decorators[i + 1:] if not _is_route_decorator(f, d)
+                 and (n := _decorator_name(d, source)) is not None]
         methods = [verb.upper()] if verb != "route" else _methods(keyword(call, source, "methods"), source, ["GET"])
         out.extend(_route(dec, m, endpoint, name, line, None, [*inherited, *below], f.certain(below),
                           f.parent(name, line, class_name), node_type="synthetic") for m in methods)
@@ -247,13 +273,15 @@ def _add_url_rule(f: _File, call: Node) -> list[Emit]:
     source = f.source
     rule = literal(argument(call, source, 0, "rule"), source)
     view = argument(call, source, 2, "view_func")
-    if rule is None or not rule.startswith("/") or view is None:
+    if rule is None or view is None or not f.is_route(call, rule):
         return []
     served = f.served(receiver(call))
     if served is None:
         return []
     prefix, inherited = served
-    endpoint = join(prefix, rule) if prefix is not None else None
+    endpoint = _address(prefix, rule)
+    if endpoint is _INVALID:
+        return []
     explicit = keyword(call, source, "methods")
     if view.type == "call":
         listed = string_list(explicit, source) if explicit is not None else None
