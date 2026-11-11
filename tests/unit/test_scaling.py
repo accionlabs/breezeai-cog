@@ -101,6 +101,30 @@ def _python_flask(n: int) -> str:
             f"app.register_blueprint(bp)\n{body}")
 
 
+def _python_flask_views(n: int) -> str:
+    """``view = Cls.as_view(...)`` variables, each named by an ``add_url_rule``."""
+    body = "".join(
+        f"class V{i}(MethodView):\n    def get(self):\n        return ''\n"
+        f"v{i} = V{i}.as_view('v{i}')\napp.add_url_rule('/v/{i}', view_func=v{i})\n"
+        for i in range(n)
+    )
+    return f"from flask import Flask\nfrom flask.views import MethodView\napp = Flask(__name__)\n{body}"
+
+
+def _python_django_method_decorators(n: int) -> str:
+    """Class-level ``method_decorator``s on views built on a chain of bases."""
+    views = "".join(
+        f"@method_decorator(login_required, name='get')\nclass V{i}(B{i}):\n    pass\n"
+        f"class B{i}(ListView):\n    def get(self, request):\n        pass\n"
+        for i in range(n)
+    )
+    patterns = "".join(f"    path('v{i}/', V{i}.as_view()),\n" for i in range(n))
+    return ("from django.urls import path\nfrom django.views.generic import ListView\n"
+            "from django.utils.decorators import method_decorator\n"
+            "from django.contrib.auth.decorators import login_required\n"
+            f"{views}urlpatterns = [\n{patterns}]\n")
+
+
 def _python_django(n: int) -> str:
     views = "".join(
         f"class V{i}(LoginRequiredMixin, ListView):\n    def post(self, request):\n        pass\n"
@@ -324,6 +348,8 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "python": ("mod.py", _python),
     "python-flask": ("app.py", _python_flask),
     "python-django": ("urls.py", _python_django),
+    "python-django-method-decorators": ("urls.py", _python_django_method_decorators),
+    "python-flask-views": ("app.py", _python_flask_views),
     "python-drf": ("urls.py", _python_drf),
     "python-drf-router-subclass": ("urls.py", _python_drf_router_subclass),
     "python-flask-rest": ("api.py", _python_flask_rest),
