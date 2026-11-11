@@ -5,11 +5,31 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import os
+
 import pytest
 
 from breezeai_cog import iter_file_records
 from breezeai_cog.parsers.contract import validate
 from breezeai_cog.schemas import Statement
+
+
+def _windows_spelled(path: Path) -> Path:
+    """``path``, but ``str()`` keeps a ``./`` segment before the file name: a real path whose
+    string spelling no longer ends with its ``/``-separated repo-relative path — as on Windows,
+    where ``str()`` uses ``\\``. Reproduces that mismatch on any OS."""
+
+    class _Spelled(type(path)):  # type: ignore[valid-type,misc]
+        def __str__(self) -> str:
+            plain = super().__str__()
+            return f"{os.path.dirname(plain)}/./{os.path.basename(plain)}"
+
+    return _Spelled(path)
+
+
+@pytest.fixture
+def windows_spelled() -> Callable[[Path], Path]:
+    return _windows_spelled
 
 
 @pytest.fixture

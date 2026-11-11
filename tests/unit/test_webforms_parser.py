@@ -284,6 +284,20 @@ namespace Acme {
     assert pr == {"SplendidCRM-CE/App/CMS/Enrollment.aspx": ["enroll/{id}"]}
 
 
+def test_mappageroute_app_root_does_not_depend_on_path_spelling(tmp_path: Path, windows_spelled) -> None:
+    # A Windows path's string never ends with its "/"-separated repo-relative path; the repo
+    # root must still reach the collector, so the subdir app root is found.
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    app = tmp_path / "Shop"
+    (app / "App_Start").mkdir(parents=True)
+    (app / "web.config").write_bytes(b"<configuration/>")
+    (app / "App_Start" / "RouteConfig.cs").write_bytes(ROUTECFG)
+    cfg = windows_spelled(app / "App_Start" / "RouteConfig.cs")
+    assert page_routes(build_csharp_index(tmp_path, [cfg])) == {
+        "Shop/CMS/Enrollment.aspx": ["enroll/{id}"]}
+
+
 def test_mappageroute_ast_only_ignores_comment_and_string() -> None:
     # A MapPageRoute in a comment or string must NOT be picked up (AST extraction, not regex).
     src = b"""

@@ -51,12 +51,12 @@ class JavaIndex:
 _IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]]
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
+def _fqcn_index_one(args: tuple[str, str, str]) -> _IndexFrag | None:
     """Parse one Java file (once) → its ``{package.TypeName: rel}`` FQCN entries **and** its
     ``static final String`` constants as ``{Class.FIELD: tokens}`` (qualified only — a bare
     field name is meaningless cross-file). Pure, picklable worker; ``None`` on read failure."""
-    file_s, rel = args
-    repo_root = Path(file_s[: -len(rel) - 1]) if file_s.endswith("/" + rel) else None
+    file_s, rel, root_s = args
+    repo_root = Path(root_s)  # passed in, not derived from the path string ("\\" on Windows)
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -96,7 +96,7 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     declared in >1 file with a differing value collapses to ``None`` (ambiguous → honest-null;
     the constant is then simply not folded)."""
     files, fact_files = split_fact_sources("java", list(files))
-    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("java", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}

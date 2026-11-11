@@ -491,16 +491,14 @@ _Fragment = tuple[
 ]
 
 
-def _index_one(args: tuple[str, str, str | None]) -> _Fragment | None:
+def _index_one(args: tuple[str, str, str | None, str]) -> _Fragment | None:
     """Parse one file (with its owning project) into a **partial** index fragment — pure, no
     shared state, so it is safe to run in a worker process (module-level + picklable, for
     :func:`parallel_map`). Returns ``None`` on read error."""
-    file_s, rel, project = args
-    # Derive repo_root from the absolute path and the repo-relative path (registered facts
-    # resolve paths against it — e.g. ``~/`` in a MapPageRoute against its app root).
-    repo_root: Path | None = None
-    if file_s.endswith("/" + rel):
-        repo_root = Path(file_s[: -len(rel) - 1])
+    file_s, rel, project, root_s = args
+    # The repo root, passed in rather than derived from the path string (``\\`` on Windows);
+    # registered facts resolve paths against it — e.g. ``~/`` in a MapPageRoute.
+    repo_root = Path(root_s)
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -569,8 +567,9 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
     by_fqn: dict[str, ClassHeritage | None] = {}   # partials merged per fully-qualified name
     method_files: dict[tuple[str, str], str | None] = {}
     # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
-    fragments = parallel_map([(str(f), rel, index.project_of(rel)) for f, rel in zip(files, rels)],
-                             _index_one, jobs)
+    fragments = parallel_map(
+        [(str(f), rel, index.project_of(rel), str(repo_root)) for f, rel in zip(files, rels)],
+        _index_one, jobs)
     # REDUCE: fold fragments into the shared index (deterministic, order-independent).
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("csharp", fact_files, repo_root, jobs)
