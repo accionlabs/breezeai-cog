@@ -412,3 +412,31 @@ def test_include_through_a_name_that_is_not_imported_reaches_no_module(analyze_f
         "import shop.api.urls\nurlpatterns = [path('a/', include(stranger.api.urls))]\n", **SHOP))
     routes = [s for s in _eps(st) if s.routeKind == "route"]
     assert sorted(str(s.endpoint) for s in routes) == ["None", "None"]  # both urlconfs: reached from nowhere
+
+
+def test_django_auth_views_have_their_documented_verbs(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth import views as auth_views\n"
+        "urlpatterns = [path('login/', auth_views.LoginView.as_view()),\n"
+        "               path('pw/done/', auth_views.PasswordChangeDoneView.as_view()),\n"
+        "               path('logout/', auth_views.LogoutView.as_view())]\n"))
+    assert sorted((s.endpoint, str(s.method), s.handler) for s in _eps(st)) == [
+        ("/login/", "GET", "LoginView"), ("/login/", "POST", "LoginView"), ("/login/", "PUT", "LoginView"),
+        ("/logout/", "None", "LogoutView"), ("/pw/done/", "GET", "PasswordChangeDoneView")]
+
+
+def test_view_built_on_a_django_auth_view_inherits_its_verbs(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth.views import PasswordResetView\n"
+        "class Reset(PasswordResetView):\n    template_name = 'x.html'\n"
+        "urlpatterns = [path('reset/', Reset.as_view())]\n"))
+    assert sorted((s.method, s.handler, s.handlerLine) for s in _eps(st)) == [
+        ("GET", "get", 3), ("POST", "post", 3), ("PUT", "put", 3)]
+
+
+def test_view_of_the_same_name_from_another_library_is_not_djangos(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from allauth.account.views import LoginView\n"
+        "urlpatterns = [path('login/', LoginView.as_view())]\n"))
+    (r,) = _eps(st)
+    assert (r.method, r.handler) == (None, "LoginView")  # its verbs are not Django's to name

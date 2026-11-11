@@ -11,8 +11,10 @@ never imports a framework package (architecture §15).
 
 from __future__ import annotations
 
-#: Django's generic views (``django.views.generic`` and ``django.views``) → the verbs they handle,
-#: each by the method of that name. ``RedirectView`` answers every verb (``ANY``).
+#: Django's class-based views (``django.views``, ``django.views.generic``, ``django.views.i18n`` and
+#: ``django.contrib.auth.views``) → the verbs they handle, each by the method of that name.
+#: ``RedirectView`` answers every verb (``ANY``). The auth views are built on ``FormView`` /
+#: ``TemplateView`` and handle what those do.
 DJANGO_VIEWS: dict[str, tuple[str, ...]] = {
     "TemplateView": ("GET",),
     "ListView": ("GET",),
@@ -29,15 +31,24 @@ DJANGO_VIEWS: dict[str, tuple[str, ...]] = {
     "UpdateView": ("GET", "POST", "PUT"),
     "DeleteView": ("GET", "POST", "DELETE"),
     "RedirectView": ("ANY",),
+    "JavaScriptCatalog": ("GET",),
+    "JSONCatalog": ("GET",),
+    "LoginView": ("GET", "POST", "PUT"),
+    "PasswordChangeView": ("GET", "POST", "PUT"),
+    "PasswordChangeDoneView": ("GET",),
+    "PasswordResetView": ("GET", "POST", "PUT"),
+    "PasswordResetDoneView": ("GET",),
+    "PasswordResetConfirmView": ("GET", "POST", "PUT"),
+    "PasswordResetCompleteView": ("GET",),
 }
-#: Views Django itself provides that a urlconf names directly (``path("m/<path:path>", serve)``,
-#: ``path("reset/", PasswordResetView.as_view())``): served by Django's code, so their records
-#: lead to nothing in the repo. Names in ``django.views`` and ``django.contrib.*.views``.
+#: Views Django itself provides that a urlconf names directly (``path("m/<path:path>", serve)``):
+#: served by Django's code, so their records lead to nothing in the repo; those not in
+#: :data:`DJANGO_VIEWS` have no verb recorded — function views answer any, and ``LogoutView``
+#: handles ``POST`` only from Django 5 (``GET`` too before), so which verbs it has depends on the
+#: version in use. Names in ``django.views`` and ``django.contrib.*.views``.
 DJANGO_PROVIDED_VIEWS = frozenset({
     "serve", "page_not_found", "server_error", "bad_request", "permission_denied",
-    "set_language", "JavaScriptCatalog", "JSONCatalog", "sitemap", "shortcut", "flatpage",
-    "LoginView", "LogoutView", "PasswordChangeView", "PasswordChangeDoneView", "PasswordResetView",
-    "PasswordResetDoneView", "PasswordResetConfirmView", "PasswordResetCompleteView",
+    "set_language", "sitemap", "shortcut", "flatpage", "LogoutView",
 })
 #: Django bases that handle no verb themselves: a view built on them handles what it defines.
 DJANGO_BASES = frozenset({"View", "ContextMixin", "TemplateResponseMixin", "SingleObjectMixin",

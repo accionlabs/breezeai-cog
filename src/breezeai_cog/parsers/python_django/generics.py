@@ -9,7 +9,7 @@ from the repository.
 from __future__ import annotations
 
 #: The modules Django's views are imported from.
-DJANGO_VIEW_MODULES = ("django.views",)
+DJANGO_VIEW_MODULES = ("django.views", "django.contrib.auth.views")
 
 #: HTTP verbs a class-based view dispatches to a method of the same (lower-case) name.
 VERBS = ("GET", "POST", "PUT", "PATCH", "DELETE")
