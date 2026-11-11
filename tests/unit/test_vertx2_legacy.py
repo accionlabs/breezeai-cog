@@ -191,6 +191,67 @@ def test_forwarded_argument_that_is_not_a_constant_leaves_the_address_empty(
     ]
 
 
+def _sub(name: str, parent: str, ctors: str, imports: str = V2) -> dict[str, str]:
+    return _java(name, f"""public class {name} extends {parent} {{
+{ctors}
+  public void handle(Message<JsonObject> m) {{ }}
+}}""", imports)
+
+
+def test_subclass_passing_its_address_to_super_is_a_consumer_at_that_call(analyze_files) -> None:
+    files = {
+        **MESSAGE_HANDLER,
+        **_sub("OrderView", "MessageHandler", """  static final String ADDRESS = OrderView.class.getSimpleName();
+  public OrderView(Vertx v, Container c) { super(v, c, ADDRESS); }"""),
+        # No Vert.x import of its own, and two constructors on one address: one record.
+        **_sub("Plain", "MessageHandler", """  public Plain() { super(null, null, "orders/plain"); }
+  public Plain(int x) { super(null, null, "orders/plain"); }""", ""),
+        # A middle class passing its own parameter on; its leaf gives the address.
+        **_java("Mid", """public abstract class Mid extends MessageHandler {
+  public Mid(Vertx v, String a) { super(v, null, a); }
+}"""),
+        **_sub("Leaf", "Mid", '  public Leaf(Vertx v) { super(v, "orders/leaf"); }'),
+        # this(…) to its own constructor, which passes the address on to super(…).
+        **_sub("Twin", "MessageHandler", """  public Twin(Vertx v) { this(v, "orders/twin"); }
+  public Twin(Vertx v, String a) { super(v, null, a); }"""),
+    }
+    # The handler is the subclass's own `handle` (same file: its line, no path); a call passing
+    # a parameter on keeps its record with the address unknown, like any helper's.
+    stmts = analyze_files(files)
+    assert _bus(stmts) == [
+        ("Leaf.java", "eventbus_consumer", "orders/leaf", "handle", None),
+        ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
+        ("Mid.java", "eventbus_consumer", None, "handle", None),
+        ("OrderView.java", "eventbus_consumer", "OrderView", "handle", None),
+        ("Plain.java", "eventbus_consumer", "orders/plain", "handle", None),
+        ("Twin.java", "eventbus_consumer", None, "handle", None),
+        ("Twin.java", "eventbus_consumer", "orders/twin", "handle", None),
+    ]
+    lines = {(s.path.rsplit("/", 1)[-1], s.endpoint): (s.nodeType, s.handlerLine)
+             for s in stmts if s.semanticType == "eventbus_consumer"}
+    assert lines[("OrderView.java", "OrderView")] == ("explicit_constructor_invocation", 12)
+    assert lines[("Plain.java", "orders/plain")] == ("explicit_constructor_invocation", 6)
+    assert lines[("Mid.java", None)][1] is None  # abstract, no `handle` of its own
+
+
+def test_super_of_a_class_that_does_not_register_itself_is_not_a_consumer(analyze_files) -> None:
+    other = {"src/main/java/com/other/MessageHandler.java":
+             "package com.other;\npublic class MessageHandler {\n"
+             "  public MessageHandler(Object v, Object c, String a) { }\n}\n"}
+    files = {
+        **MESSAGE_HANDLER, **INFO, **other,
+        # A same-named class of another package, imported: not the registering one.
+        **_sub("Elsewhere", "MessageHandler",
+               '  public Elsewhere() { super(null, null, "orders/x"); }',
+               "import com.other.MessageHandler;\n" + V2),
+        # A superclass whose constructor stores nothing to register.
+        **_sub("Info2", "InfoHandler", "  public Info2() { super(); }"),
+    }
+    assert _bus(analyze_files(files)) == [
+        ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
+    ]
+
+
 def test_helper_that_rewrites_the_address_is_not_a_forwarder(analyze_files) -> None:
     files = {**_java("Prefixed", """public class Prefixed {
   public static void send(Vertx v, String address) {

@@ -18,15 +18,16 @@ def invocations(root: Node) -> list[Node]:
 
 
 def calls_and_creations(root: Node) -> tuple[list[Node], list[Node]]:
-    """Every ``method_invocation`` and every ``object_creation_expression`` under ``root``, each
-    in source order, from one walk."""
+    """Every ``method_invocation``, and every ``object_creation_expression`` and
+    ``explicit_constructor_invocation`` (``super(…)`` / ``this(…)``) under ``root``, each in
+    source order, from one walk."""
     calls: list[Node] = []
     creations: list[Node] = []
 
     def walk(n: Node) -> None:
         if n.type == "method_invocation":
             calls.append(n)
-        elif n.type == "object_creation_expression":
+        elif n.type in ("object_creation_expression", "explicit_constructor_invocation"):
             creations.append(n)
         for c in n.named_children:
             walk(c)

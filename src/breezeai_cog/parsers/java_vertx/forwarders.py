@@ -13,13 +13,21 @@ The ``vertx.address-forwarders`` fact lists them repo-wide by fully-qualified
 with its own argument folded (unfoldable → ``endpoint`` empty). The forwarder's own call keeps
 its record (address unknown): it is the call that sends or registers, and a helper whose call
 sites the detector does not read (never called, called from a file without a Vert.x marker, or
-declared with two shapes) would otherwise leave no record at all. A call site's class is
+declared with two shapes) would otherwise leave no record at all.
+
+A subclass constructor's ``super(…)`` (or a ``this(…)``) calling a self-registering constructor
+is a call site too: the object registered is the subclass, so the record sits on that call with
+the subclass's ``handle`` — one per class and address. The subclass need not name Vert.x: such a
+call is read in any Java file once the repo has a forwarding constructor.
+
+A call site's class is
 resolved as Java resolves it (:class:`_Names`): a same-named class of another package is never
 taken for a forwarder. Shapes only, never names.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection
 from pathlib import Path
 from typing import Any
@@ -33,8 +41,8 @@ from ..handler_sites import handler_info, method_lines
 from ..index_common import record_distinct
 from ..java_variables_common import typed_vars
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
-from .java_syntax import (arguments, handle_location, handler_class, imports_and_package,
-                          known_address, name_of, plain)
+from .java_syntax import (arguments, calls_and_creations, handle_location, handler_class,
+                          imports_and_package, known_address, name_of, plain)
 
 FORWARDERS = "vertx.address-forwarders"
 
@@ -49,6 +57,8 @@ Forwarder = tuple[SemanticType, int, int, bool]
 Relay = tuple[str, tuple[str, ...], bool, str, tuple[tuple[int, int], ...]]
 #: How many relays deep a forwarder is followed.
 _RELAY_DEPTH = 4
+#: A ``super(`` / ``this(`` in a file's bytes: the cheap check before reading its tree.
+_CTOR_CALL = re.compile(rb"\b(?:super|this)\s*\(")
 
 
 # ── address forwarders ──────────────────────────────────────────────────────────────────────
@@ -145,11 +155,23 @@ def _class_of(key: str) -> str:
     return key.rsplit("/", 1)[0].rsplit(".", 1)[0]
 
 
-def _callee(call: Node, here: str, names: _Names, source: bytes
+def _callee(call: Node, here: str, sup: str | None, names: _Names, source: bytes
             ) -> tuple[tuple[str, ...], bool, str] | None:
     """(owner candidates, exact, ``method/arity``) of a call on the class itself (unqualified
-    or ``this.``) or on a class name (static); None otherwise."""
+    or ``this.``) or on a class name (static), or of a ``this(…)`` / ``super(…)`` (``<init>``
+    of the class itself / of its superclass ``sup``, as written); None otherwise."""
     obj = call.child_by_field_name("object")
+    if call.type == "explicit_constructor_invocation":
+        member = f"<init>/{len(arguments(call))}"
+        kind = name_of(call.child_by_field_name("constructor"), source)
+        if obj is not None:  # outer.super(…): an inner class's, not followed
+            return None
+        if kind == "this":
+            return (here,), True, member
+        if kind == "super" and sup:
+            found, exact = names.candidates(sup)
+            return found, exact, member
+        return None
     method = name_of(call.child_by_field_name("name"), source)
     member = f"{method}/{len(arguments(call))}"
     if not method:
@@ -179,11 +201,12 @@ class _Class:
     """A scanned class: its fully-qualified name, its members and every name assigned anywhere
     in its body (nested classes included)."""
 
-    __slots__ = ("name", "body", "decls", "assigned")
+    __slots__ = ("name", "body", "superclass", "decls", "assigned")
 
-    def __init__(self, name: str, body: Node) -> None:
+    def __init__(self, name: str, body: Node, superclass: str | None) -> None:
         self.name = name
         self.body = body
+        self.superclass = superclass
         self.decls: list[_Decl] = []
         self.assigned: dict[str, list[Node]] = {}
 
@@ -204,7 +227,7 @@ def _scan(root: Node, source: bytes, names_of: _Names) -> list[_Class]:
             body = n.child_by_field_name("body")
             if simple and body is not None:
                 inner = (*chain, simple) if stack else (simple,)
-                cls = _Class(names_of.qualify(*inner), body)
+                cls = _Class(names_of.qualify(*inner), body, superclass_of(n, source))
                 classes.append(cls)
                 for c in n.named_children:
                     walk(c, (*stack, cls), inner, None)
@@ -215,7 +238,8 @@ def _scan(root: Node, source: bytes, names_of: _Names) -> list[_Class]:
                 stack[-1].decls.append(decl)
             # else a method of a class not scanned (an interface's, an enum's): read for its
             # class's assignments only, and a class inside it is not scanned
-        elif kind == "method_invocation" and decl is not None:
+        elif kind in ("method_invocation", "explicit_constructor_invocation") \
+                and decl is not None:
             decl.calls.append(n)
         elif kind == "assignment_expression" and stack:
             left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
@@ -269,7 +293,8 @@ def _forwarders(root: Node, source: bytes) -> tuple[list[tuple[str, Forwarder]],
                     (i, names.index(name_of(a, source))) for i, a in enumerate(args)
                     if a.type == "identifier" and name_of(a, source) in names
                     and name_of(a, source) not in reassigned)
-                callee = _callee(call, cls.name, names_of, source) if mapping else None
+                callee = _callee(call, cls.name, cls.superclass, names_of, source) \
+                    if mapping else None
                 if callee is not None and not (callee[1] and f"{callee[0][0]}.{callee[2]}" == key):
                     relays.append((key, callee[0], callee[1], callee[2], mapping))
                 bus = _bus_call(call, source)
@@ -324,9 +349,11 @@ def _resolve_forwarders(values: list[tuple[list[tuple[str, Forwarder]], list[Rel
             semantic, addr, hidx, self_ = fwd
             own = dict(mapping)
             if addr in own:
-                # A handler that is the callee's own class is not this method's: none (unsure).
+                # A handler that is the callee's own class is not this method's (unsure: none),
+                # except through ``super(…)`` / ``this(…)``: the object built is this class's.
                 record_distinct(derived, key, (semantic, own[addr],
-                                               own.get(hidx, -1) if hidx >= 0 else -1, False))
+                                               own.get(hidx, -1) if hidx >= 0 else -1,
+                                               self_ and member.startswith("<init>/")))
         new = {k: v for k, v in derived.items() if v is not None and k not in known}
         if not new:
             break
@@ -339,6 +366,13 @@ register_fact(FactSpec(
     name=FORWARDERS, language="java", gate=(b"org.vertx", b"io.vertx"),  # Vert.x 2, Vert.x 3+
     collect=_collect_forwarders, resolve=_resolve_forwarders,
 ))
+
+
+def superclass_of(decl: Node, source: bytes) -> str | None:
+    """The superclass of a ``class_declaration`` as written (``Base``, ``a.b.Base<T>``)."""
+    sup = decl.child_by_field_name("superclass")
+    typ = sup.named_children[0] if sup is not None and sup.named_children else None
+    return name_of(typ, source) if typ is not None else None
 
 
 def _enclosing_classes(node: Node, source: bytes, names: _Names) -> list[str]:
@@ -358,9 +392,10 @@ def forwarder_sites(
 ) -> tuple[list[Emit], set[tuple[int, int]]]:
     """The records of every call to a known forwarder in this file — a method call on the
     class itself, on a class name (static) or on a variable declared with the class's type,
-    or ``new Class(…)`` — and their spans (so they are not classified again). ``calls`` and
-    ``creations`` are the file's method invocations and object creations (one walk, shared
-    with the rest of the Vert.x detection)."""
+    ``new Class(…)``, or a constructor's ``super(…)`` / ``this(…)`` — and their spans (so they
+    are not classified again). ``calls`` and ``creations`` are the file's method invocations
+    and object creations / constructor invocations (one walk, shared with the rest of the
+    Vert.x detection)."""
     table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
     if not table:
         return [], set()
@@ -427,12 +462,63 @@ def forwarder_sites(
         if resolved is not None and fwd is not None:
             emit(n, resolved, fwd, args)
 
+    seen: set[tuple[str, SemanticType, str | None]] = set()
+
+    def constructor_site(n: Node) -> None:
+        # `super(v, ADDRESS)` / `this(v, ADDRESS)`: the class whose constructor this is.
+        decl = n.parent
+        while decl is not None and decl.type != "class_declaration":
+            if decl.type in ("object_creation_expression", "enum_declaration",
+                             "record_declaration"):
+                return
+            decl = decl.parent
+        own = _enclosing_classes(n, source, names_of)
+        kind = name_of(n.child_by_field_name("constructor"), source)
+        if decl is None or not own or n.child_by_field_name("object") is not None:
+            return
+        target: str | None = own[0] if kind == "this" else None
+        if kind == "super":
+            written = superclass_of(decl, source)
+            target = names_of.resolve(written, classes) if written else None
+        args = arguments(n)
+        fwd = table.get(f"{target}.<init>/{len(args)}") if target else None
+        if fwd is None:
+            return
+        address = known_address(args[fwd[1]], source, consts) if fwd[1] < len(args) else None
+        if (own[0], fwd[0], address) in seen:  # two constructors, one address: one record
+            spans.add((n.start_byte, n.end_byte))
+            return
+        seen.add((own[0], fwd[0], address))
+        emit(n, own[0], fwd, args)
+
     # In source order (a node before the nodes inside it), as one walk would visit them.
     for n in sorted((*calls, *creations), key=lambda n: (n.start_byte, -n.end_byte)):
         if (n.start_byte, n.end_byte) in skip:
             continue
         if n.type == "method_invocation":
             call_site(n)
+        elif n.type == "explicit_constructor_invocation":
+            constructor_site(n)
         else:
             creation_site(n)
     return found, spans
+
+
+def has_constructor_sites(source: bytes, index: object | None) -> bool:
+    """The repo has a forwarding constructor and this file calls a ``super(…)`` / ``this(…)``:
+    the cheap check before a file without a Vert.x marker is read (a subclass of a
+    self-registering handler need not name Vert.x)."""
+    if _CTOR_CALL.search(source) is None:
+        return False
+    table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
+    return any("<init>/" in k for k in table)
+
+
+def constructor_sites(root: Node, source: bytes, path: str, record: FileRecord,
+                      consts: dict[str, str], index: object | None) -> list[Emit]:
+    """The forwarder records of a file without a Vert.x marker: its ``super(…)`` / ``this(…)``
+    calls to a forwarding constructor, and nothing else."""
+    ctors = [n for n in calls_and_creations(root)[1]
+             if n.type == "explicit_constructor_invocation"]
+    return forwarder_sites(root, [], ctors, source, path, record, consts, index, set())[0] \
+        if ctors else []
