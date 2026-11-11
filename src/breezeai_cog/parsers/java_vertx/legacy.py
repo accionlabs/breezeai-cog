@@ -32,6 +32,7 @@ from ..emits import Emit
 from ..java_variables_common import typed_vars
 from ..treesitter import node_text
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
+from .handler_factories import FactoryCalls
 from .java_syntax import (arguments, handle_location, handler_class, known_address, local_value,
                           name_of, plain)
 
@@ -77,9 +78,11 @@ def _table_of(addr: Node, source: bytes) -> str | None:
 
 def registration_tables(
     calls: list[Node], source: bytes, consts: dict[str, str], index: object | None, path: str,
+    factories: FactoryCalls | None = None,
 ) -> tuple[list[Emit], set[tuple[int, int]]]:
     """One ``eventbus_consumer`` per ``put`` into a registration table (module docstring), and
-    the spans of the loop ``registerHandler`` calls those records replace."""
+    the spans of the loop ``registerHandler`` calls those records replace. ``factories``: the
+    handler factories this file calls (a value ``X.create()`` is handled like ``new T()``)."""
     loops: dict[str, list[Node]] = {}
     for call in calls:
         obj = call.child_by_field_name("object")
@@ -102,7 +105,8 @@ def registration_tables(
         replaced |= {(c.start_byte, c.end_byte) for c in registrations}
         for put in puts:
             key, value = arguments(put)
-            impl = handler_class(value, source)
+            impl = handler_class(value, source) or (
+                factories.built(value) if factories is not None else None)
             line, handler_path = handle_location(index, impl, path)
             found.append(vertx_emit(put, "eventbus_consumer", None, known_address(key, source, consts),
                                     None, "handle" if impl else None, line,

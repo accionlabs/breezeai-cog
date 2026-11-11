@@ -34,6 +34,7 @@ from ..emits import Emit
 from .java_syntax import (calls_and_creations, handler_class, imports_and_package,
                           invocations, java_string, local_value)
 from .forwarders import forwarder_sites
+from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
 from .service_interfaces import service_methods
 from ..treesitter import node_text
@@ -373,6 +374,7 @@ def detect_vertx(
     suppress: set[tuple[int, int]] = set()
     methods = method_lines(record.functions)
     calls, creations = calls_and_creations(root)
+    built_by = FactoryCalls(root, source, index)  # handlers built by `X.create(…)`
     mounts, mount_routes = (
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
@@ -383,13 +385,13 @@ def detect_vertx(
     routers = router_vars(source)
     # Vert.x 2 idioms (legacy.py): registration tables, HttpClient calls.
     if b"org.vertx" in source:
-        tables, replaced = registration_tables(calls, source, consts, index, path)
+        tables, replaced = registration_tables(calls, source, consts, index, path, built_by)
         suppress |= replaced
         found.extend(tables)
         found.extend(http_client_calls(root, calls, source, record, consts))
     # Calls to an address forwarder (forwarders.py), any Vert.x version.
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
-                                     index, suppress)
+                                     index, suppress, built_by)
     found.extend(sites)
 
     for call in calls:
@@ -440,7 +442,8 @@ def detect_vertx(
         elif handler is None and semantic in HANDLER_SEMANTICS:
             # `registerHandler(addr, new LoadHandler(eb))`: a Vert.x `Handler` has one method,
             # so the code that runs is that class's `handle` (usually another file).
-            impl = handler_class(_handler_arg(call, source), source)
+            arg = _handler_arg(call, source)
+            impl = handler_class(arg, source) or built_by.built(arg)
             if impl:
                 handlers = ["handle"]
 

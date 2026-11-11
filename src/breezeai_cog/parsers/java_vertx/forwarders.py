@@ -389,13 +389,15 @@ def _enclosing_classes(node: Node, source: bytes, names: _Names) -> list[str]:
 def forwarder_sites(
     root: Node, calls: list[Node], creations: list[Node], source: bytes, path: str, record: FileRecord,
     consts: dict[str, str], index: object | None, skip: set[tuple[int, int]],
+    factories: Any | None = None,
 ) -> tuple[list[Emit], set[tuple[int, int]]]:
     """The records of every call to a known forwarder in this file — a method call on the
     class itself, on a class name (static) or on a variable declared with the class's type,
     ``new Class(…)``, or a constructor's ``super(…)`` / ``this(…)`` — and their spans (so they
     are not classified again). ``calls`` and ``creations`` are the file's method invocations
     and object creations / constructor invocations (one walk, shared with the rest of the
-    Vert.x detection)."""
+    Vert.x detection). ``factories`` (a :class:`~.handler_factories.FactoryCalls`) follows a
+    handler argument built by a factory."""
     table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
     if not table:
         return [], set()
@@ -422,7 +424,8 @@ def forwarder_sites(
             if hidx >= 0 and hidx < len(args):
                 handler, line = handler_info(args[hidx], source, methods)
                 if handler is None and line is None:
-                    impl = handler_class(args[hidx], source)
+                    impl = handler_class(args[hidx], source) or (
+                        factories.built(args[hidx]) if factories is not None else None)
             if impl:
                 handler = "handle"
                 line, handler_path = handle_location(index, impl, path)
