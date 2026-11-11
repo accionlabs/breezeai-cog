@@ -17,11 +17,11 @@ from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
-from ..treesitter import parse_source
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import VbIndex, build_vb_index, extract_imports
+from .source import parse_vb
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -65,7 +65,7 @@ class VbParser(BaseParser):
         return build_vb_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("vb", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_vb(ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:

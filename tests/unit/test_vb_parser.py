@@ -249,3 +249,54 @@ End Class
     m = next(f for f in rec.functions if f.name == "M")
     # a lone string literal unquoted; a named arg, a concatenation or a member as written
     assert m.decorators[0].args == ['a"b', 'Roles:="Admin"', '"s" & "t"', "Order.Last", "y := 2"]
+
+
+def test_stacked_attribute_lines_are_joined_in_place() -> None:
+    from breezeai_cog.parsers.vb.source import join_attribute_blocks
+
+    src = b'    <HttpPost>\r\n    <Route("create")>\r\n    Public Function Create() As Object\r\n'
+    out = join_attribute_blocks(src)
+    assert out == b'    <HttpPost,\r\n     Route("create")>\r\n    Public Function Create() As Object\r\n'
+    assert len(out) == len(src)
+
+
+def test_attribute_join_leaves_other_shapes_alone() -> None:
+    from breezeai_cog.parsers.vb.source import join_attribute_blocks
+
+    for src in (
+        b"<HttpPost>\nPublic Function A() As Object\n",                     # one block: nothing to join
+        b"<Assembly: A>\n<Assembly: B>\nPublic Class C\n",                  # assembly targets
+        b"<HttpPost> ' post\n<Route(\"x\")>\nPublic Sub M()\n",              # trailing comment
+        b"<A>\n<B>\nx = 1\n",                                                # not a declaration
+        b"Dim doc = <root>\n<item/>\n<item></item>\nPublic Sub M()\n",       # XML literal tags
+        b"<xs:a>\n<xs:b>\nPublic Sub M()\n",                                 # namespaced XML tags
+    ):
+        assert join_attribute_blocks(src) is src, src
+
+
+STACKED = b'''Imports System.ServiceModel
+Namespace Shop
+    <ServiceContract>
+    Public Interface IOrderService
+        <OperationContract>
+        Function GetOrder(id As Integer) As String
+
+        <OperationContract>
+        <WebGet(UriTemplate:="orders/{id}")>
+        Function GetOrderRest(id As String) As String
+    End Interface
+End Namespace
+'''
+
+
+def test_stacked_attributes_in_an_interface_are_all_kept(tmp_path) -> None:
+    p = tmp_path / "IOrderService.vb"
+    p.write_bytes(STACKED)
+    ctx = ParseContext(path="IOrderService.vb", abs_path=p, source=STACKED, repo_root=tmp_path)
+    rec = VbParser().parse_file(ctx)
+    assert [c.name for c in rec.classes] == ["IOrderService"]
+    fns = {f.name: f for f in rec.functions}
+    assert [d.name for d in fns["GetOrder"].decorators] == ["OperationContract"]
+    rest = fns["GetOrderRest"]
+    assert [d.name for d in rest.decorators] == ["OperationContract", "WebGet"]
+    assert (rest.startLine, rest.endLine) == (8, 10)  # from the first attribute line
