@@ -33,7 +33,7 @@ from tree_sitter import Node
 from ..emit import disambiguate, file_id, statement_id
 from ..schemas import FileRecord, Statement
 from .enclosing import Enclosing
-from .treesitter import first_line, node_text
+from .treesitter import end_line, first_line, node_text
 
 #: Which captured statement an emit may enrich in place:
 #: ``never`` — always append; ``unclassified`` — one with no ``semanticType`` (or one of
@@ -75,7 +75,7 @@ class Emit:
 
     @property
     def last_line(self) -> int:
-        return self.end_line if self.end_line is not None else self.node.end_point[0] + 1
+        return self.end_line if self.end_line is not None else end_line(self.node)
 
 
 def _eligible(stmt: Statement, emit: Emit) -> bool:

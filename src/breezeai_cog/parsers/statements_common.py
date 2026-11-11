@@ -31,7 +31,7 @@ from ..emit import disambiguate, statement_id
 from ..schemas import Decorator, Statement
 from ..schemas.enums import SemanticType
 from .detection import classify_call, string_has_query, text_has_query, vendor_from_imports
-from .treesitter import first_line, node_text
+from .treesitter import end_line, first_line, node_text
 
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
 # the line of each; the executor resets it around each file and emits ONE human-readable
@@ -435,7 +435,7 @@ def classify_statement(
     else:
         display_text = text_with_trailing_comment(node, source)
     start, col = node.start_point[0] + 1, node.start_point[1]
-    end = node.end_point[0] + 1
+    end = end_line(node)
 
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
     hits: list[tuple[str, str | None, str | None, str | None, Node]] = []
@@ -509,7 +509,7 @@ def classify_statement(
                     endpoint=hit_endpoint,
                     dataAccessHint=hit_hint,
                     startLine=cs,
-                    endLine=call.end_point[0] + 1,
+                    endLine=end_line(call),
                     path=path,
                 )
             )
@@ -610,7 +610,7 @@ def member_statement(
     its source). ``name`` defaults to the member's declared name; ``semantic_type`` marks the
     member's role on the same record while ``nodeType`` stays the raw grammar type."""
     start, col = node.start_point[0] + 1, node.start_point[1]
-    end = node.end_point[0] + 1
+    end = end_line(node)
     return Statement(
         id=disambiguate(statement_id(path, start, col), seen_ids),
         parentId=parent_id,

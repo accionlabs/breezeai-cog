@@ -222,3 +222,15 @@ End Namespace
 '''
     rec = _parse_source(tmp_path, src)
     assert {f.name for f in rec.functions} == {"Validate", "Total"}
+
+
+def test_spans_end_on_the_closing_line(tmp_path) -> None:
+    # VB block nodes include the trailing newline, so tree-sitter ends them at column 0 of the
+    # next line; endLine must still be the line of ``End Function`` / ``End Class``.
+    rec = _parse(tmp_path, capture=True)
+    ctrl = next(c for c in rec.classes if c.name == "OrderController")
+    assert (ctrl.startLine, ctrl.endLine) == (7, 22)
+    get = next(f for f in rec.functions if f.name == "GetOrder")
+    assert (get.startLine, get.endLine) == (17, 21)
+    ret = next(s for s in rec.statements if s.nodeType == "return_statement")
+    assert (ret.startLine, ret.endLine) == (20, 20)
