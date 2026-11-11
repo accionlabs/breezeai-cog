@@ -1,4 +1,4 @@
-"""Outbound HTTP API-call detection (language-agnostic).
+"""Outbound HTTP API-call detection, shared by the languages that name their HTTP clients.
 
 Works on a normalized call: the ``callee`` text (e.g. ``axios.get``, ``this.http.post``,
 ``requests.get``, ``fetch``) and the ``method`` (last segment). Returns the HTTP verb
@@ -12,16 +12,31 @@ from __future__ import annotations
 # bare ``foo.request()``.
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
 
-# Substrings in the callee that signal an HTTP client (matches JS ``API_CLIENT_NAMES``,
-# minus a bare ``client`` which would over-match s3Client/dbClient/graphqlClient as
-# substrings — precision-preserving deviation).
-_CLIENT_HINTS = (
-    "axios", "http", "httpclient", "httpservice", "httpx", "requests", "session", "fetch",
-    "restclient", "apiclient", "resttemplate", "webclient", "$http", "superagent",
-    "got", "ky", "urllib", "aiohttp", "guzzle", "ofetch",
-)
+# Each language's HTTP-client hints: substrings of a call's receiver that name a client library
+# of that language. A hint is read only in its own languages, because the same word is an
+# ordinary name elsewhere: ``session`` is Python's ``requests.Session`` but a JSON object or a
+# Map in Java and Groovy, and ``ky`` / ``got`` are JS libraries but fragments of any Java name
+# (``yekyJsonArray``). A bare ``client`` is never a hint: it would match s3Client / dbClient /
+# graphqlClient. A language with no entry (PHP, C, C++, an unknown one) has no name match at
+# all; its HTTP calls are recorded only by evidence-based detectors (an import, a declared type).
+_COMMON_HINTS = ("http", "restclient", "apiclient")  # http also covers httpClient, $http, httpx…
+_JVM_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")
+_DOTNET_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")  # Spring.NET RestTemplate
+_CLIENT_HINTS: dict[str, tuple[str, ...]] = {
+    "typescript": (*_COMMON_HINTS, "axios", "fetch", "superagent", "got", "ky", "ofetch",
+                   "webclient"),
+    "python": (*_COMMON_HINTS, "requests", "session", "urllib"),
+    "java": _JVM_HINTS, "kotlin": _JVM_HINTS, "groovy": _JVM_HINTS, "scala": _JVM_HINTS,
+    "csharp": _DOTNET_HINTS, "vb": _DOTNET_HINTS,
+    "go": _COMMON_HINTS,
+    "ruby": _COMMON_HINTS,
+}
 
-# Bare (receiver-less) function calls that are HTTP requests → default GET.
+#: .NET languages: ``…Async`` verbs and the ``HttpClient`` helper verbs below apply only there.
+_DOTNET = frozenset({"csharp", "vb"})
+
+# Bare (receiver-less) function calls that are HTTP requests → default GET (JS / TS only:
+# Ruby's ``hash.fetch(:key)`` reads a hash).
 _BARE_FUNCTIONS = {"fetch", "$fetch", "usefetch", "apifetch", "authfetch", "customfetch"}
 
 # ORM query-builder markers that make a chain a DB query, not an HTTP call — the
@@ -81,36 +96,36 @@ def match_api(
     axios.create(...)`` → ``service.get(...)``) or a config-object wrapper call
     (``request({ url, method })``), whose names are arbitrary. A callee whose receiver
     (or the bare callee itself) is in that set counts as a client, same as a hint match.
+    ``language`` selects the hints (:data:`_CLIENT_HINTS`); a language without any → None.
     """
+    hints = _CLIENT_HINTS.get(language or "")
+    if hints is None:
+        # No name match for this language: PHP's HTTP calls come from the imported Http facade
+        # and typed Guzzle / Symfony clients (php_http_common.py), and C / C++ have no client
+        # naming convention (``ctx_http.post("/v1/chat", handler)`` registers a server route,
+        # ``sessions.get(id)`` reads a map).
+        return None
     m = method.lower()
     low = callee.lower()
-    # PHP HTTP calls are recorded from evidence (the imported Http facade, typed Guzzle /
-    # Symfony clients) by the per-library PHP HTTP-call detectors; a receiver-name match here would be a
-    # guess (``$this->httpCache->get()``) — see php_http_common.py. C and C++ have no client
-    # naming convention either: ``ctx_http.post("/v1/chat", handler)`` registers a server
-    # route and ``sessions.get(id)`` reads a map, so only an evidence-based detector may
-    # record their HTTP calls.
-    if language in {"php", "c", "cpp"}:
-        return None
-    if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
+    if language == "typescript" and (
+            m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch")):
         return "GET"
-    # .NET (C#/VB) HttpClient uses async-suffixed verbs (``GetAsync``/``PostAsync``…);
-    # strip a trailing ``async`` so they match the same verbs (precision preserved — a
-    # client-hint substring is still required, so a bare ``FooAsync()`` never matches).
-    if m.endswith("async") and len(m) > len("async"):
-        m = m[: -len("async")]
-    m = _DOTNET_VERBS.get(m, m)  # GetStringAsync / PostAsJsonAsync … → the verb they send
+    if language in _DOTNET:
+        # .NET HttpClient verbs are async-suffixed (``GetAsync``/``PostAsync``…) or helpers
+        # (``GetStringAsync``…); a client hint is still required, so ``FooAsync()`` never matches.
+        if m.endswith("async") and len(m) > len("async"):
+            m = m[: -len("async")]
+        m = _DOTNET_VERBS.get(m, m)
     if m not in _HTTP_VERBS:
         return None
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
         return None
     receiver = _receiver_text(low)
-    # In .NET a ``…session`` is ASP.NET session state or an NHibernate ``ISession``, never an
-    # HTTP client (the ``session`` hint is Python's ``requests.Session``); so is the
-    # ``HttpContext.Session`` the ``http`` hint would otherwise match.
-    dotnet_session = language in ("csharp", "vb") and receiver.rsplit(".", 1)[-1].endswith("session")
-    is_client = not dotnet_session and any(hint in receiver for hint in _CLIENT_HINTS)
+    # In .NET a ``…Session`` is ASP.NET session state or an NHibernate ``ISession``, never an
+    # HTTP client, even as the ``HttpContext.Session`` the ``http`` hint would otherwise match.
+    dotnet_session = language in _DOTNET and receiver.rsplit(".", 1)[-1].endswith("session")
+    is_client = not dotnet_session and any(hint in receiver for hint in hints)
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).

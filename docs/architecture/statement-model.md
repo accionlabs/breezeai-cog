@@ -183,11 +183,39 @@ String q = "SELECT id, total FROM orders WHERE id = ?";
 ```
 → `nodeType: local_variable_declaration`, `semanticType: query_statement`, `name: q`.
 
+### HTTP client names, per language
+
+The HTTP step decides by the receiver's name: a call with an HTTP verb (`get`, `post`, …) whose
+receiver contains a client library's name. Each language reads only its own libraries' names,
+because the same word is an ordinary name elsewhere: `session` is Python's `requests.Session`,
+but in Java it is often a JSON object, so `session.getString("platformId")` reads a field, and
+in Groovy a Map.
+
+```mermaid
+flowchart LR
+  F["call in a file of language L"] --> H{"receiver contains one of<br/>L's client names?"}
+  H -- yes --> API[api_call]
+  H -- "no, or L has none" --> N[no HTTP meaning]
+```
+
+| Languages | Client names |
+|---|---|
+| all below | `http` (also `httpClient`, `$http`, `httpx`, `aiohttp`), `restClient`, `apiClient` |
+| JavaScript / TypeScript | `axios`, `fetch`, `superagent`, `got`, `ky`, `ofetch`, `webClient`, and a bare `fetch(…)` |
+| Python | `requests`, `session`, `urllib` |
+| Java, Kotlin, Groovy, Scala | `restTemplate`, `webClient` |
+| C#, VB | `restTemplate` (Spring.NET), `webClient`, and the `HttpClient` verbs `GetAsync`, `GetStringAsync`, `PostAsJsonAsync` … |
+| Go, Ruby | only the shared names |
+
+In C# and VB, a receiver ending in `Session` (ASP.NET session state, NHibernate `ISession`) is
+never a client, not even `HttpContext.Session`.
+
 ### Languages that skip the name match
 
 The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `session`, `repo`).
 Some languages have no naming convention to rely on, so they skip those steps and record such
-calls only through evidence-based detectors (an import, a declared type):
+calls only through evidence-based detectors (an import, a declared type). A language with no
+client names above skips the HTTP step:
 
 | Language | Skips | Recorded instead by |
 |---|---|---|
