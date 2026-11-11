@@ -29,8 +29,8 @@ from .patterns import Part, join
 from .urlconf import django_urlconf, include_target
 from .urlpatterns import Binding, Include, urlconf
 from .views import (
-    FileViews, FunctionView, Guard, Handler, ResolvedClass, certain, django_views, file_views, guards_of,
-    is_django_view, login_not_required, resolve_class,
+    FileViews, FunctionView, Guard, Handler, ResolvedClass, certain, django_views, export_of, file_views,
+    guards_of, is_django_view, login_not_required, resolve_class,
 )
 
 FRAMEWORK = "django"
@@ -85,9 +85,10 @@ class UrlFile:
             if name in self.views[self.path].functions or name in self.views[self.path].classes:
                 return self.path, name
             ref = self.imports.get(name)
-            return (ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
+            return export_of(self.views, ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
         if node.type == "attribute":
-            return attribute_owner(node, source, self.imports, self.repo_root)
+            owner = attribute_owner(node, source, self.imports, self.repo_root)
+            return export_of(self.views, *owner) if owner is not None else None
         return None
 
     def address(self, binding: Binding) -> tuple[str | None, bool | None]:

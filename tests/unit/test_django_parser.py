@@ -152,3 +152,16 @@ def test_include_of_an_app_folder_on_sys_path_for_any_jobs(capture_routes, jobs)
     }, jobs)
     assert [r["endpoint"] for r in routes["apps/orders/urls.py"]] == ["/orders/list/"]
     assert "project/urls.py" not in routes  # no library-mount record for the repo's own urlconf
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_view_re_exported_by_a_package_is_located_for_any_jobs(capture_routes, jobs) -> None:
+    routes = capture_routes({
+        "project/settings.py": "ROOT_URLCONF = 'project.urls'\n",
+        "project/urls.py": "from django.urls import path\nfrom shop import Orders\nurlpatterns = [path('o/', Orders.as_view())]\n",
+        "shop/__init__.py": "from .misc import *\n",
+        "shop/misc.py": "from django.views import View\nclass Orders(View):\n    def get(self, request):\n        pass\n",
+    }, jobs)
+    (route,) = routes["project/urls.py"]
+    assert (route["method"], route["handler"], route["handlerPath"], route["handlerLine"]) == (
+        "GET", "get", "shop/misc.py", 3)

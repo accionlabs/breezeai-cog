@@ -514,3 +514,50 @@ def test_include_of_a_library_stays_a_mount_whatever_the_repo_holds(analyze_file
         **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS}))
     routes = sorted((s.routeKind, str(s.endpoint)) for s in st if s.semanticType == "route")
     assert routes == [("mount", "/accounts/"), ("route", "None")]
+
+
+_VIEW = "from django.views import View\nclass Orders(View):\n    def get(self, request):\n        pass\n"
+
+
+def test_view_re_exported_by_name_from_a_package_is_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import OrderView, Basket\nurlpatterns = [path('o/', OrderView.as_view()), path('b/', Basket.as_view())]\n",
+        **{"shop/__init__.py": "from .views import OrderView\nfrom .carts import CartView as Basket\n",
+           "shop/views.py": _VIEW.replace("Orders", "OrderView"), "shop/carts.py": _VIEW.replace("Orders", "CartView")}))
+    assert (_one(st, "GET", "/o/").handlerPath, _one(st, "GET", "/o/").handlerLine) == ("shop/views.py", 3)
+    assert (_one(st, "GET", "/b/").handlerPath, _one(st, "GET", "/b/").handlerLine) == ("shop/carts.py", 3)
+
+
+def test_view_re_exported_by_a_star_import_is_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import Orders\nimport shop\nurlpatterns = [path('o/', Orders.as_view()), path('f/', shop.index)]\n",
+        **{"shop/__init__.py": "from .views import *\nfrom .pages import *\n", "shop/views.py": _VIEW,
+           "shop/pages.py": "def index(request):\n    pass\n"}))
+    assert _one(st, "GET", "/o/").handlerPath == "shop/views.py"
+    assert (_one(st, "ANY", "/f/").handlerPath, _one(st, "ANY", "/f/").handlerLine) == ("shop/pages.py", 1)
+
+
+def test_base_view_re_exported_by_a_package_gives_the_subclass_its_methods(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop.views import SubView\nurlpatterns = [path('s/', SubView.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/base/__init__.py": "from .generic import *\n",
+           "shop/base/generic.py": _VIEW.replace("Orders", "GenericView"),
+           "shop/views.py": "from shop.base import GenericView\nclass SubView(GenericView):\n    pass\n"}))
+    r = _one(st, "GET", "/s/")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("get", "shop/base/generic.py", 3)
+
+
+def test_name_that_two_star_imports_declare_is_not_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import Orders\nurlpatterns = [path('o/', Orders.as_view())]\n",
+        **{"shop/__init__.py": "from .a import *\nfrom .b import *\n", "shop/a.py": _VIEW, "shop/b.py": _VIEW}))
+    (r,) = _eps(st)
+    assert (r.method, r.handler, r.handlerPath) == (None, "Orders", None)  # which one is exported: not known
+
+
+def test_name_a_package_imports_from_a_library_is_not_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import Orders\nurlpatterns = [path('o/', Orders.as_view())]\n",
+        **{"shop/__init__.py": "from somelib.views import *\nfrom somelib.views import Orders\n"}))
+    (r,) = _eps(st)
+    assert (r.method, r.handler, r.handlerPath) == (None, "Orders", None)

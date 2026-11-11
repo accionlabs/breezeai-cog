@@ -23,7 +23,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..django_common import DJANGO_BASES, DJANGO_VIEWS
 from ..python_common import (
-    ImportRefs, Origins, attribute_owner, field_text, keyword, literal, positional, string_list,
+    ImportRefs, Origins, attribute_owner, field_text, keyword, literal, module_file, positional, string_list,
 )
 from ..treesitter import node_text
 from . import drf
@@ -92,6 +92,11 @@ class ClassView:
 class FileViews:
     functions: dict[str, FunctionView] = field(default_factory=dict)
     classes: dict[str, ClassView] = field(default_factory=dict)
+    #: A package's ``__init__.py`` re-exports: ``from .misc import HomeView as Home`` → name
+    #: (``Home``) → (the module's file, the name in it). Only the repo's own modules.
+    reexports: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: The repo modules a package's ``__init__.py`` star-imports (``from .misc import *``).
+    stars: tuple[str, ...] = ()
 
 
 def django_views(index: Any | None) -> dict[str, FileViews] | None:
@@ -344,6 +349,77 @@ def _takes_request(fdef: Node, source: bytes) -> bool:
     return False
 
 
+def _reexports(root: Node, source: bytes, rel: str, repo_root: Path
+               ) -> tuple[dict[str, tuple[str, str]], tuple[str, ...]]:
+    """What a package's ``__init__.py`` imports from the repo's own modules to export it: the names
+    (``from .misc import HomeView``) and the star imports. ``from . import views`` binds a module,
+    not a view, and is not one."""
+    names: dict[str, tuple[str, str]] = {}
+    twice: set[str] = set()
+    stars: list[str] = []
+    for stmt in root.named_children:
+        if stmt.type != "import_from_statement":
+            continue
+        mod = stmt.child_by_field_name("module_name")
+        if mod is None:
+            continue
+        if mod.type == "relative_import":
+            prefix = next((c for c in mod.named_children if c.type == "import_prefix"), None)
+            dotted = next((c for c in mod.named_children if c.type == "dotted_name"), None)
+            level, module = len(node_text(prefix, source)) if prefix is not None else 0, \
+                node_text(dotted, source) if dotted is not None else ""
+        else:
+            level, module = 0, node_text(mod, source)
+        file = module_file(repo_root, rel, module, level) if module else None
+        if file is None:
+            continue
+        for item in stmt.named_children:
+            if item == mod:
+                continue
+            if item.type == "wildcard_import":
+                stars.append(file)
+                continue
+            if item.type not in ("dotted_name", "aliased_import"):
+                continue
+            orig = item.child_by_field_name("name") if item.type == "aliased_import" else item
+            alias = item.child_by_field_name("alias") if item.type == "aliased_import" else item
+            if orig is None or alias is None:
+                continue
+            name = node_text(alias, source)
+            if name in names or name in twice:  # imported twice: which one is exported is not known
+                names.pop(name, None)
+                twice.add(name)
+            else:
+                names[name] = (file, node_text(orig, source))
+    return names, tuple(dict.fromkeys(stars))
+
+
+_MAX_REEXPORT_DEPTH = 5
+
+
+def _declared(views: Mapping[str, FileViews], file: str, name: str, depth: int = 0) -> tuple[str, str] | None:
+    """(file, name) of the declaration a name exported by ``file`` is: its own, or one it
+    re-exports (an explicit import before a star import). A name that star imports of two
+    modules both declare is not known."""
+    found = views.get(file)
+    if found is None or depth > _MAX_REEXPORT_DEPTH:
+        return None
+    if name in found.classes or name in found.functions:
+        return file, name
+    if name in found.reexports:
+        module, original = found.reexports[name]
+        return _declared(views, module, original, depth + 1)
+    sites = {site for module in found.stars if (site := _declared(views, module, name, depth + 1)) is not None}
+    return next(iter(sites)) if len(sites) == 1 else None
+
+
+def export_of(views: Mapping[str, FileViews], file: str, name: str) -> tuple[str, str]:
+    """Where the class or function ``name`` imported from ``file`` is declared: ``file`` itself,
+    or — when it is a package that re-exports it (``from .misc import HomeView``, ``from .misc
+    import *``) — the module that declares it. Unchanged when that is not known."""
+    return _declared(views, file, name) or (file, name)
+
+
 def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileViews:
     """The module-level classes and the functions that can be views — decorated, or taking
     ``request`` — of one file (see :class:`FileViews`)."""
@@ -356,6 +432,8 @@ def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> F
             defs.append((inner, stmt if stmt.type == "decorated_definition" else None))
     local = {field_text(d, "name", source) for d, _ in defs if d.type == "class_definition"}
     out = FileViews()
+    if rel.rpartition("/")[2] == "__init__.py" and repo_root is not None:
+        out.reexports, out.stars = _reexports(root, source, rel, repo_root)
     for inner, decorated in defs:
         name = field_text(inner, "name", source)
         if inner.type == "class_definition":
@@ -427,6 +505,8 @@ def linearize(views: Mapping[str, FileViews], key: tuple[str, str]) -> list[Base
     seen: set[Base] = set()
 
     def visit(base: Base) -> None:
+        if base[0] == "repo":  # a base imported from a package that re-exports it
+            base = ("repo", *export_of(views, base[1], base[2]))
         if base in seen:
             return
         seen.add(base)
@@ -447,6 +527,7 @@ def is_django_view(origin: str) -> bool:
 def resolve_class(views: Mapping[str, FileViews], file: str, name: str) -> ResolvedClass | None:
     """The verbs a class-based view handles and who handles each, or None when the class is not
     in ``views``."""
+    file, name = export_of(views, file, name)
     cls = views.get(file, FileViews()).classes.get(name)
     if cls is None:
         return None
@@ -628,7 +709,7 @@ def login_not_required(decorators: tuple[Guard, ...] | list[Guard]) -> bool:
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> tuple[str, FileViews] | None:
     views = file_views(root, source, rel, repo_root)
-    return (rel, views) if views.functions or views.classes else None
+    return (rel, views) if views.functions or views.classes or views.reexports or views.stars else None
 
 
 def _resolve(values: list[tuple[str, FileViews]], index: Any) -> dict[str, FileViews] | None:
@@ -641,6 +722,6 @@ register_fact(FactSpec(
     # DRF router subclasses and Channels consumers are read too: ``Router`` / ``Consumer`` in a
     # class name.
     name=FACT, language="python", gate=(b"django", b"rest_framework", b"request", b"View", b"Router",
-                                       b"Consumer"),
+                                       b"Consumer", b"import *", b"__all__"),
     collect=_collect, resolve=_resolve,
 ))
