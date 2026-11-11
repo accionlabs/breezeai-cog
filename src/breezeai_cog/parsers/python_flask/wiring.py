@@ -39,7 +39,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..python_common import (
-    Origins, calls, field_text, import_refs, keyword, literal, positional, string_list,
+    Origins, attribute_owner, calls, field_text, import_refs, keyword, literal, positional, string_list,
 )
 from ..treesitter import node_text
 
@@ -125,9 +125,10 @@ def join(prefix: str, rule: str) -> str:
 
 
 def ref_of(node: Node | None, source: bytes, rel: str, local: set[str],
-           imports: dict[str, tuple[str, ...]]) -> Ref | None:
-    """How ``node`` (``bp`` / ``auth.bp``) names an app or blueprint: a variable of this file, a
-    name imported from a repo file, or an attribute of an imported repo module."""
+           imports: dict[str, tuple[str, ...]], repo_root: Path | None = None) -> Ref | None:
+    """How ``node`` (``bp`` / ``auth.bp`` / ``user.views.bp``) names an app or blueprint: a
+    variable of this file, a name imported from a repo file, or an attribute of an imported repo
+    module — through any number of submodules (``user`` a package, ``views`` its submodule)."""
     if node is None:
         return None
     if node.type == "identifier":
@@ -139,10 +140,8 @@ def ref_of(node: Node | None, source: bytes, rel: str, local: set[str],
             return ("ext", ref[1], ref[2])
         return ("local", name)
     if node.type == "attribute":
-        obj, attr = node.child_by_field_name("object"), node.child_by_field_name("attribute")
-        ref = imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
-        if ref is not None and ref[0] == "module" and attr is not None:
-            return ("ext", ref[1], node_text(attr, source))
+        owner = attribute_owner(node, source, imports, repo_root)
+        return ("ext", *owner) if owner is not None else None
     return None
 
 
@@ -187,9 +186,10 @@ def _api_kind(call: Node, source: bytes, origins: Origins) -> str | None:
 
 
 def argument_ref(node: Node | None, source: bytes, rel: str, local: set[str],
-                 imports: dict[str, tuple[str, ...]]) -> Ref | None:
+                 imports: dict[str, tuple[str, ...]], repo_root: Path | None = None) -> Ref | None:
     """:func:`ref_of`, for an argument: a name only (a call or a literal is not a variable)."""
-    return ref_of(node, source, rel, local, imports) if node is not None and node.type in ("identifier", "attribute") else None
+    return ref_of(node, source, rel, local, imports, repo_root) \
+        if node is not None and node.type in ("identifier", "attribute") else None
 
 
 def _is(call: Node, source: bytes, origins: Origins, classes: frozenset[str]) -> bool:
@@ -239,7 +239,7 @@ def view_classes(root: Node, source: bytes) -> dict[str, ViewClass]:
 def file_wiring(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileWiring:
     """The Flask wiring of one file (see :class:`FileWiring`)."""
     origins = Origins(root, source)
-    imports = import_refs(root, source, repo_root, rel, anywhere=True) if repo_root is not None else {}
+    imports = import_refs(root, source, repo_root, rel, anywhere=True, plain=True) if repo_root is not None else {}
     out = FileWiring()
     all_calls = calls(root)
     for call in all_calls:
@@ -268,11 +268,13 @@ def file_wiring(root: Node, source: bytes, rel: str, repo_root: Path | None) -> 
         name = node_text(target, source) if target is not None and target.type == "identifier" else ""
         if name in out.apis and parent is not None and parent.child_by_field_name("right") == call:
             args = positional(call)
-            app = argument_ref(args[0] if args else keyword(call, source, "app"), source, rel, local, imports)
+            app = argument_ref(args[0] if args else keyword(call, source, "app"), source, rel, local, imports,
+                               repo_root)
             out.apis[name] = (out.apis[name][0], app, out.apis[name][2])
         elif name in out.namespaces and _attribute_call(call, source) == "namespace":
             fn = call.child_by_field_name("function")
-            api = ref_of(fn.child_by_field_name("object") if fn is not None else None, source, rel, local, imports)
+            api = ref_of(fn.child_by_field_name("object") if fn is not None else None, source, rel, local,
+                         imports, repo_root)
             if api is not None:
                 out.attached.append((api, ("local", name), None))
     for call in all_calls:
@@ -282,33 +284,34 @@ def file_wiring(root: Node, source: bytes, rel: str, repo_root: Path | None) -> 
             continue
         method = node_text(attr, source)
         receiver = ref_of(fn.child_by_field_name("object") if fn is not None else None,
-                          source, rel, local, imports)
+                          source, rel, local, imports, repo_root)
         args = positional(call)
         if receiver is None or not args:
             continue
         if method == "register_blueprint":
-            child = ref_of(args[0], source, rel, local, imports)
+            child = ref_of(args[0], source, rel, local, imports, repo_root)
             if child is not None:
                 out.registrations.append((receiver, child, _spec(call, source)))
         elif method == "init_app":
-            app = ref_of(args[0], source, rel, local, imports)
+            app = ref_of(args[0], source, rel, local, imports, repo_root)
             if app is not None:
                 out.inits.append((receiver, app))
         elif method == "add_namespace":
-            ns = ref_of(args[0], source, rel, local, imports)
+            ns = ref_of(args[0], source, rel, local, imports, repo_root)
             path = keyword(call, source, "path") or (args[1] if len(args) > 1 else None)
             if ns is not None:
                 out.attached.append((receiver, ns, _literal_spec(path, source, None) if path is not None else None))
         elif method in ("before_request", "before_app_request") and args[0].type == "identifier":
             out.hooks.append((receiver, node_text(args[0], source), method == "before_app_request"))
     for stmt in root.named_children:  # @app.before_request on a function
-        _decorator_hooks(stmt, source, rel, local, imports, out)
+        _decorator_hooks(stmt, source, rel, local, imports, out, repo_root)
     out.classes = view_classes(root, source)
     return out
 
 
 def _decorator_hooks(node: Node, source: bytes, rel: str, local: set[str],
-                     imports: dict[str, tuple[str, ...]], out: FileWiring) -> None:
+                     imports: dict[str, tuple[str, ...]], out: FileWiring,
+                     repo_root: Path | None = None) -> None:
     for child in [node] if node.type == "decorated_definition" else []:
         fdef = child.child_by_field_name("definition")
         if fdef is None or fdef.type != "function_definition":
@@ -319,14 +322,14 @@ def _decorator_hooks(node: Node, source: bytes, rel: str, local: set[str],
                 continue
             hook = field_text(expr, "attribute", source)
             if hook in ("before_request", "before_app_request"):
-                receiver = ref_of(expr.child_by_field_name("object"), source, rel, local, imports)
+                receiver = ref_of(expr.child_by_field_name("object"), source, rel, local, imports, repo_root)
                 if receiver is not None:
                     out.hooks.append((receiver, field_text(fdef, "name", source),
                                       hook == "before_app_request"))
     if node.type in ("function_definition", "decorated_definition"):  # create_app()
         body = (node.child_by_field_name("definition") or node).child_by_field_name("body")
         for inner in body.named_children if body is not None else []:
-            _decorator_hooks(inner, source, rel, local, imports, out)
+            _decorator_hooks(inner, source, rel, local, imports, out, repo_root)
 
 
 def resolve_wiring(files: dict[str, FileWiring]) -> FlaskWiring:

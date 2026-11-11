@@ -115,3 +115,28 @@ def test_capabilities_list_the_python_frameworks_their_implementations_declare()
     assert isinstance(frameworks, list)
     assert {"fastapi", "flask", "django", "drf", "celery"} <= set(frameworks)
     assert PythonParser().frameworks == []  # the base parser detects none of them itself
+
+
+DOTTED = {
+    "project/__init__.py": "",
+    "project/settings.py": "ROOT_URLCONF = 'project.urls'\n",
+    "project/urls.py": (
+        "from django.urls import include, path\nimport shop.cart.urls\nfrom shop import api\nimport lib\n"
+        "urlpatterns = [path('cart/', include(shop.cart.urls)), path('api/', include(api.v1.urls)),\n"
+        "               path('lib/', include(lib.missing.urls))]\n"),
+    "shop/__init__.py": "",
+    "shop/cart/__init__.py": "",
+    "shop/cart/urls.py": "from django.urls import path\ndef c(request):\n    pass\nurlpatterns = [path('x/', c)]\n",
+    "shop/api/__init__.py": "",
+    "shop/api/v1/__init__.py": "",
+    "shop/api/v1/urls.py": "from django.urls import path\ndef a(request):\n    pass\nurlpatterns = [path('y/', a)]\n",
+}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_include_through_a_dotted_chain_for_any_jobs(capture_routes, jobs) -> None:
+    routes = capture_routes(DOTTED, jobs)
+    assert [r["endpoint"] for r in routes["shop/cart/urls.py"]] == ["/cart/x/"]  # import shop.cart.urls
+    assert [r["endpoint"] for r in routes["shop/api/v1/urls.py"]] == ["/api/y/"]  # from shop import api
+    # a chain that is not a module of the repo is a library's URLs: a mount, not a repo urlconf
+    assert [(r["routeKind"], r["handler"]) for r in routes["project/urls.py"]] == [("mount", "lib.missing.urls")]

@@ -31,8 +31,8 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..python_common import (
-    ImportRefs, Origins, calls, field_text, import_refs, keyword, literal, positional, string_list,
-    top_statements,
+    ImportRefs, Origins, attribute_owner, calls, field_text, import_refs, keyword, literal, positional,
+    string_list, submodule, top_statements,
 )
 from ..treesitter import node_text
 from . import drf
@@ -148,9 +148,9 @@ def _module_classes(root: Node) -> list[Node]:
 
 
 def router_ref(node: Node | None, source: bytes, rel: str, routers: Mapping[str, object] | set[str],
-               imports: dict[str, tuple[str, ...]]) -> Target | None:
+               imports: dict[str, tuple[str, ...]], repo_root: Path | None = None) -> Target | None:
     """The router ``node`` names: one made in this file, an imported one (``from api.routers
-    import router``) or an attribute of an imported module (``api.router``)."""
+    import router``) or an attribute of an imported module (``api.router``, ``pkg.api.router``)."""
     if node is None:
         return None
     if node.type == "identifier":
@@ -160,10 +160,10 @@ def router_ref(node: Node | None, source: bytes, rel: str, routers: Mapping[str,
         ref = imports.get(name)
         return ("router", ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
     if node.type == "attribute":
-        obj = node.child_by_field_name("object")
-        ref = imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
-        if ref is not None and ref[0] == "module":
-            return ("router", ref[1], field_text(node, "attribute", source))
+        owner = attribute_owner(node, source, imports, repo_root)
+        if owner is None or submodule(repo_root, *owner) is not None:
+            return None  # not a name of the repo's, or a module (``api.v1`` of ``api.v1.urls``)
+        return ("router", *owner)
     return None
 
 
@@ -173,7 +173,8 @@ def include_target(target: tuple[str, object], source: bytes, rel: str, repo_roo
     ``shop_urls``, ``router.urls``), or None."""
     kind, value = target
     if isinstance(value, Node) and value.type == "attribute" and field_text(value, "attribute", source) == "urls":
-        found = router_ref(value.child_by_field_name("object"), source, rel, routers or {}, imports)
+        found = router_ref(value.child_by_field_name("object"), source, rel, routers or {}, imports,
+                           repo_root)
         if found is not None:
             return found
     if kind == "module" and isinstance(value, str):
@@ -184,15 +185,11 @@ def include_target(target: tuple[str, object], source: bytes, rel: str, repo_roo
             ref = imports.get(node_text(value, source))
             if ref is not None and ref[0] == "module":
                 return ("module", ref[1])
-        elif value.type == "attribute":  # shop.urls with `import shop` / `from shop import urls`
-            obj = value.child_by_field_name("object")
-            ref = imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
-            if ref is not None and ref[0] == "module":
-                attr = field_text(value, "attribute", source)
-                sub = Path(ref[1])
-                base = sub.parent if sub.name == "__init__.py" else None
-                if base is not None and repo_root is not None and (repo_root / base / f"{attr}.py").is_file():
-                    return ("module", (base / f"{attr}.py").as_posix())
+        elif value.type == "attribute":  # shop.urls, pkg.shop.urls: each part a module of the repo
+            owner = attribute_owner(value, source, imports, repo_root)
+            sub = submodule(repo_root, *owner) if owner is not None else None
+            if sub is not None:
+                return ("module", sub)
     return None
 
 
@@ -264,12 +261,12 @@ def file_urlconf(root: Node, source: bytes, rel: str, repo_root: Path | None) ->
     if root_urlconf is not None and repo_root is not None:
         out.root = module_target(root_urlconf, rel, repo_root)
     origins = Origins(root, source)
-    out.routers = local_routers(root, source, origins, rel, ImportRefs(root, source, repo_root, rel)) \
+    out.routers = local_routers(root, source, origins, rel, ImportRefs(root, source, repo_root, rel, plain=True)) \
         if b"Router" in source else {}
     found = urlconf(root, source, origins) if b"urlpatterns" in source else None
     if found is not None:
         out.has_patterns = True
-        imports = import_refs(root, source, repo_root, rel) if repo_root is not None else {}
+        imports = import_refs(root, source, repo_root, rel, plain=True) if repo_root is not None else {}
         for inc in found[1]:
             target = include_target(inc.target, source, rel, repo_root, imports, out.routers)
             if target is not None:

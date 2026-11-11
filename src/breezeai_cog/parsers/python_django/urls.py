@@ -21,7 +21,7 @@ from tree_sitter import Node
 from ..django_common import DJANGO_VIEWS
 from ..emits import Emit
 from ..handler_sites import handler_location
-from ..python_common import Origins, field_text, import_refs, literal, positional
+from ..python_common import Origins, attribute_owner, field_text, import_refs, literal, positional
 from ..treesitter import node_text
 from . import drf
 from .generics import LOGIN_REQUIRED_MIDDLEWARE, short
@@ -63,7 +63,7 @@ class UrlFile:
         self.root, self.source, self.path, self.repo_root = root, source, path, repo_root
         self.ctx_index = index
         self.origins = Origins(root, source)
-        self.imports = import_refs(root, source, repo_root, path) if repo_root is not None else {}
+        self.imports = import_refs(root, source, repo_root, path, plain=True) if repo_root is not None else {}
         # This file's own views over the repo's (never copied: it is read-only and repo-sized).
         self.views: Mapping[str, FileViews] = ChainMap(
             {path: file_views(root, source, path, repo_root)}, django_views(index) or {})
@@ -86,10 +86,7 @@ class UrlFile:
             ref = self.imports.get(name)
             return (ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
         if node.type == "attribute":
-            obj = node.child_by_field_name("object")
-            ref = self.imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
-            if ref is not None and ref[0] == "module":
-                return ref[1], field_text(node, "attribute", source)
+            return attribute_owner(node, source, self.imports, self.repo_root)
         return None
 
     def address(self, binding: Binding) -> tuple[str | None, bool | None]:

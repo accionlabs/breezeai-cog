@@ -121,3 +121,38 @@ def test_blueprint_registered_in_another_file_for_any_jobs(tmp_path, jobs) -> No
     (route,) = [s for s in rec["statements"] if s.get("semanticType") == "route"]
     assert (route["method"], route["endpoint"], route["handler"]) == ("GET", "/main/index", "index")
     assert rec["framework"] == "flask"  # a route file that never imports Flask
+
+
+CONDUIT = {
+    "conduit/__init__.py": "",
+    "conduit/user/__init__.py": "from . import views\n",
+    "conduit/user/views.py": (
+        "from flask import Blueprint\nblueprint = Blueprint('user', __name__)\n\n"
+        "@blueprint.route('/api/users', methods=['POST'])\ndef register():\n    return ''\n"),
+    "conduit/profile/__init__.py": "",
+    "conduit/profile/views.py": (
+        "from flask import Blueprint\nblueprint = Blueprint('profile', __name__)\n\n"
+        "@blueprint.route('/<name>')\ndef profile(name):\n    return ''\n"),
+    "conduit/other/__init__.py": "",
+    "conduit/other/views.py": (
+        "from flask import Blueprint\nblueprint = Blueprint('other', __name__)\n\n"
+        "@blueprint.route('/x')\ndef x():\n    return ''\n"),
+    "conduit/app.py": (
+        "from flask import Flask\nfrom conduit import user\nimport conduit.profile.views\n"
+        "import thirdparty\n\n"
+        "def create_app():\n    app = Flask(__name__)\n"
+        "    app.register_blueprint(user.views.blueprint)\n"
+        "    app.register_blueprint(conduit.profile.views.blueprint, url_prefix='/profiles')\n"
+        "    app.register_blueprint(thirdparty.views.blueprint, url_prefix='/lib')\n"
+        "    return app\n"),
+}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_blueprint_reached_through_a_dotted_chain_for_any_jobs(capture_routes, jobs) -> None:
+    routes = capture_routes(CONDUIT, jobs)
+    assert [(r["method"], r["endpoint"]) for r in routes["conduit/user/views.py"]] == [("POST", "/api/users")]
+    assert [(r["method"], r["endpoint"]) for r in routes["conduit/profile/views.py"]] == \
+        [("GET", "/profiles/<name>")]
+    # registered nowhere the code shows (the chain `thirdparty.views` is not a module of the repo)
+    assert [r.get("endpoint") for r in routes["conduit/other/views.py"]] == [None]

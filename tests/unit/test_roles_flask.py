@@ -331,3 +331,52 @@ def test_smorest_blueprint_registered_where_the_code_does_not_show_has_no_addres
         "app = Flask(__name__)\nblp = Blueprint('b', __name__)\nApi(app).register_blueprint(blp)\n"
         "@blp.route('/m')\nclass M(MethodView):\n    def post(self):\n        pass\n")})
     assert [(s.method, s.endpoint, s.handler) for s in _eps(st)] == [("POST", None, "post")]
+
+
+# ── a blueprint reached through a dotted chain ───────────────────────────────────────────
+
+CHAIN = {
+    "conduit/__init__.py": "",
+    "conduit/user/__init__.py": "from . import views\n",
+    "conduit/user/views.py": (
+        HEAD + "blueprint = Blueprint('user', __name__)\n"
+        "@blueprint.route('/user')\ndef current_user():\n    return ''\n"
+        "@blueprint.route('/users', methods=['POST'])\ndef register():\n    return ''\n"),
+}
+
+
+def test_blueprint_registered_through_a_package_and_module(analyze_files) -> None:
+    st = analyze_files({**CHAIN, "conduit/app.py": (
+        HEAD + "from conduit import user\napp = Flask(__name__)\n"
+        "app.register_blueprint(user.views.blueprint, url_prefix='/api')\n")})
+    assert _one(st, "GET", "/api/user").handler == "current_user"
+    assert _one(st, "POST", "/api/users").handler == "register"
+
+
+def test_blueprint_chain_that_is_not_a_module_of_the_repo_is_not_followed(analyze_files) -> None:
+    st = analyze_files({**CHAIN, "conduit/app.py": (
+        HEAD + "from conduit import user\napp = Flask(__name__)\n"
+        "app.register_blueprint(user.missing.blueprint, url_prefix='/api')\n")})
+    assert {(s.handler, s.endpoint) for s in _eps(st)} == {("current_user", None), ("register", None)}
+
+
+def test_blueprint_registered_through_a_plain_import_of_the_chain(analyze_files) -> None:
+    st = analyze_files({
+        "pkg/__init__.py": "",
+        "pkg/auth/__init__.py": "",
+        "pkg/auth/views.py": HEAD + "bp = Blueprint('auth', __name__)\n@bp.route('/login')\ndef login():\n    return ''\n",
+        "app.py": HEAD + "import pkg.auth.views\napp = Flask(__name__)\n"
+                  "app.register_blueprint(pkg.auth.views.bp, url_prefix='/auth')\n",
+    })
+    assert _one(st, "GET", "/auth/login").handler == "login"
+
+
+def test_blueprint_registered_through_a_name_that_is_not_imported_is_not_followed(analyze_files) -> None:
+    st = analyze_files({
+        "pkg/__init__.py": "",
+        "pkg/auth/__init__.py": "",
+        "pkg/auth/views.py": HEAD + "bp = Blueprint('auth', __name__)\n@bp.route('/login')\ndef login():\n    return ''\n",
+        "app.py": HEAD + "app = Flask(__name__)\napp.register_blueprint(pkg.auth.views.bp, url_prefix='/auth')\n",
+    })
+    (login,) = _eps(st)
+    assert login.endpoint is None  # registered nowhere the code shows

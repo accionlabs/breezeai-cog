@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
@@ -159,8 +160,12 @@ def _import_nodes(root: Node, anywhere: bool) -> Iterator[Node]:
 _Entry = tuple[str, ...]
 
 
-def _import_entries(root: Node, source: bytes, anywhere: bool) -> dict[str, list[_Entry]]:
-    """Local name → its imports in source order, as written (nothing resolved yet)."""
+def _import_entries(root: Node, source: bytes, anywhere: bool,
+                    plain: bool = False) -> dict[str, list[_Entry]]:
+    """Local name → its imports in source order, as written (nothing resolved yet). ``plain``: a
+    ``import pkg.mod`` also binds ``pkg`` to the package it names, which is what a dotted chain
+    (``pkg.mod.urls``) starts from; off by default, so a caller that never follows a chain sees
+    the same names as before."""
     out: dict[str, list[_Entry]] = {}
     for node in _import_nodes(root, anywhere):
         if node.type == "import_from_statement":
@@ -175,7 +180,7 @@ def _import_entries(root: Node, source: bytes, anywhere: bool) -> dict[str, list
             else:
                 level, module = 0, node_text(mod, source)
             for name_node in node.named_children:
-                if name_node is mod or name_node.type not in ("dotted_name", "aliased_import"):
+                if name_node == mod or name_node.type not in ("dotted_name", "aliased_import"):
                     continue
                 orig = name_node.child_by_field_name("name") if name_node.type == "aliased_import" else name_node
                 alias = name_node.child_by_field_name("alias") if name_node.type == "aliased_import" else name_node
@@ -184,8 +189,12 @@ def _import_entries(root: Node, source: bytes, anywhere: bool) -> dict[str, list
                         ("from", module, str(level), node_text(orig, source)))
         elif node.type == "import_statement":
             for name_node in node.named_children:
+                if name_node.type == "dotted_name" and plain:  # `import pkg.mod` binds `pkg`
+                    top = node_text(name_node, source).split(".", 1)[0]
+                    out.setdefault(top, []).append(("import", top))
+                    continue
                 if name_node.type != "aliased_import":
-                    continue  # `import pkg.mod` binds `pkg`, not the module — not followed
+                    continue  # without ``plain``: `import pkg.mod` binds `pkg`, not the module
                 orig, alias = name_node.child_by_field_name("name"), name_node.child_by_field_name("alias")
                 if orig is not None and alias is not None:
                     out.setdefault(node_text(alias, source), []).append(("import", node_text(orig, source)))
@@ -209,8 +218,8 @@ class ImportRefs:
     filesystem) only when it is asked for."""
 
     def __init__(self, root: Node, source: bytes, repo_root: Path | None, rel: str, *,
-                 anywhere: bool = False) -> None:
-        self._entries = _import_entries(root, source, anywhere)
+                 anywhere: bool = False, plain: bool = False) -> None:
+        self._entries = _import_entries(root, source, anywhere, plain)
         self._repo_root, self._rel, self._anywhere = repo_root, rel, anywhere
         self._done: dict[str, tuple[str, ...] | None] = {}
 
@@ -231,14 +240,52 @@ class ImportRefs:
 
 
 def import_refs(root: Node, source: bytes, repo_root: Path, rel: str, *,
-                anywhere: bool = False) -> dict[str, tuple[str, ...]]:
+                anywhere: bool = False, plain: bool = False) -> dict[str, tuple[str, ...]]:
     """Local name → what it refers to in the repo: ``("module", file)`` or
     ``("symbol", file, name)``. Library imports are left out.
 
     Module-level imports only, unless ``anywhere``: then an import inside a function counts too
     (``def create_app(): from app.auth import bp``), and a name imported as two different things
     in two places is left out."""
-    return ImportRefs(root, source, repo_root, rel, anywhere=anywhere).all()
+    return ImportRefs(root, source, repo_root, rel, anywhere=anywhere, plain=plain).all()
+
+
+def submodule(repo_root: Path | None, package_file: str, name: str) -> str | None:
+    """The repo file of the submodule ``name`` of the package whose ``__init__.py`` is
+    ``package_file`` (``pkg/name.py`` or ``pkg/name/__init__.py``); None when that file is not a
+    package or has no such submodule."""
+    path = Path(package_file)
+    if repo_root is None or path.name != "__init__.py":
+        return None
+    for cand in (path.parent / f"{name}.py", path.parent / name / "__init__.py"):
+        if (repo_root / cand).is_file():
+            return cand.as_posix()
+    return None
+
+
+def _module_of(node: Node, source: bytes, imports: Any, repo_root: Path | None) -> str | None:
+    """The repo file of the module a dotted name denotes: an imported module (``user``) or a
+    submodule reached through imported packages (``user.views``)."""
+    if node.type == "identifier":
+        ref = imports.get(node_text(node, source))
+        return ref[1] if ref is not None and ref[0] == "module" else None
+    if node.type != "attribute":
+        return None
+    obj, attr = node.child_by_field_name("object"), node.child_by_field_name("attribute")
+    owner = _module_of(obj, source, imports, repo_root) if obj is not None else None
+    return submodule(repo_root, owner, node_text(attr, source)) if owner is not None and attr is not None else None
+
+
+def attribute_owner(node: Node, source: bytes, imports: Any, repo_root: Path | None
+                    ) -> tuple[str, str] | None:
+    """(repo file, name) of ``a.b.c`` when ``a.b`` is a module of the repo reached through
+    imports: ``a`` imported as a module, each further part a submodule of the one before. None
+    for anything else — a name that is not an import, a part that is not a module of the repo."""
+    if node.type != "attribute":
+        return None
+    obj, attr = node.child_by_field_name("object"), node.child_by_field_name("attribute")
+    owner = _module_of(obj, source, imports, repo_root) if obj is not None else None
+    return (owner, node_text(attr, source)) if owner is not None and attr is not None else None
 
 
 def _bind(seen: dict[str, tuple[str, ...] | None], name: str, ref: tuple[str, ...],
@@ -271,7 +318,7 @@ class Origins:
                 if any(c.type == "wildcard_import" for c in node.named_children):
                     self.star.add(module)
                 for name_node in node.named_children:
-                    if name_node is mod or name_node.type not in ("dotted_name", "aliased_import"):
+                    if name_node == mod or name_node.type not in ("dotted_name", "aliased_import"):
                         continue
                     orig = name_node.child_by_field_name("name") if name_node.type == "aliased_import" else name_node
                     alias = name_node.child_by_field_name("alias") if name_node.type == "aliased_import" else name_node

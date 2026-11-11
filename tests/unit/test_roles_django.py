@@ -379,3 +379,36 @@ def test_a_view_that_is_not_a_consumer_is_not_a_channels_binding(analyze_files) 
     st = analyze_files(_channels(
         "def page(request):\n    pass\nwebsocket_urlpatterns = [path('page/', page)]\n"))
     assert _eps(st) == []
+
+
+# ── include() through a dotted chain ─────────────────────────────────────────────────────
+
+_V = URLS + "def v(request):\n    pass\nurlpatterns = [path('x/', v)]\n"
+SHOP = {"shop/__init__.py": "", "shop/api/__init__.py": "", "shop/api/urls.py": _V,
+        "shop/api/v1/__init__.py": "", "shop/api/v1/urls.py": _V}
+
+
+def test_include_through_packages_reaches_the_module(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import api\nurlpatterns = [path('a/', include(api.urls)), path('b/', include(api.v1.urls))]\n",
+        **SHOP))
+    assert sorted(s.endpoint for s in _eps(st)) == ["/a/x/", "/b/x/"]
+
+
+def test_include_through_a_chain_that_is_not_in_the_repo_gives_no_address(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import api\nurlpatterns = [path('a/', include(api.missing.urls))]\n", **SHOP))
+    assert sorted(str(s.endpoint) for s in _eps(st)) == ["None", "None"]  # both urlconfs: reached from nowhere
+
+
+def test_include_through_a_plain_import_of_the_whole_chain(analyze_files) -> None:
+    st = analyze_files(_project(
+        "import shop.api.urls\nurlpatterns = [path('a/', include(shop.api.urls))]\n", **SHOP))
+    assert sorted(str(s.endpoint) for s in _eps(st)) == ["/a/x/", "None"]  # `shop.api.v1.urls`: nothing includes it
+
+
+def test_include_through_a_name_that_is_not_imported_reaches_no_module(analyze_files) -> None:
+    st = analyze_files(_project(
+        "import shop.api.urls\nurlpatterns = [path('a/', include(stranger.api.urls))]\n", **SHOP))
+    routes = [s for s in _eps(st) if s.routeKind == "route"]
+    assert sorted(str(s.endpoint) for s in routes) == ["None", "None"]  # both urlconfs: reached from nowhere

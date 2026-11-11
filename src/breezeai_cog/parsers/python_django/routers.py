@@ -64,7 +64,7 @@ def detect_routers(root: Node, source: bytes, path: str, f: UrlFile) -> list[Emi
         fn = call.child_by_field_name("function")
         if fn is None or fn.type != "attribute" or field_text(fn, "attribute", source) != "register":
             continue
-        ref = router_ref(fn.child_by_field_name("object"), source, path, local, f.imports)
+        ref = router_ref(fn.child_by_field_name("object"), source, path, local, f.imports, f.repo_root)
         served = wiring.routers.get(ref[1], {}).get(ref[2]) if wiring is not None and ref is not None else None
         made = served[2] if served is not None else local[ref[2]][1] if ref is not None and ref[2] in local \
             and ref[1] == path else None

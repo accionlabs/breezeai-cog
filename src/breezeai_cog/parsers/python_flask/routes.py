@@ -56,7 +56,8 @@ class _File:
         root, source, path = dc.root, dc.source, dc.path
         self.source, self.path, self.origins = source, path, origins
         repo_root = Path(dc.ctx.repo_root) if dc.ctx.repo_root is not None else None
-        self.imports = import_refs(root, source, repo_root, path, anywhere=True) if repo_root is not None else {}
+        self.repo_root = repo_root
+        self.imports = import_refs(root, source, repo_root, path, anywhere=True, plain=True) if repo_root is not None else {}
         wiring: FlaskWiring | None = flask_wiring(dc.ctx.resolution_index)
         if wiring is None:  # no repo index: this file's own wiring only
             wiring = resolve_wiring({path: file_wiring(root, source, path, repo_root)})
@@ -88,7 +89,7 @@ class _File:
 
     def container(self, receiver: Node | None) -> tuple[str | None, tuple[str, ...]] | None:
         """:meth:`served` for an app or blueprint the code shows; None otherwise."""
-        ref = ref_of(receiver, self.source, self.path, self.local, self.imports)
+        ref = ref_of(receiver, self.source, self.path, self.local, self.imports, self.repo_root)
         if ref is None:
             return None
         file, var = key_of(ref, self.path)
@@ -98,7 +99,7 @@ class _File:
         """(the prefix the URLs of a Flask-RESTful / RESTX Api or RESTX namespace ``receiver``
         are appended to — None when unknown, guards); ``(None, ())`` for a receiver the code
         does not resolve, in a file of those extensions; None when it is not one."""
-        ref = ref_of(receiver, self.source, self.path, self.local_resources, self.imports)
+        ref = ref_of(receiver, self.source, self.path, self.local_resources, self.imports, self.repo_root)
         if ref is not None:
             file, var = key_of(ref, self.path)
             found = self.wiring.resources.get(file, {}).get(var)
@@ -113,7 +114,7 @@ class _File:
         name = node_text(node, self.source)
         if node.type == "identifier" and name in self.classes:
             return name, self.classes[name], self.path
-        ref = ref_of(node, self.source, self.path, set(), self.imports)
+        ref = ref_of(node, self.source, self.path, set(), self.imports, self.repo_root)
         found = self.wiring.classes.get(ref[1], {}).get(ref[2]) if ref is not None and ref[0] == "ext" else None
         return (ref[2], found, ref[1]) if ref is not None and found is not None else None
 

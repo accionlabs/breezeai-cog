@@ -22,7 +22,9 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..django_common import DJANGO_BASES, DJANGO_VIEWS
-from ..python_common import ImportRefs, Origins, field_text, keyword, literal, positional, string_list
+from ..python_common import (
+    ImportRefs, Origins, attribute_owner, field_text, keyword, literal, positional, string_list,
+)
 from ..treesitter import node_text
 from . import drf
 from .generics import (
@@ -221,7 +223,7 @@ _LIBRARIES = ("django.", "rest_framework.")
 
 
 def _base(node: Node, source: bytes, rel: str, local: set[str], imports: ImportRefs,
-          origins: Origins) -> Base:
+          origins: Origins, repo_root: Path | None) -> Base:
     written = node_text(node, source)
     origin = origins.qualified(written)
     if origin is not None and origin.startswith(_LIBRARIES):
@@ -233,20 +235,19 @@ def _base(node: Node, source: bytes, rel: str, local: set[str], imports: ImportR
         if ref is not None and ref[0] == "symbol":
             return ("repo", ref[1], ref[2])
     elif node.type == "attribute":
-        obj, attr = node.child_by_field_name("object"), node.child_by_field_name("attribute")
-        ref = imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
-        if ref is not None and ref[0] == "module" and attr is not None:
-            return ("repo", ref[1], node_text(attr, source))
+        owner = attribute_owner(node, source, imports, repo_root)  # pkg.mod.Base: each part a module
+        if owner is not None:
+            return ("repo", *owner)
     if origin is not None and not origin.startswith("."):
         return ("lib", origin, written)
     return ("unknown", written)
 
 
 def _class(cdef: Node, decorated: Node | None, source: bytes, rel: str, local: set[str],
-           imports: ImportRefs, origins: Origins) -> ClassView:
+           imports: ImportRefs, origins: Origins, repo_root: Path | None) -> ClassView:
     view = ClassView(line=cdef.start_point[0] + 1)
     supers = cdef.child_by_field_name("superclasses")
-    view.bases = tuple(_base(b, source, rel, local, imports, origins)
+    view.bases = tuple(_base(b, source, rel, local, imports, origins, repo_root)
                        for b in (supers.named_children if supers is not None else [])
                        if b.type in ("identifier", "attribute"))
     dispatch: list[Guard] = []
@@ -302,7 +303,7 @@ def _positional_to_base_init(call: Node, source: bytes) -> bool:
 def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileViews:
     """The module-level functions and classes of one file (see :class:`FileViews`)."""
     origins = Origins(root, source)
-    imports = ImportRefs(root, source, repo_root, rel)  # resolved only for the bases that need it
+    imports = ImportRefs(root, source, repo_root, rel, plain=True)  # resolved only for the bases that need it
     defs: list[tuple[Node, Node | None]] = []
     for stmt in root.named_children:
         inner = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" else stmt
@@ -313,7 +314,7 @@ def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> F
     for inner, decorated in defs:
         name = field_text(inner, "name", source)
         if inner.type == "class_definition":
-            out.classes[name] = _class(inner, decorated, source, rel, local, imports, origins)
+            out.classes[name] = _class(inner, decorated, source, rel, local, imports, origins, repo_root)
             continue
         decorators = _decorators(decorated, source, origins) if decorated is not None else []
         out.functions[name] = FunctionView(

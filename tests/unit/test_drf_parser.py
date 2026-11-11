@@ -66,3 +66,32 @@ def test_router_registered_in_a_file_without_drf_for_any_jobs(tmp_path, jobs) ->
     assert routes == [("GET", "/api/orders/", "list", "api/views.py"),
                       ("GET", "/api/orders/<pk>/", "retrieve", "api/views.py")]
     assert rec["framework"] == "drf"  # set by the detector: the file never imports DRF
+
+
+ROUTED = {
+    "api/__init__.py": "",
+    "api/v1/__init__.py": "",
+    "api/v1/views.py": "from rest_framework import viewsets\nclass OrderViewSet(viewsets.ModelViewSet):\n    pass\n",
+    "api/v1/routers.py": (
+        "from rest_framework.routers import DefaultRouter\nfrom .views import OrderViewSet\n"
+        "router = DefaultRouter()\nrouter.register('orders', OrderViewSet)\n"),
+    "settings.py": "ROOT_URLCONF = 'urls'\n",
+    "urls.py": (
+        "from django.urls import include, path\nimport api.v1.routers\n"
+        "urlpatterns = [path('api/', include(api.v1.routers.router.urls))]\n"),
+}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_router_included_through_a_dotted_chain_for_any_jobs(capture_routes, jobs) -> None:
+    routes = capture_routes(ROUTED, jobs)
+    assert sorted((r["method"], r["endpoint"]) for r in routes["api/v1/routers.py"]) == [
+        ("DELETE", "/api/orders/<pk>/"), ("GET", "/api/orders/"), ("GET", "/api/orders/<pk>/"),
+        ("PATCH", "/api/orders/<pk>/"), ("POST", "/api/orders/"), ("PUT", "/api/orders/<pk>/")]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_router_behind_a_chain_that_is_not_in_the_repo_has_no_address(capture_routes, jobs) -> None:
+    files = {**ROUTED, "urls.py": ROUTED["urls.py"].replace("api.v1.routers.router", "api.v2.routers.router")}
+    routes = capture_routes(files, jobs)
+    assert {r.get("endpoint") for r in routes["api/v1/routers.py"]} == {None}
