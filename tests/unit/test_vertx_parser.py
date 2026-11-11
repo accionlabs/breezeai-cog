@@ -198,6 +198,40 @@ def test_cross_file_constant_address_folds(tmp_path) -> None:
     assert "APP0957/x" in eps      # cross-file constant chain
 
 
+def test_class_simple_name_address_folds(tmp_path) -> None:
+    # `T.class.getSimpleName()` is the class's simple name as written: it folds in a constant
+    # (same file and across files), nested (`Outer.Inner` -> `Inner`) and inline. A class reached
+    # through a value (`obj.getClass()`), an array class and `getName()` stay empty.
+    (tmp_path / "Filter.java").write_text(
+        "package a;\npublic class Filter {\n"
+        "  public static final String ADDRESS = Filter.class.getSimpleName();\n"
+        "}\n"
+    )
+    v = tmp_path / "V.java"
+    v.write_text(
+        "package a;\nimport io.vertx.core.AbstractVerticle;\n"
+        "public class V extends AbstractVerticle {\n"
+        '  static final String OWN = V.class.getSimpleName() + "/x";\n'
+        "  static final String FQ = V.class.getName();\n"
+        "  void start() {\n"
+        "    vertx.eventBus().consumer(Filter.ADDRESS, h);\n"
+        "    vertx.eventBus().consumer(Filter.Inner.class.getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(OWN, h);\n"
+        "    vertx.eventBus().consumer(Direct.class.getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(FQ, h);\n"
+        "    vertx.eventBus().consumer(this.getClass().getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(int[].class.getSimpleName(), h);\n"
+        "  }\n}\n"
+    )
+    parser = VertxParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    ctx = ParseContext(path="V.java", abs_path=v, source=v.read_bytes(), repo_root=tmp_path,
+                       resolution_index=idx, capture_statements=True)
+    rec = parser.parse_file(ctx)
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert eps == ["Filter", "Inner", "V/x", "Direct", None, None, None]
+
+
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"
