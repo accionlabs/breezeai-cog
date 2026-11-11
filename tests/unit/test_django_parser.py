@@ -140,3 +140,15 @@ def test_include_through_a_dotted_chain_for_any_jobs(capture_routes, jobs) -> No
     assert [r["endpoint"] for r in routes["shop/api/v1/urls.py"]] == ["/api/y/"]  # from shop import api
     # a chain that is not a module of the repo is a library's URLs: a mount, not a repo urlconf
     assert [(r["routeKind"], r["handler"]) for r in routes["project/urls.py"]] == [("mount", "lib.missing.urls")]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_include_of_an_app_folder_on_sys_path_for_any_jobs(capture_routes, jobs) -> None:
+    routes = capture_routes({
+        "project/settings.py": "ROOT_URLCONF = 'project.urls'\n",
+        "project/urls.py": "from django.urls import include, path\nurlpatterns = [path('orders/', include('orders.urls'))]\n",
+        "apps/orders/__init__.py": "",
+        "apps/orders/urls.py": "from django.urls import path\ndef lst(request):\n    pass\nurlpatterns = [path('list/', lst)]\n",
+    }, jobs)
+    assert [r["endpoint"] for r in routes["apps/orders/urls.py"]] == ["/orders/list/"]
+    assert "project/urls.py" not in routes  # no library-mount record for the repo's own urlconf

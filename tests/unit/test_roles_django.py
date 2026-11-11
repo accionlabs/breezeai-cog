@@ -486,3 +486,31 @@ def test_class_method_decorator_with_a_name_that_is_not_a_literal_claims_nothing
             "NAME = 'get'\n@method_decorator(login_required, name=NAME)\nclass Account(View):\n"
             "    def get(self, request):\n        pass\n")}))
     assert (_one(st, "GET", "/a/").guards, _one(st, "GET", "/a/").authRequired) == (None, None)
+
+
+_ORDERS = "from django.urls import path\ndef lst(request):\n    pass\nurlpatterns = [path('list/', lst)]\n"
+
+
+def test_include_of_an_app_folder_on_sys_path_reaches_the_urlconf(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('orders/', include('orders.urls'))]\n",
+        **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS}))
+    routes = sorted((s.routeKind, s.endpoint) for s in st if s.semanticType == "route")
+    assert routes == [("route", "/orders/list/")]  # the app's urlconf, not a library mount
+
+
+def test_include_of_a_name_that_two_urlconfs_end_with_is_not_followed(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('orders/', include('orders.urls'))]\n",
+        **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS,
+           "legacy/orders/__init__.py": "", "legacy/orders/urls.py": _ORDERS}))
+    routes = sorted((s.routeKind, str(s.endpoint)) for s in st if s.semanticType == "route")
+    assert routes == [("mount", "/orders/"), ("route", "None"), ("route", "None")]  # which one: not known
+
+
+def test_include_of_a_library_stays_a_mount_whatever_the_repo_holds(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('accounts/', include('allauth.urls'))]\n",
+        **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS}))
+    routes = sorted((s.routeKind, str(s.endpoint)) for s in st if s.semanticType == "route")
+    assert routes == [("mount", "/accounts/"), ("route", "None")]

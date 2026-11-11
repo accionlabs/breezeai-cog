@@ -69,6 +69,7 @@ class UrlFile:
             {path: file_views(root, source, path, repo_root)}, django_views(index) or {})
         wiring = django_urlconf(index)
         self.base: tuple[Part, ...] | None = wiring.served.get(path) if wiring is not None else None
+        self.dotted: dict[str, str] = wiring.dotted if wiring is not None else {}
         self.middleware: tuple[str, ...] = wiring.settings.get("MIDDLEWARE", ()) if wiring is not None else ()
         #: DRF's default permission classes, when every settings module agrees.
         self.drf_permissions: tuple[Guard, ...] = tuple(
@@ -255,6 +256,8 @@ def _library_mount(f: UrlFile, inc: Include) -> str | None:
     kind, value = inc.target
     if kind == "module" and isinstance(value, str):
         top = value.split(".", 1)[0]
+        if value in f.dotted:  # an urlconf of the repo, in a folder on sys.path
+            return None
         return value if f.repo_root is None or not (f.repo_root / top).exists() else None
     if isinstance(value, Node):
         written = node_text(value, f.source)

@@ -41,7 +41,9 @@ from .urlpatterns import module_target, urlconf
 
 FACT = "django.urlconf"
 
-#: What an include points at: ``("module", file)`` or ``("router", file, variable)``.
+#: What an include points at: ``("module", file)``, ``("router", file, variable)`` or, for a module
+#: name that is not a path from the including file, ``("dotted", name)`` until it is matched to a
+#: urlconf of the repo (:func:`resolve_urlconf`).
 Target = tuple[str, ...]
 #: The settings read: name → value, or None when it is set but not a literal list.
 #: ``DRF_PERMISSIONS`` is ``REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"]``.
@@ -74,6 +76,10 @@ class DjangoUrlconf:
     #: the repo class it is made from — None for DRF's own)}.
     routers: dict[str, dict[str, tuple[tuple[Part, ...] | None, bool, tuple[str, str] | None]]] = \
         field(default_factory=dict)
+    #: ``include("orders.urls")`` names that no path from the including file leads to, matched to the
+    #: one urlconf of the repo whose path ends with them (``apps/orders/urls.py``: the app folder is
+    #: on ``sys.path``): name → file. A name that matches none or several is left out.
+    dotted: dict[str, str] = field(default_factory=dict)
 
 
 def django_urlconf(index: Any | None) -> DjangoUrlconf | None:
@@ -269,16 +275,40 @@ def file_urlconf(root: Node, source: bytes, rel: str, repo_root: Path | None) ->
         imports = import_refs(root, source, repo_root, rel, plain=True) if repo_root is not None else {}
         for inc in found[1]:
             target = include_target(inc.target, source, rel, repo_root, imports, out.routers)
+            if target is None and inc.target[0] == "module" and isinstance(inc.target[1], str):
+                target = ("dotted", inc.target[1])  # a library's, or an app folder on sys.path
             if target is not None:
                 out.includes.append((inc.prefix, target))
     return out
 
 
+def _dotted_urlconf(name: str, urlconfs: set[str]) -> str | None:
+    """The one urlconf of ``urlconfs`` whose path ends with the module ``name`` (``orders.urls`` →
+    ``apps/orders/urls.py``); None when none or several do, or when ``name`` has a single part (a
+    top-level module could be anything)."""
+    stem = name.replace(".", "/")
+    if "/" not in stem:
+        return None
+    tails = (f"{stem}.py", f"{stem}/__init__.py")
+    found = sorted(rel for rel in urlconfs if any(rel == t or rel.endswith(f"/{t}") for t in tails))
+    return found[0] if len(found) == 1 else None
+
+
 def resolve_urlconf(files: dict[str, FileUrlconf]) -> DjangoUrlconf:
     roots = {f.root for f in files.values() if f.root is not None}
+    urlconfs = {rel for rel, f in files.items() if f.has_patterns}
+    dotted: dict[str, str] = {}
+    for f in files.values():
+        for _, target in f.includes:
+            if target[0] == "dotted" and (found := _dotted_urlconf(target[1], urlconfs)) is not None:
+                dotted[target[1]] = found
     sites: dict[Target, list[tuple[str, tuple[Part, ...] | None]]] = {}
     for rel, f in files.items():
         for parts, target in f.includes:
+            if target[0] == "dotted":
+                if target[1] not in dotted:
+                    continue
+                target = ("module", dotted[target[1]])
             sites.setdefault(target, []).append((rel, parts))
     memo: dict[str, tuple[Part, ...] | None] = {}
 
@@ -317,7 +347,7 @@ def resolve_urlconf(files: dict[str, FileUrlconf]) -> DjangoUrlconf:
             routers.setdefault(rel, {})[var] = (
                 parent_base + parts if parent_base is not None and parts is not None else None, slash, cls)
     return DjangoUrlconf(served={m: served(m, frozenset()) for m in modules}, settings=settings,
-                         routers=routers)
+                         routers=routers, dotted=dotted)
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> tuple[str, FileUrlconf] | None:
