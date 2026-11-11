@@ -440,3 +440,49 @@ def test_view_of_the_same_name_from_another_library_is_not_djangos(analyze_files
         "urlpatterns = [path('login/', LoginView.as_view())]\n"))
     (r,) = _eps(st)
     assert (r.method, r.handler) == (None, "LoginView")  # its verbs are not Django's to name
+
+
+_AUTH = ("from django.contrib.auth.decorators import login_required\n"
+         "from django.utils.decorators import method_decorator\nfrom django.views import View\n")
+
+
+def test_class_method_decorator_guards_only_the_method_it_names(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Account.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "@method_decorator(login_required, name='get')\nclass Account(View):\n"
+            "    def get(self, request):\n        pass\n    def post(self, request):\n        pass\n")}))
+    get, post = _one(st, "GET", "/a/"), _one(st, "POST", "/a/")
+    assert (get.guards, get.authRequired) == (["login_required"], True)
+    assert (post.guards, post.authRequired) == (None, None)
+
+
+def test_class_method_decorator_applies_to_a_method_of_a_base_and_to_djangos(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Sub.as_view()), path('t/', views.Page.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "from django.views.generic import TemplateView\n"
+            "class Base(View):\n    def get(self, request):\n        pass\n"
+            "@method_decorator(login_required, name='get')\nclass Sub(Base):\n    pass\n"
+            "@method_decorator(login_required, name='get')\nclass Page(TemplateView):\n    pass\n")}))
+    assert _one(st, "GET", "/a/").guards == ["login_required"]  # the base's get, wrapped by the subclass
+    assert _one(st, "GET", "/t/").guards == ["login_required"]  # Django's own get, wrapped
+
+
+def test_class_method_decorator_of_a_base_does_not_reach_an_override(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Sub.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "@method_decorator(login_required, name='get')\nclass Base(View):\n"
+            "    def get(self, request):\n        pass\n"
+            "class Sub(Base):\n    def get(self, request):\n        pass\n")}))
+    assert (_one(st, "GET", "/a/").guards, _one(st, "GET", "/a/").authRequired) == (None, None)
+
+
+def test_class_method_decorator_with_a_name_that_is_not_a_literal_claims_nothing(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Account.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "NAME = 'get'\n@method_decorator(login_required, name=NAME)\nclass Account(View):\n"
+            "    def get(self, request):\n        pass\n")}))
+    assert (_one(st, "GET", "/a/").guards, _one(st, "GET", "/a/").authRequired) == (None, None)

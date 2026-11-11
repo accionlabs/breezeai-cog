@@ -14,7 +14,7 @@ guessed.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +71,9 @@ class ClassView:
     line: int
     bases: tuple[Base, ...] = ()
     methods: dict[str, Method] = field(default_factory=dict)
-    #: ``@method_decorator(x, name="dispatch")`` on the class: guards of every method.
-    dispatch_decorators: tuple[Guard, ...] = ()
+    #: ``@method_decorator(x, name="get")`` on the class: method name → the decorators it applies to
+    #: that method, outermost first. ``dispatch`` guards every method.
+    method_decorators: dict[str, tuple[Guard, ...]] = field(default_factory=dict)
     #: DRF class attributes. ``permission_classes``: None when not set here; ``unknown`` when set
     #: to something that is not a literal list.
     permissions: tuple[Guard, ...] | None = None
@@ -273,12 +274,11 @@ def _class(cdef: Node, decorated: Node | None, source: bytes, rel: str, local: s
     view.bases = tuple(_base(b, source, rel, local, imports, origins, repo_root)
                        for b in (supers.named_children if supers is not None else [])
                        if b.type in ("identifier", "attribute"))
-    dispatch: list[Guard] = []
     for guard, expr in _decorators(decorated, source, origins) if decorated is not None else []:
-        name = keyword(expr, source, "name") if expr.type == "call" else None
-        if short(guard[0]) == "method_decorator" and literal(name, source) == "dispatch":
-            dispatch.extend(_unwrap_method_decorator(guard, expr, source, origins))
-    view.dispatch_decorators = tuple(dispatch)
+        named = literal(keyword(expr, source, "name"), source) if expr.type == "call" else None
+        if short(guard[0]) == "method_decorator" and named:  # a name that is not a literal: not known
+            view.method_decorators[named] = (
+                *view.method_decorators.get(named, ()), *_unwrap_method_decorator(guard, expr, source, origins))
     body = cdef.child_by_field_name("body")
     for member in body.named_children if body is not None else []:
         fdef = member.child_by_field_name("definition") if member.type == "decorated_definition" else member
@@ -458,7 +458,7 @@ def resolve_class(views: Mapping[str, FileViews], file: str, name: str) -> Resol
             found = views.get(base[1], FileViews()).classes.get(base[2])
             if found is None:
                 continue
-            decorators.extend(found.dispatch_decorators)
+            decorators.extend(found.method_decorators.get("dispatch", ()))
             for method, info in found.methods.items():
                 if method.upper() in VERBS and method.upper() not in out.verbs:
                     out.verbs[method.upper()] = Handler(method, base[1], info.line, info.decorators)
@@ -480,7 +480,40 @@ def resolve_class(views: Mapping[str, FileViews], file: str, name: str) -> Resol
     if not out.verbs and dispatch is not None:
         out.verbs["ANY"] = dispatch
     out.decorators = tuple(decorators)
+    _apply_method_decorators(views, out)
     return out
+
+
+def _class_decorators(views: Mapping[str, FileViews], resolved: ResolvedClass, handler: Handler
+                      ) -> tuple[Guard, ...]:
+    """The ``@method_decorator(x, name=…)`` of the classes in the view's resolution order that
+    apply to ``handler``: those of the view's class and its bases down to the one declaring the
+    method (a base further up is overridden, and not called). A handler a Django base provides has
+    no declaring class in the repo: every one applies."""
+    out: list[Guard] = []
+    for base in resolved.mro:
+        cls = views.get(base[1], FileViews()).classes.get(base[2]) if base[0] == "repo" else None
+        if cls is None:
+            continue
+        out.extend(cls.method_decorators.get(handler.name, ()))
+        declared = cls.methods.get(handler.name)
+        if not handler.inherited and declared is not None and (base[1], declared.line) == (handler.file, handler.line):
+            break
+    return tuple(out)
+
+
+def _with_class_decorators(views: Mapping[str, FileViews], resolved: ResolvedClass, handler: Handler) -> Handler:
+    decorators = _class_decorators(views, resolved, handler)
+    return replace(handler, decorators=(*decorators, *handler.decorators)) if decorators else handler
+
+
+def _apply_method_decorators(views: Mapping[str, FileViews], out: ResolvedClass) -> None:
+    """Add the class-level ``method_decorator``s to each handler they decorate. ``dispatch`` is not
+    one of them: its decorators already guard every method (:attr:`ResolvedClass.decorators`)."""
+    out.verbs = {v: h if h.name == "dispatch" else _with_class_decorators(views, out, h)
+                 for v, h in out.verbs.items()}
+    out.actions = {a: _with_class_decorators(views, out, h) for a, h in out.actions.items()}
+    out.extra = {n: (_with_class_decorators(views, out, e[0]), *e[1:]) for n, e in out.extra.items()}
 
 
 def _repo_classes(views: Mapping[str, FileViews], resolved: ResolvedClass) -> list[tuple[str, ClassView]]:
