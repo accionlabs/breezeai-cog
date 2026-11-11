@@ -21,6 +21,6 @@ In Java the detection is the additive `vertx` detector (`java_vertx/detector.py`
 | `@ProxyGen` interface | None | — | Service contract only |
 | `eventBus.send` / `request` / 2.x `sendWithTimeout` | Outbound | `eventbus_send` | Our code sending |
 | `eventBus.publish` | Outbound | `eventbus_publish` | Our code publishing |
-| 2.x `HttpClient` (`org.vertx.java.core.http.HttpClient` variable, or an in-file method returning one): `get` / `getNow` / `post` / `put` / `delete` / `head` / `options` / `patch` / `trace` / `connect` / `request(method, uri, …)` | Outbound | `api_call`, `method`, `endpoint` = URI folded, else empty; never `db_method_call` | Our code calling an HTTP service |
+| 2.x `HttpClient` (`org.vertx.java.core.http.HttpClient` variable, or an in-file method returning one): `get` / `getNow` / `post` / `put` / `delete` / `head` / `options` / `patch` / `trace` / `connect` / `request(method, uri, …)` | Outbound | `api_call`, `method`, `endpoint` = URI folded, else empty; never `db_method_call`. A class implementing `HttpClient` that delegates to another client is recorded at its own calls too: each is the real outbound call, and its address is a parameter, so `endpoint` is empty | Our code calling an HTTP service |
 | `vertx.deployVerticle(...)` / 2.x `container.deployWorkerVerticle(...)` / `container.deployModule(...)` | None | (structural `verticle_deploy` statement) | Start-up |
 | `vertx.createHttpServer()…listen(port)` | None | — | Start-up |
