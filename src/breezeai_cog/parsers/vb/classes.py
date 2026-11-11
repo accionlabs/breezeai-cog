@@ -11,8 +11,11 @@ Three VB grammar quirks handled here:
 * **Nested types are not parsed at all.** A ``Public Class Result`` inside a class surfaces
   as a ``field_declaration``, the enclosing ``class_block`` ends at the *nested* ``End
   Class``, the nested type's own members become siblings of the outer type's, and whatever
-  follows lands in an ``ERROR`` node. Members after a nested type are therefore untrustworthy
-  and are dropped — see :func:`_nested_type_marker`.
+  follows lands in an ``ERROR`` node. :mod:`.source` parses the outer types with the nested
+  ones blanked and each nesting level on its own; a nested type is built here with its
+  ``owner`` (``path#Outer.Inner``, parented to the file like C#). Only when that layout can't
+  be read (unpaired ``End`` lines) does a nested type reach this builder unparsed — members
+  after it are then untrustworthy and are dropped, see :func:`_nested_type_marker`.
 """
 
 from __future__ import annotations
@@ -59,7 +62,11 @@ def _nested_type_marker(member: Node, source: bytes) -> str | None:
     """
     if member.type != "field_declaration":
         return None
-    words = node_text(member, source).strip().split()
+    # Read from after any attribute block (``<Serializable>`` above ``Public Class Result``).
+    first = next((c for c in member.children if c.type != "attribute_block"), None)
+    if first is None:
+        return None
+    words = source[first.start_byte:member.end_byte].decode("utf-8", "replace").strip().split()
     i = 0
     while i < len(words) and words[i] in _TYPE_MODIFIERS:
         i += 1
@@ -92,11 +99,13 @@ def build_class(
     limit: int,
     pending_attrs: list[Node],
     resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
 ) -> tuple[Class, list[Function], list[Statement]]:
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
+    qualified = f"{owner}.{name}" if owner else name
     start, end = line_span(node)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    cid = disambiguate(class_id(path, qualified), seen_ids)
     extends, implements = _heritage(node, source)
 
     visibility, _ = flags(node, source)
@@ -121,8 +130,8 @@ def build_class(
         if member.type in _METHOD_MEMBERS:
             fn, fn_statements = build_method(
                 member, source, path,
-                parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
-                resolve=resolve,
+                parent_id=cid, class_name=name, id_owner=qualified if owner else None,
+                seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
             )
             methods.append(fn)
             statements.extend(fn_statements)

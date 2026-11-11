@@ -204,6 +204,7 @@ def build_method(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
@@ -213,7 +214,8 @@ def build_method(
     declared, header_broken = method_name(node, source)
     name = declared or ("New" if is_ctor else "<anonymous>")
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # A nested type's methods carry its dotted owner (``Outer.Inner``) in their id.
+    fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
     # A broken header's parameter list and return type are read from the wrong text: empty.
     ret = None if header_broken else node.child_by_field_name("return_type")

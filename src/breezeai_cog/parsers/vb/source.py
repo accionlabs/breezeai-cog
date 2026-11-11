@@ -19,13 +19,23 @@ each line holds one attribute block and nothing else and the run is directly fol
 declaration line; ``<Assembly:``/``<Module:`` targets, XML-literal tags (``</x>``, ``<x/>``,
 ``<x:y>``) and lines with a trailing comment or ``_`` continuation are left alone, so anything
 else parses exactly as written.
+
+The grammar has no rule for a type inside a type either: ``Public Class Dto`` inside a class reads
+as a field, the outer class closes at the nested ``End Class``, and the outer type's members after
+it fall into an ``ERROR`` node. :func:`parse_vb` therefore parses the file with every nested type
+blanked (spaces, newlines kept — the outer type is whole again), and :func:`parse_nested` parses
+each nesting level on its own from a shadow that keeps only that level's types. A line scan finds
+the types (``[modifiers] Class|Structure|Interface|Module|Enum Name`` … ``End …``); a file whose
+openers and ``End`` lines do not pair up is parsed as written.
 """
 
 from __future__ import annotations
 
 import re
+from functools import lru_cache
+from typing import NamedTuple
 
-from tree_sitter import Tree
+from tree_sitter import Node, Tree
 
 from ..treesitter import parse_source
 
@@ -81,7 +91,123 @@ def join_attribute_blocks(source: bytes) -> bytes:
     return bytes(out) if out is not None else source
 
 
+#: A type declaration line: optional modifiers, the type keyword, the name.
+_TYPE_OPEN = re.compile(
+    rb"^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Partial|NotInheritable|MustInherit|"
+    rb"Shadows|Overloads)[ \t]+)*(Class|Structure|Interface|Module|Enum)[ \t]+"
+    rb"(?:\[([^\]\r\n]+)\]|([A-Za-z_]\w*))",
+    re.IGNORECASE,
+)
+_TYPE_CLOSE = re.compile(rb"^[ \t]*End[ \t]+(Class|Structure|Interface|Module|Enum)\b", re.IGNORECASE)
+#: A comment line (``'`` / ``REM``) — a nested type's doc comment goes with it.
+_COMMENT_LINE = re.compile(rb"^[ \t]*(?:'|REM\b)", re.IGNORECASE)
+
+
+class TypeBlock(NamedTuple):
+    """One type declaration's bytes (with the attribute and comment lines right above it),
+    its nesting depth (0 = not inside another type) and its dotted name (``Outer.Inner``)."""
+
+    start: int
+    end: int
+    depth: int
+    name: str
+
+
+def _type_blocks(source: bytes) -> list[TypeBlock] | None:
+    """Every type declaration, or None when an opener and its ``End`` do not pair up."""
+    lines = source.split(b"\n")
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    stack: list[tuple[bytes, int, str]] = []  # (keyword, start offset, dotted name)
+    blocks: list[TypeBlock] = []
+    for i, line in enumerate(lines):
+        if m := _TYPE_OPEN.match(line):
+            first = i
+            while first > 0 and (_is_attr_line(lines[first - 1])
+                                 or _COMMENT_LINE.match(lines[first - 1])):
+                first -= 1
+            own = (m.group(2) or m.group(3)).decode("utf-8", "replace").strip()
+            name = f"{stack[-1][2]}.{own}" if stack else own
+            stack.append((m.group(1).lower(), offsets[first], name))
+        elif m := _TYPE_CLOSE.match(line):
+            if not stack or stack[-1][0] != m.group(1).lower():
+                return None
+            _, start, name = stack.pop()
+            blocks.append(TypeBlock(start, offsets[i] + len(line.rstrip(b"\r")), len(stack), name))
+    return None if stack else blocks
+
+
+def _blank(out: bytearray, start: int, end: int) -> None:
+    for k in range(start, end):
+        if out[k] not in (0x0A, 0x0D):
+            out[k] = 0x20
+
+
+class _Layout(NamedTuple):
+    joined: bytes  # the attribute-joined source
+    nested: list[TypeBlock]  # the types inside another type (empty: nothing to do)
+
+
+@lru_cache(maxsize=8)
+def _layout(source: bytes) -> _Layout:
+    joined = join_attribute_blocks(source)
+    blocks = _type_blocks(joined)
+    return _Layout(joined, [b for b in blocks or [] if b.depth > 0])
+
+
+def _level_shadow(layout: _Layout, depth: int) -> bytes:
+    """The joined source with everything but the depth-``depth`` types blanked (and the types
+    nested in those); depth 0 keeps everything but the nested types."""
+    out = bytearray(layout.joined)
+    if depth == 0:
+        for b in layout.nested:
+            if b.depth == 1:
+                _blank(out, b.start, b.end)
+        return bytes(out)
+    keep = sorted((b.start, b.end) for b in layout.nested if b.depth == depth)
+    pos = 0
+    for start, end in keep:
+        _blank(out, pos, start)
+        pos = end
+    _blank(out, pos, len(out))
+    for b in layout.nested:
+        if b.depth == depth + 1:
+            _blank(out, b.start, b.end)
+    return bytes(out)
+
+
 def parse_vb(source: bytes, timeout_micros: int = 0) -> Tree:
-    """Parse VB ``source`` through the attribute-joining shadow. Read node text from the
-    original ``source`` — the shadow differs only in the joined ``<``/``>`` bytes."""
-    return parse_source("vb", join_attribute_blocks(source), timeout_micros)
+    """Parse VB ``source`` through the shadow: stacked attribute blocks joined, and any type
+    nested in another type blanked (see :func:`parse_nested` for those). Read node text from
+    the original ``source`` — the shadow differs only in joined ``<``/``>`` and blanked bytes."""
+    layout = _layout(source)
+    shadow = _level_shadow(layout, 0) if layout.nested else layout.joined
+    return parse_source("vb", shadow, timeout_micros)
+
+
+class NestedLevel(NamedTuple):
+    """The parse of one nesting level: its types are the tree's top-level types."""
+
+    root: Node
+    blocks: list[TypeBlock]
+
+    def owner(self, node: Node) -> str | None:
+        """The dotted name of the type ``node``'s type is declared in (``Outer`` for
+        ``Outer.Inner``)."""
+        for b in self.blocks:
+            if b.start <= node.start_byte < b.end:
+                return b.name.rsplit(".", 1)[0]
+        return None
+
+
+def parse_nested(source: bytes, timeout_micros: int = 0) -> list[NestedLevel]:
+    """One parse per nesting level of the types declared inside another type, at their real
+    offsets; empty when the file has none."""
+    layout = _layout(source)
+    levels: list[NestedLevel] = []
+    for depth in sorted({b.depth for b in layout.nested}):
+        tree = parse_source("vb", _level_shadow(layout, depth), timeout_micros)
+        levels.append(NestedLevel(tree.root_node,
+                                  [b for b in layout.nested if b.depth == depth]))
+    return levels

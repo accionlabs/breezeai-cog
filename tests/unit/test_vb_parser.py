@@ -169,16 +169,23 @@ def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
 
 
 # The grammar has no rule for a nested type: `Public Class Result` inside a class surfaces as a
-# field_declaration, the enclosing class_block ends at the *nested* End Class, and the nested
-# type's members become siblings of the outer type's.
+# field_declaration, the enclosing class_block ends at the *nested* End Class, and the members
+# after it fall into an ERROR node. The outer types are parsed with the nested ones blanked, and
+# each nesting level on its own.
 NESTED_TYPE = b'''Namespace Shop
   Public Class OrderService
     Public Sub Validate()
     End Sub
 
+    \' The outcome of a save.
+    <Serializable>
     Public Class Result
       Public Sub Describe()
       End Sub
+
+      Public Enum Kind
+        Ok
+      End Enum
     End Class
 
     Public Sub Save()
@@ -196,17 +203,34 @@ def _parse_source(tmp_path, src: bytes) -> FileRecord:
     return VbParser().parse_file(ctx)
 
 
-def test_members_after_an_unparsed_nested_type_are_dropped(tmp_path) -> None:
-    # Describe belongs to Result, not to OrderService. Emitting it here would assert a
-    # HAS_METHOD edge the code does not have, so capture stops at the nested type: a known gap
-    # beats a wrong edge. Result and Save stay uncaptured -- a grammar limitation.
+def test_nested_types_and_the_members_after_them_are_captured(tmp_path) -> None:
     rec = _parse_source(tmp_path, NESTED_TYPE)
-    assert [c.name for c in rec.classes] == ["OrderService"]
-    names = {f.name for f in rec.functions}
-    assert "Validate" in names                 # declared before the nested type
-    assert "Describe" not in names             # would have been mis-parented to OrderService
-    for fn in rec.functions:
-        assert fn.parentId.endswith("#OrderService")
+    classes = {c.id.split("#", 1)[1]: (c.name, c.startLine, c.endLine, c.parentId) for c in rec.classes}
+    fid = rec.id
+    assert classes == {
+        "OrderService": ("OrderService", 2, 19, fid),              # ends at its own End Class
+        "OrderService.Result": ("Result", 8, 15, fid),
+        "OrderService.Result.Kind": ("Kind", 12, 14, fid),
+    }
+    result = next(c for c in rec.classes if c.name == "Result")
+    assert [d.name for d in result.decorators] == ["Serializable"]
+    owners = {f.name: f.parentId.split("#", 1)[1] for f in rec.functions}
+    assert owners == {"Validate": "OrderService", "Save": "OrderService",
+                      "Describe": "OrderService.Result"}
+    # The nested declaration line is not a field of the outer class.
+    assert not any("Public Class Result" in s.text for s in rec.statements)
+    # Its comment belongs to the nested type, not to the next outer member.
+    comment = next(s for s in rec.statements if "outcome of a save" in s.text)
+    assert comment.parentId.endswith("#OrderService.Result")
+
+
+def test_unpaired_type_lines_keep_the_old_cut_off(tmp_path) -> None:
+    # An End Class with no opener: the layout can't be trusted, so the file is parsed as written
+    # and members after the nested type are dropped rather than mis-parented.
+    src = NESTED_TYPE.replace(b"  End Class\nEnd Namespace", b"  End Class\n  End Class\nEnd Namespace")
+    rec = _parse_source(tmp_path, src)
+    assert "Describe" not in {f.name for f in rec.functions}
+    assert all(f.parentId.endswith("#OrderService") for f in rec.functions)
 
 
 def test_a_class_without_a_nested_type_is_unaffected(tmp_path) -> None:

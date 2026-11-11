@@ -17,7 +17,7 @@ from tree_sitter import Node
 
 from ..index_common import ClassHeritage, parallel_map, record_heritage
 from ..treesitter import node_text
-from .source import parse_vb
+from .source import parse_nested, parse_vb
 
 
 def extract_imports(
@@ -56,9 +56,9 @@ def _vb_index_one(file_s: str) -> dict[str, ClassHeritage | None] | None:
     except OSError:
         return None
     try:
-        root = parse_vb(source, 0).root_node
+        roots = [parse_vb(source, 0).root_node, *(lv.root for lv in parse_nested(source, 0))]
         heritage: dict[str, ClassHeritage | None] = {}
-        for block, attrs in iter_type_declarations(root):
+        for block, attrs in (t for root in roots for t in iter_type_declarations(root)):
             name_node = block.child_by_field_name("name")
             name = node_text(name_node, source) if name_node is not None else None
             if not name:
