@@ -424,3 +424,54 @@ def test_blueprint_registered_through_a_name_that_is_not_imported_is_not_followe
     })
     (login,) = _eps(st)
     assert login.endpoint is None  # registered nowhere the code shows
+
+
+VIEW_CLASS = "class Tasks(MethodView):\n    def get(self):\n        return ''\n    def post(self):\n        return ''\n"
+VIEWS = HEAD + "from flask.views import MethodView\n"
+
+
+def test_view_held_in_a_variable_is_followed(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        VIEWS + "app = Flask(__name__)\n" + VIEW_CLASS +
+        "tasks = Tasks.as_view('tasks')\napp.add_url_rule('/tasks', view_func=tasks)\n")})
+    assert (_one(st, "GET", "/tasks").handler, _one(st, "POST", "/tasks").handler) == ("get", "post")
+
+
+def test_view_variable_assigned_twice_is_not_followed(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        VIEWS + "app = Flask(__name__)\n" + VIEW_CLASS + "class Other(MethodView):\n    def get(self):\n        return ''\n"
+        "tasks = Tasks.as_view('tasks')\ntasks = Other.as_view('other')\n"
+        "app.add_url_rule('/tasks', view_func=tasks)\n")})
+    (r,) = _eps(st)
+    assert (r.method, r.handler, r.handlerLine) == ("GET", "tasks", None)  # which class? not known
+
+
+def test_view_variable_of_another_function_is_not_followed(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        VIEWS + "app = Flask(__name__)\n" + VIEW_CLASS +
+        "def make():\n    tasks = Tasks.as_view('tasks')\n    return tasks\n"
+        "def wire(tasks):\n    app.add_url_rule('/tasks', view_func=tasks)\n")})
+    (r,) = _eps(st)
+    assert (r.handler, r.handlerLine) == ("tasks", None)
+
+
+def test_view_function_imported_from_another_file_is_located(analyze_files) -> None:
+    st = analyze_files({
+        "views.py": "from flask import jsonify\nfrom flask_login import login_required\n\n@login_required\ndef index():\n    return jsonify({})\n",
+        "app.py": HEAD + "from views import index\nimport views\napp = Flask(__name__)\n"
+                  "app.add_url_rule('/', view_func=index)\napp.add_url_rule('/home', view_func=views.index)\n",
+    })
+    for endpoint in ("/", "/home"):
+        r = _one(st, "GET", endpoint)
+        assert (r.handler, r.handlerPath, r.handlerLine, r.guards, r.authRequired) == (
+            "index", "views.py", 5, ["login_required"], True)
+
+
+def test_view_function_that_is_not_a_function_of_the_repo_is_not_located(analyze_files) -> None:
+    st = analyze_files({
+        "views.py": "from flask import jsonify\nindex = make_view()\n",
+        "app.py": HEAD + "from views import index\nfrom somelib import other\napp = Flask(__name__)\n"
+                  "app.add_url_rule('/', view_func=index)\napp.add_url_rule('/o', view_func=other)\n",
+    })
+    assert sorted((r.endpoint, r.handler, r.handlerLine) for r in _eps(st)) == [
+        ("/", "index", None), ("/o", "other", None)]

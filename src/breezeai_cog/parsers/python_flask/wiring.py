@@ -52,6 +52,12 @@ Ref = tuple[str, ...]
 #: A ``url_prefix``: ``("lit", value)`` or ``("unknown",)``.
 Spec = tuple[str, ...]
 
+#: Decorators that certainly reject an anonymous caller, by dotted origin: Flask-Login's own. An
+#: app's ``login_required`` of its own, or an option that can't be read, makes no claim.
+CERTAIN_AUTH = frozenset({
+    "flask_login.login_required", "flask_login.fresh_login_required",
+    "flask_login.utils.login_required", "flask_login.utils.fresh_login_required",
+})
 _APP_CLASSES = frozenset({"flask.Flask"})
 _BLUEPRINT_CLASSES = frozenset({"flask.Blueprint", "flask.blueprints.Blueprint",
                                 "flask_smorest.Blueprint", "flask_smorest.blueprint.Blueprint"})
@@ -89,6 +95,10 @@ class FileWiring:
     hooks: list[tuple[Ref, str, bool]] = field(default_factory=list)
     #: Class-based views declared at module level.
     classes: dict[str, ViewClass] = field(default_factory=dict)
+    #: Functions declared at module level: name → (line, decorators as written, outermost first,
+    #: whether they certainly reject an anonymous caller) — where a route in another file that
+    #: names one as its ``view_func`` leads.
+    functions: dict[str, tuple[int, tuple[str, ...], bool]] = field(default_factory=dict)
     #: REST extension ``Api`` variable → (extension, the app or blueprint it is made with — None
     #: when not given, its ``prefix``).
     apis: dict[str, tuple[str, Ref | None, Spec]] = field(default_factory=dict)
@@ -107,6 +117,8 @@ class FlaskWiring:
     served: dict[str, dict[str, tuple[str | None, tuple[str, ...]]]] = field(default_factory=dict)
     #: File → its class-based views.
     classes: dict[str, dict[str, ViewClass]] = field(default_factory=dict)
+    #: File → its module-level functions (see :attr:`FileWiring.functions`).
+    functions: dict[str, dict[str, tuple[int, tuple[str, ...], bool]]] = field(default_factory=dict)
     #: File → {Flask-RESTful / RESTX ``Api`` or RESTX namespace variable → (the prefix its
     #: resources' URLs are appended to — None when unknown, guards)}.
     resources: dict[str, dict[str, tuple[str | None, tuple[str, ...]]]] = field(default_factory=dict)
@@ -205,6 +217,39 @@ def _assignment(node: Node) -> Node | None:
     if node.type == "expression_statement" and node.named_children:
         node = node.named_children[0]
     return node if node.type == "assignment" else None
+
+
+def decorator_name(dec: Node, source: bytes) -> str | None:
+    """A decorator as written, without its arguments (``roles_required("admin")`` →
+    ``roles_required``)."""
+    expr = dec.named_children[0] if dec.named_children else None
+    if expr is not None and expr.type == "call":
+        expr = expr.child_by_field_name("function")
+    if expr is None or expr.type not in ("identifier", "attribute"):
+        return None
+    return node_text(expr, source)
+
+
+def view_functions(root: Node, source: bytes, origins: Origins) -> dict[str, tuple[int, tuple[str, ...], bool]]:
+    """The module-level functions of a file: name → (line, decorators, whether they certainly
+    reject an anonymous caller). A name defined twice is left out (which one a route reaches is
+    not known)."""
+    out: dict[str, tuple[int, tuple[str, ...], bool]] = {}
+    twice: set[str] = set()
+    for stmt in root.named_children:
+        fdef = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" else stmt
+        if fdef is None or fdef.type != "function_definition":
+            continue
+        name = field_text(fdef, "name", source)
+        decorators = tuple(n for d in stmt.named_children if d.type == "decorator"
+                           and (n := decorator_name(d, source)) is not None)
+        if name in out or name in twice:
+            out.pop(name, None)
+            twice.add(name)
+            continue
+        out[name] = (fdef.start_point[0] + 1, decorators,
+                     any(origins.qualified(d) in CERTAIN_AUTH for d in decorators))
+    return out
 
 
 def view_classes(root: Node, source: bytes) -> dict[str, ViewClass]:
@@ -306,6 +351,7 @@ def file_wiring(root: Node, source: bytes, rel: str, repo_root: Path | None) -> 
     for stmt in root.named_children:  # @app.before_request on a function
         _decorator_hooks(stmt, source, rel, local, imports, out, repo_root)
     out.classes = view_classes(root, source)
+    out.functions = view_functions(root, source, origins)
     return out
 
 
@@ -389,6 +435,7 @@ def resolve_wiring(files: dict[str, FileWiring]) -> FlaskWiring:
         guards = tuple(whole.get(root, ())) + guards if root is not None else guards
         out.setdefault(rel, {})[var] = (prefix, tuple(dict.fromkeys(guards)))
     return FlaskWiring(served=out, classes={rel: f.classes for rel, f in files.items() if f.classes},
+                       functions={rel: f.functions for rel, f in files.items() if f.functions},
                        resources=resources)
 
 
@@ -450,7 +497,7 @@ def _resources(files: dict[str, FileWiring], apis: dict[Key, tuple[str, Key | No
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> tuple[str, FileWiring] | None:
     facts = file_wiring(root, source, rel, repo_root)
     if not (facts.apps or facts.blueprints or facts.registrations or facts.hooks or facts.classes
-            or facts.apis or facts.namespaces or facts.attached or facts.inits):
+            or facts.functions or facts.apis or facts.namespaces or facts.attached or facts.inits):
         return None
     return rel, facts
 

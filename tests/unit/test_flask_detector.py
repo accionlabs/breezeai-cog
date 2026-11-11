@@ -156,3 +156,14 @@ def test_blueprint_reached_through_a_dotted_chain_for_any_jobs(capture_routes, j
         [("GET", "/profiles/<name>")]
     # registered nowhere the code shows (the chain `thirdparty.views` is not a module of the repo)
     assert [r.get("endpoint") for r in routes["conduit/other/views.py"]] == [None]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_imported_view_function_is_located_for_any_jobs(capture_routes, jobs) -> None:
+    routes = capture_routes({
+        "views.py": "from flask import jsonify\n\ndef index():\n    return jsonify({})\n",
+        "app.py": "from flask import Flask\nfrom views import index\napp = Flask(__name__)\n"
+                  "app.add_url_rule('/', view_func=index)\n",
+    }, jobs)
+    (route,) = routes["app.py"]
+    assert (route["handler"], route["handlerPath"], route["handlerLine"]) == ("index", "views.py", 3)

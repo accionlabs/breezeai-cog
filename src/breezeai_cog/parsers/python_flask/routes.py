@@ -30,17 +30,14 @@ from ..python_common import (
 )
 from ..treesitter import node_text
 from .wiring import (
-    VERBS, FlaskWiring, ViewClass, file_wiring, flask_wiring, join, key_of, ref_of, resolve_wiring,
+    CERTAIN_AUTH, VERBS, FlaskWiring, ViewClass, decorator_name, file_wiring, flask_wiring, join, key_of, ref_of,
+    resolve_wiring, view_functions,
 )
 
 FRAMEWORK = "flask"
 #: Decorator methods that register a route: ``route`` (``methods=``) and the Flask 2.0 verbs.
 _ROUTE_METHODS = frozenset({"route", *VERBS})
 #: Flask-Login decorators that reject an anonymous user before the view runs.
-CERTAIN_AUTH = frozenset({
-    "flask_login.login_required", "flask_login.fresh_login_required",
-    "flask_login.utils.login_required", "flask_login.utils.fresh_login_required",
-})
 #: Bytes a file with a Flask import or a route-shaped call must contain (the detector's own
 #: guard): ``route(``, ``add_url_rule``, ``add_resource``, and a verb decorator
 #: (``@bp.get(``) — never a bare ``.get(``, which every ``dict.get`` has.
@@ -73,14 +70,9 @@ class _File:
         self.flask_file = origins.imports_package("flask") and not origins.imports_package("fastapi")
         self.rest_file = any(origins.imports_package(p) for p in _REST_PACKAGES)
         self.local_resources = set(wiring.resources.get(path, {}))
-        self.functions: dict[str, tuple[int, list[str]]] = {}
-        for stmt in root.named_children:
-            fdef = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" else stmt
-            if fdef is not None and fdef.type == "function_definition":
-                decorators = [d for d in stmt.named_children if d.type == "decorator"]
-                self.functions[field_text(fdef, "name", source)] = (
-                    fdef.start_point[0] + 1,
-                    [n for d in decorators if (n := _decorator_name(d, source)) is not None])
+        self.functions = view_functions(root, source, origins)
+        #: ``view = Cls.as_view("name")`` assignments: variable → [(enclosing function, the call)].
+        self.view_vars: dict[str, list[tuple[int, Node]]] = {}
 
     def served(self, receiver: Node | None) -> tuple[str | None, tuple[str, ...]] | None:
         """(served prefix — None when unknown, guards) of the app or blueprint ``receiver``;
@@ -122,6 +114,26 @@ class _File:
         found = self.wiring.classes.get(ref[1], {}).get(ref[2]) if ref is not None and ref[0] == "ext" else None
         return (ref[2], found, ref[1]) if ref is not None and found is not None else None
 
+    def view_function(self, node: Node) -> tuple[str, int, tuple[str, ...], bool, str] | None:
+        """(name, line, decorators, whether they certainly reject anonymous calls, declaring file)
+        of the module-level function ``node`` names, in this file or imported (``from .views import
+        index``, ``views.index``); None when the code does not show it."""
+        name = node_text(node, self.source)
+        if node.type == "identifier" and name in self.functions:
+            line, decorators, certain = self.functions[name]
+            return name, line, decorators, certain, self.path
+        ref = ref_of(node, self.source, self.path, set(), self.imports, self.repo_root)
+        found = self.wiring.functions.get(ref[1], {}).get(ref[2]) if ref is not None and ref[0] == "ext" else None
+        return (ref[2], *found, ref[1]) if ref is not None and found is not None else None
+
+    def view_from_variable(self, call: Node, name: str) -> Node | None:
+        """The ``Cls.as_view("name")`` call a variable holds, when it is assigned once — at module
+        level or in the function the ``add_url_rule`` call is in; None otherwise (assigned twice, or
+        somewhere the call does not see)."""
+        scope = _scope(call)
+        held = [node for where, node in self.view_vars.get(name, []) if where in (-1, scope)]
+        return held[0] if len(held) == 1 else None
+
     def is_route(self, call: Node, rule: str) -> bool:
         """Whether a route-shaped call with this ``rule`` registers a route. Flask joins a rule to
         the prefix of the blueprint it is on, so ``""`` and ``"login"`` are rules there; every
@@ -136,15 +148,12 @@ class _File:
         return fid if fid in self.function_ids else None
 
 
-def _decorator_name(dec: Node, source: bytes) -> str | None:
-    """A decorator as written, without its arguments (``roles_required("admin")`` →
-    ``roles_required``)."""
-    expr = dec.named_children[0] if dec.named_children else None
-    if expr is not None and expr.type == "call":
-        expr = expr.child_by_field_name("function")
-    if expr is None or expr.type not in ("identifier", "attribute"):
-        return None
-    return node_text(expr, source)
+def _scope(node: Node) -> int:
+    """The start of the function a node is in; -1 at module level."""
+    parent = node.parent
+    while parent is not None and parent.type != "function_definition":
+        parent = parent.parent
+    return parent.start_byte if parent is not None else -1
 
 
 def _route_call(dec: Node, source: bytes) -> tuple[Node, str, str] | None:
@@ -238,7 +247,7 @@ def _decorated(f: _File, decorated: Node, fdef: Node, class_name: str | None) ->
             continue
         # Only the decorators below the route wrap the view it registers.
         below = [n for d in decorators[i + 1:] if not _is_route_decorator(f, d)
-                 and (n := _decorator_name(d, source)) is not None]
+                 and (n := decorator_name(d, source)) is not None]
         methods = [verb.upper()] if verb != "route" else _methods(keyword(call, source, "methods"), source, ["GET"])
         out.extend(_route(dec, m, endpoint, name, line, None, [*inherited, *below], f.certain(below),
                           f.parent(name, line, class_name), node_type="synthetic") for m in methods)
@@ -279,6 +288,8 @@ def _add_url_rule(f: _File, call: Node) -> list[Emit]:
     view = argument(call, source, 2, "view_func")
     if rule is None or view is None or not f.is_route(call, rule):
         return []
+    if view.type == "identifier":  # view = Cls.as_view("name"); add_url_rule(…, view_func=view)
+        view = f.view_from_variable(call, node_text(view, source)) or view
     served = f.served(receiver(call))
     if served is None:
         return []
@@ -293,9 +304,11 @@ def _add_url_rule(f: _File, call: Node) -> list[Emit]:
     if view.type not in ("identifier", "attribute"):
         return []
     name = node_text(view, source)
-    line, decorators = f.functions.get(name, (None, [])) if view.type == "identifier" else (None, [])
-    return [_route(call, m, endpoint, name.rsplit(".", 1)[-1], line, None, [*inherited, *decorators],
-                   f.certain(decorators)) for m in _methods(explicit, source, ["GET"])]
+    found = f.view_function(view)
+    decorators = list(found[2]) if found is not None else []
+    line, path = handler_location((found[4], found[1]) if found is not None else None, f.path)
+    return [_route(call, m, endpoint, name.rsplit(".", 1)[-1], line, path, [*inherited, *decorators],
+                   found is not None and found[3]) for m in _methods(explicit, source, ["GET"])]
 
 
 def _resource_records(f: _File, node: Node, cls: tuple[str, ViewClass, str] | None, written: str,
@@ -367,13 +380,15 @@ def _class_route(f: _File, decorated: Node, cdef: Node) -> list[Emit]:
     return out
 
 
-def _candidates(root: Node, source: bytes) -> list[tuple[str, Node, Node | None, str | None]]:
+def _candidates(root: Node, source: bytes) -> tuple[list[tuple[str, Node, Node | None, str | None]],
+                                                    dict[str, list[tuple[int, Node]]]]:
     """Route-shaped constructs, in source order: ``("decorated", definition, function,
     enclosing class)``, ``("class", definition, class, None)`` (a ``route`` decorator on a class),
     ``("call", add_url_rule call, None, None)`` and ``("resource", add_resource call, None,
-    None)``. One walk; nothing is
-    resolved yet."""
+    None)``; and the ``view = Cls.as_view("name")`` assignments (variable → [(enclosing function,
+    the call)]). One walk; nothing is resolved yet."""
     out: list[tuple[str, Node, Node | None, str | None]] = []
+    view_vars: dict[str, list[tuple[int, Node]]] = {}
 
     def walk(node: Node, class_name: str | None) -> None:
         for child in node.named_children:
@@ -392,6 +407,11 @@ def _candidates(root: Node, source: bytes) -> list[tuple[str, Node, Node | None,
             elif child.type == "class_definition":
                 walk(child, field_text(child, "name", source))
             else:
+                if child.type == "assignment":
+                    left, right = child.child_by_field_name("left"), child.child_by_field_name("right")
+                    if left is not None and left.type == "identifier" and right is not None \
+                            and right.type == "call" and _call_attribute(right, source) == "as_view":
+                        view_vars.setdefault(node_text(left, source), []).append((_scope(child), right))
                 if child.type == "call" and _is_add_url_rule(child, source):
                     out.append(("call", child, None, None))
                 elif child.type == "call" and _call_attribute(child, source) == "add_resource":
@@ -399,7 +419,7 @@ def _candidates(root: Node, source: bytes) -> list[tuple[str, Node, Node | None,
                 walk(child, class_name)
 
     walk(root, None)
-    return out
+    return out, view_vars
 
 
 def _detect(dc: DetectContext) -> Detection | None:
@@ -408,10 +428,11 @@ def _detect(dc: DetectContext) -> Detection | None:
         return None
     origins = Origins(dc.root, source)
     imports_flask = origins.imports_package("flask")
-    candidates = _candidates(dc.root, source)
+    candidates, view_vars = _candidates(dc.root, source)
     if not candidates:
         return Detection([], label=FRAMEWORK) if imports_flask else None
     f = _File(dc, origins)
+    f.view_vars = view_vars
     found: list[Emit] = []
     for kind, node, fdef, class_name in candidates:
         if kind == "decorated" and fdef is not None:
