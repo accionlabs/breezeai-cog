@@ -563,6 +563,21 @@ def test_batch_upload_force_reuploads_everything(tmp_path, monkeypatch) -> None:
     assert not state_file.exists()  # cleared after a fully-successful run
 
 
+def test_upload_timeout_flag_help_shows_minimum() -> None:
+    result = runner.invoke(app, ["repo-to-json-tree", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "[x>=1.0]" in result.stdout
+
+
+def test_upload_timeout_flag_rejects_values_below_one_second(tmp_path) -> None:
+    ws = _workspace_with(tmp_path, ["proj-a"])
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--upload-timeout", "0.5"],
+    )
+    assert result.exit_code == 2
+
+
 def test_upload_tuning_flags_plumb_into_settings(tmp_path, monkeypatch) -> None:
     import breezeai_cog.services.batch_upload as _bu
 
