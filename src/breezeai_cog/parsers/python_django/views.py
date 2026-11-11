@@ -233,6 +233,14 @@ def _class_attributes(view: "ClassView", body: Node, source: bytes, origins: Ori
             setattr(view, name, literal(right, source))
 
 
+#: The methods a class view is read for: the verbs it handles, ``dispatch`` and ``__call__``, a
+#: viewset's actions, the two overrides that make its permissions or serializer unknown, and the
+#: methods of a router that build its URLs. Any other method matters only when it is an ``@action``.
+_READ_METHODS = frozenset({
+    *(v.lower() for v in VERBS), "dispatch", "__call__", "get_permissions", "get_serializer_class",
+    *drf.ACTION_ROUTES, *drf.ROUTER_URL_METHODS,
+})
+
 #: Bases from these packages are never repo classes: no import needs resolving for them.
 _LIBRARIES = ("django.", "rest_framework.")
 
@@ -276,16 +284,24 @@ def _class(cdef: Node, decorated: Node | None, source: bytes, rel: str, local: s
         fdef = member.child_by_field_name("definition") if member.type == "decorated_definition" else member
         if fdef is None or fdef.type != "function_definition":
             continue
+        name = field_text(fdef, "name", source)
+        if name not in _READ_METHODS and member.type != "decorated_definition":
+            continue  # nothing reads a method of another name, unless it is an ``@action``
         raw = _decorators(member, source, origins) if member.type == "decorated_definition" else []
+        action = _action(raw, source)
+        if name not in _READ_METHODS and action is None:
+            continue
         decorators = [g for guard, expr in raw for g in _unwrap_method_decorator(guard, expr, source, origins)]
-        view.methods[field_text(fdef, "name", source)] = Method(
-            fdef.start_point[0] + 1, tuple(decorators), _action(raw, source),
-            _action_permissions(raw, source, origins))
+        view.methods[name] = Method(fdef.start_point[0] + 1, tuple(decorators), action,
+                                    _action_permissions(raw, source, origins))
     if body is not None:
         _class_attributes(view, body, source, origins)
         text = source[body.start_byte:body.end_byte]
-        view.rewrites_routes = any(m in text for m in (b"routes", b"trailing_slash", b"__init__(")) \
-            and _rewrites_routes(body, source)
+        # Only a class that can be in a router chain — built on repo classes or DRF's routers —
+        # can matter to :func:`standard_router`; any other is rejected there whatever it assigns.
+        in_chain = any(b[0] == "repo" or (b[0] == "lib" and b[1] in drf.ROUTERS) for b in view.bases)
+        view.rewrites_routes = in_chain and any(
+            m in text for m in (b"routes", b"trailing_slash", b".__init__(")) and _rewrites_routes(body, source)
     return view
 
 
@@ -316,8 +332,21 @@ def _positional_to_base_init(call: Node, source: bytes) -> bool:
     return len(args) > (0 if written == "super().__init__" else 1)
 
 
+def _takes_request(fdef: Node, source: bytes) -> bool:
+    """Whether a function has a parameter named ``request`` — Django's convention for a view."""
+    params = fdef.child_by_field_name("parameters")
+    for param in params.named_children if params is not None else ():
+        name = param
+        if param.type in ("typed_parameter", "default_parameter", "typed_default_parameter"):
+            name = param.child_by_field_name("name") or (param.named_children[0] if param.named_children else param)
+        if name.type == "identifier" and node_text(name, source) == "request":
+            return True
+    return False
+
+
 def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileViews:
-    """The module-level functions and classes of one file (see :class:`FileViews`)."""
+    """The module-level classes and the functions that can be views — decorated, or taking
+    ``request`` — of one file (see :class:`FileViews`)."""
     origins = Origins(root, source)
     imports = ImportRefs(root, source, repo_root, rel, plain=True)  # resolved only for the bases that need it
     defs: list[tuple[Node, Node | None]] = []
@@ -332,6 +361,8 @@ def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> F
         if inner.type == "class_definition":
             out.classes[name] = _class(inner, decorated, source, rel, local, imports, origins, repo_root)
             continue
+        if decorated is None and not _takes_request(inner, source):
+            continue  # a helper: no urlconf names it as a view, and it has nothing a view needs
         decorators = _decorators(decorated, source, origins) if decorated is not None else []
         out.functions[name] = FunctionView(
             line=inner.start_point[0] + 1,

@@ -7,7 +7,8 @@ framework package imports another's (architecture §15).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import os
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -128,18 +129,31 @@ def module_file(repo_root: Path, importer: str, module: str, level: int) -> str 
     the importing file ``importer`` (repo-relative). A relative import (``level`` dots) starts at
     the importer's package; an absolute one is tried from the importer's directory up to the repo
     root (nearest first), so ``from app.x import y`` works in a repo that holds the project in a
-    subdirectory. Not a repo file (a library) → None."""
+    subdirectory. Not a repo file (a library) → None.
+
+    Plain string and ``os.path`` work, not ``Path`` objects: this runs for every import of every
+    candidate view or router class, so the object churn showed up in the index build time."""
     parts = [p for p in module.split(".") if p]
-    here = Path(importer).parent
+    here = importer.split("/")[:-1]  # the importer's directory, as path parts
+    starts: Sequence[int]
     if level > 0:
-        bases = [here.parents[level - 2] if level > 1 else here] if level - 1 <= len(here.parents) else []
+        up = level - 1
+        starts = [len(here) - up] if up <= len(here) else []
     else:
-        bases = [here, *here.parents]
-    for base in bases:
-        target = repo_root / base / Path(*parts) if parts else repo_root / base
-        for cand in (target.with_suffix(".py") if parts else None, target / "__init__.py"):
-            if cand is not None and cand.is_file():
-                return cand.relative_to(repo_root).as_posix()
+        starts = range(len(here), -1, -1)  # the directory itself, then each one above it
+    root = os.fspath(repo_root)
+    tail = "/".join(parts)
+    for n in starts:
+        base = "/".join(here[:n])
+        stem = f"{base}/{tail}" if base else tail
+        cands: tuple[str, ...]
+        if not parts:
+            cands = (f"{base}/__init__.py" if base else "__init__.py",)
+        else:
+            cands = (f"{stem}.py", f"{stem}/__init__.py")
+        for cand in cands:
+            if os.path.isfile(f"{root}/{cand}"):
+                return cand
     return None
 
 
@@ -254,12 +268,14 @@ def submodule(repo_root: Path | None, package_file: str, name: str) -> str | Non
     """The repo file of the submodule ``name`` of the package whose ``__init__.py`` is
     ``package_file`` (``pkg/name.py`` or ``pkg/name/__init__.py``); None when that file is not a
     package or has no such submodule."""
-    path = Path(package_file)
-    if repo_root is None or path.name != "__init__.py":
+    folder, _, file = package_file.rpartition("/")
+    if repo_root is None or file != "__init__.py":
         return None
-    for cand in (path.parent / f"{name}.py", path.parent / name / "__init__.py"):
-        if (repo_root / cand).is_file():
-            return cand.as_posix()
+    root = os.fspath(repo_root)
+    base = f"{folder}/{name}" if folder else name
+    for cand in (f"{base}.py", f"{base}/__init__.py"):
+        if os.path.isfile(f"{root}/{cand}"):
+            return cand
     return None
 
 

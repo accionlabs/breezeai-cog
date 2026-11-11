@@ -275,7 +275,7 @@ def test_view_wrapped_in_the_urlconf(analyze_files) -> None:
     st = analyze_files(_project(
         "from functools import partial\nfrom django.contrib.auth.decorators import login_required\n"
         "from django.views.decorators.cache import cache_page\n"
-        "def v(r, code=0):\n    pass\n"
+        "def v(request, code=0):\n    pass\n"
         "urlpatterns = [path('a/', login_required(v)), path('b/', cache_page(60)(v)),\n"
         "               path('c/', partial(v, code=400))]\n"))
     a = _one(st, "ANY", "/a/")
