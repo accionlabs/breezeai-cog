@@ -18,12 +18,13 @@ from pathlib import Path
 
 from tree_sitter import Node
 
+from ..django_common import DJANGO_VIEWS
 from ..emits import Emit
 from ..handler_sites import handler_location
 from ..python_common import Origins, field_text, import_refs, literal, positional
 from ..treesitter import node_text
 from . import drf
-from .generics import DJANGO_VIEWS, LOGIN_REQUIRED_MIDDLEWARE, short
+from .generics import LOGIN_REQUIRED_MIDDLEWARE, short
 from .patterns import Part, join
 from .urlconf import django_urlconf, include_target
 from .urlpatterns import Binding, Include, urlconf

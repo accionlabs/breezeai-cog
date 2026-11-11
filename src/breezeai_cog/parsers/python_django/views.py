@@ -21,12 +21,13 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
+from ..django_common import DJANGO_BASES, DJANGO_VIEWS
 from ..python_common import ImportRefs, Origins, field_text, keyword, literal, positional, string_list
 from ..treesitter import node_text
 from . import drf
 from .generics import (
-    AUTH_MIXIN_MODULE, AUTH_MIXINS, CERTAIN_AUTH, DJANGO_BASES, DJANGO_VIEW_MODULES, DJANGO_VIEWS,
-    LOGIN_NOT_REQUIRED, METHOD_DECORATORS, NOT_GUARDS, VERBS, short,
+    AUTH_MIXIN_MODULE, AUTH_MIXINS, CERTAIN_AUTH, DJANGO_VIEW_MODULES, LOGIN_NOT_REQUIRED,
+    METHOD_DECORATORS, NOT_GUARDS, VERBS, short,
 )
 
 FACT = "django.views"

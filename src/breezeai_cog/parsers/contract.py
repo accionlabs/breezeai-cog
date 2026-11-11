@@ -53,7 +53,7 @@ from dataclasses import dataclass
 
 from ..schemas import FileRecord, Statement
 from .aspnet_common import FRAMEWORK_SERVED
-from .python_django.generics import DJANGO_SERVED
+from .django_common import DJANGO_SERVED
 
 ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
 

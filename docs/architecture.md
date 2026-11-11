@@ -1081,7 +1081,8 @@ src/breezeai_cog/
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
 │  │  java_spring_config.py, java_web_guards.py, java_security_guards.py, java_variables_common.py,
 │  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
-│  │  php_route_common.py, php_data_access_common.py, php_http_common.py
+│  │  php_route_common.py, php_data_access_common.py, php_http_common.py,
+│  │  python_common.py, django_common.py
 │  │                               helpers shared by several frameworks or libraries
 │  ├─ cfamily_common/              the extraction and index C, C++ and CUDA share
 │  ├─ <lang>/                      language parsers
@@ -1121,7 +1122,7 @@ from another. The same holds between languages: C, C++ and CUDA share their extr
 | **Parser-local** | `parsers/<lang>_<framework>/`, `parsers/<lang>_<library>/`, its test file | That parser only (a library package's detectors: see *Additive detector*) |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
-| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `python_common.py`, `django_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.
