@@ -16,6 +16,7 @@ create_app()``) — the file imports Flask and not FastAPI, whose decorators loo
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from tree_sitter import Node
@@ -40,8 +41,11 @@ CERTAIN_AUTH = frozenset({
     "flask_login.login_required", "flask_login.fresh_login_required",
     "flask_login.utils.login_required", "flask_login.utils.fresh_login_required",
 })
-#: Bytes a file with a Flask route or a Flask import must contain (the detector's own guard).
-_MARKERS = (b"flask", b"route(", b"add_url_rule", b"add_resource", *(f".{v}(".encode() for v in VERBS))
+#: Bytes a file with a Flask import or a route-shaped call must contain (the detector's own
+#: guard): ``route(``, ``add_url_rule``, ``add_resource``, and a verb decorator
+#: (``@bp.get(``) — never a bare ``.get(``, which every ``dict.get`` has.
+_MARKERS = (b"flask", b"route(", b"add_url_rule", b"add_resource")
+_VERB_DECORATOR = re.compile(rb"@[\w.]+\.(?:" + "|".join(VERBS).encode() + rb")\(")
 #: The REST extensions whose ``add_resource`` / class ``route`` a receiver the code does not
 #: resolve may belong to.
 _REST_PACKAGES = ("flask_restful", "flask_restx", "flask_smorest")
@@ -400,7 +404,7 @@ def _candidates(root: Node, source: bytes) -> list[tuple[str, Node, Node | None,
 
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
-    if not any(m in source for m in _MARKERS):
+    if not (any(m in source for m in _MARKERS) or _VERB_DECORATOR.search(source)):
         return None
     origins = Origins(dc.root, source)
     imports_flask = origins.imports_package("flask")
