@@ -130,6 +130,24 @@ def _calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> 
     return calls
 
 
+#: ``Function Name`` / ``Sub Name`` in a declaration header.
+_HEADER_NAME = re.compile(rb"\b(?:Function|Sub)[ \t]+(?:\[([^\]\n]+)\]|([A-Za-z_]\w*))", re.IGNORECASE)
+
+
+def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
+    """``(name, header_broken)`` of a method or constructor. When the grammar fails inside the
+    header (an ``ERROR`` before the ``name`` field), that field points into the body — e.g. at
+    ``IsNullOrWhiteSpace`` from the first ``If`` — so the name is read from the header text
+    instead, and ``header_broken`` tells the caller not to trust the parsed parameters."""
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        return None, False
+    if not any(c.type == "ERROR" and c.start_byte < name_node.start_byte for c in node.named_children):
+        return node_text(name_node, source), False
+    m = _HEADER_NAME.search(source, node.start_byte, name_node.start_byte)
+    return (next(g for g in m.groups() if g).decode("utf-8", "replace") if m else None), True
+
+
 def defined_names(root: Node, source: bytes) -> set[str]:
     names: set[str] = set()
     types = {
@@ -139,7 +157,11 @@ def defined_names(root: Node, source: bytes) -> set[str]:
 
     def walk(n: Node) -> None:
         for c in n.named_children:
-            if c.type in types:
+            if c.type in ("method_declaration", "constructor_declaration"):
+                name, _ = method_name(c, source)
+                if name is not None:
+                    names.add(name)
+            elif c.type in types:
                 nm = c.child_by_field_name("name")
                 if nm is not None:
                     names.add(node_text(nm, source))
@@ -188,12 +210,14 @@ def build_method(
     resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
     is_ctor = node.type == "constructor_declaration"
-    name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source) if name_node is not None else ("New" if is_ctor else "<anonymous>")
+    declared, header_broken = method_name(node, source)
+    name = declared or ("New" if is_ctor else "<anonymous>")
     start, end = line_span(node)
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     visibility, is_static = flags(node, source)
-    ret = node.child_by_field_name("return_type")
+    # A broken header's parameter list and return type are read from the wrong text: empty.
+    ret = None if header_broken else node.child_by_field_name("return_type")
+    params_node = None if header_broken else node.child_by_field_name("parameters")
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -202,7 +226,7 @@ def build_method(
         type="constructor" if is_ctor else "method",
         visibility=visibility,
         isStatic=is_static,
-        params=extract_params(node.child_by_field_name("parameters"), source),
+        params=extract_params(params_node, source),
         decorators=extract_attributes(node, source),
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,

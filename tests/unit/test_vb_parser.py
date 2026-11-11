@@ -300,3 +300,36 @@ def test_stacked_attributes_in_an_interface_are_all_kept(tmp_path) -> None:
     rest = fns["GetOrderRest"]
     assert [d.name for d in rest.decorators] == ["OperationContract", "WebGet"]
     assert (rest.startLine, rest.endLine) == (8, 10)  # from the first attribute line
+
+
+BROKEN_HEADER = b'''Public Class ReportsController
+    Public Async Function GetRate(<FromQuery> fromX As String, <FromQuery> toY As String) As Task(Of IActionResult)
+        If String.IsNullOrWhiteSpace(fromX) OrElse String.IsNullOrWhiteSpace(toY) Then
+            Return BadRequest()
+        End If
+        Return Ok()
+    End Function
+
+    Public Function Other(x As Integer) As Integer
+        Return IsNullOrWhiteSpace(x)
+    End Function
+End Class
+'''
+
+
+def test_a_broken_method_header_keeps_its_declared_name(tmp_path) -> None:
+    # This header shape (an attributed parameter named ``to…``, a generic return type, an
+    # ``If … OrElse …`` call condition) makes the grammar fail inside the header; its ``name`` field then points at
+    # ``IsNullOrWhiteSpace`` on the If line; the name comes from the header text instead, and the
+    # mis-read parameters and return type stay empty rather than wrong.
+    p = tmp_path / "R.vb"
+    p.write_bytes(BROKEN_HEADER)
+    ctx = ParseContext(path="R.vb", abs_path=p, source=BROKEN_HEADER, repo_root=tmp_path)
+    rec = VbParser().parse_file(ctx)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"GetRate", "Other"}
+    assert fns["GetRate"].params == [] and fns["GetRate"].returnType is None
+    assert fns["GetRate"].id == "R.vb#ReportsController#GetRate@2"
+    # nothing in the file is named IsNullOrWhiteSpace, so that call resolves to no local function
+    assert [c.path for c in fns["Other"].calls if c.name == "IsNullOrWhiteSpace"] == [None]
+    assert [p.name for p in fns["Other"].params] == ["x"]  # an intact header is unchanged
