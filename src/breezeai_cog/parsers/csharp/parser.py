@@ -106,7 +106,10 @@ class CSharpParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index
         )
-        set_datastore_vendor(external)
+        # The ORM may be imported once for the whole project (``global using`` in another file,
+        # ``<Using Include>`` in the .csproj): those namespaces are in scope here too.
+        index = ctx.resolution_index if isinstance(ctx.resolution_index, CSharpIndex) else None
+        set_datastore_vendor(external + sorted(index.usings_for(path)) if index else external)
         local_names = defined_names(root, source)
         # A `using static Ns.Type` puts Type's members in scope unqualified, so a bare
         # `M()` needs them bound; `local_names` keeps a same-file declaration winning.

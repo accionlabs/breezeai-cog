@@ -449,6 +449,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
     if m in _EF_INCLUDE_VERBS and language in _DOTNET:
+        if "bundle" in low and not _has_ef_source(low):
+            return None  # ASP.NET bundling: ``new ScriptBundle("~/x").Include("~/Scripts/x.js")``
         ef = vendor == "entity_framework" or _has_ef_source(low)
         return "entity_framework" if ef else None
     if _is_active_record_call(callee, method, language, typed_db_ids):

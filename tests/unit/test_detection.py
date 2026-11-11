@@ -916,3 +916,12 @@ def test_truncate_needs_sql_structure(text: str, is_sql: bool) -> None:
     from breezeai_cog.parsers.detection.queries import is_query
 
     assert is_query("printf", text) is is_sql
+
+
+def test_bundling_include_is_not_entity_framework() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    bundle = 'new ScriptBundle("~/bundles/app").Include'
+    assert match_db(bundle, "Include", "csharp", vendor="entity_framework") is None
+    assert match_db("bundle.Include", "Include", "csharp", vendor="entity_framework") is None
+    # an EF source in the chain still wins over the name
+    assert match_db("_context.ProductBundles.Include", "Include", "csharp") == "entity_framework"
