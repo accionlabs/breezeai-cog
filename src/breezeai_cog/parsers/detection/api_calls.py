@@ -111,7 +111,7 @@ def match_api(
     # ``HttpContext.Session`` the ``http`` hint would otherwise match.
     dotnet_session = language in ("csharp", "vb") and receiver.rsplit(".", 1)[-1].endswith("session")
     is_client = not dotnet_session and any(hint in receiver for hint in _CLIENT_HINTS)
-    if not is_client and known_client:
+    if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
         own = callee.removeprefix("this.")  # this.client.get → client
