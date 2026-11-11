@@ -802,3 +802,5 @@ def test_named_attribute_arguments_keep_their_key(tmp_path) -> None:
     assert named_arg('Name = "GetOrder"') == ("Name", '"GetOrder"')
     assert named_arg("api/{page=1}") == (None, "api/{page=1}")
     assert named_arg("a == b") == (None, "a == b")
+    assert named_arg('Name:="GetOrder"') == ("Name", '"GetOrder"')  # VB
+    assert named_arg("y := 2") == ("y", "2")

@@ -28,13 +28,14 @@ def simple_attr_name(name: str) -> str:
     return name[: -len("Attribute")] if name.endswith("Attribute") and name != "Attribute" else name
 
 
-#: ``Name = value`` — a named attribute argument as the C# attribute reader keeps it.
-_NAMED_ARG = re.compile(r"^\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.*?)\s*$", re.DOTALL)
+#: ``Name = value`` (C#) / ``Name:=value`` (VB) — a named attribute argument as the attribute
+#: readers keep it.
+_NAMED_ARG = re.compile(r"^\s*([A-Za-z_]\w*)\s*:?=(?!=)\s*(.*?)\s*$", re.DOTALL)
 
 
 def named_arg(arg: str) -> tuple[str | None, str]:
-    """``(key, value)`` of a C# attribute argument: ``("Name", '"X"')`` for ``Name = "X"``,
-    ``(None, arg)`` for a positional one."""
+    """``(key, value)`` of a C# or VB attribute argument: ``("Name", '"X"')`` for ``Name = "X"``
+    or ``Name:="X"``, ``(None, arg)`` for a positional one."""
     m = _NAMED_ARG.match(arg)
     return (m.group(1), m.group(2)) if m else (None, arg.strip())
 

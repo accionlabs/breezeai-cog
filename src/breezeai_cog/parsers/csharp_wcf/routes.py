@@ -46,9 +46,8 @@ def _has_attr(decorators: list[Decorator], name: str) -> bool:
     the full ``…Attribute`` form (e.g. ``[ServiceContractAttribute]``)."""
     return any(simple_attr_name(d.name) == name for d in decorators)
 
-# The C# attribute reader keeps a named argument as written (``Name = "X"``) and a positional
-# string unquoted; ``named_arg`` splits the key off. The VB reader drops the key, so a key-less
-# argument is still read by the shape of its value.
+# The C# and VB attribute readers keep a named argument as written (``Name = "X"`` /
+# ``Name:="X"``) and a positional string unquoted; ``named_arg`` splits the key off.
 
 
 #: A ``UriTemplate`` that is set but cannot be read (not a literal or a known constant).
@@ -98,7 +97,7 @@ def _verb_arg(dec: Decorator) -> str | None:
 
 def _name_arg(decorators: list[Decorator], attr: str) -> str | None:
     """The bare-identifier ``Name="X"`` value on the given attribute, if present (a plain
-    identifier — not a namespace URI). A key-less arg is a reader that drops keys (VB)."""
+    identifier — not a namespace URI) — or a positional one of that shape."""
     for d in decorators:
         if simple_attr_name(d.name) == attr:
             for a in d.args:

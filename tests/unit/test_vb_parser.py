@@ -234,3 +234,18 @@ def test_spans_end_on_the_closing_line(tmp_path) -> None:
     assert (get.startLine, get.endLine) == (17, 21)
     ret = next(s for s in rec.statements if s.nodeType == "return_statement")
     assert (ret.startLine, ret.endLine) == (20, 20)
+
+
+def test_attribute_args_as_written(tmp_path) -> None:
+    src = b'''Public Class P
+    <X("a""b", Roles:="Admin", "s" & "t", Order.Last, y := 2)>
+    Public Sub M()
+    End Sub
+End Class
+'''
+    p = tmp_path / "P.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="P.vb", abs_path=p, source=src, repo_root=tmp_path))
+    m = next(f for f in rec.functions if f.name == "M")
+    # a lone string literal unquoted; a named arg, a concatenation or a member as written
+    assert m.decorators[0].args == ['a"b', 'Roles:="Admin"', '"s" & "t"', "Order.Last", "y := 2"]

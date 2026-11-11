@@ -6,6 +6,8 @@ attributes under ``attribute_block`` nodes; calls use ``invocation`` / ``member_
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
@@ -40,21 +42,25 @@ def _attribute(node: Node, source: bytes) -> Decorator:
     arglist = next((c for c in node.named_children if c.type == "argument_list"), None)
     if arglist is not None:
         for arg in arglist.named_children:
-            if arg.type != "argument":
-                continue
-            lit = _find_string(arg)
-            args.append(node_text(lit, source).strip('"') if lit is not None else node_text(arg, source))
+            if arg.type == "argument":
+                args.append(_attribute_arg(arg, source))
     return Decorator(name=name, args=args)
 
 
-def _find_string(node: Node) -> Node | None:
-    if node.type == "string_literal":
-        return node
-    for c in node.named_children:
-        found = _find_string(c)
-        if found is not None:
-            return found
-    return None
+#: A whole VB string literal (``""`` is an escaped quote).
+_VB_STRING = re.compile(r'^"((?:[^"]|"")*)"$', re.DOTALL)
+
+
+def _attribute_arg(arg: Node, source: bytes) -> str:
+    """One attribute argument as the C# reader keeps it: a named argument as written
+    (``Name:="GetOrder"``), a positional string literal unquoted (``{id}``), anything else
+    (``"a" & "b"``, ``Order.Last``) as written."""
+    text = node_text(arg, source).strip()
+    first = arg.named_children[0] if arg.named_children else None
+    if first is not None and first.type == "identifier":  # ``Key:=value``
+        return text
+    m = _VB_STRING.match(text)
+    return m.group(1).replace('""', '"') if m else text
 
 
 def attributes_from_blocks(blocks: list[Node], source: bytes) -> list[Decorator]:
