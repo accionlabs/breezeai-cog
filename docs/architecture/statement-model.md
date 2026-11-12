@@ -155,7 +155,8 @@ flowchart TD
 1. **A distinctive method:** `insertOne` → `mongodb`.
 2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
    it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
-   verb in another language (`stream().findFirst()`) needs a data-access receiver too. A
+   verb, or a Firebase JavaScript SDK verb (`getDocs`, `onSnapshot`), in another language
+   (`stream().findFirst()`, a Groovy `paperKit.getDocs()`) needs a data-access receiver too. A
    receiver whose declared type is the product's client counts for that product's generic verbs:
    in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
    `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call. The name is bound where
@@ -178,7 +179,10 @@ flowchart TD
 
 The order matters: API is checked first (so Django's `objects.get` is not mistaken for an HTTP
 GET only because of its name), and raw queries before ORM calls (so `createNativeQuery("SELECT …")`
-is a `query_statement`). If no call matches but the statement contains a string with real SQL
+is a `query_statement`). `createQuery` is a raw query only with a query string as its argument
+(`em.createQuery("select p from Person p")`) or in a file importing JPA or Hibernate (step 3
+above): elsewhere the name builds something else, such as a model's `Query.createQuery(key, value)`
+or LINQ's `Provider.CreateQuery(expression)`. If no call matches but the statement contains a string with real SQL
 structure, it becomes a `query_statement`:
 
 ```java

@@ -203,9 +203,10 @@ _RECEIVER_HINTS: tuple[tuple[str, str, frozenset[str]], ...] = (
 # method and ``Array.FindAll``. In another language the verb is not evidence of the product,
 # nor of data access, so the receiver has to show it (see ``match_db``). Products absent here
 # are portable: Mongo/Redis/DynamoDB/ES/Neo4j driver verbs appear across languages, and the EF
-# verbs have their own ``_DOTNET`` gate.
+# verbs have their own ``_DOTNET`` gate. The Firebase verbs (``getDocs``, ``onSnapshot``) are the
+# JavaScript SDK's; a Java or Groovy ``getDocs()`` is a getter.
 _PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
-    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS,
+    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS, "firebase": _JSTS,
     "django": _PYTHON, "sqlalchemy": _PYTHON,
 }
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).

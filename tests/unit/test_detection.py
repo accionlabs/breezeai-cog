@@ -983,3 +983,26 @@ def test_client_name_must_end_the_receiver_name() -> None:
     # A short name must start a word: `sky` and `forgot` are not ky / got.
     assert match_api("sky.get", "get", language="typescript") is None
     assert match_api("forgot.post", "post", language="typescript") is None
+
+
+def test_create_query_needs_a_query_string_or_an_orm_import() -> None:
+    # JPA / Hibernate: a JPQL/HQL string, or a file importing EntityManager / Session.
+    assert classify_call("em.createQuery", "createQuery", "select p from Person p", "java") == \
+        ("query_statement", "createQuery", None)
+    assert classify_call("em.createQuery", "createQuery", None, "java", vendor="jpa") == \
+        ("query_statement", "createQuery", None)
+    assert classify_call("session.CreateQuery", "CreateQuery", None, "csharp",
+                         vendor="hibernate") == ("query_statement", "CreateQuery", None)
+    # A model's factory method and a LINQ provider build no query.
+    assert classify_call("Query.createQuery", "createQuery", "C01", "groovy") is None
+    assert classify_call("source.Provider.CreateQuery", "CreateQuery", None, "csharp") is None
+    # Raw-query builders with distinctive names need no import.
+    assert classify_call("em.createNativeQuery", "createNativeQuery", None, "java") == \
+        ("query_statement", "createNativeQuery", None)
+
+
+def test_firebase_verbs_only_in_javascript() -> None:
+    assert classify_call("db.getDocs", "getDocs", None, "typescript") == \
+        ("db_method_call", "getDocs", "firebase")
+    assert classify_call("paperKit.getDocs", "getDocs", None, "groovy") is None
+    assert classify_call("letter.getDocs", "getDocs", None, "java") is None

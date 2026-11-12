@@ -36,15 +36,27 @@ _SQL_RE = re.compile(
 # (e.g. `em.createNativeQuery(sql)`, `prisma.$queryRaw`...).
 _STRONG_QUERY_METHODS = {
     "$queryraw", "$queryrawunsafe", "$executeraw", "$executerawunsafe",
-    "createnativequery", "createquery", "executequery", "executeupdate",
+    "createnativequery", "executequery", "executeupdate",
     "preparestatement", "nativequery", "rawquery",
 }
 
+# ``createQuery`` is JPA's ``em.createQuery(jpql)`` and Hibernate's ``session.createQuery(hql)``,
+# but the name is common elsewhere: a model's ``Query.createQuery(key, value)`` factory, LINQ's
+# ``IQueryProvider.CreateQuery(expression)``. Without a query string as its argument it is a raw
+# query only in a file whose imports name JPA or Hibernate (``vendor_from_imports``).
+_ORM_QUERY_METHODS = {"createquery"}
+_ORM_QUERY_VENDORS = frozenset({"jpa", "hibernate"})
 
-def is_query(method: str, arg: str | None) -> bool:
+
+def is_query(method: str, arg: str | None, vendor: str | None = None) -> bool:
+    """Whether a call runs a raw query: its first string argument is SQL/JPQL, or the method is
+    a raw-query builder. ``vendor`` is the ORM the file's imports name."""
     if arg and _SQL_RE.match(arg):
         return True
-    return method.lower() in _STRONG_QUERY_METHODS
+    m = method.lower()
+    if m in _ORM_QUERY_METHODS:
+        return vendor in _ORM_QUERY_VENDORS
+    return m in _STRONG_QUERY_METHODS
 
 
 # The SQL forms recognised in a statement's string literals. Structure, not a leading verb.
