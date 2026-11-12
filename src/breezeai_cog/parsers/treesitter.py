@@ -28,10 +28,9 @@ def _load_dekobon_groovy() -> Language:
     """Load the Groovy grammar from ``dekobon_tree_sitter_groovy``.
 
     ``pyproject.toml`` pins this distribution to the Accionlabs fork
-    (github.com/accionlabs/tree-sitter-groovy), which adds nested-type,
-    modifier-enum, enum-members-without-``;``, and enhanced-for support that stock
-    dekobon lacks. The upstream PR is pending; the pin moves back to a released
-    dekobon version once it merges. See ``.todo/groovy-grammar-evaluation.md``.
+    (github.com/accionlabs/tree-sitter-groovy): upstream v0.5.0 plus fixes still under
+    upstream review. The pin moves back to a released dekobon version once they release.
+    See ``.todo/groovy-grammar-evaluation.md``.
     """
     import dekobon_tree_sitter_groovy
 
