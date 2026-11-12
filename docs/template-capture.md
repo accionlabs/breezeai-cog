@@ -32,7 +32,7 @@ code half is captured either way.
 | `.phtml` | `php` | `.php` |
 | `.html` `.htm` | `html` | — |
 | `.cshtml` `.razor` | `razor` | — |
-| `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind |
+| `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind (VB code-behind, `.aspx.vb`, is `vb-webforms`'s) |
 | `.vue` | `typescript-vue` | `.ts` `.tsx` `.js` `.jsx` … |
 | `.jsp` `.jspx` `.jspf` `.tag` `.tagx` | `jsp` | — |
 

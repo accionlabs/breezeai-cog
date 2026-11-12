@@ -13,11 +13,11 @@ from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.csharp_aspnet.parser import AspNetCoreParser
-from breezeai_cog.parsers.csharp_webforms.page_routes import page_routes
+from breezeai_cog.parsers.webforms_common.page_routes import page_routes
 from breezeai_cog.parsers.emits import apply
 from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
-from breezeai_cog.parsers.csharp_webforms.routes import (
+from breezeai_cog.parsers.webforms_common.pages import (
     detect_webforms_pages,
 )
 from breezeai_cog.schemas import FileRecord

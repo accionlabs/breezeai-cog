@@ -500,7 +500,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     ...
 ```
 
-- The language must be in `INDEX_HOOKED_LANGUAGES` (`csharp`, `go`, `graphql`, `groovy`, `java`, `python`, `ruby`, `scala`, `typescript`): those are the languages
+- The language must be in `INDEX_HOOKED_LANGUAGES` (`apex`, `c`, `cpp`, `csharp`, `cuda`, `go`, `graphql`, `groovy`, `java`, `php`, `python`, `ruby`, `scala`, `typescript`, `vb`): those are the languages
   whose `build_index` calls `collect_additive` / `resolve_additive`. The gate is required. Both
   are checked at registration.
 - **Files another parser owns.** `sources=(".svc",)` (and optionally `grammar="graphql"`) makes

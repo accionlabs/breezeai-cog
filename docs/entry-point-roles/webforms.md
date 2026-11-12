@@ -1,6 +1,11 @@
 # ASP.NET Web Forms — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/csharp_webforms/` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_webforms.py`
+Parsers: `src/breezeai_cog/parsers/csharp_webforms/` (C#, and the markup), `src/breezeai_cog/parsers/vb_webforms/` (VB code-behind); shared rules in `src/breezeai_cog/parsers/webforms_common/` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_webforms.py`, `tests/unit/test_vb_webforms.py`
+
+A VB code-behind (`.aspx.vb`, `.ascx.vb`, `.master.vb`) gets the same records as a C# one, from the
+rows below up to `Response.Redirect`; `<WebMethod()> Public Shared Function` is the page method, and
+`MapPageRoute` is read from the VB files (a page takes the friendly URLs registered in its own
+language). `.ashx` handlers and `web.config` handler mappings are C# only.
 
 | Construct | Role | Record | Why |
 |---|---|---|---|

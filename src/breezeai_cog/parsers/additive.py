@@ -68,7 +68,7 @@ HOOKED_LANGUAGES: frozenset[str] = frozenset(
 #: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
     {"apex", "c", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "php", "python", "ruby",
-     "scala", "typescript"})
+     "scala", "typescript", "vb"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
 _MARKERS = (b"register_detector(", b"register_fact(")
