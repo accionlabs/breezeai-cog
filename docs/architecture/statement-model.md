@@ -223,6 +223,13 @@ flowchart LR
 | Go | only the shared names |
 | Ruby | `HTTParty` |
 
+Some clients are recognised by their imported classes instead of a name. Apache HttpClient
+(Java) puts the verb in the request class and sends with a generic `execute`, so the record sits
+where the request is built: `new HttpGet(url)`, with `HttpGet` imported from
+`org.apache.http.client.methods` (or HttpClient 5's `org.apache.hc.client5.http.classic.methods`),
+→ `api_call`, `method: GET`, `endpoint` from `url` when it holds a string. A class of the
+repository's own with the same name is not one.
+
 In C# and VB, a receiver ending in `Session` (ASP.NET session state, NHibernate `ISession`) is
 never a client, not even `HttpContext.Session`.
 

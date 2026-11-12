@@ -143,13 +143,13 @@ def test_deep_string_concat_does_not_recurse(tmp_path) -> None:
 
 def test_short_concat_still_renders_endpoint() -> None:
     # The depth cap must not regress normal URL/path concatenation rendering.
-    from breezeai_cog.parsers.java.statements import _render_url
+    from breezeai_cog.parsers.java.statements import render_url
     from breezeai_cog.parsers.treesitter import parse_source
 
     src = b'class C { void m() { String u = "http://api/" + id + "/x"; } }'
     root = parse_source("java", src, 0).root_node
     concat = next(n for n in _walk(root) if n.type == "binary_expression")
-    assert _render_url(concat, src) == "http://api/{id}/x"
+    assert render_url(concat, src) == "http://api/{id}/x"
 
 
 def _walk(node):

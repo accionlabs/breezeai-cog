@@ -676,6 +676,7 @@ the file:
   │                                                                                  │
   │  java            10   quartz           java_quartz/jobs.py               ✔       │
   │                  20   struts2          java_struts2/annotations.py       ✔       │
+  │                  60   apache-httpcl…   java_apache_httpclient/…calls.py  ✔       │
   │                  90   vertx            java_vertx/detector.py            ✔       │
   │                                                                                  │
   │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
