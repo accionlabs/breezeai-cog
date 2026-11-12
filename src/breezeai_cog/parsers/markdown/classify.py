@@ -26,6 +26,9 @@ _AGENT_INSTRUCTION_NAMES = frozenset({"CLAUDE.MD", "CLAUDE.LOCAL.MD", "AGENTS.MD
 _CHANGELOG_NAMES = frozenset({"CHANGELOG", "HISTORY", "RELEASES"})
 _MARKDOWN_SUFFIXES = (".md", ".mdx")
 _ADR_NAME = re.compile(r"^\d{4}-.+\.mdx?$", re.IGNORECASE)
+#: Front-matter keys only a Claude Code slash command / subagent file has.
+_COMMAND_KEYS = ("argument-hint", "allowed-tools", "model", "disable-model-invocation")
+_AGENT_KEYS = ("tools", "model", "color")
 
 
 def classify(
@@ -37,7 +40,7 @@ def classify(
     """Return the semantic type of the Markdown file at repo-relative ``path``.
 
     ``in_plugin(dir)`` tells whether a repo-relative directory is inside a Claude Code plugin
-    (an ancestor holds ``.claude-plugin/plugin.json``); only consulted for ``commands/``."""
+    (an ancestor holds ``.claude-plugin/plugin.json``); consulted for ``commands/`` and ``agents/``."""
     p = PurePosixPath(path)
     name = p.name
     upper = name.upper()
@@ -55,6 +58,13 @@ def classify(
         and name.lower().endswith(_MARKDOWN_SUFFIXES)
         and has_name
         and has_description
+        # `name` + `description` are also generic doc front matter (Docusaurus, VitePress): an
+        # `agents/` folder outside Claude / a plugin also needs an agent key.
+        and (
+            ".claude" in dirs
+            or _has_any(front_matter, _AGENT_KEYS)
+            or in_plugin(_folder(dirs, "agents"))
+        )
     ):
         return "agent"
 
@@ -63,10 +73,14 @@ def classify(
     if upper.endswith(".PROMPT.MD") and _contains(dirs, (".github", "prompts")):
         return "command"
     if "commands" in dirs and name.lower().endswith(_MARKDOWN_SUFFIXES):
-        # A generic `commands/` folder is often CLI documentation; only a Claude command folder,
-        # a plugin's, or a file declaring a description is a slash command.
-        commands_dir = "/".join(dirs[: len(dirs) - dirs[::-1].index("commands")])
-        if ".claude" in dirs or has_description or in_plugin(commands_dir):
+        # A generic `commands/` folder is often CLI documentation (and `description` is common
+        # doc front matter): only a Claude command folder, a plugin's, or a file declaring a
+        # command key is a slash command.
+        if (
+            ".claude" in dirs
+            or _has_any(front_matter, _COMMAND_KEYS)
+            or in_plugin(_folder(dirs, "commands"))
+        ):
             return "command"
 
     if (
@@ -92,6 +106,15 @@ def classify(
         return "adr"
 
     return "doc"
+
+
+def _has_any(front_matter: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    return any(k in front_matter for k in keys)
+
+
+def _folder(dirs: tuple[str, ...], name: str) -> str:
+    """The repo-relative path of the innermost ``name`` folder in ``dirs``."""
+    return "/".join(dirs[: len(dirs) - dirs[::-1].index(name)])
 
 
 def _contains(parts: tuple[str, ...], seq: tuple[str, ...]) -> bool:

@@ -28,7 +28,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..structured_json.redaction import redact_text
 from .classify import classify
-from .frontmatter import load_front_matter, split_front_matter, string_field
+from .frontmatter import _secret_key, load_front_matter, split_front_matter, string_field
 
 #: Statement text cap, in UTF-8 bytes (the largest SKILL.md measured is 60.5 KB).
 MAX_TEXT_BYTES = 64 * 1024
@@ -38,17 +38,22 @@ _MAX_HEADINGS = 200
 _MAX_HEADING_LEVEL = 3
 _MAX_HEADING_CHARS = 200
 
-_ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t#]*$")
+# Linear: the closing ``#`` sequence is stripped in code, not by a backtracking regex tail.
+_ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _RST_UNDERLINE = re.compile(r"^([=\-~^\"'`#*+])\1{2,}\s*$")
 #: Inline base64 payloads (pasted images) carry no meaning for a reader and would eat the cap.
 _DATA_URI = re.compile(r"data:([a-zA-Z0-9.+/\-]+);base64,[A-Za-z0-9+/=]{200,}")
-#: Env-style assignment of a secret-named variable (``export DB_PASSWORD=…``). Upper-case names
-#: only, so prose ("the password = …") is untouched.
-_ENV_SECRET = re.compile(
-    r"(?m)^(\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|PRIVATE_KEY)"
-    r"[A-Z0-9_]*\s*[=:]\s*)([\"']?)[^\s\"']+\2"
+#: Env-style assignment of a variable (``export DB_PASSWORD=…``); masked when the name is
+#: secret-like (:data:`_SECRET_NAME`). Upper-case names only, so prose ("the password = …") is
+#: untouched. The name is matched possessively and checked in code, so a long line cannot
+#: backtrack quadratically.
+_ENV_ASSIGN = re.compile(
+    r"(?m)^([ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]*+[ \t]*[=:][ \t]*)([\"']?)[^\s\"']+\2"
 )
+_SECRET_NAME = re.compile(r"PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|PRIVATE_KEY")
+#: A ``key:`` line in YAML front matter (optionally a list item).
+_FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
 
 
 class MarkdownParser(BaseParser):
@@ -66,7 +71,7 @@ class MarkdownParser(BaseParser):
         fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
         front_matter, fm_ok = load_front_matter(fm_text)
         headings = _rst_headings(lines) if rst else _atx_headings(lines, body_start)
-        title = string_field(front_matter, "title") or next(
+        title = _redacted(string_field(front_matter, "title")) or next(
             (h["text"] for h in headings if h["level"] == 1), None
         )
         kind = classify(ctx.path, front_matter, headings, _plugin_check(ctx.repo_root))
@@ -98,6 +103,9 @@ class MarkdownParser(BaseParser):
         if not ctx.capture_statements:
             return record
 
+        # Secret-named front-matter values are masked in the text too, not only in metadata.
+        if body_start:
+            text = "\n".join(_mask_front_matter(lines, body_start))
         body, end_line, dropped = _cap(_clean(text), lines)
         if dropped:
             record.metadata.update(truncated=True, originalSize=size)
@@ -112,11 +120,11 @@ class MarkdownParser(BaseParser):
                 startLine=1,
                 endLine=end_line,
                 path=ctx.path,
-                name=string_field(front_matter, "name")
+                name=_redacted(string_field(front_matter, "name"))
                 or (stem if kind == "command" else None)
                 or title
                 or PurePosixPath(ctx.path).name,
-                description=string_field(front_matter, "description"),
+                description=_redacted(string_field(front_matter, "description")),
             )
         )
         return record
@@ -124,8 +132,42 @@ class MarkdownParser(BaseParser):
 
 def _clean(text: str) -> str:
     text = redact_text(text)
-    text = _ENV_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}***{m.group(2)}", text)
+    text = _ENV_ASSIGN.sub(_mask_env, text)
     return _DATA_URI.sub(lambda m: f"data:{m.group(1)};base64,…", text)
+
+
+def _mask_env(m: re.Match[str]) -> str:
+    if not _SECRET_NAME.search(m.group(1)):
+        return m.group(0)
+    return f"{m.group(1)}{m.group(2)}***{m.group(2)}"
+
+
+def _redacted(value: str | None) -> str | None:
+    return redact_text(value) if value else value
+
+
+def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
+    """``lines`` with the values of secret-named front-matter keys (``api_token: x``, and the
+    indented block under such a key) replaced by ``***``. Front matter is ``lines[1 :
+    body_start - 1]``, between the delimiters."""
+    out = list(lines)
+    block_indent: int | None = None  # indent of a secret key whose value is a nested block
+    for i in range(1, body_start - 1):
+        line = out[i]
+        indent = len(line) - len(line.lstrip(" \t"))
+        if block_indent is not None:
+            if line.strip() and indent > block_indent:
+                out[i] = line[:indent] + "***"
+                continue
+            block_indent = None
+        m = _FM_KEY.match(line)
+        if m is None or not _secret_key(m.group(2).strip("\"'")):
+            continue
+        if m.group(4).strip():
+            out[i] = f"{m.group(1)}{m.group(2)}{m.group(3)} ***"
+        else:
+            block_indent = indent
+    return out
 
 
 def _cap(text: str, lines: list[str]) -> tuple[str, int, int]:
@@ -170,17 +212,23 @@ def _atx_headings(lines: list[str], start: int) -> list[dict[str, Any]]:
         if fence is not None:
             continue
         h = _ATX.match(line)
-        if h and len(h.group(1)) <= _MAX_HEADING_LEVEL:
+        heading = h.group(2).rstrip(" \t#").strip() if h else ""
+        if h and heading and len(h.group(1)) <= _MAX_HEADING_LEVEL:
             out.append(
                 {
                     "level": len(h.group(1)),
-                    "text": h.group(2).strip()[:_MAX_HEADING_CHARS],
+                    "text": _heading_text(heading),
                     "line": i + 1,
                 }
             )
             if len(out) >= _MAX_HEADINGS:
                 break
     return out
+
+
+def _heading_text(text: str) -> str:
+    # Redact before the cut so a token is not split past its pattern; bound the input first.
+    return redact_text(text[: _MAX_HEADING_CHARS * 5])[:_MAX_HEADING_CHARS]
 
 
 def _rst_headings(lines: list[str]) -> list[dict[str, Any]]:
@@ -197,7 +245,7 @@ def _rst_headings(lines: list[str]) -> list[dict[str, Any]]:
             order.append(m.group(1))
         level = order.index(m.group(1)) + 1
         if level <= _MAX_HEADING_LEVEL:
-            out.append({"level": level, "text": prev[:_MAX_HEADING_CHARS], "line": i})
+            out.append({"level": level, "text": _heading_text(prev), "line": i})
             if len(out) >= _MAX_HEADINGS:
                 break
     return out

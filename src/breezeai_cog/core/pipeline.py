@@ -288,6 +288,16 @@ class _ConfigSummary:
         }
 
 
+def _markdown_slots(entries: list[ScanEntry], cap: int) -> frozenset[str] | None:
+    """The Markdown files whose untyped ``doc`` statement fits ``max_markdown_statements``: the
+    first ``cap`` documentation files in path order. Decided from the scan, not from the order
+    parallel workers finish in, so the same repo always keeps the same docs."""
+    if cap <= 0:
+        return None
+    docs = sorted(e.path for e in entries if e.language in DOC_LANGUAGES)
+    return frozenset(docs[:cap])
+
+
 def _assemble(
     repo_root: Path,
     records: Iterator[tuple[str, FileRecord]],
@@ -296,6 +306,7 @@ def _assemble(
     statement_text_limit: int = 0,
     max_statement_parts: int = 0,
     max_markdown_statements: int = 0,
+    markdown_slots: frozenset[str] | None = None,
     candidates: int | None = None,
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
@@ -333,7 +344,12 @@ def _assemble(
             md = record.metadata or {}
             if record.statements and md.get("kind") == "doc":
                 doc_statements += 1
-                if 0 < max_markdown_statements < doc_statements:
+                over_cap = (
+                    record.path not in markdown_slots
+                    if markdown_slots is not None
+                    else 0 < max_markdown_statements < doc_statements
+                )
+                if over_cap:
                     # Untyped doc past the cap: keep the File (metadata + outline) only.
                     record.statements = []
                     md["statementSkipped"] = "max_markdown_statements"
@@ -444,6 +460,7 @@ def run(
         repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
         max_statement_parts=settings.max_statement_parts,
         max_markdown_statements=settings.max_markdown_statements,
+        markdown_slots=_markdown_slots(entries, settings.max_markdown_statements),
         candidates=len(entries), skips=report.counts,
         debug_on=debug_on, progress=progress, summary_out=summary_out,
     )
@@ -477,5 +494,6 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
         repo_root, gen(), sink, statement_text_limit=settings.statement_text_limit,
         max_statement_parts=settings.max_statement_parts,
         max_markdown_statements=settings.max_markdown_statements,
+        markdown_slots=_markdown_slots(entries, settings.max_markdown_statements),
         candidates=len(entries), skips=report.counts, debug_on=debug_on,
     )

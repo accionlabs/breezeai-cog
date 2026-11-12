@@ -70,8 +70,9 @@ class Settings(BaseSettings):
     # dropped and marked inline in the last part's text. 0 = unbounded (fully lossless; the
     # absolute worst case is already bounded by `max_file_size`). (emit/split.py)
     max_statement_parts: int = Field(default=0, ge=0)
-    # Cap on how many *untyped* Markdown docs (semanticType ``doc``) keep their whole-file
-    # statement; past it a doc keeps its File record (metadata + outline) only. Typed documents
+    # Cap on untyped Markdown docs (semanticType ``doc``): one keeps its whole-file statement
+    # only when it is among the first N documentation files in path order (deterministic under
+    # parallel parsing); past it a doc keeps its File record (metadata + outline) only. Typed documents
     # (skill / agent / command / agent_instructions / adr / readme / changelog) are always
     # captured. Bounds a docs-heavy monorepo. 0 = unbounded. (core/pipeline.py, BREEZEAI-1457)
     max_markdown_statements: int = Field(default=2000, ge=0)

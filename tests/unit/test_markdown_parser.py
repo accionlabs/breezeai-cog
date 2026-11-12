@@ -92,12 +92,24 @@ def test_markdown_owns_md_mdx_mdc_and_readme_rst() -> None:
         ("skills/search/SKILL.md", SKILL, "skill"),
         (".claude/skills/x/SKILL.md", SKILL, "skill"),
         ("skills/search/SKILL.md", "# no front matter\n", "doc"),
-        ("agents/reviewer.md", "---\nname: reviewer\ndescription: Reviews code\n---\n", "agent"),
+        (
+            "agents/reviewer.md",
+            "---\nname: reviewer\ndescription: Reviews code\ntools: Read\n---\n",
+            "agent",
+        ),
+        # Docusaurus / VitePress front matter: name + description alone is not an agent.
+        ("docs/agents/overview.md", "---\nname: overview\ndescription: About agents\n---\n", "doc"),
         (".claude/agents/r.md", "---\nname: r\ndescription: d\n---\n", "agent"),
         ("agents/notes.md", "# notes without front matter\n", "doc"),
         (".github/agents/planner.agent.md", "# planner\n", "agent"),
         (".claude/commands/deploy.md", "Deploy the app\n", "command"),
-        ("plugin/commands/x.md", "---\ndescription: does x\n---\n", "command"),
+        (
+            "plugin/commands/x.md",
+            "---\ndescription: does x\nargument-hint: <file>\n---\n",
+            "command",
+        ),
+        # A CLI reference page with an SEO description is documentation, not a slash command.
+        ("website/docs/cli/commands/build.md", "---\ndescription: Build the site\n---\n", "doc"),
         ("docs/commands/build.md", "# build CLI docs\n", "doc"),
         (".github/prompts/review.prompt.md", "Review this\n", "command"),
         ("skills/x/references/agent.prompt.md", "A template\n", "doc"),
@@ -319,3 +331,53 @@ def test_untyped_docs_past_the_cap_keep_the_file_only() -> None:
     assert by_path["docs/2.md"].metadata["statementSkipped"] == "max_markdown_statements"
     assert len(by_path["CLAUDE.md"].statements) == 1  # typed docs are always kept
     assert meta.totalFiles == 4
+
+
+def test_front_matter_secrets_are_masked_in_the_text() -> None:
+    text = (
+        "---\nname: x\ndescription: d\napi_token: abc123\npassword: 'hunter2'\n"
+        "credentials:\n  user: bob\n  key: zzz999\nmodel: opus\n---\nBody\n"
+    )
+    record = _parse("skills/x/SKILL.md", text)
+    st = record.statements[0]
+    for secret in ("abc123", "hunter2", "zzz999"):
+        assert secret not in st.text
+    assert "api_token: ***" in st.text and "model: opus" in st.text and "Body" in st.text
+    assert record.metadata["frontmatter"]["api_token"] == "***"
+
+
+def test_headings_title_and_name_are_redacted() -> None:
+    token = "ghp_" + "a" * 36
+    record = _parse("docs/setup.md", f"# Setup with {token}\n## Use https://bob:pw@host/x\n")
+    assert token not in record.metadata["title"]
+    assert all(
+        token not in h["text"] and "bob:pw" not in h["text"] for h in record.metadata["headings"]
+    )
+    assert token not in record.statements[0].name
+
+
+def test_adversarial_lines_parse_in_linear_time() -> None:
+    import time
+
+    start = time.perf_counter()
+    _parse("docs/a.md", "TOKEN" * 100_000 + "\n" + "# a" + " " * 200_000 + "x\n")
+    assert time.perf_counter() - start < 2.0
+
+
+def test_env_secret_still_masked_and_non_secret_kept() -> None:
+    st = _parse("docs/a.md", "export DB_PASSWORD=hunter2\nPATH_PREFIX=/usr\n").statements[0]
+    assert "hunter2" not in st.text and "DB_PASSWORD=***" in st.text
+    assert "PATH_PREFIX=/usr" in st.text
+
+
+def test_doc_cap_follows_path_order_not_arrival_order() -> None:
+    from breezeai_cog.core.scanner import ScanEntry
+
+    paths = [f"docs/{i}.md" for i in range(3)]
+    slots = pipeline._markdown_slots([ScanEntry(p, "markdown") for p in reversed(paths)], 2)
+    for order in (paths, list(reversed(paths))):
+        sink, _ = _assemble(
+            [_parse(p, "# x\n") for p in order], max_markdown_statements=2, markdown_slots=slots
+        )
+        kept = sorted(r.path for r in sink.records if r.statements)
+        assert kept == ["docs/0.md", "docs/1.md"]
