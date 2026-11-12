@@ -437,3 +437,25 @@ def test_string_named_method_is_named_without_quotes(tmp_path) -> None:
     plain = next(f for f in rec.functions if f.name == "plain")
     assert [(c.name, c.path) for c in plain.calls] == [("order is created", "T.groovy")]
 
+
+def test_named_argument_url_is_the_endpoint(tmp_path) -> None:
+    # Groovy collects named arguments into one map, so a `url:` / `uri:` / `path:` entry is the
+    # call's URL wherever it sits. A call with no such key still reads its first positional
+    # argument, and a call with neither has no endpoint.
+    src = (
+        b"class C {\n"
+        b"  def httpClient\n"
+        b'  void a() { httpClient.get(url: "https://x.dev/named", timeout: 30) }\n'
+        b'  void b(String id) { httpClient.post(timeout: 3, uri: "/orders/" + id) }\n'
+        b'  void c() { httpClient.get(timeout: 3, "/positional") }\n'
+        b"  void d() { httpClient.get(timeout: 3) }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    calls = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"]
+    assert calls == [
+        ("GET", "https://x.dev/named"),
+        ("POST", "/orders/{id}"),
+        ("GET", "/positional"),
+        ("GET", None),
+    ]

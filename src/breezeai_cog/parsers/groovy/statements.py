@@ -12,6 +12,10 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "method_invocation"
 
+# Named-argument keys that carry a call's URL (``get(url: "https://…", timeout: 30)``). Groovy
+# collects named arguments into one map, so their position among the arguments is irrelevant.
+_URL_KEYS = frozenset({"url", "uri", "path"})
+
 # Declaration node types that may carry annotations (@Autowired, GORM constraints, ...).
 _ANNOTATED_DECL_TYPES = {"field_declaration"}
 
@@ -37,6 +41,17 @@ def _render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
+def _named_url_argument(arg_nodes: list[Node], source: bytes) -> Node | None:
+    """The value of a ``url:`` / ``uri:`` / ``path:`` named argument, if the call has one."""
+    for arg in arg_nodes:
+        if arg.type != "named_argument":
+            continue
+        key = arg.child_by_field_name("key")
+        if key is not None and node_text(key, source).strip("'\"") in _URL_KEYS:
+            return arg.child_by_field_name("value")
+    return None
+
+
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     fn = call.child_by_field_name("function")
     if fn is None:
@@ -50,8 +65,13 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         method = node_text(fn, source)
         callee = method
     args = call.child_by_field_name("arguments")
-    named = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(named, source, _render_url)
+    arg_nodes = list(args.named_children) if args is not None else []
+    url_arg = _named_url_argument(arg_nodes, source)
+    if url_arg is not None:
+        endpoint, override = _render_url(url_arg, source), None
+    else:
+        positional = [a for a in arg_nodes if a.type != "named_argument"]
+        endpoint, override = resolve_endpoint(positional, source, _render_url)
     if override is not None:
         method = override
     return callee, method, endpoint
