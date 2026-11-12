@@ -468,3 +468,20 @@ def test_index_facts_get_the_repo_root_whatever_the_path_spelling(tmp_path, monk
     src.write_text("package a\nclass A {}\n")
     imports.build_fqcn_index(tmp_path, [windows_spelled(src)], jobs=1)
     assert seen == [("a/A.java", tmp_path)]
+
+
+def test_varargs_parameter_keeps_its_type() -> None:
+    from breezeai_cog.parsers.java.functions import extract_params
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = (b"class A { A(String... names) {} void f(String url, final @NotNull Handler<Buffer>... h,"
+           b" int[]... m, java.util.Map<String, Object> /* c */ ... x) {} }")
+    methods = [n for n in _walk(parse_source("java", src).root_node)
+               if n.type in ("method_declaration", "constructor_declaration")]
+    params = [[(p.name, p.type, [d.name for d in p.decorators])
+               for p in extract_params(m.child_by_field_name("parameters"), src)] for m in methods]
+    assert params == [
+        [("names", "String...", [])],
+        [("url", "String", []), ("h", "Handler<Buffer>...", ["NotNull"]), ("m", "int[]...", []),
+         ("x", "java.util.Map<String, Object>...", [])],
+    ]

@@ -56,12 +56,19 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
         if p.type in ("formal_parameter", "spread_parameter"):
             tnode = p.child_by_field_name("type")
             nnode = p.child_by_field_name("name")
-            if nnode is None:  # spread_parameter holds a variable_declarator
+            suffix = ""
+            if p.type == "spread_parameter":
+                # ``Handler... h``: the grammar names neither the type nor the name here; the
+                # type is the child that is not a modifier or the declarator, written with ``...``.
                 decl = next((c for c in p.named_children if c.type == "variable_declarator"), None)
                 nnode = decl.child_by_field_name("name") if decl is not None else None
+                tnode = next((c for c in p.named_children
+                              if c.type not in ("modifiers", "variable_declarator", "line_comment",
+                                                 "block_comment")), None)
+                suffix = "..."
             out.append(Parameter(
                 name=node_text(nnode, source) if nnode is not None else "",
-                type=node_text(tnode, source) if tnode is not None else "",
+                type=node_text(tnode, source) + suffix if tnode is not None else "",
                 decorators=extract_annotations(modifiers_node(p), source),
             ))
     return out
