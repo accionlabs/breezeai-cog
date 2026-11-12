@@ -21,6 +21,11 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
   base call ``super.M()`` / ``base.M()`` / ``MyBase.M()`` → the nearest ancestor (up the
   enclosing ``owner``'s heritage chain) that declares ``M``, resolved to that ancestor's file.
 
+* **Call receiver** (with ``declared_only``): ``x.m().n()`` / ``m().n()`` / ``Type.m().n()``
+  → ``m``'s declared return type (``heritage`` ``returns``, from ``x``'s type, the enclosing
+  class or ``Type``, ancestors included) → the file that declares ``n`` on that type. One call
+  deep; a return type two repository classes share a name with → ``None``.
+
 The Extension and Inheritance tiers are inert unless ``ext_index`` / ``heritage`` are
 supplied (and, for inheritance, the call passes the ``owner`` class), so callers that omit
 them behave exactly as the base tiers.
@@ -28,11 +33,33 @@ them behave exactly as the base tiers.
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 from .index_common import ClassHeritage, walk_heritage
 
 CallResolver = Callable[..., str | None]
+
+#: A receiver that is one call: ``m(…)``, ``x.m(…)``, ``this.m(…)``, ``Type.m(…)``.
+_CALL_RECEIVER = re.compile(r"(?:([A-Za-z_]\w*)\.)?([A-Za-z_]\w*)\s*\(")
+
+
+def _one_call(receiver: str) -> tuple[str | None, str] | None:
+    """``(qualifier, method)`` when ``receiver`` is exactly one call (its argument list closes at
+    the end), else None: ``builder.dataApi()`` → ``("builder", "dataApi")``."""
+    m = _CALL_RECEIVER.fullmatch(receiver[: receiver.find("(") + 1]) if "(" in receiver else None
+    if m is None or not receiver.endswith(")"):
+        return None
+    depth = 0
+    for i in range(m.end() - 1, len(receiver)):
+        ch = receiver[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and i != len(receiver) - 1:
+                return None  # `a.m().n()` — more than one call
+    return (m.group(1), m.group(2)) if depth == 0 else None
 
 
 def _base_type(t: str | None) -> str | None:
@@ -78,20 +105,40 @@ def make_resolver(
                 return anc.methods[name]  # its file, or None when that name is file-ambiguous
         return None
 
+    def _lookup(typ: str, name: str, table: str) -> tuple[bool, str | None]:
+        """``(found, value)`` for ``name`` in ``typ``'s ``methods`` / ``returns``, else in its
+        nearest in-repo ancestor's."""
+        assert heritage is not None
+        own = heritage.get(typ)
+        if own is None:
+            return False, None
+        for cls in (own, *walk_heritage(typ, own.extends, heritage).ancestors):
+            entries = getattr(cls, table)
+            if name in entries:
+                return True, entries[name]
+        return False, None
+
     def _declared(name: str, typ: str, resolved: str) -> str | None:
         """The file declaring ``typ.name``: ``typ`` itself, else its nearest in-repo ancestor.
         A type the index cannot tell apart (two classes, one simple name) is left as resolved."""
-        if heritage is None or typ not in heritage:
+        if heritage is None or heritage.get(typ) is None:
             return resolved
-        own = heritage[typ]
-        if own is None:
-            return resolved
-        if name in own.methods:
-            return own.methods[name]
-        for anc in walk_heritage(typ, own.extends, heritage).ancestors:
-            if name in anc.methods:
-                return anc.methods[name]
-        return None
+        return _lookup(typ, name, "methods")[1]
+
+    def _via_call(name: str, receiver: str, owner: str | None) -> str | None:
+        """``x.m().name()``: ``name`` on ``m``'s return type → the file that declares it."""
+        call = _one_call(receiver)
+        if call is None or heritage is None:
+            return None
+        qual, method = call
+        if qual is None or qual == "this":
+            cls = owner
+        else:
+            cls = _base_type(types.get(qual)) or (qual if qual in heritage else None)
+        if cls is None:
+            return None
+        ret = _lookup(cls, method, "returns")[1]
+        return _lookup(ret, name, "methods")[1] if ret else None
 
     def resolve(name: str, receiver: str | None, owner: str | None = None) -> str | None:
         if receiver in ("self", "this"):
@@ -116,6 +163,8 @@ def make_resolver(
         # unresolved (honest-null). Empty by default, so non-JS languages are unaffected.
         if name in builtin_methods:
             return None
+        if declared_only and receiver.endswith(")"):  # `builder.dataApi().get()`
+            return _via_call(name, receiver, owner)
         # Phase 2: `repo.method()` / `this.repo.method()` → type of repo → its file
         var = receiver[len("this."):] if receiver.startswith("this.") else receiver
         if var and "." not in var:

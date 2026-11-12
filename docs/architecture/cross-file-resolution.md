@@ -306,6 +306,7 @@ decorators/attributes and, where supported, its methods. It is used for two thin
 |---|---|---|
 | **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++, Java | `calls[].path` → the base class's file |
 | **Declared methods on a typed receiver** (Java) — `param.getActor()` where `param` is an `OrderParam` | Java | `calls[].path` → the file that declares `getActor`: `OrderParam`'s own, else its nearest in-repo ancestor's; neither (a method from a library base, or a variable that has another type in this method) → null |
+| **A call on a call** (Java) — `builder.dataApi().get(…)`, `Factory.create().run()`, `own().save()` | Java | `calls[].path` → the file that declares the method on the first call's declared return type (that type or its in-repo ancestors); one call deep; a return type that is a library class, or whose simple name two repository classes share → null |
 | **Inherited route settings** — a controller's route prefix and auth come from its base class | ASP.NET (C#, VB); HotChocolate root types | `[Route("api/[controller]")]` and `[Authorize]` on `BaseApiController` apply to `OrdersController : BaseApiController` |
 
 Walking the chain (`index_common.walk_heritage`) goes nearest ancestor first and stops at a

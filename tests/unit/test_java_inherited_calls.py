@@ -116,3 +116,52 @@ def test_a_typed_receiver_resolves_to_the_file_that_declares_the_method(tmp_path
     assert calls["b"] == {"body": f"{_ROOT}/Response.java"}
     # `response` is a Response in b() but a library JsonObject here: Response has no putString
     assert calls["c"] == {"putString": None}
+
+
+_HANDLER_BASE = """package com.acme;
+public class ApiHandler { public void send(String url) {} }
+"""
+_DATA_HANDLER = """package com.acme;
+public class DataApiHandler extends ApiHandler {
+    public void get(String table) {}
+}
+"""
+_BUILDER = """package com.acme;
+import java.util.List;
+public class Builder {
+    public DataApiHandler dataApi() { return new DataApiHandler(); }
+    public static Builder create() { return new Builder(); }
+    public List<String> names() { return null; }
+    public void done() {}
+}
+"""
+_SERVICE = """package com.acme.web;
+import com.acme.Builder;
+public class Service extends Base2 {
+    void a(Builder builder) { builder.dataApi().get("T"); }
+    void b(Builder builder) { builder.dataApi().send("/x"); }
+    void c() { Builder.create().done(); }
+    void d(Builder builder) { builder.names().get(0); }
+    void e(Builder builder) { builder.dataApi().missing(); }
+    void f() { own().get("T"); }
+    void g(Builder builder) { builder.create().dataApi().get("T"); }
+    com.acme.DataApiHandler own() { return null; }
+}
+"""
+_BASE2 = """package com.acme.web;
+public class Base2 {}
+"""
+
+
+def test_a_call_on_a_call_resolves_through_the_return_type(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {"ApiHandler.java": _HANDLER_BASE,
+                              "DataApiHandler.java": _DATA_HANDLER, "Builder.java": _BUILDER,
+                              "web/Service.java": _SERVICE, "web/Base2.java": _BASE2},
+                   "web/Service.java")
+    assert calls["a"]["get"] == f"{_ROOT}/DataApiHandler.java"
+    assert calls["b"]["send"] == f"{_ROOT}/ApiHandler.java"     # inherited by the return type
+    assert calls["c"]["done"] == f"{_ROOT}/Builder.java"        # static factory on a class
+    assert calls["d"]["get"] is None                            # a library return type
+    assert calls["e"]["missing"] is None                        # not declared on the type
+    assert calls["f"]["get"] == f"{_ROOT}/DataApiHandler.java"  # own method's return type
+    assert calls["g"]["get"] is None                            # two calls deep: not followed

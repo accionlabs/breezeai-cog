@@ -34,6 +34,7 @@ class HeritageFrag:
     candidates: tuple[str, ...]
     local: bool
     methods: tuple[str, ...]
+    returns: tuple[tuple[str, str | None], ...] = ()
 
 
 def _base_name(node: Node, source: bytes) -> str | None:
@@ -44,6 +45,21 @@ def _base_name(node: Node, source: bytes) -> str | None:
     if ti is None:
         return None
     return "".join(node_text(ti, source).split()).split("<", 1)[0]
+
+
+_NO_RETURN = frozenset({"void", "boolean", "byte", "char", "short", "int", "long", "float",
+                        "double"})
+
+
+def _return_type(method: Node, source: bytes) -> str | None:
+    """The simple name of a method's declared return type (``Foo``, ``a.b.Foo``, ``Foo<T>`` →
+    ``Foo``); None for void, a primitive or an array (no method of its own to call)."""
+    typ = method.child_by_field_name("type")
+    if typ is None or typ.type == "array_type":
+        return None
+    text = "".join(node_text(typ, source).split()).split("<", 1)[0]
+    simple = text.rsplit(".", 1)[-1]
+    return None if not simple or simple in _NO_RETURN else simple
 
 
 def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFrag]:
@@ -95,11 +111,22 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
                 candidates = (f"{package}.{base}" if package else base,
                               *(f"{w}.{base}" for w in wildcards))
         body = node.child_by_field_name("body")
-        names = (m.child_by_field_name("name") for m in (body.named_children if body else ())
-                 if m.type == "method_declaration")
-        methods = tuple(node_text(n, source) for n in names if n is not None)
+        decls = [m for m in (body.named_children if body else ())
+                 if m.type == "method_declaration"]
+        returns: dict[str, str | None] = {}
+        names: list[str] = []
+        for decl in decls:
+            nm = decl.child_by_field_name("name")
+            if nm is None:
+                continue
+            name = node_text(nm, source)
+            names.append(name)
+            ret = _return_type(decl, source)
+            # overloads that return different types → ambiguous
+            returns[name] = ret if name not in returns or returns[name] == ret else None
         fqcn = f"{package}.{qualified}" if package else qualified
-        out.append(HeritageFrag(fqcn, base, candidates, local, methods))
+        out.append(HeritageFrag(fqcn, base, candidates, local, tuple(names),
+                                tuple(returns.items())))
     return out
 
 
@@ -118,7 +145,8 @@ def build_heritage(
             if frag.local or len(in_repo) == 1:
                 extends = frag.base.rsplit(".", 1)[-1]
         heritage = ClassHeritage(extends=extends, decorators=[],
-                                 methods={m: rel for m in frag.methods})
+                                 methods={m: rel for m in frag.methods},
+                                 returns=dict(frag.returns))
         # The same simple name declared twice in the repo → ambiguous (None).
         record_distinct(out, frag.fqcn.rsplit(".", 1)[-1], heritage, same=lambda a, b: False)
     return out
