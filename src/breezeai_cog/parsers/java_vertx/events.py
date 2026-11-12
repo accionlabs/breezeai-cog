@@ -52,6 +52,7 @@ from ..vertx_common import (
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
+    failure_handler_only,
     join_path,
     render_address,
     router_vars,
@@ -122,6 +123,19 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
             found = pargs.named_children[0] if pargs is not None and pargs.named_children else None
         node = parent
     return found
+
+
+def _chained(call: Node, source: bytes) -> list[str]:
+    """The names of the calls chained on ``call``: ``router.get("/x").handler(h)`` → ``[handler]``."""
+    names: list[str] = []
+    node = call
+    while (parent := node.parent) is not None and parent.type == "method_invocation" \
+            and parent.child_by_field_name("object") == node:
+        name = parent.child_by_field_name("name")
+        if name is not None:
+            names.append(node_text(name, source))
+        node = parent
+    return names
 
 
 def _mount_arg(node: Node, source: bytes) -> str | None:
@@ -405,6 +419,8 @@ def detect_vertx(
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
+        if semantic == "route" and failure_handler_only(_chained(call, source)):
+            continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
         unknown_base = False
         receiver = call.child_by_field_name("object")
         recv = router_name(_root_receiver(receiver, source)) if receiver is not None else ""

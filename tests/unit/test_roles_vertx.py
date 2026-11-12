@@ -105,6 +105,49 @@ def test_router_route_without_path_has_no_record(analyze_files) -> None:
     assert _eps(st) == []
 
 
+def test_route_with_only_a_failure_handler_has_no_record(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.get("/orders").handler(this::handle);
+    router.get("/orders").failureHandler(ctx -> ctx.response().end());""")
+    )
+    [r] = _eps(st)
+    assert (r.startLine, r.method, r.endpoint, r.handler) == (9, "GET", "/orders", "handle")
+    assert not any(s.semanticType == "route" for s in _at(st, 10))
+
+
+def test_route_with_a_handler_and_a_failure_handler_keeps_its_handler(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.post("/orders").handler(this::handle).failureHandler(ctx -> ctx.fail(500));""")
+    )
+    [r] = _eps(st)
+    assert (r.method, r.endpoint, r.handler) == ("POST", "/orders", "handle")
+
+
+def test_groovy_route_with_only_a_failure_handler_has_no_record(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "src/main/groovy/a/Api.groovy": """package a
+import io.vertx.ext.web.Router
+class Api extends io.vertx.core.AbstractVerticle {
+  void start() {
+    def router = Router.router(vertx)
+    router.get("/a").handler(this::list)
+    router.get("/a").failureHandler { ctx -> ctx.response().end() }
+    router.post("/b").blockingHandler(this::save).failureHandler(this::fail)
+  }
+  void list(ctx) {}
+  void save(ctx) {}
+  void fail(ctx) {}
+}
+"""
+        }
+    )
+    got = sorted((r.startLine, r.method, r.endpoint, r.handler) for r in _eps(st))
+    assert got == [(6, "GET", "/a", "list"), (8, "POST", "/b", "save")]
+
+
 def test_sub_router_mount_is_wiring(analyze_files) -> None:
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);
