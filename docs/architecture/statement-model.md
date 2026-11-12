@@ -151,6 +151,11 @@ flowchart TD
   D -- no --> N[no meaning]
 ```
 
+`method` on an `api_call` is an HTTP verb or empty. A generic `client.request(…)` whose verb
+the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`) is an
+`api_call` with an empty `method`; where the language parser reads the verb from the arguments
+(`requests.request("GET", url)`, `axios({ method: "post" })`) it is that verb.
+
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
 2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language

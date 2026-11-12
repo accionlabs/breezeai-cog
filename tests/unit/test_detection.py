@@ -108,7 +108,7 @@ def test_classify_api_recall() -> None:
     assert classify_call("restTemplate.getForObject", "getForObject") is None  # not an HTTP verb
     assert classify_call("this.httpService.post", "post", language="typescript") == ("api_call", "POST", None)
     assert classify_call("webClient.get", "get", language="java") == ("api_call", "GET", None)
-    assert classify_call("axios.request", "request", language="typescript") == ("api_call", "REQUEST", None)
+    assert classify_call("axios.request", "request", language="typescript") == ("api_call", None, None)
     assert classify_call("$fetch", "$fetch", language="typescript") == ("api_call", "GET", None)
     assert classify_call("useFetch", "useFetch", language="typescript") == ("api_call", "GET", None)
     # bare .request() without a client hint is NOT an API call (precision)

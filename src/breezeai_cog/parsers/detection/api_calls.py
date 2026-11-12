@@ -159,5 +159,5 @@ def match_api(
     if is_client:
         if any(mk in low for mk in _DB_CHAIN_MARKERS):
             return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())
-        return m.upper()  # ``request`` -> "REQUEST" (verb lives in the config arg; matches legacy)
+        return m.upper()  # ``request`` -> "REQUEST": a client call whose verb it does not name
     return None
