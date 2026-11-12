@@ -124,6 +124,16 @@ def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
     return extract_annotations(node, source)
 
 
+def _is_block_command(node: Node) -> bool:
+    """A call without parentheses that passes a block: ``node { … }``, a DSL section such as a
+    whole Jenkins pipeline. It stays a call in ``Function.calls`` but is not a statement: its
+    text would hold the block and every comment in it, and the block's own statements are
+    captured where they are."""
+    return node.type == "command_chain" and any(
+        c.type == "closure" for c in node.children_by_field_name("argument")
+    )
+
+
 def _iter_in_scope(node: Node, descend_all: bool = False):
     """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks
     into inline closures, attributing their statements to this function; ``False``
@@ -132,7 +142,7 @@ def _iter_in_scope(node: Node, descend_all: bool = False):
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
-        if child.type in EMIT_TYPES:
+        if child.type in EMIT_TYPES and not _is_block_command(child):
             yield child
         yield from _iter_in_scope(child, descend_all)
 

@@ -115,6 +115,9 @@ def _callee(call: Node, source: bytes) -> tuple[str, str | None, bool]:
     ``identifier`` (receiver ``None``) or a member access: ``obj.method``, ``obj?.method`` or
     ``list*.method``. A spread call runs the method on each element, so the receiver's own type
     says nothing about it: it is not resolvable."""
+    if call.type == "command_chain":  # ``println "done"`` — the call's name is its receiver field
+        name = call.child_by_field_name("receiver")
+        return (node_text(name, source), None, True) if name is not None else ("", None, False)
     fn = call.child_by_field_name("function")
     if fn is None:
         return "", None, False
@@ -140,7 +143,7 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
         # Descend into every scope, including inline closures — their calls belong to
         # the nearest named enclosing function (mirrors Java lambda handling).
         for child in node.named_children:
-            if child.type == "method_invocation":
+            if child.type in ("method_invocation", "command_chain"):
                 name, receiver, resolvable = _callee(child, source)
                 if name and name not in seen:
                     seen.add(name)

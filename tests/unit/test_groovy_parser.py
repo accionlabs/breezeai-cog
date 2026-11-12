@@ -499,3 +499,40 @@ def test_safe_navigation_and_spread_calls_are_named_by_their_method(tmp_path) ->
     run = next(f for f in rec.functions if f.name == "run")
     assert [c.name for c in run.calls] == ["save", "helper"]
     assert next(c for c in run.calls if c.name == "helper").path is None
+
+
+def test_a_call_without_parentheses_is_a_call_and_a_statement(tmp_path) -> None:
+    # `println "done"` / `helper 3` are calls without parentheses (a `command_chain`). Each is a
+    # call of its function and a statement with that nodeType.
+    src = (
+        b"class C {\n"
+        b"  void run() {\n"
+        b'    println "done"\n'
+        b"    helper 3\n"
+        b"  }\n"
+        b"  void helper(int n) { }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    run = next(f for f in rec.functions if f.name == "run")
+    assert [(c.name, c.path) for c in run.calls] == [("println", None), ("helper", "T.groovy")]
+    chains = [(s.text, s.semanticType, s.parentId) for s in rec.statements
+              if s.nodeType == "command_chain"]
+    assert chains == [('println "done"', None, run.id), ("helper 3", None, run.id)]
+
+
+
+def test_a_call_without_parentheses_passing_a_block_is_not_a_statement(tmp_path) -> None:
+    # `node { … }` wraps a whole pipeline: it stays a call, but as a statement it would swallow
+    # the block and its comments, which keep their own records.
+    src = (
+        b"node {\n"
+        b"    // Make the output directory.\n"
+        b'    sh "mkdir -p output"\n'
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    assert [s.nodeType for s in rec.statements if s.nodeType == "command_chain"] == []
+    assert [s.text for s in rec.statements if s.semanticType == "comment"] == [
+        "// Make the output directory."
+    ]
