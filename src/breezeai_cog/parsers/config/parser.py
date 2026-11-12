@@ -49,8 +49,7 @@ class ConfigParser(BaseParser):
         ".gitignore",
         ".dockerignore",
         "LICENSE",
-        "README.md",
-        "README.rst",
+        # README.md / README.rst are owned by the Markdown parser (parsers/markdown).
         ".env",
     )
 

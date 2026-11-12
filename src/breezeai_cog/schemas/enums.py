@@ -77,4 +77,26 @@ SemanticType = Literal[
     "iac_module",
     # .tfvars attribute assignment (variable values, not variable declarations)
     "iac_variable_value",
+    # MCP server tool — an entry point an AI client calls (BREEZEAI-1457). ``endpoint`` = the
+    # tool name the client calls (after any rename), ``method="TOOL"``, ``framework`` = the SDK
+    # (fastmcp | mcp-python | mcp-sdk-ts | spring-ai-mcp | mcp-csharp | mcp-go), plus
+    # ``description`` and ``params``. Treated like a route by the entry-point contract.
+    "mcp_tool",
+    # Markdown documents (BREEZEAI-1457) — one whole-file statement per ``.md`` / ``.mdx`` /
+    # ``.mdc`` file (``nodeType="document"``, full text up to 64 KB, unembedded), classified by
+    # file name / location (parsers/markdown/classify.py):
+    #   skill              — ``SKILL.md`` with front-matter name + description (Agent Skills)
+    #   agent              — sub-agent definition (``agents/*.md`` / ``.claude/agents``, ``*.agent.md``)
+    #   command            — slash command (``.claude/commands``, plugin ``commands/``, ``*.prompt.md``)
+    #   agent_instructions — CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions / cursor rules
+    #   readme | adr | changelog — README, architecture decision record, release history
+    #   doc                — any other Markdown
+    "skill",
+    "agent",
+    "command",
+    "agent_instructions",
+    "readme",
+    "adr",
+    "changelog",
+    "doc",
 ]

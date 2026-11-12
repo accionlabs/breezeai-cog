@@ -59,6 +59,16 @@ class Call(BaseModel):
     path: str | None = None
 
 
+class ToolParam(BaseModel):
+    """One input parameter of an ``mcp_tool`` statement, read from its input schema."""
+
+    name: str
+    type: str | None = None  # as written in the schema / signature (``str``, ``z.number()`` → ``number``)
+    required: bool = True
+    default: str | None = None  # source text of the default value, when declared
+    description: str | None = None
+
+
 class Statement(BaseModel):
     """Flat statement. Two-axis type: ``nodeType`` (structural, always present)
     + ``semanticType`` (set only on route/db/api/event detection)."""
@@ -109,6 +119,11 @@ class Statement(BaseModel):
     keyFields: list[str] | None = None
     # iac-only: cloud provider inferred from resource type prefix or provider name
     platform: str | None = None
+    # Human description (BREEZEAI-1457): the front-matter ``description`` of a skill / agent /
+    # command document, or the tool description / docstring of an ``mcp_tool``.
+    description: str | None = None
+    # mcp_tool-only: the tool's input parameters.
+    params: list[ToolParam] | None = None
 
 
 class Function(BaseModel):
@@ -248,6 +263,11 @@ class ProjectMetaData(BaseModel):
         # file types — an empty ``{}`` is a JSON file but captures nothing, so it does not
         # count. Format-neutral: covers every full-capture parser, not just JSON.
         if (cfg.get("capturedDataDocuments") or 0) > 0:
+            return True
+        # A typed AI / decision document (skill, agent, command, agent instructions, ADR —
+        # parsers/markdown) is content an agent uses, even in a repo with no code. Untyped docs
+        # (a README, a changelog, prose) alone are not. BREEZEAI-1457.
+        if (cfg.get("capturedAgentDocuments") or 0) > 0:
             return True
         # IaC repos (Terraform, etc.) have no code language or functions but are real
         # content — detected via the "iac" category set in FileRecord.metadata.

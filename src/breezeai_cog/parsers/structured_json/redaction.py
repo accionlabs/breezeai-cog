@@ -44,6 +44,8 @@ _SECRET_RE = re.compile(
   | \bAIza[0-9A-Za-z_\-]{35}\b                                         # Google API key (39 chars)
   | \bxox[baprs]-[0-9A-Za-z-]{10,48}\b                                 # Slack token
   | \b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b                           # Stripe secret / restricted key
+  | \bsk-ant-[A-Za-z0-9_\-]{20,}                                       # Anthropic API key
+  | \bsk-proj-[A-Za-z0-9_\-]{20,}                                      # OpenAI project key
   | \beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b  # JWT: header.payload.signature
     """,
     re.VERBOSE,
@@ -63,3 +65,24 @@ def redact_secrets(value: str) -> str:
     if _PEM_RE.search(value):
         return "***"
     return _SECRET_RE.sub(_mask, value)
+
+
+#: A whole PEM private-key block, header to footer (or to the end when the footer is missing).
+#: Used by :func:`redact_text`, where the value is a long document and only the block is key
+#: material — dropping the whole value (as :func:`redact_secrets` does) would lose the document.
+_PEM_BLOCK_RE = re.compile(
+    r"-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----.*?(?:-----END \1PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+
+
+def redact_text(text: str) -> str:
+    """Redact secrets inside a free-text document (BREEZEAI-1457, Markdown capture): a PEM
+    private-key block is replaced by an empty ``***`` block in place, and the same span
+    patterns as :func:`redact_secrets` (provider tokens, JWTs, URL credentials) are masked
+    where they sit. Prose around them is kept."""
+    text = _PEM_BLOCK_RE.sub(
+        lambda m: f"-----BEGIN {m.group(1)}PRIVATE KEY-----\n***\n-----END {m.group(1)}PRIVATE KEY-----",
+        text,
+    )
+    return _SECRET_RE.sub(_mask, text)

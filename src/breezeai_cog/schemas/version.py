@@ -17,7 +17,9 @@ from typing import Any
 #      iac_data semantic type; module blocks yield Class records.
 # 2.3: additive optional `Statement.handlerPath` (the handler's file, when it is another file).
 # 2.4: additive optional `Class.alias` (a C/C++ typedef'd type's tag).
-SCHEMA_VERSION = "2.4"
+# 2.5: additive optional `Statement.description` / `Statement.params` (mcp_tool, Markdown docs);
+#      semantic types mcp_tool + the Markdown document types; nodeType `document`.
+SCHEMA_VERSION = "2.5"
 
 
 def export_json_schema() -> dict[str, Any]:

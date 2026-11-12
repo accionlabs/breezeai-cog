@@ -13,6 +13,7 @@ from .capture import (
     Parameter,
     ProjectMetaData,
     Statement,
+    ToolParam,
 )
 from .enums import ClassType, FileType, SemanticType
 from .version import SCHEMA_VERSION, export_json_schema, write_json_schema
@@ -28,6 +29,7 @@ __all__ = [
     "ConstructorParam",
     "Decorator",
     "Call",
+    "ToolParam",
     # vocabularies
     "FileType",
     "ClassType",
