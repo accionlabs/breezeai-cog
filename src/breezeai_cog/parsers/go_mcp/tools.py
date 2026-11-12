@@ -124,14 +124,29 @@ def _params(
     return description, out
 
 
+_SCOPES = ("function_declaration", "method_declaration", "func_literal")
+
+
+def _scope(node: Node) -> tuple[int, int]:
+    """The byte span of the innermost function enclosing ``node`` (the file at top level)."""
+    cur = node
+    while cur.parent is not None and cur.type not in _SCOPES:
+        cur = cur.parent
+    return (cur.start_byte, cur.end_byte)
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     pkgs = _package_names(dc.root, source)
     if not pkgs:
         return None
     nodes = _walk(dc.root)
-    # tool expression (the NewTool call, or the variable holding it) → handler node
-    handlers: dict[str, Node] = {}
+    # AddTool(<NewTool call>, h): the call's start byte → handler node.
+    inline: dict[int, Node] = {}
+    # AddTool(<var>, h): (scope, var) → [(start byte, handler node)], in source order. A tool
+    # variable pairs with the first AddTool of it after the assignment in the same function,
+    # so a reused `tool :=` in several functions keeps each tool's own handler.
+    by_var: dict[tuple[tuple[int, int], str], list[tuple[int, Node]]] = {}
     assigned: dict[int, str] = {}  # NewTool call start byte → variable name
     for n in nodes:
         if n.type == "call_expression":
@@ -145,12 +160,11 @@ def _detect(dc: DetectContext) -> Detection | None:
             if field is not None and node_text(field, source) == "AddTool" and args is not None:
                 a = [c for c in args.named_children if c.type != "comment"]
                 if len(a) >= 2:
-                    key = (
-                        node_text(a[0], source)
-                        if a[0].type == "identifier"
-                        else f"@{a[0].start_byte}"
-                    )
-                    handlers[key] = a[1]
+                    if a[0].type == "identifier":
+                        key = (_scope(n), node_text(a[0], source))
+                        by_var.setdefault(key, []).append((n.start_byte, a[1]))
+                    else:
+                        inline[a[0].start_byte] = a[1]
         elif n.type in ("short_var_declaration", "var_spec", "assignment_statement"):
             left = n.child_by_field_name("left") or n.child_by_field_name("name")
             right = n.child_by_field_name("right") or n.child_by_field_name("value")
@@ -172,6 +186,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 if rv is not None and ln.type == "identifier" and rv.type == "call_expression":
                     assigned[rv.start_byte] = node_text(ln, source)
     functions = {f.name: f.startLine for f in dc.record.functions}
+    root_span = (dc.root.start_byte, dc.root.end_byte)
     found: list[Emit] = []
     for n in nodes:
         call = _pkg_call(n, source, pkgs)
@@ -182,7 +197,17 @@ def _detect(dc: DetectContext) -> Detection | None:
             continue
         description, params = _params(call[1][1:], source, pkgs)
         var = assigned.get(n.start_byte)
-        h = handlers.get(var) if var is not None else handlers.get(f"@{n.start_byte}")
+        h = inline.get(n.start_byte)
+        if var is not None:
+            scope = _scope(n)
+            if scope == root_span:  # a package-level tool var is registered inside a function
+                adds = sorted(
+                    (x for (_, v), xs in by_var.items() if v == var for x in xs),
+                    key=lambda x: x[0],
+                )
+            else:
+                adds = by_var.get((scope, var), [])
+            h = next((node for at, node in adds if at > n.start_byte), None)
         handler, handler_line = None, None
         if h is not None and h.type == "identifier":
             handler = node_text(h, source)

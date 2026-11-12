@@ -20,13 +20,15 @@
 * ``params`` — from the signature: annotation text, default, ``Annotated[T, Field(description=…)]``
   / ``Annotated[T, "…"]`` and ``= Field(…)`` descriptions; ``self`` / ``cls``, ``*args`` /
   ``**kwargs`` and the injected ``Context`` are skipped. Required = no default.
-* ``framework`` — ``fastmcp`` when the file imports the standalone ``fastmcp`` package, else
-  ``mcp-python`` (the official SDK's ``mcp.server.fastmcp``).
+* ``framework`` — ``fastmcp`` when the server's file imports the standalone ``fastmcp``
+  package, else ``mcp-python`` (the official SDK's ``mcp.server.fastmcp``); for an imported
+  server, the file that builds it decides.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 
 from tree_sitter import Node
 
@@ -35,9 +37,16 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
-from .servers import SDK_MARKERS, mcp_servers, server_assignments, server_class_names
+from .servers import (
+    mcp_servers,
+    sdk_framework,
+    server_assignments,
+    server_class_names,
+)
 
 _MAX_DEFAULT = 200
+#: ``@x.tool`` — a cheap byte check before any tree walk (``.tools`` / ``.toolbar`` do not match).
+_TOOL_DECORATOR = re.compile(rb"@[ \t]*\w+[ \t]*\.[ \t]*tool\b")
 _SKIPPED_PARAMS = frozenset({"self", "cls"})
 
 
@@ -223,7 +232,7 @@ def _params(fn: Node, source: bytes) -> list[ToolParam]:
 
 def _detect(dc: DetectContext) -> Detection | None:
     source, record = dc.source, dc.record
-    if not any(m in source for m in SDK_MARKERS) and b".tool" not in source:
+    if not _TOOL_DECORATOR.search(source):
         return None
     classes = server_class_names(dc.root, source)
     servers = server_assignments(
@@ -233,15 +242,16 @@ def _detect(dc: DetectContext) -> Detection | None:
     bindings = dc.bindings or {}
     aliases = _import_aliases(dc.root, source)
 
-    def is_server(name: str) -> bool:
-        if name in servers:
-            return True
-        target = bindings.get(name)
-        return target is not None and aliases.get(name, name) in imported.get(target, frozenset())
+    local_framework = sdk_framework(source)
 
-    framework = (
-        "fastmcp" if b"from fastmcp" in source or b"import fastmcp" in source else "mcp-python"
-    )
+    def server_framework(name: str) -> str | None:
+        """The SDK framework of the server ``name`` refers to, or None when it is not one."""
+        if name in servers:
+            return local_framework
+        target = bindings.get(name)
+        names, framework = imported.get(target, (frozenset(), "")) if target else (frozenset(), "")
+        return framework if aliases.get(name, name) in names else None
+
     functions = {(f.name, f.startLine): f for f in record.functions}
     found: list[Emit] = []
     for node in _walk(dc.root):
@@ -252,7 +262,8 @@ def _detect(dc: DetectContext) -> Detection | None:
             continue
         for decorator in (c for c in node.named_children if c.type == "decorator"):
             hit = _tool_decorator(decorator, source)
-            if hit is None or not is_server(hit[0]):
+            framework = server_framework(hit[0]) if hit is not None else None
+            if hit is None or framework is None:
                 continue
             call = hit[1]
             fn_name = node_text(fn.child_by_field_name("name"), source)  # type: ignore[arg-type]
@@ -289,7 +300,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))
-    return Detection(found, label=framework)
+    return Detection(found, label=found[0].fields.get("framework") or local_framework)
 
 
 # An entry-point emitter, so fixture/test files are skipped.

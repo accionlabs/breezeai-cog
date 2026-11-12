@@ -118,7 +118,8 @@ def test_fastmcp_server_imported_from_another_module(analyze_files) -> None:
     }
     tools = _tools(analyze_files(files))
     assert set(tools) == {"hello"}
-    assert tools["hello"].framework == "mcp-python"  # the tools file never imports fastmcp
+    # The server's file decides the SDK, not the tools file (which never imports fastmcp).
+    assert tools["hello"].framework == "fastmcp"
 
 
 def test_official_sdk_fastmcp_is_mcp_python(analyze_files) -> None:
@@ -364,3 +365,73 @@ def test_a_local_class_named_fastmcp_is_not_a_server(analyze_files) -> None:
         "app/direct.py": "from app import shim\n\nregistry = shim.FastMCP()\n",
     }
     assert _tools(analyze_files(files)) == {}
+
+
+# ── Review regressions ──────────────────────────────────────────────────────
+
+
+def test_go_reused_tool_variable_keeps_each_handler(analyze_files) -> None:
+    src = """
+package main
+
+import "github.com/mark3labs/mcp-go/mcp"
+
+var shared = mcp.NewTool("shared")
+
+func regA(s *Server) {
+    tool := mcp.NewTool("a")
+    s.AddTool(tool, handleA)
+}
+
+func regB(s *Server) {
+    tool := mcp.NewTool("b")
+    s.AddTool(tool, handleB)
+    tool = mcp.NewTool("c")
+    s.AddTool(tool, handleC)
+    s.AddTool(shared, handleShared)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert {k: t.handler for k, t in tools.items()} == {
+        "a": "handleA",
+        "b": "handleB",
+        "c": "handleC",
+        "shared": "handleShared",
+    }
+
+
+def test_typescript_class_field_server_and_wrapped_callback(analyze_files) -> None:
+    src = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+class Srv {
+  private server = new McpServer({ name: "x", version: "1" });
+  init() {
+    this.server.tool("search", "Search", { q: z.string() }, withErrors(async ({ q }) => ({ content: [] })));
+    this.server.tool("named", withErrors(namedHandler));
+  }
+}
+async function namedHandler() { return { content: [] }; }
+"""
+    tools = _tools(analyze_files({"src/srv.ts": src}))
+    assert set(tools) == {"search", "named"}
+    assert tools["search"].description == "Search" and tools["search"].handlerLine == 8
+    assert tools["named"].handler == "namedHandler"
+
+
+def test_spring_ai_tool_only_in_the_mcp_server_module(analyze_files) -> None:
+    files = {
+        "pom.xml": "<project><modules><module>mcp-server</module></modules></project>",
+        "mcp-server/pom.xml": POM_MCP,
+        "mcp-server/src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+        "chat-app/src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+    }
+    statements = analyze_files(files)
+    paths = {s.path for s in statements if s.semanticType == "mcp_tool"}
+    assert paths == {"mcp-server/src/main/java/demo/WeatherTools.java"}
+
+
+def test_python_attribute_named_tools_is_not_scanned(analyze_files) -> None:
+    src = "from fastmcp import FastMCP\n\nmcp = FastMCP('x')\nprint(mcp.tools)\n"
+    assert _tools(analyze_files({"app/server.py": src})) == {}

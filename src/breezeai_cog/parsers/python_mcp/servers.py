@@ -102,18 +102,25 @@ def server_assignments(
     return out
 
 
+def sdk_framework(source: bytes) -> str:
+    """``fastmcp`` when the file imports the standalone ``fastmcp`` package, else ``mcp-python``
+    (the official SDK's ``mcp.server.fastmcp``)."""
+    return "fastmcp" if b"from fastmcp" in source or b"import fastmcp" in source else "mcp-python"
+
+
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> Any:
     names = server_assignments(root, source, server_class_names(root, source), module_only=True)
-    return (rel, tuple(sorted(names))) if names else None
+    return (rel, tuple(sorted(names)), sdk_framework(source)) if names else None
 
 
-def _resolve(values: list[Any], index: object) -> dict[str, frozenset[str]] | None:
-    out = {rel: frozenset(names) for rel, names in values}
+def _resolve(values: list[Any], index: object) -> dict[str, tuple[frozenset[str], str]] | None:
+    out = {rel: (frozenset(names), framework) for rel, names, framework in values}
     return out or None
 
 
-def mcp_servers(index: Any | None) -> dict[str, frozenset[str]]:
-    fact: dict[str, frozenset[str]] | None = index_fact(index, FACT)
+def mcp_servers(index: Any | None) -> dict[str, tuple[frozenset[str], str]]:
+    """``{module path: (server names, framework of the SDK it was built with)}``."""
+    fact: dict[str, tuple[frozenset[str], str]] | None = index_fact(index, FACT)
     return fact or {}
 
 

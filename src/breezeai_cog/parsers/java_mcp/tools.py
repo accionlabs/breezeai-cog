@@ -10,9 +10,10 @@
 
 * ``@McpTool`` / ``@McpToolParam`` (Spring AI MCP annotations) are MCP tools by definition.
 * ``@Tool`` / ``@ToolParam`` are Spring AI's general function-calling annotations: a chat client
-  uses them too. They count only in a repo whose build declares a Spring AI MCP **server**
-  dependency (fact :data:`FACT`, read from ``pom.xml`` / ``build.gradle[.kts]``); otherwise
-  nothing is emitted.
+  uses them too. They count only in a module whose build file (``pom.xml`` /
+  ``build.gradle[.kts]`` in the file's folder or an ancestor) declares a Spring AI MCP
+  **server** dependency (fact :data:`FACT`); otherwise nothing is emitted, so a chat-client
+  module next to an MCP server module stays out.
 * ``endpoint`` — ``name =`` when a literal, else the method name (Spring AI's default).
 * ``params`` — ``description`` / ``required`` from the parameter annotation (required by
   default); ``ToolContext`` and MCP exchange / context parameters are injected, not inputs.
@@ -61,13 +62,19 @@ _INJECTED = frozenset(
 
 
 def _collect(root: Any, source: bytes, rel: str, repo_root: Path | None) -> Any:
-    if rel.rsplit("/", 1)[-1] in _BUILD_FILES and any(d in source for d in _SERVER_DEPENDENCIES):
-        return True
+    folder, _, name = rel.rpartition("/")
+    if name in _BUILD_FILES and any(d in source for d in _SERVER_DEPENDENCIES):
+        return folder  # "" for the repo root
     return None
 
 
-def _resolve(values: list[Any], index: object) -> bool | None:
-    return True if any(values) else None
+def _resolve(values: list[Any], index: object) -> frozenset[str] | None:
+    """The folders of the modules that declare an MCP server starter."""
+    return frozenset(values) or None
+
+
+def _in_mcp_module(path: str, modules: frozenset[str] | None) -> bool:
+    return bool(modules) and any(m == "" or path.startswith(f"{m}/") for m in modules or ())
 
 
 register_fact(
@@ -169,7 +176,9 @@ def _walk(node: Node) -> list[Node]:
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     mcp_annotations = b"McpTool" in source
-    plain = b"springframework.ai" in source and bool(index_fact(dc.ctx.resolution_index, FACT))
+    plain = b"springframework.ai" in source and _in_mcp_module(
+        dc.record.path, index_fact(dc.ctx.resolution_index, FACT)
+    )
     if not mcp_annotations and not plain:
         return None
     functions = {(f.name, f.startLine): f for f in dc.record.functions}

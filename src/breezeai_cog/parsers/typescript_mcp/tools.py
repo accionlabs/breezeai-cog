@@ -96,6 +96,13 @@ def _servers(root: Node, source: bytes) -> set[str]:
                 left = parent.child_by_field_name("left")
                 if left is not None:
                     out.add(node_text(left, source))
+            elif parent is not None and parent.type in (
+                "public_field_definition",
+                "field_definition",
+            ):  # class Srv { private server = new McpServer(…) }
+                name = parent.child_by_field_name("name") or parent.child_by_field_name("property")
+                if name is not None:
+                    out.update((node_text(name, source), f"this.{node_text(name, source)}"))
         elif node.type in ("required_parameter", "optional_parameter", "public_field_definition"):
             ann = node.child_by_field_name("type")
             name = node.child_by_field_name("pattern") or node.child_by_field_name("name")
@@ -216,6 +223,23 @@ def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] |
     return None
 
 
+def _unwrap(cb: Node) -> Node | None:
+    """A callback, or a wrapper call around one (``withErrors(async (a) => …)``) → the innermost
+    callback argument; None when there is none."""
+    for _ in range(4):
+        if cb.type != "call_expression":
+            return cb if cb.type in _CALLBACKS else None
+        args = cb.child_by_field_name("arguments")
+        inner = [a for a in (args.named_children if args else []) if a.type in _CALLBACKS]
+        if not inner:
+            return None
+        cb = next(
+            (a for a in inner if a.type != "identifier" and a.type != "member_expression"),
+            inner[-1],
+        )
+    return None
+
+
 def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | None, int | None]:
     if cb.type in ("identifier", "member_expression"):
         name = node_text(cb, source)
@@ -247,7 +271,8 @@ def _detect(dc: DetectContext) -> Detection | None:
             continue
         args_node = call.child_by_field_name("arguments")
         args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]
-        if len(args) < 2 or args[-1].type not in _CALLBACKS:
+        callback = _unwrap(args[-1]) if len(args) >= 2 else None
+        if callback is None:
             continue
         name = _string(args[0], source)
         if not name:
@@ -270,7 +295,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 (s for s in (_zod_shape(m, source, zod) for m in middle) if s is not None), None
             )
             params = shape or []
-        handler, handler_line = _handler(args[-1], source, functions)
+        handler, handler_line = _handler(callback, source, functions)
         found.append(
             tool_emit(
                 call,
