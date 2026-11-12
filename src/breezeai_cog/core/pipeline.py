@@ -289,9 +289,10 @@ class _ConfigSummary:
 
 
 def _markdown_slots(entries: list[ScanEntry], cap: int) -> frozenset[str] | None:
-    """The Markdown files whose untyped ``doc`` statement fits ``max_markdown_statements``: the
-    first ``cap`` documentation files in path order. Decided from the scan, not from the order
-    parallel workers finish in, so the same repo always keeps the same docs."""
+    """The Markdown files whose ``doc`` / ``readme`` / ``changelog`` statement fits
+    ``max_markdown_statements``: the first ``cap`` documentation files in path order. Decided
+    from the scan, not from the order parallel workers finish in, so the same repo always keeps
+    the same docs."""
     if cap <= 0:
         return None
     docs = sorted(e.path for e in entries if e.language in DOC_LANGUAGES)
@@ -342,7 +343,9 @@ def _assemble(
         if is_doc:
             markdown_docs += 1
             md = record.metadata or {}
-            if record.statements and md.get("kind") == "doc":
+            # Only agent documents are always kept; a README or changelog counts against the
+            # cap like any doc, so a monorepo of package READMEs stays bounded (BREEZEAI-1457).
+            if record.statements and md.get("kind") not in AGENT_DOCUMENT_KINDS:
                 doc_statements += 1
                 over_cap = (
                     record.path not in markdown_slots
@@ -350,7 +353,7 @@ def _assemble(
                     else 0 < max_markdown_statements < doc_statements
                 )
                 if over_cap:
-                    # Untyped doc past the cap: keep the File (metadata + outline) only.
+                    # Non-agent doc past the cap: keep the File (metadata + outline) only.
                     record.statements = []
                     md["statementSkipped"] = "max_markdown_statements"
                     markdown_capped += 1

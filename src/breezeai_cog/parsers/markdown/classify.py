@@ -35,13 +35,13 @@ def classify(
     path: str,
     front_matter: dict[str, Any],
     headings: list[dict[str, Any]],
-    in_plugin: Callable[[str], bool],
+    plugin_root: Callable[[str], bool],
 ) -> str:
     """Return the semantic type of the Markdown file at repo-relative ``path``.
 
-    ``in_plugin(dir)`` tells whether a repo-relative directory is inside a Claude Code or Cursor
-    plugin (an ancestor holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json``);
-    consulted for ``commands/`` and ``agents/``."""
+    ``plugin_root(dir)`` tells whether a repo-relative directory is a Claude Code or Cursor
+    plugin root (it holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json``);
+    a plugin's ``commands/`` and ``agents/`` folders sit directly in it."""
     p = PurePosixPath(path)
     name = p.name
     upper = name.upper()
@@ -64,7 +64,7 @@ def classify(
         and (
             ".claude" in dirs
             or _has_any(front_matter, _AGENT_KEYS)
-            or in_plugin(_folder(dirs, "agents"))
+            or _plugin_folder(dirs, "agents", plugin_root)
         )
     ):
         return "agent"
@@ -83,7 +83,7 @@ def classify(
         if (
             ".claude" in dirs
             or _has_any(front_matter, _COMMAND_KEYS)
-            or in_plugin(_folder(dirs, "commands"))
+            or _plugin_folder(dirs, "commands", plugin_root)
         ):
             return "command"
 
@@ -118,9 +118,11 @@ def _has_any(front_matter: dict[str, Any], keys: tuple[str, ...]) -> bool:
     return any(k in front_matter for k in keys)
 
 
-def _folder(dirs: tuple[str, ...], name: str) -> str:
-    """The repo-relative path of the innermost ``name`` folder in ``dirs``."""
-    return "/".join(dirs[: len(dirs) - dirs[::-1].index(name)])
+def _plugin_folder(dirs: tuple[str, ...], name: str, plugin_root: Callable[[str], bool]) -> bool:
+    """True when a ``name`` folder in ``dirs`` sits directly in a plugin root. A ``commands/``
+    deeper in a plugin (``docs/commands/``, a skill's ``references/commands/``) is documentation,
+    not the plugin's commands (BREEZEAI-1457)."""
+    return any(part == name and plugin_root("/".join(dirs[:i])) for i, part in enumerate(dirs))
 
 
 def _contains(parts: tuple[str, ...], seq: tuple[str, ...]) -> bool:

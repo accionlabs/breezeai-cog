@@ -26,19 +26,15 @@ _MAX_DEPTH = 3
 _MAX_ITEMS = 50
 _MAX_STRING = 4000
 
-#: Case-insensitive substrings of a front-matter key whose value is replaced by ``***`` — the
-#: key-name layer of the structured-JSON redaction, applied to document headers.
-_CREDENTIAL_TOKENS = (
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "authorization",
-    "credential",
-    "private_key",
-    "privatekey",
+#: Secret-like names, any case: the one rule for front-matter keys, env assignments and code
+#: assignments in a document. ``pass`` counts only as a whole word separated by ``_`` / ``-`` /
+#: ``.`` (``DB_PASS``, ``mysql_pass``, ``db.pass``), never inside ``passage``, ``compass`` or
+#: ``bypass``. Literal alternatives only, so a long name is searched in linear time.
+_SECRET_NAME = re.compile(
+    r"password|passwd|passphrase|secret|token|credential|authorization"
+    r"|api[_\-]?key|private[_\-]?key|access[_\-]?key|client[_\-]?key"
+    r"|(?<![a-z0-9])pass(?![a-z0-9])",
+    re.IGNORECASE,
 )
 
 _DELIMITERS = ("---",)
@@ -121,9 +117,9 @@ def _simple_fields(text: str) -> dict[str, Any]:
     return fields
 
 
-def _secret_key(key: str) -> bool:
-    low = key.lower()
-    return any(token in low for token in _CREDENTIAL_TOKENS)
+def secret_name(name: str) -> bool:
+    """True when ``name`` (a front-matter key, an env variable, a code key) looks secret."""
+    return _SECRET_NAME.search(name) is not None
 
 
 def _mapping(data: dict[Any, Any], depth: int) -> dict[str, Any]:
@@ -132,7 +128,7 @@ def _mapping(data: dict[Any, Any], depth: int) -> dict[str, Any]:
         if not isinstance(key, (str, int, float, bool)):
             continue
         name = str(key)
-        if _secret_key(name):
+        if secret_name(name):
             out[name] = "***"
             continue
         clean = _value(value, depth)
