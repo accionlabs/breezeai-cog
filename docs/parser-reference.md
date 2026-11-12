@@ -532,8 +532,9 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 - **Statement.** Under statement capture, one whole-file `Statement`: `nodeType="document"`,
   `semanticType` = the kind, `text` = the file with secrets masked (cut at 64 KB on a line
   boundary, marked inline; masking keeps every line, so `endLine` is the file's line),
-  `name` / `description` from the front matter. Over 512 KB: the File record only. Untyped
-  `doc` statements past `max_markdown_statements` are dropped (path order); typed kinds are
+  `name` / `description` from the front matter. Over 512 KB: the File record only. `doc`,
+  `readme` and `changelog` statements past `max_markdown_statements` are dropped (path order);
+  the agent-document kinds (`skill`, `agent`, `command`, `agent_instructions`, `adr`) are
   always kept. Document statements are not embedded or split.
 - **Semantic types** (`classify.py`, first match wins; a type that needs front matter is never
   given on a guess):
@@ -541,22 +542,31 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 | `semanticType` | When |
 |---|---|
 | `skill` | `SKILL.md` with front-matter `name` and `description` |
-| `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin, or with an agent key (`tools`, `model`, `color`) |
-| `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
+| `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin root's `agents/`, or with an agent key (`tools`, `model`, `color`) |
+| `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin root's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
 | `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
 | `readme` | `README.md` / `.mdx` / `.rst` |
 | `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md` / `.mdx`) |
 | `adr` | under `docs/adr/`, `docs/decisions/` or `adr/`; or `NNNN-*.md` with `## Status` and `## Decision` |
 | `doc` | anything else |
 
-  A plugin is a folder (or ancestor) holding `.claude-plugin/plugin.json` or
-  `.cursor-plugin/plugin.json`. `skill`, `agent`, `command`, `agent_instructions` and `adr`
-  are the agent-document kinds counted in `configs.capturedAgentDocuments`.
-- **Secrets.** PEM private-key bodies (to the matching footer; without one, only the
-  key-shaped lines after the header), provider tokens, JWTs and URL credentials are masked
-  anywhere; secret-named upper-case env assignments (`DB_PASSWORD=`, `DB_PASS=`) anywhere;
-  secret-named `key = value` / `key: value` pairs of any case inside fenced code blocks; and
-  secret-named front-matter values, including indented and block-scalar values.
+  A plugin root is the folder holding `.claude-plugin/plugin.json` or
+  `.cursor-plugin/plugin.json`; only the `commands/` and `agents/` folders directly in it count
+  (a `docs/commands/` or a skill's `references/commands/` in the plugin is documentation).
+  `skill`, `agent`, `command`, `agent_instructions` and `adr` are the agent-document kinds
+  counted in `configs.capturedAgentDocuments`.
+- **Secrets.** One secret-name rule (`password`, `secret`, `token`, `api_key`, `credential`,
+  `authorization`, …, and `pass` as a whole `_` / `-` / `.`-separated word, as in `DB_PASS`
+  or `mysql_pass` but not `passage` or `bypass`) applies to front-matter keys, env
+  assignments and code keys. PEM private-key bodies (to the matching footer; without one, only
+  the key-shaped lines after the header), provider tokens, JWTs and URL credentials are masked
+  anywhere; so is an authorization-style header with a scheme word (`Authorization: Bearer x`,
+  `curl -H "Authorization: Basic x"` — scheme and credential both). Secret-named upper-case env
+  assignments (`DB_PASSWORD=`) are masked anywhere; secret-named `key = value` / `key: value`
+  pairs of any case inside fenced code blocks (at any indent) and on indented code lines,
+  except values that are lookups (`os.environ['X']`, `get_token()`, `settings.PASSWORD`);
+  and secret-named front-matter values, including indented, block-scalar and flow-collection
+  (`env: {DB_PASSWORD: x}`) values.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

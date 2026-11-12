@@ -535,3 +535,126 @@ def test_front_matter_block_scalar_secret_is_masked() -> None:
     st = _parse("docs/a.md", text).statements[0]
     assert "line-one-secret" not in st.text and "line-two-secret" not in st.text
     assert "model: opus" in st.text
+
+
+# ── review fixes, round 2 (BREEZEAI-1457) ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Authorization: Bearer abcdefghijklmnop\n",
+        "```\nAuthorization: Bearer abcdefghijklmnop\n```\n",
+        '```bash\ncurl -H "Authorization: Bearer abcdefghijklmnop" https://api\n```\n',
+        "curl -H 'Proxy-Authorization: Basic abcdefghijklmnop' https://api\n",
+        "```\nX-API-Key: Key abcdefghijklmnop\n```\n",
+        "```\nAuthorization: abcdefghijklmnop\n```\n",
+        "```\nheaders = {'Authorization': 'Bearer abcdefghijklmnop'}\n```\n",
+    ],
+)
+def test_authorization_scheme_and_credential_are_masked(text: str) -> None:
+    out = _parse("docs/a.md", text).statements[0].text
+    assert "abcdefghijklmnop" not in out and "Bearer" not in out and "***" in out
+
+
+def test_authorization_prose_without_a_scheme_is_kept() -> None:
+    text = "Authorization: required for every call.\n"
+    assert _parse("docs/a.md", text).statements[0].text == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # MkDocs: a fence nested under a list item, four spaces in.
+        "1. Configure\n\n    ```yaml\n    password: hunter2\n    ```\n",
+        "- step\n\n        ```\n        client_secret = 'hunter2'\n        ```\n",
+        # A plain indented code block.
+        "Config:\n\n    db_password = hunter2\n",
+        "Config:\n\n\tapi_key: hunter2\n",
+    ],
+)
+def test_indented_fences_and_indented_code_are_masked(text: str) -> None:
+    out = _parse("docs/a.md", text).statements[0].text
+    assert "hunter2" not in out and "***" in out
+
+
+def test_a_quoted_shorter_fence_does_not_close_the_block() -> None:
+    text = "````markdown\n```python\nx = 1\n```\npassword = hunter2\n````\n"
+    assert "hunter2" not in _parse("docs/a.md", text).statements[0].text
+
+
+def test_indented_fence_masking_parses_in_linear_time() -> None:
+    import time
+
+    start = time.perf_counter()
+    _parse("docs/a.md", " " * 200_000 + "`" * 100_000 + "\n    " + "a" * 200_000 + "=\n")
+    assert time.perf_counter() - start < 2.0
+
+
+def test_front_matter_flow_mapping_secrets_are_masked() -> None:
+    text = (
+        "---\nname: x\nenv: {API_TOKEN: tok123abc, DB_PASSWORD: hunter2xyz, region: us}\n"
+        "items: [{token: abc999}, plain]\nkeys: {tokens: [aa111, bb222], ok: 1}\n---\nBody\n"
+    )
+    rec = _parse("docs/a.md", text)
+    out = rec.statements[0].text
+    for secret in ("tok123abc", "hunter2xyz", "abc999", "aa111", "bb222"):
+        assert secret not in out
+    assert "region: us" in out and "ok: 1" in out and "plain" in out
+    assert rec.metadata["frontmatter"]["env"] == {
+        "API_TOKEN": "***",
+        "DB_PASSWORD": "***",
+        "region": "us",
+    }
+
+
+def test_one_secret_name_rule_for_front_matter_env_and_code() -> None:
+    text = (
+        "---\nname: x\nDB_PASS: s1secret\nmysql_pass: s2secret\npassage: keep1\n"
+        "compass: keep2\nbypass: keep3\n---\n"
+        "```\nmysql_pass = s3secret\nredis-pass: s4secret\ncompass = keep4\n```\n"
+        "export MYSQL_PASS=s5secret\nBYPASS_CACHE=keep5\n"
+    )
+    rec = _parse("docs/a.md", text)
+    fm, out = rec.metadata["frontmatter"], rec.statements[0].text
+    assert fm["DB_PASS"] == "***" and fm["mysql_pass"] == "***"
+    assert (fm["passage"], fm["compass"], fm["bypass"]) == ("keep1", "keep2", "keep3")
+    for n in range(1, 6):
+        assert f"s{n}secret" not in out and f"keep{n}" in out
+
+
+def test_commands_folder_deeper_in_a_plugin_is_a_doc(tmp_path: Path) -> None:
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text("{}")
+    agent = "---\nname: a\ndescription: d\n---\n"
+    assert _kind("commands/deploy.md", "Deploy\n", repo_root=tmp_path) == "command"
+    assert _kind("agents/a.md", agent, repo_root=tmp_path) == "agent"
+    assert _kind("docs/commands/cli.md", "CLI\n", repo_root=tmp_path) == "doc"
+    assert _kind("skills/a/references/commands/deploy.md", "x\n", repo_root=tmp_path) == "doc"
+    assert _kind("docs/agents/a.md", agent, repo_root=tmp_path) == "doc"
+
+
+def test_readme_and_changelog_count_against_the_doc_cap() -> None:
+    docs = [_parse(p, "# x\n") for p in ("CHANGELOG.md", "README.md", "docs/a.md")]
+    agents = [_parse("CLAUDE.md", "# rules\n"), _parse("skills/s/SKILL.md", SKILL)]
+    sink, meta = _assemble([*docs, *agents], max_markdown_statements=1)
+    kept = {r.path for r in sink.records if r.statements}
+    assert kept == {"CHANGELOG.md", "CLAUDE.md", "skills/s/SKILL.md"}
+    assert meta.configs["capturedAgentDocuments"] == 2
+
+
+def test_truncated_text_with_its_marker_fits_the_cap() -> None:
+    for text in ("\n".join(["x" * 99] * 1000) + "\n", "y" * (MAX_TEXT_BYTES + 10)):
+        st = _parse("docs/big.md", text).statements[0]
+        assert "bytes dropped" in st.text and len(st.text.encode()) <= MAX_TEXT_BYTES
+
+
+def test_code_lookups_are_not_masked_but_literals_are() -> None:
+    kept = (
+        "password = os.environ['DB_PASSWORD']\ntoken = get_token()\n"
+        "secret = settings.CLIENT_SECRET\napi_key: process.env.API_KEY\n"
+    )
+    text = f"```python\n{kept}password = hunter2\napi_key = 'hunter3'\n```\n"
+    out = _parse("docs/a.md", text).statements[0].text
+    assert kept in out
+    assert "hunter2" not in out and "hunter3" not in out
