@@ -129,6 +129,14 @@ def vendor_from_imports(external_imports: "list[str] | None") -> str | None:
     return None
 
 
+# Collection-iteration methods that take a block (Groovy ``list.findAll { it.active }``). When
+# the block is the call's only argument, a call by one of these names iterates a collection in
+# memory, so it is not data access whatever the receiver is called (``collection.find { … }``,
+# ``model.findAll { … }``). A query that takes a closure (GORM ``Book.findAll { author == a }``)
+# is then left unrecorded rather than guessed. Only the iteration methods that share a name with
+# a database verb are listed.
+_CLOSURE_ITERATION_VERBS = frozenset({"find", "findall", "count"})
+
 # Ambiguous ORM verbs -> generic hint, refined by receiver below.
 _GENERIC = {
     "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
@@ -409,10 +417,13 @@ def _is_prisma_chain(low: str) -> bool:
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None,
              vendor: str | None = None,
-             typed_receivers: "Mapping[str, str] | None" = None) -> str | None:
+             typed_receivers: "Mapping[str, str] | None" = None,
+             closure_arg: bool = False) -> str | None:
     """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
     imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``.
-    ``typed_receivers`` maps a name declared as a datastore client type to its product."""
+    ``typed_receivers`` maps a name declared as a datastore client type to its product.
+    ``closure_arg`` says the call's only argument is a closure (see
+    :data:`_CLOSURE_ITERATION_VERBS`)."""
     if language in {"php", "go", "c", "cpp"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php_data_access_common.py), Go from the receiver's declared
@@ -422,6 +433,8 @@ def match_db(callee: str, method: str, language: str | None = None,
         # for them yet, so their data access is left unrecorded.
         return None
     m = method.lower()
+    if closure_arg and m in _CLOSURE_ITERATION_VERBS:
+        return None
     low = callee.lower()
     if typed_receivers and "." in callee:
         product = typed_receivers.get(callee.rsplit(".", 1)[0].rsplit(".", 1)[-1])
@@ -495,6 +508,10 @@ def match_db(callee: str, method: str, language: str | None = None,
                 if m == "remove" or "httpcontext.session" in low:
                     return None
                 return "hibernate" if vendor == "hibernate" else "orm"
+            # ``objects`` is Django's model manager; in another language it is an ordinary
+            # name (``objects.findAll { … }`` filters a list), not evidence of data access.
+            if needle == "objects" and language is not None and language not in _PYTHON:
+                continue
             # The receiver shows data access; the product named must ship for this language.
             if language is not None and language not in langs:
                 return _orm(receiver, vendor)

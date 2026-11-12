@@ -459,3 +459,24 @@ def test_named_argument_url_is_the_endpoint(tmp_path) -> None:
         ("GET", "/positional"),
         ("GET", None),
     ]
+
+
+def test_collection_methods_with_a_closure_are_not_data_access(tmp_path) -> None:
+    # `find { … }` / `findAll { … }` are Groovy collection methods: whatever the receiver is
+    # called, a call whose only argument is a closure filters a collection in memory. A name
+    # inside a closure along the chain (`it.repo`) is not the receiver either.
+    src = (
+        b"class S {\n"
+        b"  def userRepository\n"
+        b"  void a(def collection, Map model, List rows) {\n"
+        b"    def x = collection.find { it.id == 1 }\n"
+        b"    def y = model.findAll { k, v -> v }\n"
+        b"    def z = rows.collect { it.repo }.save()\n"
+        b"    def r = userRepository.findAll()\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    db = [(s.name, s.method, s.dataAccessHint) for s in rec.statements
+          if s.semanticType == "db_method_call"]
+    assert db == [("r", "findAll", "orm")]

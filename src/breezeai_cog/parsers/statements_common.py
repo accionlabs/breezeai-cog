@@ -138,6 +138,9 @@ NameOf = Callable[[Node, bytes], "str | None"]
 # (semanticType, method, endpoint, dataAccessHint) or None for one call-like node. A language
 # whose constructs the shared heuristics cannot classify (Apex DML / inline SOQL) supplies this
 # instead of ``call_details``; it replaces ``classify_call`` for that language.
+# True when a call node's only argument is a closure/block — a collection iteration
+# (``items.findAll { … }``), never data access by a colliding name (see ``match_db``).
+ClosureOnly = Callable[[Node], bool]
 ClassifyNode = Callable[[Node, bytes], "tuple[str, str | None, str | None, str | None] | None"]
 
 
@@ -424,6 +427,7 @@ def classify_statement(
     decorators: "list[Decorator] | None" = None,
     local_names: Collection[str] = (),
     classify: ClassifyNode | None = None,
+    closure_only: ClosureOnly | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -464,6 +468,7 @@ def classify_statement(
             http_client_ids=current_http_client_ids() or None,
             vendor=_datastore_vendor.get(),
             typed_receivers=_datastore_receivers.get() or None,
+            closure_arg=closure_only is not None and closure_only(call),
         )
         if classified is None:
             continue

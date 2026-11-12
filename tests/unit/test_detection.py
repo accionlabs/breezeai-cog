@@ -1006,3 +1006,28 @@ def test_firebase_verbs_only_in_javascript() -> None:
         ("db_method_call", "getDocs", "firebase")
     assert classify_call("paperKit.getDocs", "getDocs", None, "groovy") is None
     assert classify_call("letter.getDocs", "getDocs", None, "java") is None
+
+
+def test_objects_is_django_evidence_only_in_python() -> None:
+    assert classify_call("User.objects.find", "find", None, "python") == \
+        ("db_method_call", "find", "django")
+    # Elsewhere `objects` is an ordinary name: a Groovy list filter, a Java field.
+    assert classify_call("objects.findAll", "findAll", None, "groovy") is None
+    assert classify_call("this.objects.find", "find", None, "typescript") is None
+    # A data-access receiver still decides, whatever the language.
+    assert classify_call("userRepository.findAll", "findAll", None, "groovy") == \
+        ("db_method_call", "findAll", "orm")
+
+
+def test_a_closure_only_argument_is_a_collection_iteration() -> None:
+    # `collection.find { … }` / `model.findAll { … }` iterate a collection in memory.
+    assert classify_call("collection.find", "find", None, "groovy", closure_arg=True) is None
+    assert classify_call("model.findAll", "findAll", None, "groovy", closure_arg=True) is None
+    assert classify_call("orderRepository.count", "count", None, "groovy",
+                         closure_arg=True) is None
+    # Without the flag the receiver decides, as before.
+    assert classify_call("model.findAll", "findAll", None, "groovy") == \
+        ("db_method_call", "findAll", "orm")
+    # A verb that is not a collection iteration is unaffected.
+    assert classify_call("orderRepository.save", "save", None, "groovy", closure_arg=True) == \
+        ("db_method_call", "save", "orm")
