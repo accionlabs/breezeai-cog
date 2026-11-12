@@ -274,7 +274,7 @@ even if `items` has an in-repo type.
 |---|---|---|---|---|
 | TypeScript / JavaScript | ✓ | ✓ (+ built-in guard) | — | ✓ |
 | C# | ✓ (+ `using static`) | ✓ | ✓ | ✓ |
-| Java | ✓ | ✓ | — | ✓ (+ a bare call is `this`) |
+| Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
 | Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
@@ -305,6 +305,7 @@ decorators/attributes and, where supported, its methods. It is used for two thin
 | Use | Languages | Example |
 |---|---|---|
 | **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++, Java | `calls[].path` → the base class's file |
+| **Declared methods on a typed receiver** (Java) — `param.getActor()` where `param` is an `OrderParam` | Java | `calls[].path` → the file that declares `getActor`: `OrderParam`'s own, else its nearest in-repo ancestor's; neither (a method from a library base, or a variable that has another type in this method) → null |
 | **Inherited route settings** — a controller's route prefix and auth come from its base class | ASP.NET (C#, VB); HotChocolate root types | `[Route("api/[controller]")]` and `[Authorize]` on `BaseApiController` apply to `OrdersController : BaseApiController` |
 
 Walking the chain (`index_common.walk_heritage`) goes nearest ancestor first and stops at a

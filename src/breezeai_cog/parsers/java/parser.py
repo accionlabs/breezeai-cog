@@ -66,6 +66,7 @@ class JavaParser(BaseParser):
         resolve = make_resolver(  # calls[].path (Tiers 1+2, receiver type, inherited methods)
             bindings, defined_names(root, source), path, type_map(root, source),
             heritage=idx.class_heritage if isinstance(idx, JavaIndex) else None,
+            declared_only=True,
         )
         functions: list[Function] = []
         classes = []

@@ -9,7 +9,10 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
 * **Tier 2 — same file:** a call to a function/method/class defined in the current file
   (bare ``foo()`` or ``self``/``this`` method call) → the current file.
 * **Phase 2 — receiver type:** ``obj.method()`` where ``obj``'s declared type resolves to
-  an in-repo file → that file.
+  an in-repo file → that file. With ``declared_only`` (and ``heritage``), only when that type
+  declares ``method`` — else the nearest in-repo ancestor that does, else ``None``: a method
+  the type inherits from a library, or a variable whose type differs in another method of the
+  file, has no in-repo target.
 * **Extension:** ``recv.M()`` where ``recv``'s type is not an in-repo member call and ``M``
   is an in-repo extension method on that type (``static M(this T …)``) → the defining file,
   via ``ext_index[(M, T)]`` (simple type names). Only fires when Phase 2 found nothing, so
@@ -49,6 +52,7 @@ def make_resolver(
     ext_index: dict[tuple[str, str], str | None] | None = None,
     heritage: dict[str, ClassHeritage | None] | None = None,
     builtin_methods: frozenset[str] = frozenset(),
+    declared_only: bool = False,
 ) -> CallResolver:
     """``(name, receiver, owner=None) -> repo path | None``. ``receiver`` is the callee's
     qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -57,7 +61,9 @@ def make_resolver(
 
     See the module docstring for the tier order. ``ext_index`` maps ``(method, this-param
     type)`` → defining file (``None`` = ambiguous, honest-null); ``heritage`` is the
-    repo ``class_heritage`` index walked for inherited-method resolution."""
+    repo ``class_heritage`` index walked for inherited-method resolution. ``declared_only``
+    makes the receiver-type tier check ``heritage``: the method must be declared by the type or
+    an in-repo ancestor (its file), else no edge."""
     types = types or {}
 
     def _inherited(name: str, owner: str) -> str | None:
@@ -70,6 +76,21 @@ def make_resolver(
         for anc in walk_heritage(owner, start.extends, heritage).ancestors:
             if name in anc.methods:  # nearest ancestor declaring it wins (matches C# binding)
                 return anc.methods[name]  # its file, or None when that name is file-ambiguous
+        return None
+
+    def _declared(name: str, typ: str, resolved: str) -> str | None:
+        """The file declaring ``typ.name``: ``typ`` itself, else its nearest in-repo ancestor.
+        A type the index cannot tell apart (two classes, one simple name) is left as resolved."""
+        if heritage is None or typ not in heritage:
+            return resolved
+        own = heritage[typ]
+        if own is None:
+            return resolved
+        if name in own.methods:
+            return own.methods[name]
+        for anc in walk_heritage(typ, own.extends, heritage).ancestors:
+            if name in anc.methods:
+                return anc.methods[name]
         return None
 
     def resolve(name: str, receiver: str | None, owner: str | None = None) -> str | None:
@@ -102,7 +123,7 @@ def make_resolver(
             if typ:
                 resolved = bindings.get(typ) or (path if typ in local_defs else None)
                 if resolved is not None:
-                    return resolved
+                    return _declared(name, typ, resolved) if declared_only else resolved
                 # Extension: `M` is an in-repo extension method on `typ`
                 if ext_index is not None:
                     return ext_index.get((name, typ))

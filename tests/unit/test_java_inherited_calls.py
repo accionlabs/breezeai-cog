@@ -80,3 +80,39 @@ public class Child extends Base { void a() { foo(); } }
     calls = _calls(tmp_path, {"Base.java": _BASE, "Root.java": _ROOT_CLASS,
                               "Child.java": child}, "Child.java")
     assert calls["a"] == {"foo": f"{_ROOT}/Base.java"}
+
+
+_PARAM_BASE = """package com.acme;
+public class BaseParam { public String getActor() { return ""; } }
+"""
+_PARAM = """package com.acme;
+import org.json.JsonObject;
+public class OrderParam extends BaseParam {
+    public String getOrder() { return ""; }
+}
+"""
+_RESPONSE = """package com.acme;
+public class Response { public String body() { return ""; } }
+"""
+_USER = """package com.acme.web;
+import com.acme.OrderParam;
+import com.acme.Response;
+import org.json.JsonObject;
+public class User {
+    void a(OrderParam p) { p.getOrder(); p.getActor(); p.getMissing(); }
+    void b(Response response) { response.body(); }
+    void c() { JsonObject response = new JsonObject(); response.putString("k", "v"); }
+}
+"""
+
+
+def test_a_typed_receiver_resolves_to_the_file_that_declares_the_method(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {"BaseParam.java": _PARAM_BASE, "OrderParam.java": _PARAM,
+                              "Response.java": _RESPONSE, "web/User.java": _USER},
+                   "web/User.java")
+    # declared on the type → its file; inherited → the ancestor's file; declared nowhere → null
+    assert calls["a"] == {"getOrder": f"{_ROOT}/OrderParam.java",
+                          "getActor": f"{_ROOT}/BaseParam.java", "getMissing": None}
+    assert calls["b"] == {"body": f"{_ROOT}/Response.java"}
+    # `response` is a Response in b() but a library JsonObject here: Response has no putString
+    assert calls["c"] == {"putString": None}
