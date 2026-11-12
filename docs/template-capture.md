@@ -31,7 +31,7 @@ code half is captured either way.
 |---|---|---|
 | `.phtml` | `php` | `.php` |
 | `.html` `.htm` | `html` | — |
-| `.cshtml` `.razor` | `razor` | — |
+| `.cshtml` `.razor` `.vbhtml` | `razor` | — |
 | `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind (VB code-behind, `.aspx.vb`, is `vb-webforms`'s) |
 | `.vue` | `typescript-vue` | `.ts` `.tsx` `.js` `.jsx` … |
 | `.jsp` `.jspx` `.jspf` `.tag` `.tagx` | `jsp` | — |
@@ -290,12 +290,13 @@ discoverable. Skip `.vue` and all of that goes with it.
 | `.html` (plain page) | — | — | a File node only |
 | `.cshtml` | `razor` | `template` | `@page` → a `route`; model and expression statements |
 | `.razor` | `razor` | `component` | same, plus `@code { }` methods as **Functions** |
+| `.vbhtml` | `razor` | `template` | `@ModelType`, `@expr` and control-flow (`@For Each`, `@If`, …) statements, all `nodeType: synthetic` — the Razor grammar is C# only, so a VB view is read by a text scan; no `@page` in VB Razor |
 | `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring |
 | `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
 | `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); directives, EL and JSP comments (`nodeType: synthetic` — there is no JSP grammar; directives keep their keyword in `name`, comments carry `semanticType: comment`), prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
 | `.tag` `.tagx` | `jsp` | `component` | same as a page |
 
-**Inline scripts.** In `.html`, `.cshtml`/`.razor` and `.aspx`/`.ascx`/`.master`, the bodies of
+**Inline scripts.** In `.html`, `.cshtml`/`.razor`/`.vbhtml` and `.aspx`/`.ascx`/`.master`, the bodies of
 inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
 `$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
 counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
