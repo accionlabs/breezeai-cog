@@ -416,3 +416,24 @@ def test_synchronized_block_is_control_flow(tmp_path) -> None:
     ]
     body = [s for s in rec.statements if s.text == "pending.clear()"]
     assert [(s.parentId, s.startLine) for s in body] == [(sync[0].parentId, 4)]
+
+
+def test_string_named_method_is_named_without_quotes(tmp_path) -> None:
+    # Spock feature methods are named by a string; the method's name is the text inside the
+    # quotes, whichever quote style declares it.
+    src = (
+        b"class OrderSpec {\n"
+        b'  def "order is created"() { expect: true }\n'
+        b"  def 'order is cancelled'() { expect: true }\n"
+        b'  def plain(String f) { this."order is created"(); this."findBy$f"() }\n'
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src)
+    assert [f.name for f in rec.functions] == [
+        "order is created", "order is cancelled", "plain"
+    ]
+    # A call by the string name resolves to the method in this file; a call whose name is
+    # interpolated is only known at run time, so it is not recorded.
+    plain = next(f for f in rec.functions if f.name == "plain")
+    assert [(c.name, c.path) for c in plain.calls] == [("order is created", "T.groovy")]
+
