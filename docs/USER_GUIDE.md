@@ -13,7 +13,7 @@ tools query it. This guide only covers the generator — the part you run agains
 - **Languages:** TypeScript/JavaScript, Python, PHP, Ruby, Java, C#, VB.NET, Kotlin, Groovy, Go, and C++.
 - **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
   Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
-  and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET and Web Forms (VB.NET); Ktor
+  and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET, Web Forms and WCF/ASMX (VB.NET); Ktor
   (Kotlin); Laravel, CodeIgniter 4, Slim, and Symfony (PHP); Rails, Sinatra, and Grape (Ruby);
   Vert.x (Groovy); net/http, Gin, Echo, chi, Fiber, gorilla/mux, gRPC, NATS, Kafka, cron /
   ticker schedules, and AWS Lambda (Go). WordPress hooks and cross-cutting SDK detectors (AWS
