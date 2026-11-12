@@ -33,6 +33,7 @@ class ConfigParser(BaseParser):
         ".toml",
         ".ini",
         ".xml",
+        ".dnn",
         ".gradle",
         ".sbt",
         ".csproj",

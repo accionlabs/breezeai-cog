@@ -83,6 +83,8 @@ NX_ONLY_JSON_NAMES: frozenset[str] = frozenset({"project.json", "workspace.json"
 
 
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
+    if suffix == ".dnn":
+        return _dnn_manifest(text)
     if name == "package.json":
         return _package_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
@@ -143,6 +145,10 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     if suffix == ".gradle":
         return _gradle(name, text)
     return {}
+
+
+def _dnn_manifest(text: str) -> dict[str, Any]:
+    return {"kind": "dnn-manifest", "category": "dotnet"}
 
 
 # ── JSON family ───────────────────────────────────────────────────────────────

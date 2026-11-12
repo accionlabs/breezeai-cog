@@ -772,6 +772,19 @@ def _call_statement(call: Node) -> Node:
     return call
 
 
+def _is_dnn_route_mapper(call: Node, source: bytes) -> bool:
+    if b"IServiceRouteMapper" not in source:
+        return False
+    cur = call.parent
+    while cur is not None:
+        if cur.type in ("method_declaration", "method_block"):
+            name = cur.child_by_field_name("name")
+            if name is not None and node_text(name, source) == "RegisterRoutes":
+                return True
+        cur = cur.parent
+    return False
+
+
 def detect_route_registrations(
     root: Node,
     source: bytes,
@@ -802,6 +815,8 @@ def detect_route_registrations(
                 if func is not None and func.type == member_type:
                     name_node = func.child_by_field_name(name_field)
                     method = node_text(name_node, source) if name_node is not None else ""
+                    if method in _MAP_ROUTE_METHODS and _is_dnn_route_mapper(child, source):
+                        method = ""
                     url = _maproute_url(child, source) if method in _MAP_ROUTE_METHODS else None
                     text = node_text(child, source) if url else ""
                     seen_registration = seen_registration or url is not None
