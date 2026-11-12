@@ -21,6 +21,7 @@ CONTROL_FLOW = {
     "try_statement",
     "catch_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
     "finally_clause",
+    "synchronized_statement",
 }
 
 JUMP = {

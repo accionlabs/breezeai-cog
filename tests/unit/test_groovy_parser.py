@@ -394,3 +394,25 @@ def test_field_annotations_captured_on_statements(tmp_path) -> None:
     rec = _parse_src(tmp_path, src, capture=True)
     field = next(s for s in rec.statements if s.name == "userService")
     assert [(d.name, d.args) for d in field.decorators] == [("Autowired", [])]
+
+
+def test_synchronized_block_is_control_flow(tmp_path) -> None:
+    # A `synchronized (lock) { … }` block is control flow, as in Java: one statement for the
+    # header with no semanticType. Its body's statements are captured beside it under the
+    # method, as an `if` body's are.
+    src = (
+        b"class Queue {\n"
+        b"  void drain() {\n"
+        b"    synchronized (lock) {\n"
+        b"      pending.clear()\n"
+        b"    }\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    sync = [s for s in rec.statements if s.nodeType == "synchronized_statement"]
+    assert [(s.text, s.semanticType, s.startLine, s.endLine) for s in sync] == [
+        ("synchronized (lock) {", None, 3, 5)
+    ]
+    body = [s for s in rec.statements if s.text == "pending.clear()"]
+    assert [(s.parentId, s.startLine) for s in body] == [(sync[0].parentId, 4)]
