@@ -413,3 +413,78 @@ def test_await_is_left_alone_where_it_can_be_a_name() -> None:
     assert blank_await(b"    Await _s3.Put()") == b"    Call  _s3.Put()"
     assert blank_await(b"Dim r = Await Get()") == b"Dim r =       Get()"
     assert blank_await(b"If x Then Await Go()") == b"If x Then Call  Go()"
+
+
+_IMPLEMENTS = b"""Public Class OrderService
+    Implements IOrderService
+    Public Async Function GetByIdAsync(id As Integer) As Task(Of OrderDto) Implements IOrderService.GetByIdAsync
+        Return Nothing
+    End Function
+    <Obsolete> Public Function Fetch(id As String) As Order Implements IOrderService.GetOrder, IOther.Get ' both
+        Return Nothing
+    End Function
+    Public ReadOnly Property Name As String Implements IOrderService.Name
+        Get
+            Return ""
+        End Get
+    End Property
+    Public Sub Save(o As Order) Implements IOrderService.Save
+    End Sub
+    Public Function GetAll() As List(Of T) Implements IRepository(Of T).GetAll
+    End Function
+End Class
+"""
+
+
+def test_a_member_implements_clause_is_not_its_return_type(tmp_path) -> None:
+    from breezeai_cog.parsers.vb.source import member_implements
+
+    rec = _parse_source(tmp_path, _IMPLEMENTS)
+    got = {f.name: (f.returnType, f.startLine) for f in rec.functions}
+    assert got["GetByIdAsync"] == ("Task(Of OrderDto)", 3)
+    assert got["Fetch"] == ("Order", 6)
+    assert got["Save"][0] is None
+    assert got["GetAll"][0] == "List(Of T)"
+    assert [c.implements for c in rec.classes] == [["IOrderService"]]
+    # The clause is read from the source as written.
+    assert member_implements(_IMPLEMENTS) == {
+        3: ["IOrderService.GetByIdAsync"], 6: ["IOrderService.GetOrder", "IOther.Get"],
+        9: ["IOrderService.Name"], 14: ["IOrderService.Save"], 16: ["IRepository(Of T).GetAll"],
+    }
+
+
+def test_implements_is_left_alone_off_a_member_header() -> None:
+    from breezeai_cog.parsers.vb.source import blank_implements
+
+    kept = [
+        b"    Implements IOrderService",                                 # the class statement
+        b'    Dim s = "Function F() Implements I.J"',                     # in a string
+        b"    ' Public Function F() As X Implements I.J",                 # a comment
+        b"    Public Function F() As X _",                                # continued header
+    ]
+    for line in kept:
+        assert blank_implements(line) == line, line
+
+
+_GENERICS = b"""Public Class R
+    Public Function B() As Task(Of List(Of Customer))
+    End Function
+    Public Sub S(xs As List(Of Customer), n As Integer)
+    End Sub
+    Public Function D() As Dictionary(Of String, List(Of Integer))
+    End Function
+    Public Function E() As Customer
+    End Function
+End Class
+"""
+
+
+def test_a_generic_type_keeps_its_closing_parentheses(tmp_path) -> None:
+    # The grammar reads `Of T` without its parentheses; the `)` it drops are taken from the source.
+    rec = _parse_source(tmp_path, _GENERICS)
+    got = {f.name: (f.returnType, [(p.name, p.type) for p in f.params]) for f in rec.functions}
+    assert got["B"] == ("Task(Of List(Of Customer))", [])
+    # A parameter after a generic one is lost to the grammar; a Sub still returns nothing.
+    assert got["S"][0] is None and got["S"][1][0] == ("xs", "List(Of Customer)")
+    assert got["D"][0] == "Dictionary(Of String, List(Of Integer))"
+    assert got["E"][0] == "Customer"

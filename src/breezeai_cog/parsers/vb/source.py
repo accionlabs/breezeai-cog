@@ -36,6 +36,12 @@ expression (``Dim r = Await …``, ``Return Await …``). ``Await`` is replaced 
 outside strings and comments, when followed by whitespace and the start of a name — never before
 an operator keyword (``Await Is Nothing``), ``=``, ``.``, ``(`` or ``,``, where it can be a variable
 (VB reserves it only inside ``Async`` methods).
+
+Nor has it a member's ``Implements`` clause: in ``Function Fetch(id As String) As Order Implements
+IOrderService.GetOrder`` the ``As`` type falls into an ``ERROR`` node and ``IOrderService.GetOrder``
+reads as the return type. The shadow blanks the clause on a ``Function``/``Sub``/``Property``/
+``Event`` header line (:func:`blank_implements`); :func:`member_implements` reads it from the
+original source. A header continued onto the next line (`` _``) is left as written.
 """
 
 from __future__ import annotations
@@ -130,6 +136,56 @@ def blank_await(source: bytes) -> bytes:
     return bytes(out) if out is not None else source
 
 
+#: One implemented member, as written: ``IOrders.Get``, ``IRepository(Of T).GetAll``.
+_MEMBER = rb"[\w\[\]]+(?:[ \t]*\([ \t]*Of\b[^()\n]*\))?(?:\.[\w\[\]]+(?:[ \t]*\([ \t]*Of\b[^()\n]*\))?)*"
+#: A member header line ending with an ``Implements A.B[, C.D]`` clause (group 1; group 2 the list);
+#: a generic interface is named with its arguments (``IRepository(Of T).GetAll``).
+#: The header may start with a joined attribute block and modifiers; a ``'`` before the clause
+#: (a string or a comment) or a continuation keeps the line out.
+_IMPLEMENTS_HEADER = re.compile(
+    rb"^[ \t]*(?:<[^\n]*>[ \t]*)?(?:[A-Za-z]+[ \t]+)*?(?:Function|Sub|Property|Event)[ \t]+"
+    rb"[^\n'\"]*?([ \t]Implements[ \t]+(" + _MEMBER + rb"(?:[ \t]*,[ \t]*" + _MEMBER + rb")*))"
+    rb"[ \t]*(?:'[^\n]*)?\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def blank_implements(source: bytes) -> bytes:
+    """``source`` with each member header's ``Implements …`` clause blanked (spaces); ``source``
+    itself when there is none."""
+    if not re.search(rb"(?i)implements", source):
+        return source
+    out: bytearray | None = None
+    for m in _IMPLEMENTS_HEADER.finditer(source):
+        if out is None:
+            out = bytearray(source)
+        out[m.start(1):m.end(1)] = b" " * (m.end(1) - m.start(1))
+    return bytes(out) if out is not None else source
+
+
+def _split_members(clause: bytes) -> list[bytes]:
+    """``IA.X, IRepo(Of K, V).Y`` → its members, at the commas outside ``(Of …)``."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(clause):
+        depth += (ch == ord("(")) - (ch == ord(")"))
+        if ch == ord(",") and depth == 0:
+            parts.append(clause[start:i])
+            start = i + 1
+    return [*parts, clause[start:]]
+
+
+def member_implements(source: bytes) -> dict[int, list[str]]:
+    """Header line (1-based) → the interface members its ``Implements`` clause names, as
+    written (``["IOrderService.GetOrder"]``)."""
+    if not re.search(rb"(?i)implements", source):
+        return {}
+    return {
+        source.count(b"\n", 0, m.start()) + 1:
+            [p.strip().decode("utf-8", "replace") for p in _split_members(m.group(2))]
+        for m in _IMPLEMENTS_HEADER.finditer(source)
+    }
+
+
 #: A type declaration line: optional modifiers, the type keyword, the name.
 _TYPE_OPEN = re.compile(
     rb"^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Partial|NotInheritable|MustInherit|"
@@ -190,7 +246,7 @@ class _Layout(NamedTuple):
 
 @lru_cache(maxsize=8)
 def _layout(source: bytes) -> _Layout:
-    joined = blank_await(join_attribute_blocks(source))
+    joined = blank_implements(blank_await(join_attribute_blocks(source)))
     blocks = _type_blocks(joined)
     return _Layout(joined, [b for b in blocks or [] if b.depth > 0])
 

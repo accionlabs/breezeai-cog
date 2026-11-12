@@ -2,6 +2,10 @@
 
 VB nests modifiers under a ``modifiers`` wrapper, types under an ``as_clause``, and
 attributes under ``attribute_block`` nodes; calls use ``invocation`` / ``member_access``.
+
+The grammar's type argument list is ``Of T`` without its parentheses, so in ``List(Of Customer)``
+the ``(`` is an ``ERROR`` inside the type and the ``)`` an ``ERROR`` right after it: a type's text
+is read by :func:`type_text`, which takes those closing parentheses back from the source.
 """
 
 from __future__ import annotations
@@ -76,6 +80,31 @@ def extract_attributes(node: Node, source: bytes) -> list[Decorator]:
     return attributes_from_blocks(blocks, source)
 
 
+def _is_sub(node: Node, source: bytes) -> bool:
+    """Whether a method is a ``Sub``, which returns nothing — whatever the grammar put in its
+    ``return_type`` when a parameter list misparses (a type after a generic parameter)."""
+    name = node.child_by_field_name("name")
+    head = source[node.start_byte:name.start_byte] if name is not None else b""
+    return re.search(rb"(?i)\bSub[ \t]+$", head) is not None
+
+
+def type_text(node: Node, source: bytes) -> str | None:
+    """A type node's text with the closing parentheses its generic arguments lost to the grammar
+    (``Task(Of List(Of Customer``, then ``))`` in the source → ``Task(Of List(Of Customer))``);
+    only ``)`` directly after the node (spaces between) are taken, as many as are missing. None
+    when they are not there: a partial type is not a type."""
+    end = node.end_byte
+    missing = node_text(node, source).count("(") - node_text(node, source).count(")")
+    while missing > 0:
+        j = end
+        while j < len(source) and source[j] in b" \t":
+            j += 1
+        if source[j:j + 1] != b")":
+            return None
+        end, missing = j + 1, missing - 1
+    return source[node.start_byte:end].decode("utf-8", "replace") if missing == 0 else None
+
+
 def as_clause_type(container: Node, source: bytes) -> str | None:
     """The declared type of a node's ``As <type>`` clause (param/field), else None."""
     as_clause = next((c for c in container.named_children if c.type == "as_clause"), None)
@@ -83,7 +112,7 @@ def as_clause_type(container: Node, source: bytes) -> str | None:
         tnode = as_clause.child_by_field_name("type") or next(
             (c for c in as_clause.named_children if c.type in ("type", "primitive_type")), None)
         if tnode is not None:
-            return node_text(tnode, source)
+            return type_text(tnode, source)
     return None
 
 
@@ -218,7 +247,7 @@ def build_method(
     fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
     # A broken header's parameter list and return type are read from the wrong text: empty.
-    ret = None if header_broken else node.child_by_field_name("return_type")
+    ret = None if header_broken or _is_sub(node, source) else node.child_by_field_name("return_type")
     params_node = None if header_broken else node.child_by_field_name("parameters")
     fn = Function(
         id=fid,
@@ -230,7 +259,7 @@ def build_method(
         isStatic=is_static,
         params=extract_params(params_node, source),
         decorators=extract_attributes(node, source),
-        returnType=node_text(ret, source) if ret is not None else None,
+        returnType=type_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
         calls=_calls(node, source, resolve),
