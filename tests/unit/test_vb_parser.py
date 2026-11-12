@@ -357,3 +357,59 @@ def test_a_broken_method_header_keeps_its_declared_name(tmp_path) -> None:
     # nothing in the file is named IsNullOrWhiteSpace, so that call resolves to no local function
     assert [c.path for c in fns["Other"].calls if c.name == "IsNullOrWhiteSpace"] == [None]
     assert [p.name for p in fns["Other"].params] == ["x"]  # an intact header is unchanged
+
+
+_AWAITS = b"""Public Class Orders
+    Public Async Function Place(req As Object) As Task
+        Await _s3.PutObjectAsync(req)
+        Dim r = Await _sqs.ReceiveMessageAsync("orders")
+        If r IsNot Nothing Then Await _s3.DeleteObjectAsync(req)
+        Return Await _db.SaveAsync(req)
+    End Function
+End Class
+"""
+
+
+def test_await_is_read_as_a_keyword_and_statements_keep_their_place(tmp_path) -> None:
+    from breezeai_cog.parsers.vb.source import parse_vb
+    from breezeai_cog.parsers.treesitter import node_text
+
+    # The awaited call parses whole: its receiver is the client, not a variable named Await.
+    root = parse_vb(_AWAITS).root_node
+    receivers = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        assert n.type != "ERROR"
+        if n.type == "member_access":
+            receivers.append(node_text(n.child_by_field_name("object"), _AWAITS))
+        stack.extend(n.named_children)
+    assert sorted(receivers) == ["_db", "_s3", "_s3", "_sqs"]
+    # Ids and text still come from the source as written, Await included.
+    rec = _parse_source(tmp_path, _AWAITS)
+    stmts = {s.id.split(":", 1)[1]: s.text.strip() for s in rec.statements
+             if s.nodeType in ("call_statement", "dim_statement")}
+    assert stmts == {
+        "3:8": "Await _s3.PutObjectAsync(req)",
+        "4:8": 'Dim r = Await _sqs.ReceiveMessageAsync("orders")',
+        "5:32": "Await _s3.DeleteObjectAsync(req)",  # the single-line If's statement
+    }
+
+
+def test_await_is_left_alone_where_it_can_be_a_name() -> None:
+    from breezeai_cog.parsers.vb.source import blank_await
+
+    kept = [
+        b"If Await Is Nothing Then",       # an operator keyword follows
+        b"Await = 1",                      # assignment
+        b"Dim Await As Integer",           # a declaration
+        b"obj.Await x",                    # a member
+        b"Await (t)",                      # a call or a parenthesised await: not repaired
+        b'x = "Await me" \' Await y',      # in a string, in a comment
+        b"REM Await x",
+    ]
+    for line in kept:
+        assert blank_await(line) == line, line
+    assert blank_await(b"    Await _s3.Put()") == b"    Call  _s3.Put()"
+    assert blank_await(b"Dim r = Await Get()") == b"Dim r =       Get()"
+    assert blank_await(b"If x Then Await Go()") == b"If x Then Call  Go()"

@@ -27,6 +27,15 @@ blanked (spaces, newlines kept — the outer type is whole again), and :func:`pa
 each nesting level on its own from a shadow that keeps only that level's types. A line scan finds
 the types (``[modifiers] Class|Structure|Interface|Module|Enum Name`` … ``End …``); a file whose
 openers and ``End`` lines do not pair up is parsed as written.
+
+The grammar has no ``Await`` either: ``Await _s3.PutObjectAsync(req)`` reads as a member access on
+a variable named ``Await`` with ``_s3`` in an ``ERROR`` node. The shadow replaces the keyword
+(:func:`blank_await`) so the awaited expression parses as written: with ``Call `` where it starts a
+statement (the statement keeps its start, so its id and text are unchanged), with spaces inside an
+expression (``Dim r = Await …``, ``Return Await …``). ``Await`` is replaced only
+outside strings and comments, when followed by whitespace and the start of a name — never before
+an operator keyword (``Await Is Nothing``), ``=``, ``.``, ``(`` or ``,``, where it can be a variable
+(VB reserves it only inside ``Async`` methods).
 """
 
 from __future__ import annotations
@@ -91,6 +100,36 @@ def join_attribute_blocks(source: bytes) -> bytes:
     return bytes(out) if out is not None else source
 
 
+#: A string (``""`` escapes; may span lines), a comment, or an ``Await`` keyword (group 1).
+_AWAIT_SCAN = re.compile(
+    rb'"(?:[^"]|"")*"|\'[^\n]*|\bREM\b[^\n]*'
+    rb"|(?<![\w.])(Await)(?=[ \t]+(?!(?:Is|IsNot|And|AndAlso|Or|OrElse|Xor|Mod|Like|As|To|Then"
+    rb"|Step)\b)[A-Za-z_\[])",
+    re.IGNORECASE,
+)
+
+
+#: What precedes an ``Await`` that starts a statement, on its line.
+_STATEMENT_START = re.compile(rb"(?:^|:|\bThen|\bElse)[ \t]*$", re.IGNORECASE)
+
+
+def blank_await(source: bytes) -> bytes:
+    """``source`` with each ``Await`` keyword replaced in place — ``Call `` at a statement's start,
+    five spaces inside an expression; ``source`` itself when there is none."""
+    if not re.search(rb"(?i)await", source):
+        return source
+    out: bytearray | None = None
+    for m in _AWAIT_SCAN.finditer(source):
+        start = m.start(1)
+        if start == -1:
+            continue
+        if out is None:
+            out = bytearray(source)
+        line = source[source.rfind(b"\n", 0, start) + 1:start]
+        out[start:m.end(1)] = b"Call " if _STATEMENT_START.search(line) else b"     "
+    return bytes(out) if out is not None else source
+
+
 #: A type declaration line: optional modifiers, the type keyword, the name.
 _TYPE_OPEN = re.compile(
     rb"^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Partial|NotInheritable|MustInherit|"
@@ -145,13 +184,13 @@ def _blank(out: bytearray, start: int, end: int) -> None:
 
 
 class _Layout(NamedTuple):
-    joined: bytes  # the attribute-joined source
+    joined: bytes  # the attribute-joined source, ``Await`` blanked
     nested: list[TypeBlock]  # the types inside another type (empty: nothing to do)
 
 
 @lru_cache(maxsize=8)
 def _layout(source: bytes) -> _Layout:
-    joined = join_attribute_blocks(source)
+    joined = blank_await(join_attribute_blocks(source))
     blocks = _type_blocks(joined)
     return _Layout(joined, [b for b in blocks or [] if b.depth > 0])
 
