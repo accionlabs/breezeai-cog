@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     github_api_base_url: str = "https://api.github.com"
     gitlab_api_base_url: str = "https://gitlab.com/api/v4"
     bitbucket_api_base_url: str = "https://api.bitbucket.org/2.0"
+    # No bitbucket_server default: Data Center ships no public cloud, so the base is
+    # taken from scm_instance_base_url_mapping or derived from the repo URL's context
+    # path (see integrations/scm/factory.resolve_api_base_url).
     azure_devops_api_base_url: str = "https://dev.azure.com"
     # Per-request cap (seconds) on provider REST calls (tree / compare / file content).
     scm_api_timeout: float = Field(default=60.0, gt=0)
@@ -114,6 +117,11 @@ class Settings(BaseSettings):
     scm_token_gitlab: SecretStr | None = None
     scm_token_bitbucket: SecretStr | None = None
     scm_token_azure_devops: SecretStr | None = None
+    # Bitbucket Data Center has no scm_token_* fallback on purpose. Every host is a
+    # different customer's instance, so a deployment-wide credential would be sent to
+    # whichever host the request named — one customer's credential to another's server.
+    # The credential must arrive as `gitToken` on the request; without it the factory
+    # answers 400 (AbstractSCMClient.requires_credential).
     # Self-hosted instances: host → provider slug, e.g. {"git.acme.com": "gitlab"}. A repo
     # URL on a listed host is parsed with that provider's grammar. (JSON in env.)
     scm_instances: dict[str, str] = Field(default_factory=dict)

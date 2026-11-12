@@ -24,7 +24,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .base import SUPPORTED_PROVIDERS, AbstractSCMClient, RepoRef
-from .errors import UnsupportedSCMProviderError
+from .errors import SCMCredentialError, UnsupportedSCMProviderError
 
 if TYPE_CHECKING:
     from ...config import Settings
@@ -36,6 +36,9 @@ _PROVIDER_CLASSES: dict[str, str] = {
     "bitbucket": "breezeai_cog.integrations.scm.bitbucket.BitbucketSCMClient",
     "gitlab": "breezeai_cog.integrations.scm.gitlab.GitLabSCMClient",
     "azure_devops": "breezeai_cog.integrations.scm.azure_devops.AzureDevOpsSCMClient",
+    "bitbucket_server": (
+        "breezeai_cog.integrations.scm.bitbucket_server.BitbucketServerSCMClient"
+    ),
 }
 assert set(_PROVIDER_CLASSES) == SUPPORTED_PROVIDERS
 
@@ -60,6 +63,11 @@ def resolve_api_base_url(ref: RepoRef, settings: Settings) -> str | None:
     mapped = settings.scm_instance_base_url_mapping.get(ref.host)
     if mapped:
         return mapped
+    if ref.provider == "bitbucket_server":
+        # Data Center has no public cloud to fall back to, but it always serves REST
+        # under the same context path as the /scm clone prefix the URL was parsed from,
+        # so the base is derivable rather than guessed.
+        return f"https://{ref.host}{ref.context_path}/rest/api/1.0"
     if ref.provider == "azure_devops" and ref.host.endswith(".visualstudio.com"):
         # Legacy per-organisation host; the public dev.azure.com/{org} API serves it.
         return None
@@ -107,6 +115,12 @@ class SCMClientFactory:
             )
         module_path, class_name = fqn.rsplit(".", 1)
         cls = getattr(importlib.import_module(module_path), class_name)
+        if getattr(cls, "requires_credential", False) and not token:
+            raise SCMCredentialError(
+                f"Provider {key!r} has no anonymous access; supply gitToken on the "
+                "request.",
+                provider=key,
+            )
         logger.debug(
             "Creating SCM client provider=%s class=%s api_base_url=%s",
             key, class_name, api_base_url or "<default>",

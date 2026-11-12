@@ -19,6 +19,11 @@ ingress and is called server-to-server.
 | ``/api/git/pull-request`` | ``repoUrl``, ``pullRequestId``, ``gitToken?`` | ``{number, title, state, baseBranch, headBranch, baseCommitId, headCommitId, url}`` |
 | ``/api/git/pr-comment`` | ``repoUrl``, ``pullRequestId``, ``body``, ``gitToken?`` | ``{id, url}`` — **the one write**; not retried |
 | ``/api/git/parse-pr-url`` | ``prUrl`` | ``{source, repoUrl, prId, prLinks: {repo, diff, comment, decline}}`` — no provider call |
+
+Every route also accepts an optional ``gitProvider``. Only ``"bitbucket_server"`` is acted on:
+Bitbucket Data Center has no public-cloud URL pattern, so without the slug its host must be listed
+in ``BREEZEAI_COG_SCM_INSTANCES``. Any other value is ignored and the provider is taken from the
+URL, as before.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from starlette.concurrency import run_in_threadpool
 from ..config import Settings
 from ..integrations.scm import AbstractSCMClient, RepoRef, SCMError
 from ..integrations.scm.pr_url import parse_pr_url
-from ..integrations.scm.repository import parse_repo_url
+from ..integrations.scm.repository import parse_bitbucket_server_url, parse_repo_url
 from .deps import ServerDeps
 from .errors import ApiError
 from .git import INVALID_REPO_URL_MESSAGE
@@ -53,8 +58,31 @@ def _require(body: dict[str, Any], *fields: str) -> None:
         raise ApiError(f"All fields required: {', '.join(fields)}", 400)
 
 
+def _provider_override(body: dict[str, Any]) -> str:
+    """``body["gitProvider"]`` lower-cased, or ``""``.
+
+    Only ``bitbucket_server`` is honoured. Every other value is ignored rather than
+    rejected: the four cloud providers are identified from the URL and always have been,
+    so accepting a slug there would create a second source of truth that could disagree
+    with the host.
+    """
+    return str(body.get("gitProvider") or "").strip().lower()
+
+
 def _ref(settings: Settings, body: dict[str, Any]) -> RepoRef:
-    ref = parse_repo_url(str(body["repoUrl"]), settings.scm_instances)
+    """``body["repoUrl"]`` → ``RepoRef``.
+
+    Bitbucket Data Center ships no public cloud, so no URL pattern can identify it and a
+    host would otherwise have to be pre-registered in ``BREEZEAI_COG_SCM_INSTANCES``.
+    ``gitProvider: "bitbucket_server"`` on the request says so directly, which is what
+    lets a per-customer instance be analysed without deployment-wide config. Every other
+    provider keeps host detection unchanged.
+    """
+    repo_url = str(body["repoUrl"])
+    if _provider_override(body) == "bitbucket_server":
+        ref = parse_bitbucket_server_url(repo_url)
+    else:
+        ref = parse_repo_url(repo_url, settings.scm_instances)
     if ref is None:
         raise ApiError(INVALID_REPO_URL_MESSAGE, 400)
     return ref
@@ -91,7 +119,9 @@ async def parse_pr_url_route(request: Request) -> dict[str, Any]:
     settings: Settings = request.app.state.settings
     body = await _body(request)
     _require(body, "prUrl")
-    info = parse_pr_url(str(body["prUrl"]), settings)
+    info = parse_pr_url(
+        str(body["prUrl"]), settings, provider=_provider_override(body)
+    )
     if info is None:
         raise ApiError(
             "Invalid pull request URL: expected a supported host and a PR / MR number in the path",

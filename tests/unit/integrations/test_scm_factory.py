@@ -107,3 +107,47 @@ def test_for_repo_threads_everything_through() -> None:
         assert isinstance(client, GitLabSCMClient)
         assert client._http.base_url == "https://git.acme.com/api/v4"
         assert client.clone_url(ref) == "https://oauth2:glpat-global@git.acme.com/grp/proj.git"
+
+
+# ── Bitbucket Data Center ──────────────────────────────────────────────────
+
+_DC_REF = RepoRef(
+    "bitbucket_server", "p3", "kit", host="stash.payroll.co.jp", context_path="/stash"
+)
+
+
+def test_bitbucket_server_without_a_token_is_a_400_before_any_call() -> None:
+    """`requires_credential` is enforced in the factory, so a tokenless request gets one
+    400 naming gitToken instead of a 401 per provider call."""
+    settings = Settings(_env_file=None)
+    with pytest.raises(SCMCredentialError) as info:
+        SCMClientFactory.for_repo(_DC_REF, settings)
+    assert info.value.status_code == 400 and "gitToken" in str(info.value)
+
+
+def test_bitbucket_server_has_no_deployment_wide_token_fallback() -> None:
+    """Every Data Center host is a different customer's instance, so there is no
+    `scm_token_bitbucket_server` for a tokenless request to fall back to."""
+    settings = Settings(_env_file=None)
+    assert not hasattr(settings, "scm_token_bitbucket_server")
+    assert resolve_scm_token("bitbucket_server", None, settings) is None
+    assert resolve_scm_token("bitbucket_server", "abc", settings) == "abc"
+
+
+def test_bitbucket_server_api_base_is_derived_from_the_context_path() -> None:
+    settings = Settings(_env_file=None)
+    assert resolve_api_base_url(_DC_REF, settings) == (
+        "https://stash.payroll.co.jp/stash/rest/api/1.0"
+    )
+
+
+def test_bitbucket_server_api_base_mapping_wins_over_the_derived_one() -> None:
+    settings = Settings(
+        _env_file=None,
+        scm_instance_base_url_mapping={
+            "stash.payroll.co.jp": "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+        },
+    )
+    assert resolve_api_base_url(_DC_REF, settings) == (
+        "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+    )
