@@ -157,6 +157,48 @@ def test_all_changed_files_unreadable_is_a_502() -> None:
     assert info.value.status_code == 502 and "read_api" in str(info.value)
 
 
+def test_incremental_fetches_the_context_files_cross_file_facts_read(recorded_git) -> None:
+    """BREEZEAI-1457: a changed tools file keeps its MCP server proof — the module's build file
+    and the Python module that builds the server get real content, but are not streamed."""
+    tools_py = "from .server import mcp\n\n@mcp.tool\ndef f():\n    pass\n"
+    client = FakeClient(
+        tree=[
+            "pom.xml", "svc/pom.xml", "svc/src/main/java/T.java", "other/pom.xml",
+            "app/server.py", "app/tools.py", "app/util.py",
+        ],
+        changed=["svc/src/main/java/T.java", "app/tools.py"],
+        content={
+            "svc/src/main/java/T.java": "class T {}\n",
+            "app/tools.py": tools_py,
+            "pom.xml": "<project/>",
+            "svc/pom.xml": "<project>mcp</project>",
+            "app/server.py": "mcp = FastMCP('x')\n",
+        },
+    )
+
+    temp_dir, filter_set, _ = git_mod.resolve_git_diff(client, REF, "base", _SHA)
+
+    root = Path(temp_dir)
+    assert (root / "svc/pom.xml").read_text() == "<project>mcp</project>"
+    assert (root / "pom.xml").read_text() == "<project/>"
+    assert (root / "app/server.py").read_text() == "mcp = FastMCP('x')\n"
+    assert (root / "other/pom.xml").read_text() == "" and (root / "app/util.py").read_text() == ""
+    assert filter_set == {"svc/src/main/java/T.java", "app/tools.py"}  # context is not streamed
+    fetched = {c for c in client.calls if c.startswith("content:")}
+    assert "content:other/pom.xml" not in fetched and "content:app/util.py" not in fetched
+
+
+def test_context_paths_are_bounded_and_skip_plain_python() -> None:
+    tree = [f"m{i}/pom.xml" for i in range(80)] + [f"m{i}/A.java" for i in range(80)]
+    changed = {f"m{i}/A.java": "" for i in range(80)}
+    assert len(git_mod.context_paths(changed, tree)) == git_mod._MAX_CONTEXT_FILES
+    tree = ["app/server.py", "app/x.py"]
+    assert git_mod.context_paths({"app/x.py": "from .server import mcp\n"}, tree) == []
+    assert git_mod.context_paths(
+        {"app/x.py": "from app.server import mcp\n@mcp.tool\ndef f(): ...\n"}, tree
+    ) == ["app/server.py"]
+
+
 # --- clone_repo_full ----------------------------------------------------------------
 
 

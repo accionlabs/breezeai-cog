@@ -93,6 +93,59 @@ def clone_repo_full(
     return temp_dir
 
 
+#: Unchanged files whose content cross-file facts read when a file next to them changes
+#: (BREEZEAI-1457). Without them the skeleton holds them empty, and a fact proven there — a
+#: Spring AI MCP server starter in a build file, a FastMCP server built in another module —
+#: vanishes, so the changed file's tools would be dropped. Bounded: at most this many fetches.
+_MAX_CONTEXT_FILES = 50
+_BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts")
+#: ``@x.tool`` in a Python file: a FastMCP tool whose server may be imported.
+_PY_TOOL = re.compile(r"@[ \t]*\w+[ \t]*\.[ \t]*tool\b")
+_PY_FROM_IMPORT = re.compile(r"^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import\b", re.MULTILINE)
+
+
+def _python_module_files(path: str, dots: str, module: str, tree: set[str]) -> list[str]:
+    """Repo files a ``from <dots><module> import …`` in ``path`` may load."""
+    mod = [p for p in module.split(".") if p]
+    if dots:
+        base = path.split("/")[:-1]
+        up = len(dots) - 1
+        if up > len(base):
+            return []
+        stem = "/".join(base[: len(base) - up] + mod)
+        if not stem:
+            return []
+        candidates = [f"{stem}.py", f"{stem}/__init__.py"]
+        return [c for c in candidates if c in tree]
+    if not mod:
+        return []
+    tails = ("/".join(mod) + ".py", "/".join(mod) + "/__init__.py")
+    return sorted(t for t in tree if t in tails or t.endswith(tuple(f"/{x}" for x in tails)))
+
+
+def context_paths(changed: Mapping[str, str], tree: list[str]) -> list[str]:
+    """Unchanged files to fetch with real content for the facts the ``changed`` files (path →
+    content) depend on: build files in a changed Java file's folder or an ancestor, and the
+    modules a changed Python file with an ``@x.tool`` imports from. At most
+    :data:`_MAX_CONTEXT_FILES`, in a stable order."""
+    unchanged = set(tree) - set(changed)
+    out: dict[str, None] = {}
+    for path in sorted(changed):
+        if path.endswith(".java"):
+            parts = path.split("/")[:-1]
+            for n in range(len(parts), -1, -1):
+                folder = "/".join(parts[:n])
+                for name in _BUILD_FILES:
+                    candidate = f"{folder}/{name}" if folder else name
+                    if candidate in unchanged:
+                        out[candidate] = None
+        elif path.endswith(".py") and _PY_TOOL.search(changed[path]):
+            for m in _PY_FROM_IMPORT.finditer(changed[path]):
+                for candidate in _python_module_files(path, m.group(1), m.group(2), unchanged):
+                    out[candidate] = None
+    return list(out)[:_MAX_CONTEXT_FILES]
+
+
 def resolve_git_diff(
     client: AbstractSCMClient,
     ref: RepoRef,
@@ -103,7 +156,8 @@ def resolve_git_diff(
 
     Returns ``(temp_dir, filter_set, deleted)``. The temp dir holds **every** blob path
     at ``incoming`` as an empty file (so the scanner and import resolution see the whole
-    repo shape) with real content only for the changed files.
+    repo shape) with real content for the changed files and the few unchanged files their
+    cross-file facts read (:func:`context_paths`).
     """
     diff = client.compare(ref, current, incoming)
 
@@ -117,12 +171,14 @@ def resolve_git_diff(
         return tempfile.mkdtemp(prefix="ontology-"), set(), []
 
     temp_dir = tempfile.mkdtemp(prefix="ontology-")
-    for sp in client.tree(ref, incoming):
+    tree = list(client.tree(ref, incoming))
+    for sp in tree:
         full = Path(temp_dir) / sp
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text("")
 
     filter_set: set[str] = set()
+    contents: dict[str, str] = {}
     for path in diff.changed:
         try:
             content = client.file_content(ref, path, incoming)
@@ -136,6 +192,17 @@ def resolve_git_diff(
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8")
         filter_set.add(path)
+        contents[path] = content
+
+    # Real content for the unchanged files cross-file facts read; parsed, never streamed (they
+    # are not in `filter_set`). A file that cannot be read stays empty, as before.
+    for path in context_paths(contents, tree):
+        try:
+            content = client.file_content(ref, path, incoming)
+        except SCMAPIError as exc:
+            logger.warning("Skipping unreadable context file %s: %s", path, exc)
+            continue
+        (Path(temp_dir) / path).write_text(content, encoding="utf-8")
 
     if diff.changed and not filter_set:
         # The compare found changed files but none could be read. Failing keeps the

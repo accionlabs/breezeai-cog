@@ -19,4 +19,6 @@ A tool is recorded only when the object it is registered on is **proven an MCP s
 | A computed tool name (`name=NAME`, `Name = Const`) | None | — | The tool exists, but its name is unknown |
 | `@agent.tool` (pydantic-ai), LangChain `StructuredTool`, Spring AI `@Tool` without an MCP server, `.tool(…)` on any other object | None | — | Not an MCP server tool |
 
+**Incremental sync** (`/api/analyze-diff`): unchanged files are materialised empty, so the proof a changed tools file needs from another file is fetched with real content (not streamed): the build files in a changed Java file's folder and its ancestors, and the modules a changed Python file with an `@x.tool` imports from (`from .server import mcp`), at most 50 per sync.
+
 Not covered yet (follow-up): Kotlin, the low-level APIs (Python `Server.list_tools`, TypeScript `setRequestHandler(ListToolsRequestSchema, …)`, the MCP Java SDK's `McpServer.sync(…).tool(…)` / `toolCall(…)` shortcuts), the official Go SDK, `mcp_resource` / `mcp_prompt`, and MCP **client** calls.
