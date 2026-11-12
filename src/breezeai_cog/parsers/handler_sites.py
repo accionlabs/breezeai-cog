@@ -149,7 +149,7 @@ def handler_location(site: _Site | None, own_path: str) -> tuple[int | None, str
 
 
 #: Statements that point at a handler.
-HANDLED = frozenset({"route", "eventbus_consumer", "timer"})
+HANDLED = frozenset({"route", "eventbus_consumer", "timer", "mcp_tool"})
 
 
 def unlocated(s: Statement, located_by_detector: Collection[str] = ()) -> bool:
