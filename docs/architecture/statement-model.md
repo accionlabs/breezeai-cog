@@ -160,6 +160,9 @@ flowchart TD
    in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
    `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call. The name is bound where
    the call is: a class that declares its own `_ctx` as something else is not DynamoDB.
+   A cache's name is not evidence of a product: `cache.get(key)`, `cacheManager.Set(…)` or
+   `HttpRuntime.Cache.Get(…)` is most often in memory, so only a name that says Redis
+   (`redisClient.get`) or a Redis verb (`hset`, `lpush`) gives `redis`.
 3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
    entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
    `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the

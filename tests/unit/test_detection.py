@@ -256,9 +256,8 @@ def test_generic_verb_non_db_receiver_guarded() -> None:
         ("cartItems.remove", "remove"),
     ]:
         assert classify_call(callee, method) is None, callee
-    # An explicit ``cache`` receiver name is tagged redis; a ``…Cache`` suffix is NOT (it is
-    # commonly an in-memory Map — see test_suffix_named_cache_is_not_redis).
-    assert classify_call("cache.delete", "delete") == ("db_method_call", "delete", "redis")
+    # A cache's name is not Redis (see test_cache_name_is_not_redis).
+    assert classify_call("cache.delete", "delete") is None
     assert classify_call("this.userCache.delete", "delete") is None
     # true positives preserved: explicit repo/vendor hint and distinctive methods
     assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
@@ -669,18 +668,12 @@ def test_non_terminal_client_segment_does_not_hijack_es() -> None:
         ("db_method_call", "bulk", "elasticsearch")
 
 
-def test_cache_redis_calls_detected() -> None:
-    # Cache/Redis service .get()/.set()/.del() must be tagged as redis.
-    assert classify_call("this.cacheService.get", "get") == \
-        ("db_method_call", "get", "redis")
-    assert classify_call("this.cacheManager.set", "set") == \
-        ("db_method_call", "set", "redis")
-    assert classify_call("this.cacheService.del", "del") == \
-        ("db_method_call", "del", "redis")
+def test_redis_calls_detected() -> None:
+    # A receiver named after Redis: .get()/.set()/.del() are Redis.
     assert classify_call("this.redisService.get", "get") == \
         ("db_method_call", "get", "redis")
-    assert classify_call("this.cacheService.delete", "delete") == \
-        ("db_method_call", "delete", "redis")
+    assert classify_call("redisClient.set", "set") == ("db_method_call", "set", "redis")
+    assert classify_call("this.redis.del", "del") == ("db_method_call", "del", "redis")
     # plain Map.get / Set.set stay unclassified (no cache receiver)
     assert classify_call("map.get", "get") is None
     assert classify_call("settings.set", "set") is None
@@ -697,11 +690,25 @@ def test_suffix_named_cache_is_not_redis() -> None:
     # a ``…cache`` segment deeper in the chain also stays out (terminal receiver is entries/items)
     assert classify_call("this.responseCache.entries.delete", "delete") is None
     assert classify_call("this.pageCache.items.get", "get") is None
-    # …but explicit cache/redis receiver names still classify.
-    assert classify_call("this.cacheService.get", "get") == \
-        ("db_method_call", "get", "redis")
+    # …but a name that says Redis still classifies.
     assert classify_call("this.userRedis.get", "get") == \
         ("db_method_call", "get", "redis")
+
+
+def test_cache_name_is_not_redis() -> None:
+    # A cache's name does not say where its data lives — in every language, it is most often
+    # in memory: ASP.NET's HttpRuntime / HostingEnvironment cache, a HashMap, a cache service.
+    assert classify_call("HttpRuntime.Cache.Get", "Get", language="csharp") is None
+    assert classify_call("System.Web.Hosting.HostingEnvironment.Cache.Get", "Get",
+                         language="csharp") is None
+    assert classify_call("cacheManager.Set", "Set", language="csharp") is None
+    assert classify_call("cache.Remove", "Remove", language="csharp") is None
+    assert classify_call("cacheManager.Remove", "Remove", language="csharp") is None  # not orm
+    assert classify_call("CacheManager.Remove", "Remove", language="csharp") is None
+    assert classify_call("cache.get", "get", language="groovy") is None
+    assert classify_call("cacheService.get", "get", language="java") is None
+    assert classify_call("this.cacheManager.set", "set", language="typescript") is None
+    assert classify_call("this.cacheService.delete", "delete", language="typescript") is None
 
 
 def test_dataaccess_false_positives() -> None:
@@ -808,9 +815,9 @@ def test_scala_false_positive_gates() -> None:
     from breezeai_cog.parsers.detection.db_queries import match_db
     from breezeai_cog.parsers.detection.api_calls import match_api
 
-    # B1: in-memory Map named cache is not Redis in Scala
+    # B1: a Map named cache is not Redis (in any language)
     assert match_db("cache.get", "get", language="scala") is None
-    assert match_db("cache.get", "get", language="javascript") == "redis"
+    assert match_db("cache.get", "get", language="javascript") is None
 
     # B2: bare aggregate is not MongoDB
     assert match_db("aggregate", "aggregate", language="scala") is None
