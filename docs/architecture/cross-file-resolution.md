@@ -94,7 +94,7 @@ What each index holds:
 
 | Language | Holds | Used for |
 |---|---|---|
-| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`, Spring Security URL rules per module `spring.security-rules`, Vert.x address forwarders (a method or constructor passing a parameter on as an EventBus address) `vertx.address-forwarders`, Vert.x handler factories (a static method whose body is only `return new T(…)`) `vertx.handler-factories`; Java and Groovy: Vert.x router factories mounted as sub-routers `vertx.mounted-factories`) | imports, same-package types, event addresses / route paths |
+| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; Java: class heritage incl. methods; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`, Spring Security URL rules per module `spring.security-rules`, Vert.x address forwarders (a method or constructor passing a parameter on as an EventBus address) `vertx.address-forwarders`, Vert.x handler factories (a static method whose body is only `return new T(…)`) `vertx.handler-factories`; Java and Groovy: Vert.x router factories mounted as sub-routers `vertx.mounted-factories`) | imports, same-package types, event addresses / route paths |
 | Kotlin | fully-qualified class name → file; fully-qualified name → string constant (a top-level `val` / `const val`, or a `val` of an `object` / `companion object`, resolved within its own file; a name with two values is left out) | imports, same-package types, Ktor route paths written with another file's constant |
 | Scala | fully-qualified class name → file; **registered facts** (method declarations `scala.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes and handlers |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
@@ -274,7 +274,8 @@ even if `items` has an in-repo type.
 |---|---|---|---|---|
 | TypeScript / JavaScript | ✓ | ✓ (+ built-in guard) | — | ✓ |
 | C# | ✓ (+ `using static`) | ✓ | ✓ | ✓ |
-| Java, Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
+| Java | ✓ | ✓ | — | ✓ (+ a bare call is `this`) |
+| Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
@@ -303,11 +304,18 @@ decorators/attributes and, where supported, its methods. It is used for two thin
 
 | Use | Languages | Example |
 |---|---|---|
-| **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++ | `calls[].path` → the base class's file |
+| **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++, Java | `calls[].path` → the base class's file |
 | **Inherited route settings** — a controller's route prefix and auth come from its base class | ASP.NET (C#, VB); HotChocolate root types | `[Route("api/[controller]")]` and `[Authorize]` on `BaseApiController` apply to `OrdersController : BaseApiController` |
 
 Walking the chain (`index_common.walk_heritage`) goes nearest ancestor first and stops at a
 cycle, at a parent outside the repo, or at an ambiguous name.
+
+In Java a bare call in a method, `save()`, is `this.save()` when it is not a static import or a
+method of the same file. Java names a parent through its imports, so a parent counts as the
+repository's class only when its import (or, without one, its package) names a class of the
+repository: `extends Base` with `import org.lib.Base` ends the chain even if the repository has a
+`Base` of its own. A class name declared twice in the repository is ambiguous, so nothing
+resolves through it.
 
 ```mermaid
 flowchart LR
@@ -562,7 +570,7 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | Python resolves absolute imports from the repo root only | `src/`-layout projects (package under `src/`) resolve poorly |
 | Ruby `require_relative "x/y"` (no `./`) resolves from the repo root | It should resolve from the file's own folder |
 | TypeScript heritage: any class name used in two files → `None` | Even identical duplicates block inherited-call resolution |
-| Java, Kotlin, Groovy, Scala: no inherited-call resolution | `this.save()` from a base class has no `path` |
+| Kotlin, Groovy, Scala: no inherited-call resolution; Java: class inheritance only (not an interface's `default` method) | `this.save()` from a base class has no `path` |
 | VB: no import resolution and no inherited calls | Few `CALLS` edges in VB repos |
 | The Scala index has a constants field that is never filled; Kotlin's is not followed through star imports or into a constant built from another file's constant | No cross-file constant folding in Scala; those Kotlin paths stay empty |
 | Values from config files / environment | Routes and addresses built from them stay empty |

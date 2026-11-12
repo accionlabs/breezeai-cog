@@ -63,8 +63,9 @@ class JavaParser(BaseParser):
             root, source, path, ctx.repo_root, fqcn
         )
         set_datastore_vendor(external)
-        resolve = make_resolver(  # calls[].path (Tiers 1+2 + receiver-type Phase 2)
-            bindings, defined_names(root, source), path, type_map(root, source)
+        resolve = make_resolver(  # calls[].path (Tiers 1+2, receiver type, inherited methods)
+            bindings, defined_names(root, source), path, type_map(root, source),
+            heritage=idx.class_heritage if isinstance(idx, JavaIndex) else None,
         )
         functions: list[Function] = []
         classes = []

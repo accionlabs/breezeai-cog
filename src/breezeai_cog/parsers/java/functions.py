@@ -74,7 +74,13 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
+) -> list[Call]:
+    """The calls in a method body. ``owner`` is the simple name of the class it is declared in:
+    a call on ``this`` or ``super``, or a bare call (Java's implicit ``this``), may resolve to an
+    inherited method."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -92,7 +98,10 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
                     receiver = node_text(obj, source) if obj is not None else None
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+                        path = resolve(name, receiver, owner)
+                        if path is None and receiver is None and owner is not None:
+                            path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
+                        calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)
@@ -187,7 +196,7 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
