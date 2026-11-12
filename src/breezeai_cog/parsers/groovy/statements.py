@@ -21,12 +21,13 @@ _ANNOTATED_DECL_TYPES = {"field_declaration"}
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
+    """The first declared name. ``def x = 1`` and fields hold it in a ``variable_declarator``; a
+    typed local (``RestTemplate rt = …``, ``int a = 1, b = 2``) has its ``name`` fields directly."""
     if node.type in ("local_variable_declaration", "field_declaration"):
-        decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
-        if decl is not None:
-            name = decl.child_by_field_name("name")
-            if name is not None:
-                return node_text(name, source)
+        decl = next((c for c in node.named_children if c.type == "variable_declarator"), node)
+        name = decl.child_by_field_name("name")
+        if name is not None:
+            return node_text(name, source)
     return None
 
 

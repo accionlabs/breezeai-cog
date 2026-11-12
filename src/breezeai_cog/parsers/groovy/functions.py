@@ -214,6 +214,9 @@ def type_map(root: Node, source: bytes) -> dict[str, str]:
                 for d in c.named_children:
                     if d.type == "variable_declarator":
                         add(d.child_by_field_name("name"), tnode, override=False)
+                # A typed local (``RestTemplate rt = …``) holds its names directly.
+                for name_node in c.children_by_field_name("name"):
+                    add(name_node, tnode, override=False)
             walk(c)
 
     walk(root)

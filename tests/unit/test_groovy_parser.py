@@ -536,3 +536,26 @@ def test_a_call_without_parentheses_passing_a_block_is_not_a_statement(tmp_path)
     assert [s.text for s in rec.statements if s.semanticType == "comment"] == [
         "// Make the output directory."
     ]
+
+
+def test_a_typed_local_is_named_and_typed(tmp_path) -> None:
+    # A typed local holds its names directly on the declaration (no `variable_declarator`): the
+    # statement is named, and the variable's type is known for resolving calls made on it.
+    from breezeai_cog.parsers.groovy.functions import type_map
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = (
+        b"class C {\n"
+        b"  void run() {\n"
+        b"    Mailer m = new Mailer()\n"
+        b"    int a = 1, b = 2\n"
+        b"    def c = 3\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    decls = [s.name for s in rec.statements if s.nodeType == "local_variable_declaration"]
+    assert decls == ["m", "a", "c"]
+    types = type_map(parse_source("groovy", src).root_node, src)
+    assert {k: types[k] for k in ("m", "a", "b")} == {"m": "Mailer", "a": "int", "b": "int"}
+    assert "c" not in types
