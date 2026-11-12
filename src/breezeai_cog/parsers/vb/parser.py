@@ -15,6 +15,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
@@ -99,7 +100,8 @@ class VbParser(BaseParser):
         classes = []
         statements: list[Statement] = []
 
-        declared = [(block, attrs, None) for block, attrs in iter_type_declarations(root)]
+        declared: list[tuple[Node, list[Node], str | None]] = [
+            (block, attrs, None) for block, attrs in iter_type_declarations(root)]
         for level in nested:
             declared += [(block, attrs, level.owner(block))
                          for block, attrs in iter_type_declarations(level.root)]
@@ -123,7 +125,7 @@ class VbParser(BaseParser):
                     )
                 )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -135,3 +137,8 @@ class VbParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors (parsers/additive.py), on every nesting level's tree: a nested
+        # type's calls are only in its level's parse.
+        for tree in trees:
+            run_additive("vb", tree, ctx, record, is_fixture=self.is_fixture_file(path))
+        return record

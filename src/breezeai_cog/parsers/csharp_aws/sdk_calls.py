@@ -43,49 +43,16 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..aspnet_areas import constant_string
-from ..aws_sdk_common import ADDRESS_KEYS, DIRECT_ADDRESS_KEYS, address_name
+from ..aws_sdk_common import (
+    ADDRESS_KEYS, DIRECT_ADDRESS_KEYS, DOTNET_API_SERVICES, DOTNET_CLIENT_TYPES, DOTNET_MESSAGING,
+    DOTNET_NOT_OPERATIONS, DOTNET_POSITIONAL_KEY, address_name,
+)
 from ..csharp.scopes import Classify, TypeScopes, receiver_label
 from ..csharp.statements import typed
 from ..emits import Emit
 from ..treesitter import first_line, node_text
-
-#: Client types → service (the ``framework`` value).
-_CLIENT_TYPES = {
-    "IAmazonS3": "aws-s3", "AmazonS3Client": "aws-s3",
-    "ITransferUtility": "aws-s3", "TransferUtility": "aws-s3",
-    "IAmazonSimpleSystemsManagement": "aws-ssm", "AmazonSimpleSystemsManagementClient": "aws-ssm",
-    "IAmazonCognitoIdentityProvider": "aws-cognito",
-    "AmazonCognitoIdentityProviderClient": "aws-cognito",
-    "IAmazonLambda": "aws-lambda", "AmazonLambdaClient": "aws-lambda",
-    "IAmazonSimpleNotificationService": "aws-sns", "AmazonSimpleNotificationServiceClient": "aws-sns",
-    "IAmazonSQS": "aws-sqs", "AmazonSQSClient": "aws-sqs",
-    "IAmazonEventBridge": "aws-eventbridge", "AmazonEventBridgeClient": "aws-eventbridge",
-    "IAmazonCloudWatchEvents": "aws-eventbridge", "AmazonCloudWatchEventsClient": "aws-eventbridge",
-}
-
-#: Services whose every operation is a request/response call.
-_API_SERVICES = frozenset({"aws-s3", "aws-ssm", "aws-cognito", "aws-lambda"})
-
-#: Messaging operations (sync and ``Async``) → semantic type, per service.
-_MESSAGING: dict[str, dict[str, SemanticType]] = {
-    "aws-sns": {"Publish": "eventbus_publish", "PublishBatch": "eventbus_publish"},
-    "aws-sqs": {"SendMessage": "eventbus_send", "SendMessageBatch": "eventbus_send",
-                "ReceiveMessage": "eventbus_consumer"},
-    "aws-eventbridge": {"PutEvents": "eventbus_publish"},
-}
-
-#: The address the positional overload's first argument stands for
-#: (``PublishAsync(topicArn, message)``, ``SendMessageAsync(queueUrl, body)``).
-_POSITIONAL_KEY = {"aws-sns": "TopicArn", "aws-sqs": "QueueUrl"}
-
-#: Client methods that are not service operations: local signing, lifetime, ``object``.
-_NOT_OPERATIONS = frozenset({
-    "Dispose", "DetermineServiceOperationEndpoint", "GetPreSignedURL", "GetPreSignedURLAsync",
-    "Equals", "GetHashCode", "ToString", "GetType",
-})
 
 #: Declarations a consumer's handler can be: the method (or local function) the receive is in.
 _HANDLERS = ("method_declaration", "local_function_statement", "constructor_declaration")
@@ -116,7 +83,7 @@ def _receiver_and_method(call: Node, source: bytes) -> tuple[Node, str] | None:
     return receiver, node_text(name, source)
 
 
-_CLIENT = typed(_CLIENT_TYPES)
+_CLIENT = typed(DOTNET_CLIENT_TYPES)
 
 
 def _service(receiver: Node, source: bytes, scopes: TypeScopes,
@@ -126,7 +93,7 @@ def _service(receiver: Node, source: bytes, scopes: TypeScopes,
     (``new TransferUtility(s3).UploadAsync(…)``)."""
     if receiver.type == "object_creation_expression":
         typ = receiver.child_by_field_name("type")
-        return _CLIENT_TYPES.get(node_text(typ, source).rsplit(".", 1)[-1]) if typ else None
+        return DOTNET_CLIENT_TYPES.get(node_text(typ, source).rsplit(".", 1)[-1]) if typ else None
     if receiver.type == "parenthesized_expression" and receiver.named_children:
         return _service(receiver.named_children[0], source, scopes, classify)
     return receiver_label(receiver, source, scopes, classify)
@@ -176,7 +143,7 @@ def _address(call: Node, source: bytes, service: str, index: object,
         _local_creation(node_text(first, source), call, source) if first.type == "identifier"
         else None)
     if creation is None:
-        key = _POSITIONAL_KEY.get(service)
+        key = DOTNET_POSITIONAL_KEY.get(service)
         literal = constant_string(first, source, index)
         if key is None or len(values) < positional_min or literal is None:
             return None, None
@@ -219,19 +186,19 @@ def detect_sdk_calls(root: Node, source: bytes, index: object = None) -> list[Em
         if parts is None:
             continue
         receiver, method = parts
-        if method in _NOT_OPERATIONS or not method[:1].isupper():
+        if method in DOTNET_NOT_OPERATIONS or not method[:1].isupper():
             continue
         service = _service(receiver, source, scopes)
         if service is None:
             continue
         fields: dict[str, object]
         fill: dict[str, object] = {}
-        if service in _API_SERVICES:
+        if service in DOTNET_API_SERVICES:
             if method.startswith("End") and method[3:4].isupper():
                 continue  # the APM pattern's completion half; ``BeginX`` is the call
             fields = {"semanticType": "api_call", "framework": service, "endpoint": method}
         else:
-            semantic = _MESSAGING[service].get(_operation(method))
+            semantic = DOTNET_MESSAGING[service].get(_operation(method))
             if semantic is None:
                 continue
             consumer = semantic == "eventbus_consumer"

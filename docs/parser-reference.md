@@ -455,7 +455,7 @@ register_detector(Detector(
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.
-- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `java`, `python`, `scala`, `php`, `go`); `order` must be
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `vb`, `java`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
@@ -467,7 +467,11 @@ register_detector(Detector(
   member's locals and parameters (a local of another type shadows the field) to the type's fields
   and properties, its same-file bases and outer types; `this.x` looks at the type only. The
   shared call classifiers take names, not nodes, so the C# parser sets their `HttpClient` and
-  datastore names for each body it walks (`csharp/statements.py`, `ReceiverNames`).
+  datastore names for each body it walks (`csharp/statements.py`, `ReceiverNames`). For VB,
+  `vb/scopes.py`: `receiver_type` looks a receiver up from the enclosing lambda and member to each
+  enclosing type's fields and properties, case-insensitively; a declaration whose type can't be
+  read hides the name instead of letting it fall through to a field. `iter_calls` also reads a
+  generic call (`x.M(Of T)(…)`), which the grammar misparses, as one call.
 - Add the detector to the inventory in `tests/unit/test_additive.py`.
 
 **Facts from other files.** When the detection needs a fact that lives in *another* file — a

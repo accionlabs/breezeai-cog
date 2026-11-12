@@ -706,7 +706,10 @@ the file:
   │                  52   symfony-http-…   php_symfony/http_calls.py                 │
   │                  53   psr-http-calls   php_psr/http_calls.py                     │
   │                                                                                  │
-  │  Kotlin · Groovy · Ruby · VB · C++ · HCL                                         │
+  │  vb              10   aws-sdk-calls    vb_aws/sdk_calls.py               ✔       │
+  │                  20   graphql-client   vb_graphql_client/…ions.py        ✔       │
+  │                                                                                  │
+  │  Kotlin · Groovy · Ruby · HCL                                                    │
   │   └─ no additive hook yet: shared classifiers only                               │
   └──────────────────────────────────────┬───────────────────────────────────────────┘
                                          │

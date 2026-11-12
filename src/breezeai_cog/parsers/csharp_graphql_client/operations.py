@@ -38,25 +38,12 @@ from ..aspnet_areas import constant_string
 from ..csharp.scopes import TypeScopes, receiver_label
 from ..csharp.statements import typed
 from ..emits import Emit
-from ..graphql.operations import (
-    OPERATION_KINDS, fragment_definitions, operation_request_dto, root_fields,
-)
+from ..graphql.operations import operation_request_dto, root_fields
 from ..graphql.sdl import child_of_type
-from ..treesitter import first_line, node_text, parse_source
+from ..graphql_dotnet_common import CLIENT_TYPES, METHOD_KINDS, REQUEST_TYPES, pick_operation
+from ..treesitter import first_line, node_text
 
-_CLIENT_TYPES = {
-    "GraphQLHttpClient": "graphql", "IGraphQLClient": "graphql",
-    "IGraphQLWebSocketClient": "graphql",
-}
-_CLIENT = typed(_CLIENT_TYPES)
-
-#: Client method → the operation kind it sends when the document can't be read.
-_METHOD_KINDS = {
-    "SendQueryAsync": "query", "SendMutationAsync": "mutation",
-    "CreateSubscriptionStream": "subscription",
-}
-
-_REQUEST_TYPES = frozenset({"GraphQLRequest", "GraphQLHttpRequest"})
+_CLIENT = typed(CLIENT_TYPES)
 
 #: Simple escapes in a regular C# string literal.
 _ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "'": "'", "\\": "\\", "0": ""}
@@ -148,7 +135,7 @@ def _request(call: Node, source: bytes) -> Node | None:
     if creation is None:
         return None
     typ = creation.child_by_field_name("type")
-    if typ is None or node_text(typ, source).rsplit(".", 1)[-1] not in _REQUEST_TYPES:
+    if typ is None or node_text(typ, source).rsplit(".", 1)[-1] not in REQUEST_TYPES:
         return None
     return creation
 
@@ -177,26 +164,6 @@ def _query_and_name(creation: Node, source: bytes) -> tuple[Node | None, Node | 
     return query, name
 
 
-def _operation(document: str, wanted: str | None,
-               timeout: int) -> tuple[Node, str, bytes, dict[str, Node]] | None:
-    """(operation_definition, kind, document bytes, its fragments) — the one named ``wanted``, or
-    the only one."""
-    body = document.encode()
-    gql = parse_source("graphql", body, timeout).root_node
-    ops: list[tuple[Node, str, str | None]] = []
-    for op in _iter(gql, "operation_definition"):
-        ot = child_of_type(op, "operation_type")
-        kind = OPERATION_KINDS.get(node_text(ot, body)) if ot is not None else "query"
-        nm = child_of_type(op, "name")
-        if kind is not None:
-            ops.append((op, kind, node_text(nm, body) if nm is not None else None))
-    if wanted is not None:
-        ops = [o for o in ops if o[2] == wanted]
-    if len(ops) != 1:
-        return None
-    return ops[0][0], ops[0][1], body, fragment_definitions(gql)
-
-
 def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
                                 index: object = None) -> list[Emit]:
     scopes = TypeScopes(root, source)
@@ -205,7 +172,7 @@ def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
     found: list[Emit] = []
     for call in _iter(root, "invocation_expression"):
         parts = _receiver_and_method(call, source)
-        if parts is None or parts[1] not in _METHOD_KINDS or not _is_client(parts[0], source, scopes):
+        if parts is None or parts[1] not in METHOD_KINDS or not _is_client(parts[0], source, scopes):
             continue
         text = first_line(node_text(call, source))[:120]
         resolved = None
@@ -215,9 +182,9 @@ def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
             document = _string(query, source, index) if query is not None else None
             wanted = _string(name, source, index) if name is not None else None
             if document is not None and (name is None or wanted is not None):
-                resolved = _operation(document, wanted, timeout)
+                resolved = pick_operation(document, wanted, timeout)
         if resolved is None:
-            kind = _METHOD_KINDS[parts[1]]
+            kind = METHOD_KINDS[parts[1]]
             found.append(Emit(
                 call, {"semanticType": "api_call", "method": kind.upper(), "framework": "graphql",
                        "routeKind": kind},

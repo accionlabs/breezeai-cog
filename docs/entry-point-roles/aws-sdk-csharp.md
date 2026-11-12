@@ -1,6 +1,6 @@
-# AWS SDK for .NET (C#) — entry-point roles
+# AWS SDK for .NET (C# and VB) — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/csharp_aws/sdk_calls.py` (additive detector) · Addresses: `src/breezeai_cog/parsers/aws_sdk_common.py` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_csharp_aws_sdk_calls.py`
+Parser: `src/breezeai_cog/parsers/csharp_aws/sdk_calls.py` and `src/breezeai_cog/parsers/vb_aws/sdk_calls.py` (additive detectors) · Service tables and addresses: `src/breezeai_cog/parsers/aws_sdk_common.py` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_csharp_aws_sdk_calls.py`, `tests/unit/test_vb_aws_sdk_calls.py`
 
 A call counts only on a name declared as an AWS client type (`IAmazonSQS`, `AmazonSQSClient`,
 `IAmazonSimpleNotificationService`, …): a field, property, parameter, local or `new`, bound as
@@ -12,6 +12,13 @@ A queue, topic or bus is written by name (`…amazonaws.com/123456789012/orders`
 the deploy config's consumers and the senders write it, from a literal or a `const` /
 `static readonly` string (the `csharp.string-constants` fact); anything else leaves `endpoint`
 empty. Mock and fixture files are skipped.
+
+**VB** follows the same table with one SDK service table. A name binds where the call is — the
+enclosing lambda, the member's parameters and every declaration in its body, then each
+enclosing type's fields and properties (`vb/scopes.py`); names are case-insensitive, and a
+declaration whose type can't be read (an untyped lambda parameter, a `For Each` without `As`)
+hides the field rather than guessing. `Me._s3` is the field. The address comes from string
+literals only — a VB `Const` leaves `endpoint` empty.
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
