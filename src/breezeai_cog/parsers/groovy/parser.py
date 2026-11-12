@@ -9,9 +9,8 @@ and top-level *statements* (module-level declarations, bare calls, control flow)
 captured and parented to the file — mirroring the Python/TypeScript parsers.
 
 Groovy is a **best-effort / second-tier** language: the dekobon grammar recovers the
-package/class/method/field/enum skeleton reliably, but degrades expression bodies with
-named-argument commas, parenthesised enum constants, and heavy GString/DSL use to
-*missing* nodes (never wrong). See ``.todo/groovy-grammar-evaluation.md``.
+package/class/method/field/enum skeleton reliably, but some method-body and enum shapes
+still mis-parse (README's Groovy note lists them). See ``.todo/groovy-grammar-evaluation.md``.
 """
 
 from __future__ import annotations

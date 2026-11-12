@@ -3,9 +3,8 @@
 Groovy structurally mirrors Java (package/import/class/method/field/enum), so the
 node sets mirror Java's — but the dekobon grammar names a few nodes differently
 (``for_in_statement``, ``super_interfaces``, ``trait_declaration``, ``closure``).
-Groovy is a **best-effort** language: expression bodies with named-argument commas,
-parenthesised enum constants, and heavy GString/DSL use degrade to *missing* nodes
-(never wrong) — see ``.todo/groovy-grammar-evaluation.md``.
+Groovy is a **best-effort** language: some method-body and enum shapes still mis-parse
+(README's Groovy note lists them) — see ``.todo/groovy-grammar-evaluation.md``.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ CONTROL_FLOW = {
     "try_statement",
     "catch_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
     "finally_clause",
+    "synchronized_statement",
 }
 
 JUMP = {

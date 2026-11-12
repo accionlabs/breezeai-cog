@@ -394,3 +394,68 @@ def test_field_annotations_captured_on_statements(tmp_path) -> None:
     rec = _parse_src(tmp_path, src, capture=True)
     field = next(s for s in rec.statements if s.name == "userService")
     assert [(d.name, d.args) for d in field.decorators] == [("Autowired", [])]
+
+
+def test_synchronized_block_is_control_flow(tmp_path) -> None:
+    # A `synchronized (lock) { … }` block is control flow, as in Java: one statement for the
+    # header with no semanticType. Its body's statements are captured beside it under the
+    # method, as an `if` body's are.
+    src = (
+        b"class Queue {\n"
+        b"  void drain() {\n"
+        b"    synchronized (lock) {\n"
+        b"      pending.clear()\n"
+        b"    }\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    sync = [s for s in rec.statements if s.nodeType == "synchronized_statement"]
+    assert [(s.text, s.semanticType, s.startLine, s.endLine) for s in sync] == [
+        ("synchronized (lock) {", None, 3, 5)
+    ]
+    body = [s for s in rec.statements if s.text == "pending.clear()"]
+    assert [(s.parentId, s.startLine) for s in body] == [(sync[0].parentId, 4)]
+
+
+def test_string_named_method_is_named_without_quotes(tmp_path) -> None:
+    # Spock feature methods are named by a string; the method's name is the text inside the
+    # quotes, whichever quote style declares it.
+    src = (
+        b"class OrderSpec {\n"
+        b'  def "order is created"() { expect: true }\n'
+        b"  def 'order is cancelled'() { expect: true }\n"
+        b'  def plain(String f) { this."order is created"(); this."findBy$f"() }\n'
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src)
+    assert [f.name for f in rec.functions] == [
+        "order is created", "order is cancelled", "plain"
+    ]
+    # A call by the string name resolves to the method in this file; a call whose name is
+    # interpolated is only known at run time, so it is not recorded.
+    plain = next(f for f in rec.functions if f.name == "plain")
+    assert [(c.name, c.path) for c in plain.calls] == [("order is created", "T.groovy")]
+
+
+def test_named_argument_url_is_the_endpoint(tmp_path) -> None:
+    # Groovy collects named arguments into one map, so a `url:` / `uri:` / `path:` entry is the
+    # call's URL wherever it sits. A call with no such key still reads its first positional
+    # argument, and a call with neither has no endpoint.
+    src = (
+        b"class C {\n"
+        b"  def httpClient\n"
+        b'  void a() { httpClient.get(url: "https://x.dev/named", timeout: 30) }\n'
+        b'  void b(String id) { httpClient.post(timeout: 3, uri: "/orders/" + id) }\n'
+        b'  void c() { httpClient.get(timeout: 3, "/positional") }\n'
+        b"  void d() { httpClient.get(timeout: 3) }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    calls = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"]
+    assert calls == [
+        ("GET", "https://x.dev/named"),
+        ("POST", "/orders/{id}"),
+        ("GET", "/positional"),
+        ("GET", None),
+    ]

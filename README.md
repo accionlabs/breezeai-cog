@@ -56,11 +56,19 @@ on for Razor Pages / Blazor (`@page` routes and `@code` methods live in the mark
 SFC `<script>` blocks and JSP pages. Full details: [Template Capture](docs/template-capture.md).
 
 † **Groovy is best-effort / second-tier.** It reliably captures the package / import /
-class / interface / enum / trait / method / field skeleton, but the grammar
-([dekobon-tree-sitter-groovy](https://pypi.org/project/dekobon-tree-sitter-groovy/)) degrades
-on some expression bodies (named-argument commas, parenthesised enum constants) and does not
-parse **nested type declarations** (a `class`/`enum` inside a class body). Degradation is
-always to *missing* nodes, never wrong ones — the parser fabricates nothing it cannot verify.
+class / interface / enum / trait / method / field skeleton, nested types included. The
+grammar ([dekobon-tree-sitter-groovy](https://github.com/dekobon/tree-sitter-groovy), pinned to
+a fork carrying fixes still under upstream review) has known gaps inside method bodies and
+enums. A declaration whose header fails to parse is dropped rather than emitted, but these
+shapes still give a wrong statement record:
+
+| Code | What is captured |
+|---|---|
+| `// note` then `String name = load()` | two statements, `String` and `name = load()`; the `load` call is kept |
+| `Map<String, Object> errors` (generic or array type, no initializer) | one declaration statement that also holds the next line |
+| `(long) (y)` | the cast is read as a call, and the statement can run on into the next line |
+| `A { … },` (an enum constant with a body) | the constants after it are lost; they can surface as a field |
+| `println name`, `log.info "x"` (a call without parentheses) | no call; the line becomes separate statements. Only a bare name with literal or closure arguments (`println "x"`) parses as a call, and cog does not record it yet |
 
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external
