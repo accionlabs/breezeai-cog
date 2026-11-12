@@ -435,3 +435,230 @@ def test_spring_ai_tool_only_in_the_mcp_server_module(analyze_files) -> None:
 def test_python_attribute_named_tools_is_not_scanned(analyze_files) -> None:
     src = "from fastmcp import FastMCP\n\nmcp = FastMCP('x')\nprint(mcp.tools)\n"
     assert _tools(analyze_files({"app/server.py": src})) == {}
+
+
+# ── Review fixes (BREEZEAI-1457) ────────────────────────────────────────────
+
+TS_HEADER = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+const server = new McpServer({ name: "demo", version: "1.0.0" });
+"""
+
+
+def test_typescript_unreadable_schema_is_unknown_not_empty(analyze_files) -> None:
+    src = (
+        TS_HEADER
+        + """
+server.tool("get", "Get one", { id: idSchema }, async ({ id }) => ({ content: [] }));
+server.tool("spread", { ...common, q: z.string() }, async () => ({ content: [] }));
+server.tool("coerce", { n: z.coerce.number() }, async () => ({ content: [] }));
+server.tool("shared", "Shared", sharedShape, async () => ({ content: [] }));
+server.registerTool("reg", { description: "R", inputSchema: MySchema.shape }, async () => ({ content: [] }));
+server.registerTool("json", { inputSchema: { type: "object", properties: { a: { type: "string" } }, required: fields } }, async () => ({ content: [] }));
+server.tool("empty", "Nothing", {}, async () => ({ content: [] }));
+server.tool("none", "No schema", async () => ({ content: [] }));
+server.registerTool("plain", { description: "P" }, async () => ({ content: [] }));
+"""
+    )
+    tools = _tools(analyze_files({"src/server.ts": src}))
+    for name in ("get", "spread", "coerce", "shared", "reg", "json"):
+        assert tools[name].params is None, name
+    assert tools["get"].description == "Get one"
+    for name in ("empty", "none", "plain"):
+        assert tools[name].params == [], name
+
+
+def test_typescript_handler_factory_argument_is_not_the_handler(analyze_files) -> None:
+    files = {
+        "src/client.ts": "export const apiClient = { get() {} };\n",
+        "src/server.ts": TS_HEADER
+        + """import { apiClient } from "./client";
+server.tool("search", "Search", { q: z.string() }, createHandler(apiClient));
+server.tool("wrapped", "W", withRetry(async () => ({ content: [] })));
+""",
+    }
+    tools = _tools(analyze_files(files))
+    search = tools["search"]
+    assert search.handler is None and search.handlerPath is None
+    assert search.handlerLine == 7  # the factory call builds the handler there
+    assert tools["wrapped"].handler is None and tools["wrapped"].handlerLine == 8
+
+
+def test_python_annotated_metadata_and_field_defaults(analyze_files) -> None:
+    src = """
+from typing import Annotated, Literal
+from fastmcp import FastMCP
+from pydantic import Field
+
+mcp = FastMCP("x")
+
+
+@mcp.tool
+def listing(
+    sort: Annotated[Literal["asc", "desc"], "Sort order"],
+    order: Annotated[Literal["asc", "desc"], Field(description="Order")],
+    size: Annotated[int, Field(default=5)],
+    must: int = Field(default=..., description="Must"),
+    also: int = Field(...),
+) -> str:
+    return ""
+"""
+    tools = _tools(analyze_files({"app/server.py": src}))
+    assert _params(tools["listing"]) == [
+        ("sort", 'Literal["asc", "desc"]', True, None, "Sort order"),
+        ("order", 'Literal["asc", "desc"]', True, None, "Order"),
+        ("size", "int", False, "5", None),
+        ("must", "int", True, None, "Must"),
+        ("also", "int", True, None, None),
+    ]
+
+
+def test_python_literal_type_strings_are_not_a_description(analyze_files) -> None:
+    src = (
+        "from typing import Annotated, Literal\nfrom fastmcp import FastMCP\n\nmcp = FastMCP('x')\n\n\n"
+        "@mcp.tool\ndef f(sort: Annotated[Literal['asc', 'desc'], Field(ge=1)]) -> str:\n    return ''\n"
+    )
+    [p] = _tools(analyze_files({"app/server.py": src}))["f"].params or []
+    assert p.description is None
+
+
+POM_BOM_PARENT = """<project>
+  <modules><module>chat</module></modules>
+  <dependencyManagement><dependencies>
+    <dependency><artifactId>spring-ai-starter-mcp-server-webmvc</artifactId></dependency>
+  </dependencies></dependencyManagement>
+  <!-- <dependency><artifactId>spring-ai-starter-mcp-server</artifactId></dependency> -->
+</project>"""
+
+
+def test_spring_ai_bom_entry_is_not_an_mcp_server(analyze_files) -> None:
+    files = {
+        "pom.xml": POM_BOM_PARENT,
+        "chat/pom.xml": "<project><dependencies><dependency><artifactId>spring-ai-starter-model-openai</artifactId></dependency></dependencies></project>",
+        "chat/src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+    }
+    assert _tools(analyze_files(files)) == {}
+
+
+def test_spring_ai_gradle_platform_is_not_an_mcp_server(analyze_files) -> None:
+    gradle = 'dependencies {\n  implementation platform("org.springframework.ai:spring-ai-mcp-server-bom:1.0.0")\n}\n'
+    files = {"build.gradle": gradle, "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}
+    assert _tools(analyze_files(files)) == {}
+
+
+def test_spring_ai_tool_needs_the_spring_import(analyze_files) -> None:
+    other = JAVA_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool;", "import com.acme.Tool;"
+    )
+    files = {"pom.xml": POM_MCP, "src/main/java/demo/WeatherTools.java": other}
+    assert _tools(analyze_files(files)) == {}
+    fqn = (
+        "package demo;\nimport org.springframework.ai.chat.model.ToolContext;\n"
+        'public class T {\n  @org.springframework.ai.tool.annotation.Tool(description = "D")\n'
+        '  public String now() { return ""; }\n}\n'
+    )
+    files = {"pom.xml": POM_MCP, "src/main/java/demo/T.java": fqn}
+    assert set(_tools(analyze_files(files))) == {"now"}
+
+
+JAVA_SDK = '''
+package demo;
+
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class Tools {
+    private static final String SCHEMA = "{}";
+
+    McpServerFeatures.SyncToolSpecification calc() {
+        return new McpServerFeatures.SyncToolSpecification(
+            new McpSchema.Tool("calc", "Calculator", """
+                {"type": "object", "properties": {"a": {"type": "number", "description": "First"},
+                 "b": {"type": "number"}}, "required": ["a"]}
+                """),
+            (exchange, args) -> null);
+    }
+
+    McpServerFeatures.AsyncToolSpecification echo() {
+        var tool = McpSchema.Tool.builder().name("echo").description("Echo")
+            .inputSchema(mapper, "{\\"type\\":\\"object\\",\\"properties\\":{\\"msg\\":{\\"type\\":\\"string\\"}}}").build();
+        return McpServerFeatures.AsyncToolSpecification.builder().tool(tool).callHandler(this::doEcho).build();
+    }
+
+    McpServerFeatures.SyncToolSpecification dyn() {
+        return new McpServerFeatures.SyncToolSpecification(new McpSchema.Tool("dyn", "Dynamic", SCHEMA), Tools::run);
+    }
+
+    McpServerFeatures.SyncToolSpecification computed(String n) {
+        return new McpServerFeatures.SyncToolSpecification(new McpSchema.Tool(n, "x", SCHEMA), Tools::run);
+    }
+
+    Object doEcho(Object exchange, Object req) { return null; }
+    static Object run(Object exchange, Object args) { return null; }
+}
+'''
+
+
+def test_mcp_java_sdk_tool_specifications(analyze_files) -> None:
+    tools = _tools(analyze_files({"src/main/java/demo/Tools.java": JAVA_SDK}))
+    assert set(tools) == {"calc", "echo", "dyn"}  # a computed name is not guessed
+    calc = tools["calc"]
+    assert (calc.framework, calc.description) == ("mcp-java-sdk", "Calculator")
+    assert calc.handler is None and calc.handlerLine == 16  # the lambda's line
+    assert _params(calc) == [
+        ("a", "number", True, None, "First"),
+        ("b", "number", False, None, None),
+    ]
+    echo = tools["echo"]
+    assert (echo.description, echo.handler, echo.handlerLine) == ("Echo", "doEcho", 33)
+    assert _params(echo) == [("msg", "string", False, None, None)]
+    dyn = tools["dyn"]
+    assert dyn.params is None and (dyn.handler, dyn.handlerLine) == ("run", 34)
+
+
+def test_mcp_java_sdk_needs_the_sdk(analyze_files) -> None:
+    src = JAVA_SDK.replace("io.modelcontextprotocol", "com.acme")
+    assert _tools(analyze_files({"src/main/java/demo/Tools.java": src})) == {}
+
+
+def test_go_typed_tool_handler_is_looked_through(analyze_files) -> None:
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddTool(mcp.NewTool("typed"), mcp.NewTypedToolHandler(typedHandler))
+    s.AddTool(mcp.NewTool("other"), server.NewTypedToolHandler(typedHandler))
+}
+
+func typedHandler(ctx context.Context, r mcp.CallToolRequest, args Args) (*mcp.CallToolResult, error) {
+    return nil, nil
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    for name in ("typed", "other"):
+        assert (tools[name].handler, tools[name].handlerLine) == ("typedHandler", 15), name
+
+
+def test_go_options_that_cannot_be_read_leave_params_unknown(analyze_files) -> None:
+    src = """
+package main
+
+import "github.com/mark3labs/mcp-go/mcp"
+
+func reg(s *Server) {
+    s.AddTool(mcp.NewTool("helper", mcp.WithString("q"), commonOpts()), h)
+    s.AddTool(mcp.NewTool("raw", mcp.WithRawInputSchema(schema)), h)
+    s.AddTool(mcp.NewTool("known", mcp.WithString("q"), mcp.WithReadOnlyHintAnnotation(true)), h)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert tools["helper"].params is None and tools["raw"].params is None
+    assert _params(tools["known"]) == [("q", "string", False, None, None)]

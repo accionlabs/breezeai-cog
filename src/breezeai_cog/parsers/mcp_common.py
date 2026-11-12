@@ -59,7 +59,7 @@ def tool_emit(
     handler: str | None,
     handler_line: int | None,
     description: str | None,
-    params: list[ToolParam],
+    params: list[ToolParam] | None,
     parent: str | None = None,
     node_type: str | None = "synthetic",
     extra: dict[str, Any] | None = None,

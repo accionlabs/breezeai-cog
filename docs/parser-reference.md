@@ -558,6 +558,24 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   secret-named `key = value` / `key: value` pairs of any case inside fenced code blocks; and
   secret-named front-matter values, including indented and block-scalar values.
 
+### MCP tool detectors (`parsers/<lang>_mcp/`)
+A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,
+`endpoint` = the tool name), recorded by additive detectors under the
+[entry-point contract](architecture/entry-points.md); the per-construct rules are in
+[`entry-point-roles/mcp.md`](entry-point-roles/mcp.md). The shared fields (`description`,
+`params` = `[{name, type, required, default, description}]`) are built by
+`parsers/mcp_common.py`. `params` is `[]` only for a tool with no (or an empty) schema; a schema
+that cannot be read whole is `None`.
+
+| Detector | Language | `framework` | Server proof |
+|---|---|---|---|
+| `python_mcp` (+ fact `mcp.servers`) | Python | `fastmcp`, `mcp-python` | `@<server>.tool` on a name built with `FastMCP(…)`, typed `FastMCP`, or imported from where it is built |
+| `typescript_mcp` | TypeScript / JavaScript | `mcp-sdk-ts` | `.tool(…)` / `.registerTool(…)` on `new McpServer(…)` or a parameter typed `McpServer` |
+| `java_mcp` (+ fact `spring-ai.mcp-server`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
+| `java_mcp` | Java | `mcp-java-sdk` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
+| `csharp_mcp` | C# | `mcp-csharp` | `[McpServerTool]` |
+| `go_mcp` | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` that registers it |
+
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
 highest-`priority` parser whose `claims(path, source)` is True; the base language parser

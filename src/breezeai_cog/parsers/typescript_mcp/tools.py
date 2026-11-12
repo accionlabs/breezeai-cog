@@ -16,8 +16,14 @@
   are zod chains, so an annotations object (``{ readOnlyHint: true }``) is never read as params.
 * ``registerTool(name, { description, inputSchema }, callback)`` — ``inputSchema`` a zod raw
   shape, ``z.object({…})``, or a JSON-schema literal (``properties`` / ``required``).
+* ``params`` — ``[]`` only for no schema or an empty shape ``{}``; a schema that cannot be read
+  whole (a variable, ``{ id: idSchema }``, a spread, ``MySchema.shape``) → ``None`` (unknown),
+  never a partial list.
 * ``handler`` — a named callback (its line when declared in this file); an inline callback has
-  no name, only its ``handlerLine``.
+  no name, only its ``handlerLine``. A wrapper call is looked into only for a function literal,
+  or a function declared in this file passed as its only argument
+  (``withErrors(namedHandler)``); any other wrapper (``createHandler(apiClient)``) gives no
+  ``handler``, only the wrapper's line.
 * A non-literal tool name → no record.
 """
 
@@ -38,6 +44,11 @@ _CALLBACKS = (
     "function",
     "identifier",
     "member_expression",
+)
+_FUNCTION_LITERALS = ("arrow_function", "function_expression", "function")
+#: Keys of the MCP tool-annotations object (``tool(name, shape, annotations, cb)``).
+_ANNOTATION_KEYS = frozenset(
+    {"title", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
 )
 _MAX_DEFAULT = 200
 
@@ -191,6 +202,7 @@ def _zod_shape(obj: Node, source: bytes, zod: set[str]) -> list[ToolParam] | Non
 
 
 def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] | None:
+    """Params of an ``inputSchema`` value, or None when it cannot be read whole."""
     shape = _zod_shape(node, source, zod)
     if shape is not None:
         return shape
@@ -200,14 +212,17 @@ def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] |
     if node.type == "object":  # JSON schema literal
         pairs = _pairs(node, source)
         props = pairs.get("properties")
-        if props is None or props.type != "object":
+        if props is None or props.type != "object" or not _literal_object(props, source):
             return None
         req = pairs.get("required")
-        required = (
-            {(_string(v, source) or "") for v in req.named_children}
-            if req is not None and req.type == "array"
-            else set()
-        )
+        required: set[str] = set()
+        if req is not None:
+            if req.type != "array":
+                return None  # `required: fields` — which ones is unknown
+            names = [_string(v, source) for v in req.named_children]
+            if any(n is None for n in names):
+                return None
+            required = {n for n in names if n is not None}
         out = []
         for name, spec in _pairs(props, source).items():
             fields = _pairs(spec, source) if spec.type == "object" else {}
@@ -223,21 +238,51 @@ def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] |
     return None
 
 
-def _unwrap(cb: Node) -> Node | None:
-    """A callback, or a wrapper call around one (``withErrors(async (a) => …)``) → the innermost
-    callback argument; None when there is none."""
+def _literal_object(obj: Node, source: bytes) -> bool:
+    """True when every member of the object literal is a ``key: value`` pair (no spread)."""
+    return len(_pairs(obj, source)) == len([c for c in obj.named_children if c.type != "comment"])
+
+
+def _annotations(node: Node, source: bytes) -> bool:
+    """True for a tool-annotations object literal (``{ readOnlyHint: true }``)."""
+    if node.type != "object" or not _literal_object(node, source):
+        return False
+    keys = set(_pairs(node, source))
+    return bool(keys) and keys <= _ANNOTATION_KEYS
+
+
+def _tool_params(middle: list[Node], source: bytes, zod: set[str]) -> list[ToolParam] | None:
+    """Params of ``tool(name, [description], [shape], [annotations], cb)`` from the arguments
+    between the description and the callback: ``[]`` with no shape, the shape's params when it
+    reads whole, else None (BREEZEAI-1457)."""
+    if not middle or (len(middle) == 1 and _annotations(middle[0], source)):
+        return []
+    return _zod_shape(middle[0], source, zod)
+
+
+def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
+    """The node naming the handler: the callback itself, or the function inside a wrapper call
+    (``withErrors(async (a) => …)``). A wrapper's argument is taken only when it is a function
+    literal, or a function declared in this file passed alone (``withErrors(namedHandler)``);
+    otherwise (``createHandler(apiClient)``) the wrapper call is returned: the handler is built
+    there and has no name (BREEZEAI-1457)."""
     for _ in range(4):
         if cb.type != "call_expression":
-            return cb if cb.type in _CALLBACKS else None
-        args = cb.child_by_field_name("arguments")
-        inner = [a for a in (args.named_children if args else []) if a.type in _CALLBACKS]
-        if not inner:
-            return None
-        cb = next(
-            (a for a in inner if a.type != "identifier" and a.type != "member_expression"),
-            inner[-1],
-        )
-    return None
+            return cb
+        args_node = cb.child_by_field_name("arguments")
+        args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]
+        literal = next((a for a in args if a.type in _FUNCTION_LITERALS), None)
+        if literal is not None:
+            return literal
+        if len(args) != 1:
+            return cb
+        (arg,) = args
+        if arg.type == "identifier" and node_text(arg, source) in functions:
+            return arg
+        if arg.type != "call_expression":
+            return cb
+        cb = arg
+    return cb
 
 
 def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | None, int | None]:
@@ -271,14 +316,14 @@ def _detect(dc: DetectContext) -> Detection | None:
             continue
         args_node = call.child_by_field_name("arguments")
         args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]
-        callback = _unwrap(args[-1]) if len(args) >= 2 else None
-        if callback is None:
+        if len(args) < 2 or args[-1].type not in (*_CALLBACKS, "call_expression"):
             continue
+        callback = _unwrap(args[-1], source, functions)
         name = _string(args[0], source)
         if not name:
             continue
         description: str | None = None
-        params: list[ToolParam] = []
+        params: list[ToolParam] | None = []
         middle = args[1:-1]
         if method == "registerTool":
             if not middle or middle[0].type != "object":
@@ -286,15 +331,15 @@ def _detect(dc: DetectContext) -> Detection | None:
             config = _pairs(middle[0], source)
             description = _string(config.get("description"), source)
             schema = config.get("inputSchema")
-            params = (_input_schema(schema, source, zod) or []) if schema is not None else []
+            if schema is not None:
+                params = _input_schema(schema, source, zod)
+            elif not _literal_object(middle[0], source):
+                params = None  # `{ ...base }` may carry the schema
         else:
             if middle and middle[0].type in ("string", "template_string"):
                 description = _string(middle[0], source)
                 middle = middle[1:]
-            shape = next(
-                (s for s in (_zod_shape(m, source, zod) for m in middle) if s is not None), None
-            )
-            params = shape or []
+            params = _tool_params(middle, source, zod)
         handler, handler_line = _handler(callback, source, functions)
         found.append(
             tool_emit(

@@ -173,15 +173,42 @@ def _field_call(node: Node | None, source: bytes) -> Node | None:
     return node if callee == "Field" or callee.endswith(".Field") else None
 
 
-def _annotated_description(type_node: Node, source: bytes) -> str | None:
-    if not node_text(type_node, source).lstrip().startswith("Annotated["):
-        return None
-    for n in _walk(type_node):
-        field = _field_call(n, source)
+def _annotated_metadata(type_node: Node, source: bytes) -> list[Node]:
+    """The metadata arguments of ``Annotated[T, m1, m2]`` → ``[m1, m2]`` (top level only: a
+    string inside ``T``, as in ``Literal["asc", "desc"]``, is not metadata); ``[]`` for any
+    other type."""
+    generic = type_node.named_children[0] if type_node.named_children else None
+    if generic is None or generic.type != "generic_type" or not generic.named_children:
+        return []
+    if node_text(generic.named_children[0], source).rsplit(".", 1)[-1] != "Annotated":
+        return []
+    params = next((c for c in generic.named_children if c.type == "type_parameter"), None)
+    args = [c for c in (params.named_children if params is not None else []) if c.type != "comment"]
+    return [a.named_children[0] if a.type == "type" and a.named_children else a for a in args[1:]]
+
+
+def _annotated_description(metadata: list[Node], source: bytes) -> str | None:
+    """``Annotated[T, Field(description=…)]`` or ``Annotated[T, "…"]`` → the description."""
+    for m in metadata:
+        field = _field_call(m, source)
         if field is not None:
-            return _literal(_kwarg(field, "description", source), source)
-    strings = [n for n in _walk(type_node) if n.type == "string"]
-    return _literal(strings[0], source) if strings else None
+            text = _literal(_kwarg(field, "description", source), source)
+            if text:
+                return text
+    return next((t for t in (_literal(m, source) for m in metadata) if t), None)
+
+
+def _field_default(field: Node, source: bytes) -> tuple[bool, Node | None]:
+    """``Field(…)`` → ``(has_default, default node)``. ``Field(...)`` / ``Field(default=...)``
+    mark the field required (BREEZEAI-1457); ``default_factory=`` gives a default with no
+    literal value."""
+    given = _kwarg(field, "default", source)
+    if given is None:
+        pos = _positional(field)
+        given = pos[0] if pos else None
+    if given is not None and given.type != "ellipsis" and node_text(given, source) != "...":
+        return True, given
+    return _kwarg(field, "default_factory", source) is not None, None
 
 
 def _short(node: Node, source: bytes) -> str:
@@ -212,17 +239,20 @@ def _params(fn: Node, source: bytes) -> list[ToolParam]:
         base = _split_annotated(type_text) if type_text else None
         if pname in _SKIPPED_PARAMS or (base and base.split(".")[-1].split("[")[0] == "Context"):
             continue
-        description = _annotated_description(type_node, source) if type_node is not None else None
+        metadata = _annotated_metadata(type_node, source) if type_node is not None else []
+        description = _annotated_description(metadata, source)
         default: str | None = None
         required = value is None
-        field = _field_call(value, source)
+        # `= Field(…)` decides the default; without `= value`, a `Field(…)` in `Annotated`
+        # does (`x: Annotated[int, Field(default=5)]` is optional, BREEZEAI-1457).
+        field = _field_call(value, source) if value is not None else None
+        if value is None:
+            field = next((f for f in (_field_call(m, source) for m in metadata) if f), None)
         if field is not None:
-            description = _literal(_kwarg(field, "description", source), source) or description
-            given = _kwarg(field, "default", source)
-            pos = _positional(field)
-            if given is None and pos and node_text(pos[0], source) != "...":
-                given = pos[0]
-            required = given is None and _kwarg(field, "default_factory", source) is None
+            if value is not None:
+                description = _literal(_kwarg(field, "description", source), source) or description
+            has_default, given = _field_default(field, source)
+            required = not has_default
             default = _short(given, source) if given is not None else None
         elif value is not None:
             default = _short(value, source)

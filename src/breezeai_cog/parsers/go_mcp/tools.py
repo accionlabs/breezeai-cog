@@ -15,6 +15,7 @@
   / ``WithInteger``, with ``Required()``, ``Description(…)`` and ``Default*(…)``.
 * ``handler`` — the second argument of the ``AddTool`` call that registers the tool (inline, or
   through the variable it was assigned to); a function literal gives only its line.
+  ``mcp.NewTypedToolHandler(fn)`` (or ``server.``) is looked through to ``fn``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,9 @@ from ..treesitter import node_text
 
 FRAMEWORK = "mcp-go"
 _PACKAGE = "github.com/mark3labs/mcp-go/mcp"
+_SERVER_PACKAGE = "github.com/mark3labs/mcp-go/server"
+#: Wrappers that only adapt a typed handler's signature: the handler is their argument.
+_HANDLER_WRAPPERS = frozenset({"NewTypedToolHandler"})
 _PARAM_TYPES = {
     "WithString": "string",
     "WithNumber": "number",
@@ -37,6 +41,8 @@ _PARAM_TYPES = {
     "WithObject": "object",
     "WithInteger": "integer",
 }
+#: ``NewTool`` options that set the input schema wholesale.
+_SCHEMA_OPTIONS = frozenset({"WithInputSchema", "WithRawInputSchema"})
 _MAX_DEFAULT = 200
 
 
@@ -59,18 +65,26 @@ def _string(node: Node | None, source: bytes) -> str | None:
     return None
 
 
-def _package_names(root: Node, source: bytes) -> set[str]:
-    """Local names of the mcp-go ``mcp`` package (``mcp``, or an import alias)."""
+def _package_names(root: Node, source: bytes, package: str = _PACKAGE) -> set[str]:
+    """Local names of an mcp-go package (``mcp`` / ``server``, or an import alias)."""
     out: set[str] = set()
     for spec in _walk(root):
         if spec.type != "import_spec":
             continue
         path = _string(spec.child_by_field_name("path"), source)
-        if path != _PACKAGE:
+        if path != package:
             continue
         alias = spec.child_by_field_name("name")
-        out.add(node_text(alias, source) if alias is not None else "mcp")
+        out.add(node_text(alias, source) if alias is not None else package.rsplit("/", 1)[-1])
     return out
+
+
+def _unwrap(handler: Node | None, source: bytes, pkgs: set[str]) -> Node | None:
+    """``mcp.NewTypedToolHandler(fn)`` → ``fn`` (BREEZEAI-1457); any other node as is."""
+    call = _pkg_call(handler, source, pkgs) if handler is not None else None
+    if call is not None and call[0] in _HANDLER_WRAPPERS and len(call[1]) == 1:
+        return call[1][0]
+    return handler
 
 
 def _pkg_call(node: Node, source: bytes, pkgs: set[str]) -> tuple[str, list[Node]] | None:
@@ -90,14 +104,21 @@ def _pkg_call(node: Node, source: bytes, pkgs: set[str]) -> tuple[str, list[Node
 
 def _params(
     options: list[Node], source: bytes, pkgs: set[str]
-) -> tuple[str | None, list[ToolParam]]:
+) -> tuple[str | None, list[ToolParam] | None]:
+    """``(description, params)`` from ``NewTool``'s options. An option that is not an ``mcp``
+    call (a helper, ``opts...``) or sets a raw schema may add params: params unknown (None),
+    never a partial list (BREEZEAI-1457)."""
     description: str | None = None
     out: list[ToolParam] = []
+    unknown = False
     for opt in options:
         call = _pkg_call(opt, source, pkgs)
         if call is None:
+            unknown = True
             continue
         name, args = call
+        if name in _SCHEMA_OPTIONS:
+            unknown = True
         if name == "WithDescription" and args:
             description = _string(args[0], source)
         elif name in _PARAM_TYPES and args:
@@ -121,7 +142,7 @@ def _params(
                     pname, _PARAM_TYPES[name], required=required, default=default, description=pdesc
                 )
             )
-    return description, out
+    return description, None if unknown else out
 
 
 _SCOPES = ("function_declaration", "method_declaration", "func_literal")
@@ -186,6 +207,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 if rv is not None and ln.type == "identifier" and rv.type == "call_expression":
                     assigned[rv.start_byte] = node_text(ln, source)
     functions = {f.name: f.startLine for f in dc.record.functions}
+    wrapper_pkgs = pkgs | _package_names(dc.root, source, _SERVER_PACKAGE)
     root_span = (dc.root.start_byte, dc.root.end_byte)
     found: list[Emit] = []
     for n in nodes:
@@ -208,6 +230,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             else:
                 adds = by_var.get((scope, var), [])
             h = next((node for at, node in adds if at > n.start_byte), None)
+        h = _unwrap(h, source, wrapper_pkgs)
         handler, handler_line = None, None
         if h is not None and h.type == "identifier":
             handler = node_text(h, source)
