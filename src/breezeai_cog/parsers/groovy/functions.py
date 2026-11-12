@@ -19,7 +19,7 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import MEMBER_ACCESS, extract_statements
 
 _VISIBILITY = ("public", "private", "protected")
 
@@ -110,21 +110,24 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _callee(call: Node, source: bytes) -> tuple[str, str | None]:
-    """(method_name, receiver) for a ``method_invocation``. ``function`` is a bare
-    ``identifier`` (receiver ``None``) or a ``field_access`` (``obj.method``)."""
+def _callee(call: Node, source: bytes) -> tuple[str, str | None, bool]:
+    """(method_name, receiver, resolvable) for a ``method_invocation``. ``function`` is a bare
+    ``identifier`` (receiver ``None``) or a member access: ``obj.method``, ``obj?.method`` or
+    ``list*.method``. A spread call runs the method on each element, so the receiver's own type
+    says nothing about it: it is not resolvable."""
     fn = call.child_by_field_name("function")
     if fn is None:
-        return "", None
-    if fn.type == "field_access":
-        obj = fn.child_by_field_name("object")
-        field = fn.child_by_field_name("field")
-        if field is not None and any(c.type in _INTERPOLATIONS for c in field.named_children):
-            return "", None  # ``this."find$field"()`` — the method is only known at run time
-        method = name_text(field, source) if field is not None else ""
+        return "", None, False
+    fields = MEMBER_ACCESS.get(fn.type)
+    if fields is not None:
+        obj = fn.child_by_field_name(fields[0])
+        member = fn.child_by_field_name(fields[1])
+        if member is not None and any(c.type in _INTERPOLATIONS for c in member.named_children):
+            return "", None, False  # ``this."find$field"()`` — only known at run time
+        method = name_text(member, source) if member is not None else ""
         receiver = node_text(obj, source) if obj is not None else None
-        return method, receiver
-    return node_text(fn, source), None
+        return method, receiver, fn.type != "spread_dot_expression"
+    return node_text(fn, source), None, True
 
 
 def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
@@ -138,10 +141,11 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
         # the nearest named enclosing function (mirrors Java lambda handling).
         for child in node.named_children:
             if child.type == "method_invocation":
-                name, receiver = _callee(child, source)
+                name, receiver, resolvable = _callee(child, source)
                 if name and name not in seen:
                     seen.add(name)
-                    calls.append(Call(name=name, path=resolve(name, receiver)))
+                    path = resolve(name, receiver) if resolvable else None
+                    calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)

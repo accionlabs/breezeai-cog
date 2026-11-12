@@ -480,3 +480,22 @@ def test_collection_methods_with_a_closure_are_not_data_access(tmp_path) -> None
     db = [(s.name, s.method, s.dataAccessHint) for s in rec.statements
           if s.semanticType == "db_method_call"]
     assert db == [("r", "findAll", "orm")]
+
+
+def test_safe_navigation_and_spread_calls_are_named_by_their_method(tmp_path) -> None:
+    # `a?.m()` and `list*.m()` call `m`; the operator is not part of the name. A spread call
+    # runs on each element, so the list's own type cannot resolve it.
+    src = (
+        b"class C {\n"
+        b"  void run(List items) {\n"
+        b"    helper?.save(1)\n"
+        b"    items*.helper()\n"
+        b"  }\n"
+        b"  void save(int x) { }\n"
+        b"  void helper() { }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src)
+    run = next(f for f in rec.functions if f.name == "run")
+    assert [c.name for c in run.calls] == ["save", "helper"]
+    assert next(c for c in run.calls if c.name == "helper").path is None

@@ -54,7 +54,7 @@ def _named_url_argument(arg_nodes: list[Node], source: bytes) -> Node | None:
 
 # A member access: ``a.b``, ``a?.b`` (safe navigation) or ``a*.b`` (spread), as (object field,
 # member field).
-_MEMBER_ACCESS = {
+MEMBER_ACCESS = {
     "field_access": ("object", "field"),
     "safe_navigation_expression": ("object", "property"),
     "spread_dot_expression": ("object", "property"),
@@ -66,7 +66,7 @@ def _receiver_text(node: Node, source: bytes) -> str:
     chain: ``ids.collect { it.repo }.findAll`` reads ``ids.collect.findAll``, so a name inside
     a closure never looks like the receiver. Each member access is joined with ``.``; a call
     keeps its argument list (``split(';')``)."""
-    fields = _MEMBER_ACCESS.get(node.type)
+    fields = MEMBER_ACCESS.get(node.type)
     if fields is not None:
         obj = node.child_by_field_name(fields[0])
         member = node.child_by_field_name(fields[1])
