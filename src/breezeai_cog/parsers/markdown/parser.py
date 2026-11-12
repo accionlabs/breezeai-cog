@@ -47,13 +47,36 @@ _DATA_URI = re.compile(r"data:([a-zA-Z0-9.+/\-]+);base64,[A-Za-z0-9+/=]{200,}")
 #: Env-style assignment of a variable (``export DB_PASSWORD=…``); masked when the name is
 #: secret-like (:data:`_SECRET_NAME`). Upper-case names only, so prose ("the password = …") is
 #: untouched. The name is matched possessively and checked in code, so a long line cannot
-#: backtrack quadratically.
+#: backtrack quadratically. A quoted value may hold spaces (``DB_PASSWORD="two words"``).
 _ENV_ASSIGN = re.compile(
-    r"(?m)^([ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]*+[ \t]*[=:][ \t]*)([\"']?)[^\s\"']+\2"
+    r"(?m)^([ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*+)[ \t]*[=:][ \t]*)"
+    r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"']+)"
 )
-_SECRET_NAME = re.compile(r"PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|PRIVATE_KEY")
+#: Secret-like env names. ``PASS`` only as a whole ``_``-separated word (``DB_PASS``,
+#: ``MYSQL_ROOT_PASS``), not inside ``PASSPORT`` / ``BYPASS`` (BREEZEAI-1457).
+_SECRET_NAME = re.compile(
+    r"PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|PRIVATE_KEY|CREDENTIAL|ACCESS_KEY|CLIENT_KEY"
+    r"|(?<![A-Z0-9])PASS(?![A-Z0-9])"
+)
+#: A ``key = value`` / ``key: value`` / ``"key": "value"`` pair inside a fenced code block, any
+#: case (``password: x``, ``spring.datasource.password=x``, ``"apiKey": "x"``); masked when the
+#: key holds a credential token (:func:`~.frontmatter._secret_key`, the structured-JSON rule).
+#: Starts only at the start of a key-character run, matched possessively: linear time.
+_CODE_ASSIGN = re.compile(
+    r"(?<![\w.\-])([\"']?)([A-Za-z_][\w.\-]*+)\1([ \t]*[=:][ \t]*)"
+    r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;)}\]]+)"
+)
+#: Values after a secret-named key that are a type or a placeholder, not a secret
+#: (``password: string;`` in a TypeScript interface).
+_TYPE_VALUES = frozenset(
+    {"string", "str", "String", "number", "int", "bool", "boolean", "any", "None", "null"}
+)
+#: A token *count* (``MAX_TOKENS=4096``, ``max_tokens: 1024``) is a number, not a secret.
+_TOKEN_COUNT = re.compile(r"tokens|max_?token|token_?(?:limit|count|budget)", re.IGNORECASE)
 #: A ``key:`` line in YAML front matter (optionally a list item).
 _FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
+#: Folders whose ``plugin.json`` marks a plugin root (Claude Code, Cursor).
+_PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
 
 
 class MarkdownParser(BaseParser):
@@ -63,14 +86,17 @@ class MarkdownParser(BaseParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         size = len(ctx.source)
-        text = ctx.source.decode("utf-8", "replace").lstrip("﻿")
+        text = _decode(ctx.source)
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         lines = text.split("\n")
         rst = ctx.path.endswith(".rst")
 
         fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
         front_matter, fm_ok = load_front_matter(fm_text)
-        headings = _rst_headings(lines) if rst else _atx_headings(lines, body_start)
+        # A leading ``---`` block that is not YAML at all (a thematic break around prose) is
+        # body: its headings are outline (BREEZEAI-1457). A broken YAML header stays skipped.
+        outline_start = body_start if fm_ok or _looks_like_yaml(lines, body_start) else 0
+        headings = _rst_headings(lines) if rst else _atx_headings(lines, outline_start)
         title = _redacted(string_field(front_matter, "title")) or next(
             (h["text"] for h in headings if h["level"] == 1), None
         )
@@ -130,16 +156,71 @@ class MarkdownParser(BaseParser):
         return record
 
 
+def _decode(source: bytes) -> str:
+    """Text of a document: UTF-16 when it opens with a UTF-16 byte-order mark (BREEZEAI-1457),
+    else UTF-8 (a UTF-8 BOM dropped); undecodable bytes are replaced."""
+    if source[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return source.decode("utf-16", "replace").lstrip("\ufeff")
+    return source.decode("utf-8", "replace").lstrip("\ufeff")
+
+
+def _looks_like_yaml(lines: list[str], body_start: int) -> bool:
+    """True when the front-matter block ``lines[1 : body_start - 1]`` has a ``key:`` line."""
+    return any(_FM_KEY.match(line) for line in lines[1 : max(body_start - 1, 1)])
+
+
 def _clean(text: str) -> str:
     text = redact_text(text)
     text = _ENV_ASSIGN.sub(_mask_env, text)
+    text = _mask_code_blocks(text)
     return _DATA_URI.sub(lambda m: f"data:{m.group(1)};base64,…", text)
 
 
+def _masked_value(value: str) -> str:
+    quote = value[0] if value[:1] in ("'", '"') else ""
+    return f"{quote}***{quote}"
+
+
+def _token_count(name: str, value: str) -> bool:
+    return value.isdigit() and bool(_TOKEN_COUNT.search(name))
+
+
 def _mask_env(m: re.Match[str]) -> str:
-    if not _SECRET_NAME.search(m.group(1)):
+    name, value = m.group(2), m.group(3)
+    if not _SECRET_NAME.search(name) or _token_count(name, value):
         return m.group(0)
-    return f"{m.group(1)}{m.group(2)}***{m.group(2)}"
+    return f"{m.group(1)}{_masked_value(value)}"
+
+
+def _mask_code_assign(m: re.Match[str]) -> str:
+    key, value = m.group(2), m.group(4)
+    if (
+        not _secret_key(key)
+        or value in _TYPE_VALUES
+        or value.strip("\"'") == "***"
+        or _token_count(key, value)
+    ):
+        return m.group(0)
+    return f"{m.group(1)}{key}{m.group(1)}{m.group(3)}{_masked_value(value)}"
+
+
+def _mask_code_blocks(text: str) -> str:
+    """Mask secret-named ``key = value`` pairs on the lines inside fenced code blocks, where
+    config and code snippets live (BREEZEAI-1457). Prose outside fences is untouched."""
+    lines = text.split("\n")
+    fence: str | None = None
+    for i, line in enumerate(lines):
+        m = _FENCE.match(line)
+        if m:
+            marker = m.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            continue
+        if fence is not None and ("=" in line or ":" in line):
+            lines[i] = _CODE_ASSIGN.sub(_mask_code_assign, line)
+    return "\n".join(lines)
 
 
 def _redacted(value: str | None) -> str | None:
@@ -165,8 +246,10 @@ def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
             continue
         if m.group(4).strip():
             out[i] = f"{m.group(1)}{m.group(2)}{m.group(3)} ***"
-        else:
-            block_indent = indent
+        # The lines indented under a secret key are its value too: a nested block, a block
+        # scalar (``api_token: |`` / ``>``) or a folded plain scalar (BREEZEAI-1457). Measured
+        # from the key, so a list item's sibling keys are not.
+        block_indent = len(m.group(1))
     return out
 
 
@@ -253,7 +336,8 @@ def _rst_headings(lines: list[str]) -> list[dict[str, Any]]:
 
 def _plugin_check(repo_root: Path | str | None) -> Callable[[str], bool]:
     """``in_plugin(dir)`` for :func:`classify`: True when ``dir`` or an ancestor (within the
-    repo) holds ``.claude-plugin/plugin.json``."""
+    repo) holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json`` (a Cursor
+    plugin, BREEZEAI-1457)."""
 
     def in_plugin(rel_dir: str) -> bool:
         if repo_root is None:
@@ -261,7 +345,8 @@ def _plugin_check(repo_root: Path | str | None) -> Callable[[str], bool]:
         root = Path(repo_root)
         parts = PurePosixPath(rel_dir).parts
         for n in range(len(parts), -1, -1):
-            if (root.joinpath(*parts[:n]) / ".claude-plugin" / "plugin.json").is_file():
+            folder = root.joinpath(*parts[:n])
+            if any((folder / d / "plugin.json").is_file() for d in _PLUGIN_MANIFEST_DIRS):
                 return True
         return False
 

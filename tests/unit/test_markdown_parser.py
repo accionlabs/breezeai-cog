@@ -235,7 +235,7 @@ def test_secrets_are_masked_and_prose_kept() -> None:
     assert "ghp_" not in out and "changeme" not in out and "DB_PASSWORD=***" in out
     assert (
         "MIIEow" not in out
-        and "-----BEGIN RSA PRIVATE KEY-----\n***\n-----END RSA PRIVATE KEY-----" in out
+        and "-----BEGIN RSA PRIVATE KEY-----\n***\n***\n-----END RSA PRIVATE KEY-----" in out
     )
     assert out.startswith("# Setup\nClone with") and out.rstrip().endswith("Done.")
 
@@ -381,3 +381,157 @@ def test_doc_cap_follows_path_order_not_arrival_order() -> None:
         )
         kept = sorted(r.path for r in sink.records if r.statements)
         assert kept == ["docs/0.md", "docs/1.md"]
+
+
+# ── review fixes (BREEZEAI-1457) ─────────────────────────────────────────────
+
+
+def test_pem_header_without_footer_masks_no_prose() -> None:
+    from breezeai_cog.parsers.structured_json.redaction import redact_text
+
+    text = "intro\n-----BEGIN PRIVATE KEY----- is the header\n## Next section\nmore text here"
+    assert redact_text(text) == text
+
+
+def test_unterminated_pem_masks_only_the_key_lines() -> None:
+    from breezeai_cog.parsers.structured_json.redaction import redact_text
+
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nAAAA==\n"
+    text = "```\n-----BEGIN RSA PRIVATE KEY-----\n" + body + "```\n## Next\nprose\n"
+    out = redact_text(text)
+    assert "MIIEvQ" not in out and "AAAA==" not in out
+    assert out == "```\n-----BEGIN RSA PRIVATE KEY-----\n***\n***\n```\n## Next\nprose\n"
+
+
+def test_pem_footer_after_another_header_is_not_the_match() -> None:
+    from breezeai_cog.parsers.structured_json.redaction import redact_text
+
+    text = (
+        "-----BEGIN PRIVATE KEY----- quoted in prose\nkeep this\n"
+        "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n"
+    )
+    out = redact_text(text)
+    assert "keep this" in out and "MIIE" not in out
+
+
+def test_one_line_pem_in_a_string_literal_is_masked() -> None:
+    from breezeai_cog.parsers.structured_json.redaction import redact_text
+
+    out = redact_text('k = "-----BEGIN PRIVATE KEY-----\\nMIIE\\n-----END PRIVATE KEY-----"')
+    assert out == 'k = "-----BEGIN PRIVATE KEY-----***-----END PRIVATE KEY-----"'
+
+
+def test_pem_mask_keeps_the_line_count_so_end_line_is_the_file_line() -> None:
+    key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + "\n".join(["A" * 64] * 20)
+        + "\n-----END PRIVATE KEY-----\n"
+    )
+    filler = ("x" * 99 + "\n") * 700
+    rec = _parse("docs/k.md", key + filler)
+    st = rec.statements[0]
+    body = st.text.rpartition("\n")[0]
+    assert st.endLine == len(body.split("\n"))
+    assert body.split("\n")[21] == "-----END PRIVATE KEY-----"  # line 22 in the file too
+
+
+def test_long_scheme_like_run_parses_fast() -> None:
+    import time
+
+    start = time.perf_counter()
+    rec = _parse("docs/a.md", "a" * 300_000)  # under 512 KB: goes through the cleaner
+    assert time.perf_counter() - start < 2.0
+    assert rec.statements and rec.metadata["truncated"] is True
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "kind"),
+    [
+        ("rules/breeze-guard.mdc", "---\ndescription: guard\n---\nRules\n", "agent_instructions"),
+        ("any/where/x.mdc", "Rules\n", "agent_instructions"),
+        (".cursor/commands/review.md", "Review the diff\n", "command"),
+        ("docs/review.prompt.md", "A template\n", "doc"),
+    ],
+)
+def test_cursor_rules_and_commands(path: str, text: str, kind: str) -> None:
+    assert _kind(path, text) == kind
+
+
+def test_cursor_plugin_layout(tmp_path: Path) -> None:
+    # breezeai-claude-plugin: a `.cursor-plugin/plugin.json` root with `rules/*.mdc` and
+    # `commands/*.md`.
+    (tmp_path / ".cursor-plugin").mkdir()
+    (tmp_path / ".cursor-plugin" / "plugin.json").write_text("{}")
+    assert _kind("rules/breeze-guard.mdc", "Guard\n", repo_root=tmp_path) == "agent_instructions"
+    assert _kind("commands/search.md", "Search it\n", repo_root=tmp_path) == "command"
+
+
+def test_cursor_front_matter_with_unquoted_glob_keeps_name_and_description() -> None:
+    rec = _parse(
+        "skills/x/SKILL.md",
+        "---\nname: x\ndescription: Lint TS\nglobs: **/*.ts\nalwaysApply: false\n---\n# X\n",
+    )
+    assert rec.metadata["frontmatterError"] is True
+    assert rec.metadata["frontmatter"] == {"name": "x", "description": "Lint TS"}
+    assert rec.metadata["kind"] == "skill" and rec.statements[0].description == "Lint TS"
+
+
+def test_non_yaml_leading_block_keeps_its_headings() -> None:
+    rec = _parse("docs/a.md", "---\n# Title\nSome prose here\n---\n## Next\n")
+    assert rec.metadata["frontmatterError"] is True
+    assert [h["text"] for h in rec.metadata["headings"]] == ["Title", "Next"]
+
+
+def test_utf16_document_is_decoded() -> None:
+    rec = _parse("docs/a.md", "# Título\nbody\n".encode("utf-16"))  # BOM-prefixed
+    assert rec.metadata["title"] == "Título" and rec.statements[0].text == "# Título\nbody\n"
+
+
+@pytest.mark.parametrize(
+    ("line", "secret"),
+    [
+        ("DB_PASS=hunter2", "hunter2"),
+        ("MYSQL_ROOT_PASS=hunter2", "hunter2"),
+        ("AWS_ACCESS_KEY=AKXYZ", "AKXYZ"),
+        ("OAUTH_CLIENT_KEY=ck123", "ck123"),
+        ("GCP_CREDENTIALS=/etc/creds", "/etc/creds"),
+        ('DB_PASSWORD="two words"', "two words"),
+    ],
+)
+def test_more_env_secret_names_are_masked(line: str, secret: str) -> None:
+    st = _parse("docs/a.md", f"{line}\n").statements[0]
+    assert secret not in st.text and "***" in st.text
+
+
+def test_env_lookalikes_are_kept() -> None:
+    text = "PASSPORT_URL=/p\nBYPASS_CACHE=1\nMAX_TOKENS=4096\n"
+    assert _parse("docs/a.md", text).statements[0].text == text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "password: hunter2",
+        "spring.datasource.password=hunter2",
+        '{"apiKey": "hunter2", "region": "us"}',
+        "  client_secret = 'hunter2'",
+    ],
+)
+def test_secret_keys_in_code_blocks_are_masked(line: str) -> None:
+    st = _parse("docs/a.md", f"# Config\n```\n{line}\n```\n").statements[0]
+    assert "hunter2" not in st.text and "***" in st.text
+
+
+def test_code_block_non_secrets_are_kept() -> None:
+    text = (
+        "```ts\ninterface U { password: string; }\nmax_tokens: 1024\nregion: us\n```\n"
+        "Outside a fence, password: prose stays.\n"
+    )
+    assert _parse("docs/a.md", text).statements[0].text == text
+
+
+def test_front_matter_block_scalar_secret_is_masked() -> None:
+    text = "---\nname: x\napi_token: |\n  line-one-secret\n  line-two-secret\nmodel: opus\n---\nB\n"
+    st = _parse("docs/a.md", text).statements[0]
+    assert "line-one-secret" not in st.text and "line-two-secret" not in st.text
+    assert "model: opus" in st.text
