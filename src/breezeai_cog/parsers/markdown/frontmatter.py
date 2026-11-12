@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import math
+import re
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
@@ -69,7 +70,9 @@ def split_front_matter(lines: list[str]) -> tuple[str | None, int]:
 def load_front_matter(text: str | None) -> tuple[dict[str, Any], bool]:
     """Parse front matter → ``(mapping, ok)``. ``ok`` is False when a block was present but
     could not be used (too large, invalid YAML, anchors / aliases, or not a mapping); the
-    mapping is then empty. No front matter at all is ``({}, True)``."""
+    mapping is then empty, except that invalid YAML made only of plain ``key: value`` lines
+    still gives its ``name`` / ``description`` (:func:`_simple_fields`). No front matter at all
+    is ``({}, True)``."""
     if text is None:
         return {}, True
     if len(text.encode("utf-8")) > MAX_FRONT_MATTER_BYTES:
@@ -77,12 +80,45 @@ def load_front_matter(text: str | None) -> tuple[dict[str, Any], bool]:
     try:
         data = yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 — SafeLoader subclass
     except (yaml.YAMLError, ValueError, RecursionError):
-        return {}, False
+        return _simple_fields(text), False
     if data is None:
         return {}, True
     if not isinstance(data, dict):
         return {}, False
     return _mapping(data, 1), True
+
+
+#: A top-level ``key: value`` line of the plain-line fallback.
+_SIMPLE_LINE = re.compile(r"([A-Za-z_][\w\-]*)[ \t]*:(?:[ \t]+(.*))?")
+#: Fields the fallback reads.
+_SIMPLE_FIELDS = ("name", "description")
+
+
+def _simple_fields(text: str) -> dict[str, Any]:
+    """``name`` / ``description`` of front matter YAML rejects only because of an unquoted
+    value, as in Cursor rules (``globs: **/*.ts`` reads as an alias; BREEZEAI-1457). Every
+    line must be a top-level ``key: plain value`` (or blank / a comment) and the two values
+    plain text; anything else (nesting, flow collections, block scalars, anchors) yields
+    ``{}`` — the header is then not used at all."""
+    fields: dict[str, Any] = {}
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = _SIMPLE_LINE.fullmatch(line.rstrip())
+        if m is None:
+            return {}
+        key, value = m.group(1), (m.group(2) or "").strip()
+        if value[:1] in ("&", "[", "{", "|", ">", "!"):  # anchor, collection, block, tag
+            return {}
+        if key not in _SIMPLE_FIELDS:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        elif not value or value[0] in "[]{}&*!|>@`%\"'#,?-":
+            return {}
+        fields[key] = redact_secrets(value[:_MAX_STRING])
+    return fields
 
 
 def _secret_key(key: str) -> bool:

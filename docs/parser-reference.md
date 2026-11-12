@@ -517,6 +517,47 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 `analyze_files` test fixture fails on errors; `--verbose` logs every violation as
 `contract.violation`. It never changes output.
 
+### Document parser: Markdown (`parsers/markdown/`)
+Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
+project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`, `.mdx`,
+`.mdc`, `README.rst` and `.cursorrules`; it reads text and never builds a tree.
+
+- **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
+  document never counts as an analyzed language and adds no lines of code — in the full scan
+  and in `analyze-diff` alike. `metadata` holds `kind` (the semantic type below),
+  `category: "documentation"`, `frontmatter` (YAML reduced to JSON values, secret-named keys
+  `***`), `title` and `headings` (levels 1–3, outside code fences). Invalid front matter sets
+  `frontmatterError`; a header YAML rejects only for an unquoted value (Cursor's
+  `globs: **/*.ts`) still gives `name` / `description`.
+- **Statement.** Under statement capture, one whole-file `Statement`: `nodeType="document"`,
+  `semanticType` = the kind, `text` = the file with secrets masked (cut at 64 KB on a line
+  boundary, marked inline; masking keeps every line, so `endLine` is the file's line),
+  `name` / `description` from the front matter. Over 512 KB: the File record only. Untyped
+  `doc` statements past `max_markdown_statements` are dropped (path order); typed kinds are
+  always kept. Document statements are not embedded or split.
+- **Semantic types** (`classify.py`, first match wins; a type that needs front matter is never
+  given on a guess):
+
+| `semanticType` | When |
+|---|---|
+| `skill` | `SKILL.md` with front-matter `name` and `description` |
+| `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin, or with an agent key (`tools`, `model`, `color`) |
+| `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
+| `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
+| `readme` | `README.md` / `.mdx` / `.rst` |
+| `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md` / `.mdx`) |
+| `adr` | under `docs/adr/`, `docs/decisions/` or `adr/`; or `NNNN-*.md` with `## Status` and `## Decision` |
+| `doc` | anything else |
+
+  A plugin is a folder (or ancestor) holding `.claude-plugin/plugin.json` or
+  `.cursor-plugin/plugin.json`. `skill`, `agent`, `command`, `agent_instructions` and `adr`
+  are the agent-document kinds counted in `configs.capturedAgentDocuments`.
+- **Secrets.** PEM private-key bodies (to the matching footer; without one, only the
+  key-shaped lines after the header), provider tokens, JWTs and URL credentials are masked
+  anywhere; secret-named upper-case env assignments (`DB_PASSWORD=`, `DB_PASS=`) anywhere;
+  secret-named `key = value` / `key: value` pairs of any case inside fenced code blocks; and
+  secret-named front-matter values, including indented and block-scalar values.
+
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
 highest-`priority` parser whose `claims(path, source)` is True; the base language parser

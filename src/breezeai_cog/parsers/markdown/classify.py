@@ -39,8 +39,9 @@ def classify(
 ) -> str:
     """Return the semantic type of the Markdown file at repo-relative ``path``.
 
-    ``in_plugin(dir)`` tells whether a repo-relative directory is inside a Claude Code plugin
-    (an ancestor holds ``.claude-plugin/plugin.json``); consulted for ``commands/`` and ``agents/``."""
+    ``in_plugin(dir)`` tells whether a repo-relative directory is inside a Claude Code or Cursor
+    plugin (an ancestor holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json``);
+    consulted for ``commands/`` and ``agents/``."""
     p = PurePosixPath(path)
     name = p.name
     upper = name.upper()
@@ -72,6 +73,9 @@ def classify(
     # is commonly a prompt template a skill loads (seen in breezeai-claude-plugin references/).
     if upper.endswith(".PROMPT.MD") and _contains(dirs, (".github", "prompts")):
         return "command"
+    # Cursor commands are plain Markdown (no front matter) in `.cursor/commands/` (BREEZEAI-1457).
+    if _contains(dirs, (".cursor", "commands")) and name.lower().endswith(_MARKDOWN_SUFFIXES):
+        return "command"
     if "commands" in dirs and name.lower().endswith(_MARKDOWN_SUFFIXES):
         # A generic `commands/` folder is often CLI documentation (and `description` is common
         # doc front matter): only a Claude command folder, a plugin's, or a file declaring a
@@ -87,7 +91,9 @@ def classify(
         upper in _AGENT_INSTRUCTION_NAMES
         or path.endswith(".github/copilot-instructions.md")
         or name == ".cursorrules"
-        or (name.endswith(".mdc") and _contains(dirs, (".cursor", "rules")))
+        # `.mdc` is Cursor's rule format and nothing else: a rule wherever it sits (a Cursor
+        # plugin keeps them in `rules/`, BREEZEAI-1457).
+        or name.lower().endswith(".mdc")
     ):
         return "agent_instructions"
 
