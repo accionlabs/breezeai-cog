@@ -951,3 +951,28 @@ def test_client_hints_apply_only_in_their_own_language() -> None:
     # A language without hints, or an unknown one, has no name match.
     assert match_api("axios.get", "get", language=None) is None
     assert match_api("http.get", "get", language="cpp") is None
+
+
+def test_client_name_must_end_the_receiver_name() -> None:
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # A name ending in a client word is a client …
+    assert match_api("dataApiClient.get", "get", language="java") == "GET"
+    assert match_api("new P3APIClient(uri).get", "get", language="groovy") == "GET"
+    assert match_api("DefaultHttpClient.PostAsync", "PostAsync", language="csharp") == "POST"
+    assert match_api("this._http.post", "post", language="typescript") == "POST"
+    assert match_api("this.http\n      .post", "post", language="typescript") == "POST"
+    assert match_api("this.$http.get", "get", language="typescript") == "GET"
+    assert match_api("http_client.get", "get", language="python") == "GET"
+    assert match_api("httpx.AsyncClient().get", "get", language="python") == "GET"
+    assert match_api("axios.create().get", "get", language="typescript") == "GET"
+    assert match_api("Net::HTTP.get", "get", language="ruby") == "GET"
+    assert match_api("HTTParty.get", "get", language="ruby") == "GET"
+    # … one only containing it is something else: a pool, a cache, a provider, a Map.
+    assert match_api("ApiUtil.apiClientPool.get", "get", language="java") is None
+    assert match_api("HttpRuntime.Cache.Get", "Get", language="csharp") is None
+    assert match_api("httpContextProvider.Get", "Get", language="csharp") is None
+    assert match_api("fetched.get", "get", language="typescript") is None
+    # A short name must start a word: `sky` and `forgot` are not ky / got.
+    assert match_api("sky.get", "get", language="typescript") is None
+    assert match_api("forgot.post", "post", language="typescript") is None

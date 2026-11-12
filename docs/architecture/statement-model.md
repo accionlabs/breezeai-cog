@@ -186,26 +186,35 @@ String q = "SELECT id, total FROM orders WHERE id = ?";
 ### HTTP client names, per language
 
 The HTTP step decides by the receiver's name: a call with an HTTP verb (`get`, `post`, …) whose
-receiver contains a client library's name. Each language reads only its own libraries' names,
-because the same word is an ordinary name elsewhere: `session` is Python's `requests.Session`,
-but in Java it is often a JSON object, so `session.getString("platformId")` reads a field, and
-in Groovy a Map.
+receiver names a client. A part of the receiver chain names one when its name **ends with** a
+client name that starts a word there, because the last word of a name says what it is:
+
+| Receiver | Client? |
+|---|---|
+| `dataApiClient`, `new P3APIClient(uri)`, `DefaultHttpClient`, `this._http`, `$http`, `axios.create()` | yes |
+| `apiClientPool` (a pool), `HttpRuntime.Cache` (a cache), `httpContextProvider`, `fetched` | no |
+| `sky`, `forgot` (`ky` and `got` do not start a word) | no |
+
+Each language reads only its own libraries' names, because the same word is an ordinary name
+elsewhere: `session` is Python's `requests.Session`, but in Java it is often a JSON object, so
+`session.getString("platformId")` reads a field, and in Groovy a Map.
 
 ```mermaid
 flowchart LR
-  F["call in a file of language L"] --> H{"receiver contains one of<br/>L's client names?"}
+  F["call in a file of language L"] --> H{"a receiver name ends with<br/>one of L's client names?"}
   H -- yes --> API[api_call]
   H -- "no, or L has none" --> N[no HTTP meaning]
 ```
 
 | Languages | Client names |
 |---|---|
-| all below | `http` (also `httpClient`, `$http`, `httpx`, `aiohttp`), `restClient`, `apiClient` |
-| JavaScript / TypeScript | `axios`, `fetch`, `superagent`, `got`, `ky`, `ofetch`, `webClient`, and a bare `fetch(…)` |
-| Python | `requests`, `session`, `urllib` |
+| all below | `http`, `httpClient`, `restClient`, `apiClient` |
+| JavaScript / TypeScript | `httpService`, `axios`, `fetch`, `superagent`, `got`, `ky`, `ofetch`, `webClient`, and a bare `fetch(…)` |
+| Python | `requests`, `session`, `httpx`, `aiohttp`, `urllib`, `urllib3` |
 | Java, Kotlin, Groovy, Scala | `restTemplate`, `webClient` |
 | C#, VB | `restTemplate` (Spring.NET), `webClient`, and the `HttpClient` verbs `GetAsync`, `GetStringAsync`, `PostAsJsonAsync` … |
-| Go, Ruby | only the shared names |
+| Go | only the shared names |
+| Ruby | `HTTParty` |
 
 In C# and VB, a receiver ending in `Session` (ASP.NET session state, NHibernate `ISession`) is
 never a client, not even `HttpContext.Session`.

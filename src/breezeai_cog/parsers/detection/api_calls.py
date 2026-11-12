@@ -12,25 +12,48 @@ from __future__ import annotations
 # bare ``foo.request()``.
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
 
-# Each language's HTTP-client hints: substrings of a call's receiver that name a client library
-# of that language. A hint is read only in its own languages, because the same word is an
-# ordinary name elsewhere: ``session`` is Python's ``requests.Session`` but a JSON object or a
-# Map in Java and Groovy, and ``ky`` / ``got`` are JS libraries but fragments of any Java name
-# (``yekyJsonArray``). A bare ``client`` is never a hint: it would match s3Client / dbClient /
-# graphqlClient. A language with no entry (PHP, C, C++, an unknown one) has no name match at
-# all; its HTTP calls are recorded only by evidence-based detectors (an import, a declared type).
-_COMMON_HINTS = ("http", "restclient", "apiclient")  # http also covers httpClient, $http, httpx…
+# Each language's HTTP-client names. A segment of a call's receiver is a client when its name
+# ends with one of them, starting a word (:func:`_names_client`): ``dataApiClient``,
+# ``DefaultHttpClient``, ``this._http``, ``axios.create()``; not ``apiClientPool`` (a pool),
+# ``HttpRuntime.Cache`` (a cache) or ``httpContextProvider``. A name is read only in its own
+# languages, because the same word is an ordinary name elsewhere: ``session`` is Python's
+# ``requests.Session`` but a JSON object or a Map in Java and Groovy, and ``ky`` / ``got`` are JS
+# libraries. A bare ``client`` is never one: it would match s3Client / dbClient / graphqlClient.
+# A language with no entry (PHP, C, C++, an unknown one) has no name match at all; its HTTP
+# calls are recorded only by evidence-based detectors (an import, a declared type).
+_COMMON_HINTS = ("http", "httpclient", "restclient", "apiclient")
 _JVM_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")
 _DOTNET_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")  # Spring.NET RestTemplate
 _CLIENT_HINTS: dict[str, tuple[str, ...]] = {
-    "typescript": (*_COMMON_HINTS, "axios", "fetch", "superagent", "got", "ky", "ofetch",
-                   "webclient"),
-    "python": (*_COMMON_HINTS, "requests", "session", "urllib"),
+    "typescript": (*_COMMON_HINTS, "httpservice", "axios", "fetch", "superagent", "got", "ky",
+                   "ofetch", "webclient"),
+    "python": (*_COMMON_HINTS, "requests", "session", "httpx", "aiohttp", "urllib", "urllib3"),
     "java": _JVM_HINTS, "kotlin": _JVM_HINTS, "groovy": _JVM_HINTS, "scala": _JVM_HINTS,
     "csharp": _DOTNET_HINTS, "vb": _DOTNET_HINTS,
     "go": _COMMON_HINTS,
-    "ruby": _COMMON_HINTS,
+    "ruby": (*_COMMON_HINTS, "httparty"),
 }
+
+
+def _ends_with_word(name: str, hint: str) -> bool:
+    """``name`` ends with ``hint`` (any case), and the hint starts a word there: at the start, at
+    a capital (``myHttp``, ``P3APIClient``) or after a non-letter (``this._http``, ``$http``)."""
+    i = len(name) - len(hint)
+    if i < 0 or name[i:].lower() != hint:
+        return False
+    return i == 0 or name[i].isupper() or not name[i - 1].isalpha()
+
+
+def _names_client(receiver: str, hints: tuple[str, ...]) -> bool:
+    """Whether a segment of the receiver chain names a client (see :data:`_CLIENT_HINTS`);
+    ``http_client`` is read as ``httpClient`` too, and a chain broken over lines
+    (``this.http\n  .post(…)``) as one line."""
+    for segment in "".join(receiver.split()).split("."):
+        for name in {segment, segment.replace("_", "")}:
+            if any(_ends_with_word(name, hint) for hint in hints):
+                return True
+    return False
+
 
 #: .NET languages: ``…Async`` verbs and the ``HttpClient`` helper verbs below apply only there.
 _DOTNET = frozenset({"csharp", "vb"})
@@ -121,11 +144,12 @@ def match_api(
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
         return None
-    receiver = _receiver_text(low)
+    receiver = _receiver_text(callee)
     # In .NET a ``…Session`` is ASP.NET session state or an NHibernate ``ISession``, never an
     # HTTP client, even as the ``HttpContext.Session`` the ``http`` hint would otherwise match.
-    dotnet_session = language in _DOTNET and receiver.rsplit(".", 1)[-1].endswith("session")
-    is_client = not dotnet_session and any(hint in receiver for hint in hints)
+    dotnet_session = language in _DOTNET \
+        and receiver.rsplit(".", 1)[-1].lower().endswith("session")
+    is_client = not dotnet_session and _names_client(receiver, hints)
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
