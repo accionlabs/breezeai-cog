@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from .api_calls import _ends_with_word, _receiver_text
+
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -217,6 +219,33 @@ _PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
     "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS, "firebase": _JSTS,
     "django": _PYTHON, "sqlalchemy": _PYTHON,
 }
+# Needles read like the HTTP client names (:func:`.api_calls._ends_with_word`): a name in the
+# receiver chain must end with one of the needle's words, starting a word there, because the last
+# word of a name says what it is. ``userRepository``, ``this.userRepo``, ``order_repository``,
+# ``getRepository(User)`` and ``repositories.users`` are repositories; ``reportFile`` and
+# ``reportService`` only contain the letters, and ``repoUrl`` / ``repoDir`` are a URL and a folder.
+_WORD_HINTS: dict[str, tuple[str, ...]] = {
+    "repository": ("repository", "repositories"),
+    "repo": ("repo", "repos", "repository", "repositories"),
+}
+
+
+# Everything that cannot be part of a name separates two: a dot, a line break in a chain
+# (``this.getRepository()⏎ .createQueryBuilder()``) and type arguments, whose names count too
+# (``UoW.Repository<Booking>()``, ``Engine.Resolve<IContentItemRepository>()``).
+_NAME_SEPARATORS = re.compile(r"[^A-Za-z0-9_$]+")
+
+
+def _names_word(callee: str, words: tuple[str, ...]) -> bool:
+    """Whether a name in the call's receiver chain ends with one of ``words``, starting a word."""
+    if "." not in callee:
+        return False  # a bare call has no receiver
+    return any(
+        _ends_with_word(name, w)
+        for name in _NAME_SEPARATORS.split(_receiver_text(callee)) for w in words
+    )
+
+
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
 _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
@@ -494,6 +523,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     if m in _GENERIC or gated:
         for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
+                continue
+            if needle in _WORD_HINTS and not _names_word(callee, _WORD_HINTS[needle]):
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").

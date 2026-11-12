@@ -158,7 +158,10 @@ the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`
 
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
-2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
+2. **The receiver:** `orderRepository.findOne` → `typeorm`. A repository name counts only where it
+   ends a name in the receiver chain, as the HTTP client names below do: `this.userRepo`,
+   `getRepository(User)` and `repositories.users` are repositories; `reportFile`, `reportService`
+   and `repoUrl` are not. A product is named only in a language
    it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
    verb, or a Firebase JavaScript SDK verb (`getDocs`, `onSnapshot`), in another language
    (`stream().findFirst()`, a Groovy `paperKit.getDocs()`) needs a data-access receiver too. A
