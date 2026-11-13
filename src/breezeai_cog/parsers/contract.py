@@ -63,7 +63,7 @@ NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigat
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({
     "ANY", "WEBSOCKET",
-    "QUERY", "MUTATION", "SUBSCRIPTION", "RESOLVE_REFERENCE",
+    "QUERY", "MUTATION", "SUBSCRIPTION", "RESOLVE_FIELD", "RESOLVE_REFERENCE",
     "RPC",
     "MESSAGE", "EVENT", "CONSUMER",
     "TIMER", "PERIODIC",
