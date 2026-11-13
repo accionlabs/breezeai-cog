@@ -53,7 +53,7 @@ from typing import Any, Callable
 
 from tree_sitter import Node
 
-from ..errors import RegistryError
+from ..errors import ParserTimeout, RegistryError
 from ..schemas import FileRecord
 from .base import ParseContext
 from .emits import Emit, apply
@@ -61,14 +61,14 @@ from .emits import Emit, apply
 #: Languages whose base parser calls :func:`run_additive`. Registering a detector for any
 #: other language is an error: nothing would ever run it.
 HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"typescript", "csharp", "java", "python", "scala", "php", "go", "c", "cpp", "cuda", "vb"})
+    {"typescript", "csharp", "java", "kotlin", "python", "scala", "php", "go", "c", "cpp", "cuda", "vb"})
 
 #: Languages whose ``build_index`` calls :func:`collect_additive` / :func:`resolve_additive`.
 #: A fact for any other language is an error: it would never be built, and the detector
 #: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"apex", "c", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "php", "python", "ruby",
-     "scala", "typescript", "vb"})
+    {"apex", "c", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "kotlin", "php", "python",
+     "ruby", "scala", "typescript", "vb"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
 _MARKERS = (b"register_detector(", b"register_fact(")
@@ -352,7 +352,16 @@ def run_additive(
     for detector in detectors_for(language):
         if not detector.gate.admits(ctx.source, is_fixture=is_fixture):
             continue
-        found = detector.detect(dc)
+        try:
+            found = detector.detect(dc)
+        except ParserTimeout:
+            raise  # the file's parse budget is spent: handled like any parse timeout
+        except Exception as exc:  # one detector never drops the file's other records
+            from ..logging import get_logger
+            get_logger("breezeai_cog.additive").warning(
+                "additive.detector.failed", path=ctx.path, detector=detector.name,
+                error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
         if found is None:
             continue
         apply(record, found.emits, ctx.source, ctx.path)

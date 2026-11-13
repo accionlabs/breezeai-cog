@@ -106,6 +106,16 @@ def test_config_files_are_not_analyzed_languages(captured: _Captured) -> None:
     assert meta["configs"]["totalConfigFiles"] == 2
 
 
+def test_docs_add_no_lines_of_code(captured: _Captured) -> None:
+    # same rule as the full scan: Markdown is streamed but is not code
+    files = {"README.md": "# Widgets\n\nline one\nline two\n"}
+    client = _make_client(captured, filter_set=None, deleted=[], repo_files=files)
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 200
+    assert "README.md" in {rec["path"] for rec in captured.records}
+    meta = captured.notifications[0][1]["projectMetaData"]
+    assert meta["totalLinesOfCode"] == 5  # a.py (2) + b.py (3); README.md adds none
+
+
 def test_deletion_only_commit(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=set(), deleted=["gone.py"])
     r = client.post("/api/analyze-diff", json=BODY)

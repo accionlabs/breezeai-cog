@@ -55,7 +55,9 @@ from ..schemas import FileRecord, Statement
 from .aspnet_common import FRAMEWORK_SERVED
 from .django_common import DJANGO_SERVED
 
-ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
+#: ``mcp_tool``: an MCP server tool is an entry point an AI client calls, held to
+#: the same contract as a route (``method="TOOL"``, ``endpoint`` = the tool name).
+ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer", "mcp_tool"})
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
 NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation"})
@@ -67,12 +69,14 @@ METHODS = HTTP_METHODS | frozenset({
     "RPC",
     "MESSAGE", "EVENT", "CONSUMER",
     "TIMER", "PERIODIC",
+    "TOOL",
 })
 
 ROUTE_KINDS: dict[str, frozenset[str | None]] = {
     "route": frozenset({"route", "rpc", "ws", "page", "query", "mutation", "subscription"}),
     "eventbus_consumer": frozenset({None, "message"}),
     "timer": frozenset({None}),
+    "mcp_tool": frozenset({None}),
 }
 
 _PLACEHOLDERS = ("${", "#{", "`")

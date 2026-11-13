@@ -53,7 +53,13 @@ _CONTINUATION_CLEARED: tuple[str, ...] = (
     "semanticType", "name", "uiRole", "framework", "method", "endpoint",
     "handler", "handlerLine", "routeKind", "isRegex", "version", "authRequired",
     "guards", "requestDTO", "responseDTO", "dataLoaders", "dataAccessHint", "keyFields",
+    "description", "params",
 )
+
+#: Statements that are never split: a Markdown document is one whole-file statement, already
+#: capped by its parser (parsers/markdown, 64 KB at a line boundary, loss marked inline), so a
+#: listing shows one row per document with its name and description.
+_UNSPLIT_NODE_TYPES: frozenset[str] = frozenset({"document"})
 
 
 def _chunks(text: str, limit: int) -> list[str]:
@@ -95,11 +101,11 @@ def split_oversized_statements(
     ``#part{i}of{n}`` records (each flagged ``isPartial``). ``limit <= 0`` disables (returns
     as-is); ``max_parts > 0`` caps the part count (dropping + marking the tail). The common
     all-within-limit case returns the input list untouched (no copying)."""
-    if limit <= 0 or all(len(s.text) <= limit for s in statements):
+    if limit <= 0 or all(len(s.text) <= limit or s.nodeType in _UNSPLIT_NODE_TYPES for s in statements):
         return statements
     out: list[Statement] = []
     for st in statements:
-        if len(st.text) <= limit:
+        if len(st.text) <= limit or st.nodeType in _UNSPLIT_NODE_TYPES:
             out.append(st)
             continue
         chunks = _chunks(st.text, limit)

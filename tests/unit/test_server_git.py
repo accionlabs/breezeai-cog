@@ -157,6 +157,108 @@ def test_all_changed_files_unreadable_is_a_502() -> None:
     assert info.value.status_code == 502 and "read_api" in str(info.value)
 
 
+def test_incremental_fetches_the_context_files_cross_file_facts_read(recorded_git) -> None:
+    """A changed tools file keeps its MCP server proof — the module's build file
+    and the Python module that builds the server get real content, but are not streamed."""
+    tools_py = "from .server import mcp\n\n@mcp.tool\ndef f():\n    pass\n"
+    client = FakeClient(
+        tree=[
+            "pom.xml", "svc/pom.xml", "svc/src/main/java/T.java", "other/pom.xml",
+            "app/server.py", "app/tools.py", "app/util.py",
+        ],
+        changed=["svc/src/main/java/T.java", "app/tools.py"],
+        content={
+            "svc/src/main/java/T.java": "class T {}\n",
+            "app/tools.py": tools_py,
+            "pom.xml": "<project/>",
+            "svc/pom.xml": "<project>mcp</project>",
+            "app/server.py": "mcp = FastMCP('x')\n",
+        },
+    )
+
+    temp_dir, filter_set, _ = git_mod.resolve_git_diff(client, REF, "base", _SHA)
+
+    root = Path(temp_dir)
+    assert (root / "svc/pom.xml").read_text() == "<project>mcp</project>"
+    assert (root / "pom.xml").read_text() == "<project/>"
+    assert (root / "app/server.py").read_text() == "mcp = FastMCP('x')\n"
+    assert (root / "other/pom.xml").read_text() == "" and (root / "app/util.py").read_text() == ""
+    assert filter_set == {"svc/src/main/java/T.java", "app/tools.py"}  # context is not streamed
+    fetched = {c for c in client.calls if c.startswith("content:")}
+    assert "content:other/pom.xml" not in fetched and "content:app/util.py" not in fetched
+
+
+def test_context_paths_are_bounded_and_skip_plain_python() -> None:
+    tree = [f"m{i}/pom.xml" for i in range(80)] + [f"m{i}/A.java" for i in range(80)]
+    changed = {f"m{i}/A.java": "" for i in range(80)}
+    assert len(git_mod.context_paths(changed, tree)) == git_mod._MAX_CONTEXT_FILES
+    tree = ["app/server.py", "app/x.py"]
+    assert git_mod.context_paths({"app/x.py": "from .server import mcp\n"}, tree) == []
+    assert git_mod.context_paths(
+        {"app/x.py": "from app.server import mcp\n@mcp.tool\ndef f(): ...\n"}, tree
+    ) == ["app/server.py"]
+
+
+def test_context_paths_fetch_gradle_kts_for_a_kotlin_file() -> None:
+    tree = ["build.gradle.kts", "svc/build.gradle.kts", "svc/src/main/kotlin/T.kt", "other/pom.xml"]
+    changed = {"svc/src/main/kotlin/T.kt": "class T\n"}
+    assert git_mod.context_paths(changed, tree) == ["svc/build.gradle.kts", "build.gradle.kts"]
+
+
+def test_context_paths_build_files_have_their_own_budget_and_caps_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """80 Java modules fill the build-file budget; the FastMCP server module a changed tools
+    file imports is still fetched, and each truncation is logged."""
+    tree = [f"m{i:02}/pom.xml" for i in range(80)] + [f"m{i:02}/A.java" for i in range(80)]
+    tree += ["app/server.py", "app/tools.py"]
+    changed = {f"m{i:02}/A.java": "" for i in range(80)}
+    changed["app/tools.py"] = "from app.server import mcp\n@mcp.tool\ndef f(): ...\n"
+    with caplog.at_level("WARNING", logger=git_mod.__name__):
+        paths = git_mod.context_paths(changed, tree)
+    assert "app/server.py" in paths
+    assert len([p for p in paths if p.endswith("pom.xml")]) == git_mod._MAX_CONTEXT_FILES
+    assert paths[0] == "m00/pom.xml"  # stable order
+    assert any("80 build files" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger=git_mod.__name__):
+        git_mod.context_paths({"app/tools.py": changed["app/tools.py"]}, tree)
+    assert not caplog.records  # under both caps: no warning
+
+
+def test_context_paths_follow_the_python_import_rules() -> None:
+    tools = "from {} import mcp\n@mcp.tool\ndef f(): ...\n"
+    tree = [
+        "svc/app/__init__.py", "svc/app/tools.py", "svc/app/server.py",
+        "other/server.py", "vendor/lib/app/server.py", "proj/pyproject.toml",
+        "proj/src/core/server.py", "proj/src/core/tools.py",
+    ]
+    # Absolute `server` from a package file: not the unrelated `other/server.py`.
+    assert git_mod.context_paths({"svc/app/tools.py": tools.format("server")}, tree) == []
+    # `app.server` resolves under the import root `svc/` only, not by any path suffix.
+    assert git_mod.context_paths({"svc/app/tools.py": tools.format("app.server")}, tree) == [
+        "svc/app/server.py"
+    ]
+    # A declared project's `src/` is an import root.
+    assert git_mod.context_paths(
+        {"proj/src/core/tools.py": tools.format("core.server")}, tree
+    ) == ["proj/src/core/server.py"]
+
+
+def test_context_paths_scale_with_import_depth_not_tree_size() -> None:
+    import time
+
+    tree = [f"pkg{i}/mod{j}/file{k}.py" for i in range(50) for j in range(50) for k in range(20)]
+    changed = {
+        f"pkg{i}/mod0/file0.py": "".join(f"from pkg{i}.mod{j} import x\n" for j in range(30))
+        + "@mcp.tool\ndef f(): ...\n"
+        for i in range(50)
+    }
+    start = time.perf_counter()
+    git_mod.context_paths(changed, tree)
+    assert time.perf_counter() - start < 2.0
+
+
 # --- clone_repo_full ----------------------------------------------------------------
 
 

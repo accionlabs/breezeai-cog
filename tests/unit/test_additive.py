@@ -55,12 +55,13 @@ def test_inventory_in_run_order() -> None:
     inventory = {lang: [d.name for d in ds] for lang, ds in all_detectors().items()}
     assert inventory == {
         "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots", "aspnet-web-projects",
-                   "generic-handlers", "hangfire", "quartz", "aws-sdk-calls", "graphql-client"],
+                   "generic-handlers", "hangfire", "quartz", "aws-sdk-calls", "graphql-client", "csharp-mcp"],
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",
-               "go-lambda"],
-        "java": ["quartz", "struts2", "apache-httpclient", "vertx"],
-        "python": ["celery", "flask", "drf-routers", "django-channels"],
+               "go-lambda", "go-mcp"],
+        "java": ["quartz", "struts2", "java-mcp", "apache-httpclient", "vertx"],
+        "kotlin": ["kotlin-mcp"],
+        "python": ["celery", "flask", "drf-routers", "django-channels", "python-mcp"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
@@ -70,7 +71,7 @@ def test_inventory_in_run_order() -> None:
                        "graphql-client",
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",
-                       "react-navigation", "angularjs"],
+                       "react-navigation", "angularjs", "typescript-mcp"],
         "vb": ["aws-sdk-calls", "graphql-client"],
     }
 
@@ -198,6 +199,28 @@ def test_detection_is_applied_and_labels_the_file(isolated) -> None:
     assert record.framework == "express"
 
 
+def test_a_failing_detector_does_not_drop_the_others(isolated) -> None:
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    source = b"app.get('/x', h);\n"
+    root = parse_source("typescript", source, 0).root_node
+    call = root.named_children[0].named_children[0]
+
+    def broken(dc):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    def detect(dc):
+        return Detection([Emit(call, {"semanticType": "route", "endpoint": "/x"})])
+
+    isolated["typescript"] = [
+        Detector(name="broken", gate=Gate("typescript", order=1), detect=broken),
+        Detector(name="probe", gate=Gate("typescript", order=2), detect=detect),
+    ]
+    record = _record()
+    run_additive("typescript", root, _ctx(source), record, is_fixture=False)
+    assert [s.endpoint for s in record.statements] == ["/x"]
+
+
 # ---- facts: built from other files while the language index is built ----------------------------
 
 def _collect_marked(root, source: bytes, rel: str, repo_root) -> str:
@@ -227,7 +250,7 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="kotlin"))
+        register_fact(_marked(language="terraform"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:

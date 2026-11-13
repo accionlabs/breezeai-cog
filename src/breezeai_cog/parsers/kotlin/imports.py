@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
 from .constants import importable_constants
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
 
@@ -20,14 +24,18 @@ class KotlinIndex:
     """Repo-level pre-pass result: ``package.Type`` → path (import resolution) and the string
     constants other files can reference, by fully-qualified name (``com.acme.Paths.USERS`` →
     ``/users``; see :func:`~.constants.importable_constants`). A name declared in two files
-    with different values is absent from ``consts``: which one is meant is unknown."""
+    with different values is absent from ``consts``: which one is meant is unknown. ``facts``
+    holds the registered additive facts (``parsers/additive.py``), by name."""
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, str]] | None:
-    file_s, rel = args
+def _fqcn_index_one(
+    args: tuple[str, str, str],
+) -> tuple[dict[str, str], dict[str, str], dict[str, Any]] | None:
+    file_s, rel, repo_root_s = args
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -48,24 +56,32 @@ def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, st
                 if nm is not None:
                     name = node_text(nm, source)
                     fqcn_frag[f"{package}.{name}" if package else name] = rel
-        return fqcn_frag, importable_constants(root, source, package)
+        return (fqcn_frag, importable_constants(root, source, package),
+                collect_additive("kotlin", root, source, rel, Path(repo_root_s)))
     except Exception:
         return None
 
 
 def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> KotlinIndex:
-    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    files, fact_files = split_fact_sources("kotlin", list(files))
+    args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("kotlin", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     consts: dict[str, str | None] = {}
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, const_frag = frag
+        fqcn_frag, const_frag, facts = frag
+        for name, value in facts.items():
+            collected.setdefault(name, []).append(value)
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
         for name, value in const_frag.items():
             record_distinct(consts, name, value)
-    return KotlinIndex(fqcn=fqcn, consts={k: v for k, v in consts.items() if v is not None})
+    index = KotlinIndex(fqcn=fqcn, consts={k: v for k, v in consts.items() if v is not None})
+    # Registered facts may need the whole index, so they resolve after it is built.
+    return replace(index, facts=resolve_additive("kotlin", collected, index))
 
 
 def _package_of(root: Node, source: bytes) -> str:
