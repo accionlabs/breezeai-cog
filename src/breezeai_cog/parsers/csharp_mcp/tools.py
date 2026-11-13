@@ -10,9 +10,11 @@
                                   CancellationToken ct = default) => …
 
 * ``[McpServerTool]`` is the SDK's own attribute, so it is an MCP tool wherever it appears.
-* ``endpoint`` — ``Name =`` when a literal. Without it the SDK derives the name from the method,
-  and how (casing, an ``Async`` suffix) depends on the SDK version: the endpoint is then left
-  empty rather than guessed; ``handler`` still names the method.
+* ``endpoint`` — ``Name =`` when a literal. Without it, the name the SDK derives from the method
+  (``McpServerTool.Create`` → ``DeriveName``, SDK 0.3 and later): a trailing ``Async`` dropped when
+  the method returns ``Task`` / ``ValueTask`` / ``IAsyncEnumerable``, anything but ASCII letters
+  and digits → ``_``, then snake_case (``JsonNamingPolicy.SnakeCaseLower``): ``GetWeatherAsync``
+  → ``get_weather``. Earlier previews kept the method name; current releases are assumed.
 * ``description`` — ``[Description("…")]`` on the method, else its XML doc ``<summary>``.
 * ``params`` — ``[Description]`` per parameter; a parameter is optional only when it has a
   default (a nullable type alone stays required). Injected parameters (``CancellationToken``,
@@ -144,6 +146,42 @@ def _params(method: Node, source: bytes) -> list[ToolParam]:
     return out
 
 
+_ASYNC_RETURNS = frozenset({"Task", "ValueTask", "IAsyncEnumerable"})
+_NOT_ASCII_ALNUM = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _snake_case_lower(name: str) -> str:
+    """``JsonNamingPolicy.SnakeCaseLower``: ``GetHTTPStatus2`` → ``get_http_status2``."""
+    out: list[str] = []
+    state = ""  # "", "upper", "lower" (a lowercase letter or a digit)
+    for i, ch in enumerate(name):
+        if ch.isupper():
+            if state == "lower" or (
+                state == "upper" and i + 1 < len(name) and name[i + 1].islower()
+            ):
+                out.append("_")
+            out.append(ch.lower())
+            state = "upper"
+        elif ch.islower() or ch.isdigit():
+            out.append(ch)
+            state = "lower"
+        else:
+            out.append(ch)
+            state = ""
+    return "".join(out)
+
+
+def _derived_name(method: Node, method_name: str, source: bytes) -> str:
+    """The tool name the SDK derives from a method without ``Name =`` (see the module doc)."""
+    name = method_name
+    returns = method.child_by_field_name("returns") or method.child_by_field_name("type")
+    simple = node_text(returns, source).split("<")[0].rsplit(".", 1)[-1] if returns else ""
+    if simple in _ASYNC_RETURNS and name.endswith("Async") and len(name) > len("Async"):
+        name = name[: -len("Async")]
+    name = _NOT_ASCII_ALNUM.sub("_", name).strip("_") or method_name
+    return _snake_case_lower(name)
+
+
 def _walk(node: Node) -> list[Node]:
     out, stack = [], [node]
     while stack:
@@ -167,29 +205,31 @@ def _detect(dc: DetectContext) -> Detection | None:
             continue
         method_name = node_text(name_node, source)
         named = _named_arg(tool, "Name", source)
-        endpoint = _string(named, source) if named is not None else None
-        if named is not None and not endpoint:
+        endpoint = (
+            _string(named, source)
+            if named is not None
+            else _derived_name(method, method_name, source)
+        )
+        if not endpoint:
             continue  # a computed Name: the tool exists, but its name is unknown
         line = method.start_point[0] + 1
         owner = functions.get((method_name, line))
         description = _positional_string(attrs.get("Description"), source) or _xml_summary(
             method, source
         )
-        emit = tool_emit(
-            tool,
-            source,
-            endpoint=endpoint or "",
-            framework=FRAMEWORK,
-            handler=method_name,
-            handler_line=line,
-            description=description,
-            params=_params(method, source),
-            parent=owner.id if owner is not None else None,
-            extra={"name": endpoint or method_name},
+        found.append(
+            tool_emit(
+                tool,
+                source,
+                endpoint=endpoint,
+                framework=FRAMEWORK,
+                handler=method_name,
+                handler_line=line,
+                description=description,
+                params=_params(method, source),
+                parent=owner.id if owner is not None else None,
+            )
         )
-        if not endpoint:
-            emit.fields["endpoint"] = None
-        found.append(emit)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

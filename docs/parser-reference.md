@@ -455,7 +455,7 @@ register_detector(Detector(
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.
-- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `java`, `python`, `scala`, `php`, `go`); `order` must be
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `java`, `kotlin`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
@@ -488,7 +488,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     ...
 ```
 
-- The language must be in `INDEX_HOOKED_LANGUAGES` (`csharp`, `go`, `graphql`, `groovy`, `java`, `python`, `ruby`, `scala`, `typescript`): those are the languages
+- The language must be in `INDEX_HOOKED_LANGUAGES` (`apex`, `c`, `cpp`, `csharp`, `cuda`, `go`, `graphql`, `groovy`, `java`, `kotlin`, `php`, `python`, `ruby`, `scala`, `typescript`): those are the languages
   whose `build_index` calls `collect_additive` / `resolve_additive`. The gate is required. Both
   are checked at registration.
 - **Files another parser owns.** `sources=(".svc",)` (and optionally `grammar="graphql"`) makes
@@ -583,7 +583,9 @@ that cannot be read whole is `None`.
 | `typescript_mcp` | TypeScript / JavaScript | `mcp-sdk-ts` | `.tool(…)` / `.registerTool(…)` on `new McpServer(…)` or a parameter typed `McpServer` |
 | `java_mcp` (+ fact `spring-ai.mcp-server`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
 | `java_mcp` | Java | `mcp-java-sdk` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
-| `csharp_mcp` | C# | `mcp-csharp` | `[McpServerTool]` |
+| `kotlin_mcp` (+ fact `spring-ai.mcp-server`, for Kotlin) | Kotlin | `spring-ai-mcp`, `mcp-java-sdk` | The `java_mcp` rules in Kotlin syntax (`@McpTool`; `@Tool` only with an MCP server starter in `pom.xml` / `build.gradle[.kts]`; nullable or defaulted parameters optional) |
+| `kotlin_mcp` | Kotlin | `mcp-kotlin` | `addTool(name, description, inputSchema) { … }` in a file importing `io.modelcontextprotocol.kotlin.sdk.server` |
+| `csharp_mcp` | C# | `mcp-csharp` | `[McpServerTool]`; without `Name =` the endpoint is the SDK-derived name (snake_case, `Async` dropped on an async method) |
 | `go_mcp` | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` / `server.ServerTool` literal that registers it |
 
 ### Selection: one parser per file

@@ -332,7 +332,12 @@ def _builder_chain(node: Node, source: bytes) -> tuple[str, list[tuple[str, list
 def _schema_params(node: Node | None, source: bytes) -> list[ToolParam] | None:
     """Params of a JSON-schema string literal; None when it is not one (unknown)."""
     raw = _string(node, source)
-    text = _unescape(raw) if raw is not None else None
+    return _json_schema_params(_unescape(raw) if raw is not None else None)
+
+
+def _json_schema_params(text: str | None) -> list[ToolParam] | None:
+    """Params of a JSON schema's text (``properties`` / ``required``); None when it does not
+    parse (unknown). Shared with the Kotlin detector (``kotlin_mcp``)."""
     if text is None:
         return None
     try:

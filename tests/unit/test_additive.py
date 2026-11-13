@@ -60,6 +60,7 @@ def test_inventory_in_run_order() -> None:
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda", "go-mcp"],
         "java": ["quartz", "struts2", "java-mcp", "vertx"],
+        "kotlin": ["kotlin-mcp"],
         "python": ["celery", "python-mcp"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
@@ -226,7 +227,7 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="kotlin"))
+        register_fact(_marked(language="vb"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:

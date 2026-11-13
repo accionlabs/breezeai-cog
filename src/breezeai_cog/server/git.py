@@ -195,7 +195,7 @@ def _capped(paths: dict[str, None], kind: str) -> list[str]:
 
 def context_paths(changed: Mapping[str, str], tree: list[str]) -> list[str]:
     """Unchanged files to fetch with real content for the facts the ``changed`` files (path →
-    content) depend on: build files in a changed Java file's folder or an ancestor, and the
+    content) depend on: build files in a changed Java / Kotlin file's folder or an ancestor, and the
     modules a changed Python file with an ``@x.tool`` imports from. At most
     :data:`_MAX_CONTEXT_FILES` of each kind (a warning is logged when a cap cuts), in a stable
     order."""
@@ -204,7 +204,7 @@ def context_paths(changed: Mapping[str, str], tree: list[str]) -> list[str]:
     build: dict[str, None] = {}
     modules: dict[str, None] = {}
     for path in sorted(changed):
-        if path.endswith(".java"):
+        if path.endswith((".java", ".kt")):
             parts = path.split("/")[:-1]
             for n in range(len(parts), -1, -1):
                 folder = "/".join(parts[:n])

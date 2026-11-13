@@ -301,10 +301,31 @@ def test_csharp_sdk_tools(analyze_files) -> None:
         ("times", "int", False, "1", None),
         ("prefix", "string?", True, None, None),  # nullable alone is still required
     ]
-    reverse = tools[None]  # no Name =: the SDK-derived name is not guessed
-    assert reverse.handler == "Reverse" and reverse.name == "Reverse"
+    reverse = tools["reverse"]  # no Name =: the SDK's derived name (snake_case)
+    assert reverse.handler == "Reverse" and reverse.name == "reverse"
     assert reverse.description == "Reverses the message."
     assert _params(reverse) == [("message", "string", True, None, None)]
+
+
+def test_csharp_tool_name_derived_like_the_sdk(analyze_files) -> None:
+    src = """
+using System.Threading.Tasks;
+using ModelContextProtocol.Server;
+
+[McpServerToolType]
+public class Tools
+{
+    [McpServerTool] public static async Task<string> GetWeatherAsync(string city) => city;
+    [McpServerTool] public static ValueTask PingAsync() => default;
+    [McpServerTool] public static string ExportAsync() => "";
+    [McpServerTool] public static string GetHTTPStatus2() => "";
+    [McpServerTool] public static string Async() => "";
+}
+"""
+    tools = _tools(analyze_files({"src/Tools.cs": src}))
+    # `Async` dropped only for an async return type; acronyms grouped as System.Text.Json does
+    assert set(tools) == {"get_weather", "ping", "export_async", "get_http_status2", "async"}
+    assert tools["get_weather"].handler == "GetWeatherAsync"
 
 
 # ── Go: mark3labs/mcp-go ────────────────────────────────────────────────────
@@ -822,4 +843,200 @@ def test_mcp_java_sdk_schema_too_deep_to_load_leaves_params_unknown(
     monkeypatch.setattr(java_tools, "json", SimpleNamespace(loads=too_deep))
     tools = _tools(analyze_files({"src/main/java/demo/Tools.java": JAVA_SDK}))
     assert set(tools) == {"calc", "echo", "dyn"}  # the file still parses
+    assert tools["calc"].params is None and tools["echo"].params is None
+
+
+# ── Kotlin: Spring AI, MCP Java SDK, official Kotlin SDK ────────────────────
+
+KOTLIN_TOOLS = """
+package demo
+
+import org.springframework.ai.tool.annotation.Tool
+import org.springframework.ai.tool.annotation.ToolParam
+import org.springframework.ai.chat.model.ToolContext
+
+class WeatherTools {
+    @Tool(name = "current_weather", description = "Current weather for a city")
+    fun weather(
+        @ToolParam(description = "City name") city: String,
+        @ToolParam(description = "Units", required = false) units: String,
+        days: Int = 3,
+        lang: String?,
+        @ToolParam(description = "Region", required = true) region: String? = null,
+        ctx: ToolContext,
+    ): String = ""
+
+    @Tool
+    fun now(): String = ""
+}
+"""
+GRADLE_KTS_MCP = """dependencies {
+    implementation("org.springframework.ai:spring-ai-starter-mcp-server-webflux")
+}
+"""
+
+
+def test_kotlin_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None:
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": KOTLIN_TOOLS}
+    tools = _tools(analyze_files(files))
+    assert set(tools) == {"current_weather", "now"}  # `now`: default name = function name
+    w = tools["current_weather"]
+    assert (w.framework, w.handler, w.handlerLine, w.description) == (
+        "spring-ai-mcp",
+        "weather",
+        9,
+        "Current weather for a city",
+    )
+    assert w.parentId and w.parentId.endswith("#WeatherTools#weather@9")
+    assert _params(w) == [
+        ("city", "String", True, None, "City name"),
+        ("units", "String", False, None, "Units"),
+        ("days", "Int", False, "3", None),  # a default makes it optional
+        ("lang", "String?", False, None, None),  # so does a nullable type
+        ("region", "String?", True, "null", "Region"),  # an explicit `required` wins
+    ]
+    assert tools["now"].description is None and _params(tools["now"]) == []
+
+
+def test_java_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None:
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}
+    assert set(_tools(analyze_files(files))) == {"current_weather", "now"}
+
+
+def test_kotlin_spring_ai_tool_without_an_mcp_server_is_a_chat_tool(analyze_files) -> None:
+    gradle = 'dependencies {\n    implementation("org.springframework.ai:spring-ai-starter-model-openai")\n}\n'
+    files = {"build.gradle.kts": gradle, "src/main/kotlin/demo/WeatherTools.kt": KOTLIN_TOOLS}
+    assert _tools(analyze_files(files)) == {}
+    other = KOTLIN_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool\n", "import com.acme.Tool\n"
+    )
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": other}
+    assert _tools(analyze_files(files)) == {}  # not Spring AI's @Tool
+
+
+def test_kotlin_mcp_tool_annotation_needs_no_build_evidence(analyze_files) -> None:
+    src = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpTool
+import org.springaicommunity.mcp.annotation.McpToolParam
+
+class Calc {
+    @McpTool(name = "add", description = "Add")
+    fun add(@McpToolParam(description = "First") a: Int, @McpToolParam(required = false) b: Int): Int = a + b
+
+    @McpTool
+    suspend fun reset() {}
+}
+"""
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Calc.kt": src}))
+    assert set(tools) == {"add", "reset"}
+    assert tools["add"].framework == "spring-ai-mcp"
+    assert _params(tools["add"]) == [
+        ("a", "Int", True, None, "First"),
+        ("b", "Int", False, None, None),
+    ]
+    assert tools["reset"].description is None
+
+
+KOTLIN_SDK = '''
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+fun Server.registerTools() {
+    addTool(
+        name = "calc",
+        description = "Calculator",
+        inputSchema = Tool.Input(
+            properties = buildJsonObject {
+                putJsonObject("a") { put("type", "number"); put("description", "First") }
+                putJsonObject("b") { put("type", "number") }
+            },
+            required = listOf("a"),
+        ),
+    ) { request -> CallToolResult(content = listOf()) }
+    addTool("ping", "Ping") { _ -> CallToolResult(content = listOf()) }
+    addTool(name = "dyn", description = "Dynamic", inputSchema = schemaFor("dyn")) { _ -> null }
+    addTool(name = computedName(), description = "x") { _ -> null }
+}
+'''
+
+
+def test_kotlin_sdk_add_tool(analyze_files) -> None:
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Server.kt": KOTLIN_SDK}))
+    assert set(tools) == {"calc", "ping", "dyn"}  # a computed name is not guessed
+    calc = tools["calc"]
+    assert (calc.framework, calc.description, calc.handler, calc.handlerLine) == (
+        "mcp-kotlin",
+        "Calculator",
+        None,
+        19,  # the trailing lambda's line
+    )
+    assert _params(calc) == [
+        ("a", "number", True, None, "First"),
+        ("b", "number", False, None, None),
+    ]
+    assert tools["ping"].description == "Ping" and tools["ping"].params == []  # no schema
+    assert tools["dyn"].params is None  # a schema that cannot be read
+
+
+def test_kotlin_add_tool_without_the_mcp_sdk_is_not_a_tool(analyze_files) -> None:
+    src = KOTLIN_SDK.replace("io.modelcontextprotocol.kotlin.sdk", "com.acme.agent")
+    assert _tools(analyze_files({"src/main/kotlin/demo/Server.kt": src})) == {}
+
+
+KOTLIN_JAVA_SDK = '''
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+class Tools {
+    fun calc() = McpServerFeatures.SyncToolSpecification(
+        McpSchema.Tool("calc", "Calculator", """
+            {"type": "object", "properties": {"a": {"type": "number"}}, "required": ["a"]}
+        """.trimIndent())
+    ) { exchange, args -> null }
+
+    fun echo(): McpServerFeatures.AsyncToolSpecification {
+        val tool = McpSchema.Tool.builder().name("echo").description("Echo")
+            .inputSchema(mapper, "{\\"type\\":\\"object\\",\\"properties\\":{\\"msg\\":{\\"type\\":\\"string\\"}}}").build()
+        return McpServerFeatures.AsyncToolSpecification.builder().tool(tool).callHandler(this::doEcho).build()
+    }
+
+    fun doEcho(exchange: Any, req: Any): Any? = null
+}
+'''
+
+
+def test_kotlin_mcp_java_sdk_tool_specifications(analyze_files) -> None:
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Tools.kt": KOTLIN_JAVA_SDK}))
+    assert set(tools) == {"calc", "echo"}
+    calc = tools["calc"]
+    assert (calc.framework, calc.description, calc.handler, calc.handlerLine) == (
+        "mcp-java-sdk",
+        "Calculator",
+        None,
+        12,  # the trailing lambda's line
+    )
+    assert _params(calc) == [("a", "number", True, None, None)]
+    echo = tools["echo"]
+    assert (echo.description, echo.handler, echo.handlerLine) == ("Echo", "doEcho", 20)
+    assert _params(echo) == [("msg", "string", False, None, None)]
+
+
+def test_kotlin_schema_too_deep_to_load_leaves_params_unknown(analyze_files, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from breezeai_cog.parsers.java_mcp import tools as java_tools
+
+    def too_deep(_text: str) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(java_tools, "json", SimpleNamespace(loads=too_deep))
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Tools.kt": KOTLIN_JAVA_SDK}))
+    assert set(tools) == {"calc", "echo"}  # the file still parses
     assert tools["calc"].params is None and tools["echo"].params is None

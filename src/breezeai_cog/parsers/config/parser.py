@@ -34,6 +34,8 @@ class ConfigParser(BaseParser):
         ".ini",
         ".xml",
         ".gradle",
+        "build.gradle.kts",  # Gradle Kotlin DSL; any other ``.kts`` is a Kotlin script
+        "settings.gradle.kts",
         ".sbt",
         ".csproj",
         ".vbproj",

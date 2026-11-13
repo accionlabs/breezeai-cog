@@ -199,6 +199,12 @@ def test_context_paths_are_bounded_and_skip_plain_python() -> None:
     ) == ["app/server.py"]
 
 
+def test_context_paths_fetch_gradle_kts_for_a_kotlin_file() -> None:
+    tree = ["build.gradle.kts", "svc/build.gradle.kts", "svc/src/main/kotlin/T.kt", "other/pom.xml"]
+    changed = {"svc/src/main/kotlin/T.kt": "class T\n"}
+    assert git_mod.context_paths(changed, tree) == ["svc/build.gradle.kts", "build.gradle.kts"]
+
+
 def test_context_paths_build_files_have_their_own_budget_and_caps_warn(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
