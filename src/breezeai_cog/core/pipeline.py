@@ -399,7 +399,7 @@ def _assemble(
         total_functions += len(record.functions)
         total_classes += len(record.classes)
         total_statements += len(record.statements)
-        if not is_doc:  # documentation is not code: no LOC (BREEZEAI-1457)
+        if not is_doc:  # documentation is not code: no LOC
             total_loc += record.loc
         if record.type == "config":
             config_files += 1

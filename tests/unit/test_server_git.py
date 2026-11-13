@@ -158,7 +158,7 @@ def test_all_changed_files_unreadable_is_a_502() -> None:
 
 
 def test_incremental_fetches_the_context_files_cross_file_facts_read(recorded_git) -> None:
-    """BREEZEAI-1457: a changed tools file keeps its MCP server proof — the module's build file
+    """A changed tools file keeps its MCP server proof — the module's build file
     and the Python module that builds the server get real content, but are not streamed."""
     tools_py = "from .server import mcp\n\n@mcp.tool\ndef f():\n    pass\n"
     client = FakeClient(

@@ -77,7 +77,7 @@ def classify(
     # is commonly a prompt template a skill loads (seen in breezeai-claude-plugin references/).
     if upper.endswith(".PROMPT.MD") and _contains(dirs, (".github", "prompts")):
         return "command"
-    # Cursor commands are plain Markdown (no front matter) in `.cursor/commands/` (BREEZEAI-1457).
+    # Cursor commands are plain Markdown (no front matter) in `.cursor/commands/`.
     if _contains(dirs, (".cursor", "commands")) and name.lower().endswith(_MARKDOWN_SUFFIXES):
         return "command"
     if "commands" in dirs and name.lower().endswith(_MARKDOWN_SUFFIXES):
@@ -96,7 +96,7 @@ def classify(
         or path.endswith(".github/copilot-instructions.md")
         or name == ".cursorrules"
         # `.mdc` is Cursor's rule format and nothing else: a rule wherever it sits (a Cursor
-        # plugin keeps them in `rules/`, BREEZEAI-1457).
+        # plugin keeps them in `rules/`).
         or name.lower().endswith(".mdc")
     ):
         return "agent_instructions"
@@ -135,7 +135,7 @@ def _has_any(front_matter: dict[str, Any], keys: tuple[str, ...]) -> bool:
 def _plugin_folder(dirs: tuple[str, ...], name: str, plugin_root: Callable[[str], bool]) -> bool:
     """True when a ``name`` folder in ``dirs`` sits directly in a plugin root. A ``commands/``
     deeper in a plugin (``docs/commands/``, a skill's ``references/commands/``) is documentation,
-    not the plugin's commands (BREEZEAI-1457)."""
+    not the plugin's commands."""
     return any(part == name and plugin_root("/".join(dirs[:i])) for i, part in enumerate(dirs))
 
 

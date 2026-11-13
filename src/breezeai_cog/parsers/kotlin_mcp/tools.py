@@ -105,8 +105,12 @@ register_fact(
     )
 )
 
-#: Packages whose classes an import alias may stand for (BREEZEAI-1457).
-_MCP_PACKAGES = ("org.springframework.ai.", "org.springaicommunity.mcp.", "io.modelcontextprotocol.")
+#: Packages whose classes an import alias may stand for.
+_MCP_PACKAGES = (
+    "org.springframework.ai.",
+    "org.springaicommunity.mcp.",
+    "io.modelcontextprotocol.",
+)
 _IMPORT_ALIAS = re.compile(rb"^[ \t]*import[ \t]+([\w.]+)[ \t]+as[ \t]+(\w+)", re.MULTILINE)
 
 
@@ -283,7 +287,9 @@ def _element(annotation: Node, key: str, source: bytes) -> Node | None:
 def _params(
     function: Node, source: bytes, param_annotation: str, aliases: dict[str, str]
 ) -> list[ToolParam]:
-    params = next((c for c in function.named_children if c.type == "function_value_parameters"), None)
+    params = next(
+        (c for c in function.named_children if c.type == "function_value_parameters"), None
+    )
     # (parameter, its modifiers, its default): a modifier precedes its parameter, a default
     # follows it, all as siblings.
     entries: list[list[Node | None]] = []
@@ -332,7 +338,7 @@ def _params(
     return out
 
 
-#: ``@Tool`` is Spring AI's only when imported from its package (BREEZEAI-1457).
+#: ``@Tool`` is Spring AI's only when imported from its package.
 _SPRING_TOOL_IMPORT = re.compile(
     rb"import\s+org\.springframework\.ai\.tool\.annotation\.(?:Tool\b(?!\s+as\b)|\*)"
 )
@@ -370,7 +376,9 @@ def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -
             ann, param_ann = anns["Tool"], "ToolParam"
         else:
             continue
-        name_node = next((c for c in function.named_children if c.type == "simple_identifier"), None)
+        name_node = next(
+            (c for c in function.named_children if c.type == "simple_identifier"), None
+        )
         if name_node is None:
             continue
         function_name = node_text(name_node, source)
@@ -396,7 +404,7 @@ def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -
     return found
 
 
-# ── MCP Java SDK (BREEZEAI-1457) ────────────────────────────────────────────
+# ── MCP Java SDK ────────────────────────────────────────────
 
 
 def _builder_chain(
@@ -466,7 +474,11 @@ def _tool_fields(
         if _named(args, "name") is not None:
             schema = _named(args, "inputSchema")
             desc = _string(_named(args, "description"), source)
-            return name, desc, _json_schema_params(_literal_text(schema, source)) if schema else None
+            return (
+                name,
+                desc,
+                _json_schema_params(_literal_text(schema, source)) if schema else None,
+            )
         if len(pos) == 3:  # Tool(name, description, inputSchema)
             return name, _string(pos[1], source), _json_schema_params(_literal_text(pos[2], source))
         return name, None, None  # other overloads: positions differ by SDK version
@@ -567,7 +579,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
     return found
 
 
-# ── Official Kotlin SDK (BREEZEAI-1457) ─────────────────────────────────────
+# ── Official Kotlin SDK ─────────────────────────────────────
 
 
 def _string_list(node: Node | None, source: bytes) -> list[str] | None:
@@ -582,7 +594,9 @@ def _string_list(node: Node | None, source: bytes) -> list[str] | None:
 
 def _lambda_statements(call: Node, source: bytes) -> list[Node] | None:
     """The statements of a call's trailing lambda (``f { a; b }``); None without one."""
-    lam = next((v for k, v in reversed(_call_args(call, source)) if v.type == "lambda_literal"), None)
+    lam = next(
+        (v for k, v in reversed(_call_args(call, source)) if v.type == "lambda_literal"), None
+    )
     if lam is None:
         return None
     body = next((c for c in lam.named_children if c.type == "statements"), None)
@@ -596,7 +610,11 @@ def _lambda_statements(call: Node, source: bytes) -> list[Node] | None:
 def _json_properties(node: Node | None, source: bytes) -> dict[str, dict[str, str]] | None:
     """``buildJsonObject { putJsonObject("a") { put("type", "number") } }`` → ``{"a": {"type":
     "number"}}`` (string ``put``s only); None when any statement is something else."""
-    if node is None or node.type != "call_expression" or _callee_name(node, source) != "buildJsonObject":
+    if (
+        node is None
+        or node.type != "call_expression"
+        or _callee_name(node, source) != "buildJsonObject"
+    ):
         return None
     statements = _lambda_statements(node, source)
     if statements is None:
@@ -641,7 +659,9 @@ def _kotlin_schema_params(
     if props is None or required is None:
         return None
     return [
-        param(name, spec.get("type"), required=name in required, description=spec.get("description"))
+        param(
+            name, spec.get("type"), required=name in required, description=spec.get("description")
+        )
         for name, spec in props.items()
     ]
 
@@ -663,7 +683,9 @@ def _kotlin_sdk_tool(
     name = _string(_named(fields, "name") or (pos[0] if pos else None), source)
     if not name or handler is None:
         return None
-    description = _string(_named(fields, "description") or (pos[1] if len(pos) > 1 else None), source)
+    description = _string(
+        _named(fields, "description") or (pos[1] if len(pos) > 1 else None), source
+    )
     schema = _named(fields, "inputSchema") or (pos[2] if len(pos) > 2 else None)
     params = _kotlin_schema_params(schema, source, aliases) if schema is not None else []
     handler_name, handler_line = _handler(handler, source, methods)
@@ -680,7 +702,9 @@ def _kotlin_sdk_tool(
     )
 
 
-def _registered_tools(node: Node, source: bytes, aliases: dict[str, str]) -> list[tuple[Node, Node, Node | None]]:
+def _registered_tools(
+    node: Node, source: bytes, aliases: dict[str, str]
+) -> list[tuple[Node, Node, Node | None]]:
     """``(element, Tool(…) call, handler)`` of each ``RegisteredTool(Tool(…), handler)`` in an
     ``addTools(listOf(…))`` whose list is written inline; nothing for any other list."""
     args = _call_args(node, source)
@@ -697,13 +721,20 @@ def _registered_tools(node: Node, source: bytes, aliases: dict[str, str]) -> lis
         return []
     out: list[tuple[Node, Node, Node | None]] = []
     for element in _positional(_call_args(lst, source)):
-        if element.type != "call_expression" or _type_callee(element, source, aliases) != "RegisteredTool":
+        if (
+            element.type != "call_expression"
+            or _type_callee(element, source, aliases) != "RegisteredTool"
+        ):
             continue
         el_args = _call_args(element, source)
         el_pos = _positional(el_args)  # a trailing lambda is the last one
         tool = _named(el_args, "tool") or (el_pos[0] if el_pos else None)
         handler = _named(el_args, "handler") or (el_pos[1] if len(el_pos) > 1 else None)
-        if tool is not None and tool.type == "call_expression" and _type_callee(tool, source, aliases) == "Tool":
+        if (
+            tool is not None
+            and tool.type == "call_expression"
+            and _type_callee(tool, source, aliases) == "Tool"
+        ):
             out.append((element, tool, handler))
     return out
 

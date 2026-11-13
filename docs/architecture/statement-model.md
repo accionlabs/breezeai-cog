@@ -90,7 +90,7 @@ flowchart LR
 > own (a route derived from an annotation such as `@GetMapping`) uses `synthetic` rather than an
 > invented name like `route_annotation`. The meaning goes in `semanticType`.
 >
-> **One exception — `document`** (BREEZEAI-1457, agreed on the ticket): the single whole-file
+> **One exception — `document`**: the single whole-file
 > statement of a Markdown file (`parsers/markdown`) uses `nodeType: document`. Markdown is not
 > tree-sitter parsed, the statement covers the whole file, and the value lets a reader tell a
 > document body from code at a glance. Its `semanticType` is the document kind (`skill`, `agent`,

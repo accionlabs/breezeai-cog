@@ -47,7 +47,7 @@ class _InfraStreamSink:
         self.files += 1
         self.funcs += len(record.functions)
         self.classes += len(record.classes)
-        if record.language not in pipeline.DOC_LANGUAGES:  # docs are not code (BREEZEAI-1457)
+        if record.language not in pipeline.DOC_LANGUAGES:  # docs are not code
             self.loc += record.loc
         self.by_type[record.language] = self.by_type.get(record.language, 0) + 1
         if record.type == "config":

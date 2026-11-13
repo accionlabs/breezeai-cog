@@ -85,7 +85,7 @@ _INJECTED = frozenset(
 
 
 #: A Maven ``<dependencyManagement>`` block (versions for children, not dependencies) or an XML
-#: comment; removed before the server-starter check (BREEZEAI-1457).
+#: comment; removed before the server-starter check.
 _POM_NOT_DEPENDENCIES = re.compile(
     rb"<dependencyManagement\b.*?</dependencyManagement\s*>|<!--.*?-->", re.DOTALL
 )
@@ -237,7 +237,7 @@ def _walk(node: Node) -> list[Node]:
     return out
 
 
-#: ``@Tool`` is Spring AI's only when imported from its package (BREEZEAI-1457).
+#: ``@Tool`` is Spring AI's only when imported from its package.
 _SPRING_TOOL_IMPORT = re.compile(
     rb"import\s+org\.springframework\.ai\.tool\.annotation\.(?:Tool|\*)\s*;"
 )
@@ -297,7 +297,7 @@ def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -
     return found
 
 
-# ── MCP Java SDK (BREEZEAI-1457) ────────────────────────────────────────────
+# ── MCP Java SDK ────────────────────────────────────────────
 
 _JAVA_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "s": " "}
 

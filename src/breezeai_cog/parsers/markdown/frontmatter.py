@@ -92,7 +92,7 @@ _SIMPLE_FIELDS = ("name", "description")
 
 def _simple_fields(text: str) -> dict[str, Any]:
     """``name`` / ``description`` of front matter YAML rejects only because of an unquoted
-    value, as in Cursor rules (``globs: **/*.ts`` reads as an alias; BREEZEAI-1457). Every
+    value, as in Cursor rules (``globs: **/*.ts`` reads as an alias). Every
     line must be a top-level ``key: plain value`` (or blank / a comment) and the two values
     plain text; anything else (nesting, flow collections, block scalars, anchors) yields
     ``{}`` — the header is then not used at all."""

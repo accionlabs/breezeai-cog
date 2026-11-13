@@ -119,7 +119,7 @@ class Statement(BaseModel):
     keyFields: list[str] | None = None
     # iac-only: cloud provider inferred from resource type prefix or provider name
     platform: str | None = None
-    # Human description (BREEZEAI-1457): the front-matter ``description`` of a skill / agent /
+    # Human description: the front-matter ``description`` of a skill / agent /
     # command document, or the tool description / docstring of an ``mcp_tool``.
     description: str | None = None
     # mcp_tool-only: the tool's input parameters.
@@ -266,7 +266,7 @@ class ProjectMetaData(BaseModel):
             return True
         # A typed AI / decision document (skill, agent, command, agent instructions, ADR —
         # parsers/markdown) is content an agent uses, even in a repo with no code. Untyped docs
-        # (a README, a changelog, prose) alone are not. BREEZEAI-1457.
+        # (a README, a changelog, prose) alone are not.
         if (cfg.get("capturedAgentDocuments") or 0) > 0:
             return True
         # IaC repos (Terraform, etc.) have no code language or functions but are real

@@ -42,7 +42,7 @@ _MAX_HEADING_CHARS = 200
 _ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 #: A fence at any indent, for secret masking: MkDocs and other renderers nest fenced blocks
-#: under list items, four or more spaces in (BREEZEAI-1457).
+#: under list items, four or more spaces in.
 _ANY_FENCE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)(.*)$")
 #: An indented code block line (four spaces or a tab), where snippets also live.
 _INDENTED_CODE = re.compile(r"^(?: {4}|[ \t]{0,3}\t)")
@@ -63,8 +63,8 @@ _AUTH_SCHEME = (
     r"|aws4-hmac-sha256)"
 )
 #: An authorization-style header with a scheme word, anywhere in the text (prose, ``curl -H
-#: "Authorization: Bearer x"``): the scheme and the credential after it are masked
-#: (BREEZEAI-1457). Without a scheme word the pair is left to the code masking below, so prose
+#: "Authorization: Bearer x"``): the scheme and the credential after it are masked.
+#: Without a scheme word the pair is left to the code masking below, so prose
 #: such as "Authorization: required" is kept.
 _AUTH_HEADER = re.compile(
     r"(?<![\w\-])((?i:proxy-authorization|authorization|x-api-key|api-key|x-auth-token))"
@@ -118,7 +118,7 @@ class MarkdownParser(BaseParser):
         fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
         front_matter, fm_ok = load_front_matter(fm_text)
         # A leading ``---`` block that is not YAML at all (a thematic break around prose) is
-        # body: its headings are outline (BREEZEAI-1457). A broken YAML header stays skipped.
+        # body: its headings are outline. A broken YAML header stays skipped.
         outline_start = body_start if fm_ok or _looks_like_yaml(lines, body_start) else 0
         headings = _rst_headings(lines) if rst else _atx_headings(lines, outline_start)
         title = _redacted(string_field(front_matter, "title")) or next(
@@ -181,7 +181,7 @@ class MarkdownParser(BaseParser):
 
 
 def _decode(source: bytes) -> str:
-    """Text of a document: UTF-16 when it opens with a UTF-16 byte-order mark (BREEZEAI-1457),
+    """Text of a document: UTF-16 when it opens with a UTF-16 byte-order mark,
     else UTF-8 (a UTF-8 BOM dropped); undecodable bytes are replaced."""
     if source[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return source.decode("utf-16", "replace").lstrip("\ufeff")
@@ -241,7 +241,7 @@ def _mask_code_assign(m: re.Match[str]) -> str:
 
 def _mask_code_blocks(text: str) -> str:
     """Mask secret-named ``key = value`` pairs on code lines, where config and code snippets
-    live (BREEZEAI-1457): inside fenced blocks at any indent (a fence nested under a list item
+    live: inside fenced blocks at any indent (a fence nested under a list item
     included) and on indented code lines (four spaces or a tab). Other prose is untouched.
 
     A fence closes only on a bare run of its own character at least as long as the opener, so
@@ -287,7 +287,9 @@ def _mask_name_value(lines: list[str], start: int, end: int) -> None:
         if secret and value_at is not None:
             m = _FM_KEY.match(lines[value_at])
             if m is not None:
-                lines[value_at] = f"{m.group(1)}{m.group(2)}{m.group(3)} {_masked_value(m.group(4).strip())}"
+                lines[value_at] = (
+                    f"{m.group(1)}{m.group(2)}{m.group(3)} {_masked_value(m.group(4).strip())}"
+                )
 
     for i in range(start, end):
         line = lines[i]
@@ -333,14 +335,14 @@ def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
         m = _FM_KEY.match(line)
         if m is None or not secret_name(m.group(2).strip("\"'")):
             # A flow collection (``env: {DB_PASSWORD: x}``, ``- {token: x}``) can hold
-            # secret-named pairs of its own (BREEZEAI-1457).
+            # secret-named pairs of its own.
             if "{" in line:
                 out[i] = _mask_flow(line)
             continue
         if m.group(4).strip():
             out[i] = f"{m.group(1)}{m.group(2)}{m.group(3)} ***"
         # The lines indented under a secret key are its value too: a nested block, a block
-        # scalar (``api_token: |`` / ``>``) or a folded plain scalar (BREEZEAI-1457). Measured
+        # scalar (``api_token: |`` / ``>``) or a folded plain scalar. Measured
         # from the key, so a list item's sibling keys are not.
         block_indent = len(m.group(1))
     _mask_name_value(out, 1, body_start - 1)
@@ -470,8 +472,8 @@ def _rst_headings(lines: list[str]) -> list[dict[str, Any]]:
 
 def _plugin_check(repo_root: Path | str | None) -> Callable[[str], bool]:
     """``plugin_root(dir)`` for :func:`classify`: True when the repo-relative ``dir`` itself
-    holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json`` (a Cursor plugin,
-    BREEZEAI-1457)."""
+    holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json`` (a Cursor
+    plugin)."""
 
     def plugin_root(rel_dir: str) -> bool:
         if repo_root is None:

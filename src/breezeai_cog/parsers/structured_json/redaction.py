@@ -36,7 +36,7 @@ _PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
 
 #: In-place span matches. Each branch is fixed-shape and boundary-anchored so no benign
 #: string can match; the ``conn`` / ``cs`` groups drive the partial URL-credential redact.
-#: The URL scheme is length-bounded (BREEZEAI-1457): unbounded, every start position in a long
+#: The URL scheme is length-bounded: unbounded, every start position in a long
 #: run of scheme characters with no ``://`` rescanned the rest of the run — quadratic time.
 _SECRET_RE = re.compile(
     r"""
@@ -112,7 +112,7 @@ def _pem_body_end(text: str, start: int) -> int:
 
 
 def _redact_pem(text: str) -> str:
-    """Mask the body of each PEM private-key block in ``text`` (BREEZEAI-1457). The body runs to
+    """Mask the body of each PEM private-key block in ``text``. The body runs to
     the matching ``-----END …PRIVATE KEY-----`` when one follows before the next ``-----BEGIN``;
     without one, only the key-shaped lines after the header (:func:`_pem_body_end`) — never the
     rest of the document."""
@@ -137,7 +137,7 @@ def _redact_pem(text: str) -> str:
 
 
 def redact_text(text: str) -> str:
-    """Redact secrets inside a free-text document (BREEZEAI-1457, Markdown capture): each line
+    """Redact secrets inside a free-text document (Markdown capture): each line
     of a PEM private-key body becomes ``***`` in place (header and footer kept, so the line
     count is unchanged), and the same span patterns as :func:`redact_secrets` (provider tokens,
     JWTs, URL credentials) are masked where they sit. Prose around them is kept."""

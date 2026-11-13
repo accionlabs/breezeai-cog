@@ -309,7 +309,7 @@ def _annotations(node: Node, source: bytes) -> bool:
 def _tool_params(middle: list[Node], source: bytes, zod: set[str]) -> list[ToolParam] | None:
     """Params of ``tool(name, [description], [shape], [annotations], cb)`` from the arguments
     between the description and the callback: ``[]`` with no shape, the shape's params when it
-    reads whole, else None (BREEZEAI-1457)."""
+    reads whole, else None."""
     if not middle or (len(middle) == 1 and _annotations(middle[0], source)):
         return []
     return _zod_shape(middle[0], source, zod)
@@ -320,7 +320,7 @@ def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
     (``withErrors(async (a) => …)``). A wrapper's argument is taken only when it is a function
     literal, or a function declared in this file passed alone (``withErrors(namedHandler)``);
     otherwise (``createHandler(apiClient)``) the wrapper call is returned: the handler is built
-    there and has no name (BREEZEAI-1457)."""
+    there and has no name."""
     for _ in range(4):
         if cb.type != "call_expression":
             return cb

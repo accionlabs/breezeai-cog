@@ -1,4 +1,4 @@
-"""Shared by the MCP tool detectors (``parsers/<lang>_mcp``, BREEZEAI-1457).
+"""Shared by the MCP tool detectors (``parsers/<lang>_mcp``).
 
 Each detector emits one ``mcp_tool`` statement per tool an MCP **server** declares::
 

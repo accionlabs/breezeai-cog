@@ -55,7 +55,7 @@ from ..schemas import FileRecord, Statement
 from .aspnet_common import FRAMEWORK_SERVED
 from .django_common import DJANGO_SERVED
 
-#: ``mcp_tool`` (BREEZEAI-1457): an MCP server tool is an entry point an AI client calls, held to
+#: ``mcp_tool``: an MCP server tool is an entry point an AI client calls, held to
 #: the same contract as a route (``method="TOOL"``, ``endpoint`` = the tool name).
 ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer", "mcp_tool"})
 

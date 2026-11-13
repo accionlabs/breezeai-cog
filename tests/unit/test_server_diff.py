@@ -107,7 +107,7 @@ def test_config_files_are_not_analyzed_languages(captured: _Captured) -> None:
 
 
 def test_docs_add_no_lines_of_code(captured: _Captured) -> None:
-    # same rule as the full scan (BREEZEAI-1457): Markdown is streamed but is not code
+    # same rule as the full scan: Markdown is streamed but is not code
     files = {"README.md": "# Widgets\n\nline one\nline two\n"}
     client = _make_client(captured, filter_set=None, deleted=[], repo_files=files)
     assert client.post("/api/analyze-diff", json=BODY).status_code == 200

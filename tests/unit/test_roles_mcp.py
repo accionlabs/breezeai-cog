@@ -1,4 +1,4 @@
-"""MCP server tools (BREEZEAI-1457): one ``mcp_tool`` statement per tool, per SDK.
+"""MCP server tools: one ``mcp_tool`` statement per tool, per SDK.
 
 Every case runs the whole pipeline (``analyze_files``), which also fails on any entry-point
 contract error (``parsers/contract.py``). Each SDK covers a renamed tool, a tool without a
@@ -460,7 +460,7 @@ def test_python_attribute_named_tools_is_not_scanned(analyze_files) -> None:
     assert _tools(analyze_files({"app/server.py": src})) == {}
 
 
-# ── Review fixes (BREEZEAI-1457) ────────────────────────────────────────────
+# ── Review fixes ────────────────────────────────────────────
 
 TS_HEADER = """
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -917,7 +917,10 @@ GRADLE_KTS_MCP = """dependencies {
 
 
 def test_kotlin_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None:
-    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": KOTLIN_TOOLS}
+    files = {
+        "build.gradle.kts": GRADLE_KTS_MCP,
+        "src/main/kotlin/demo/WeatherTools.kt": KOTLIN_TOOLS,
+    }
     tools = _tools(analyze_files(files))
     assert set(tools) == {"current_weather", "now"}  # `now`: default name = function name
     w = tools["current_weather"]
@@ -943,7 +946,9 @@ def test_kotlin_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None
 def test_kotlin_long_default_is_cut(analyze_files) -> None:
     src = KOTLIN_TOOLS.replace("days: Int = 3,", 'days: String = "' + "x" * 300 + '",')
     files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": src}
-    days = next(p for p in _tools(analyze_files(files))["current_weather"].params if p.name == "days")
+    days = next(
+        p for p in _tools(analyze_files(files))["current_weather"].params if p.name == "days"
+    )
     assert len(days.default) == 200 and days.default.endswith("…")
 
 
@@ -988,7 +993,7 @@ class Calc {
     assert tools["reset"].description is None
 
 
-KOTLIN_SDK = '''
+KOTLIN_SDK = """
 package demo
 
 import io.modelcontextprotocol.kotlin.sdk.CallToolResult
@@ -1011,7 +1016,7 @@ fun Server.registerTools() {
     addTool(name = "dyn", description = "Dynamic", inputSchema = schemaFor("dyn")) { _ -> null }
     addTool(name = computedName(), description = "x") { _ -> null }
 }
-'''
+"""
 
 
 def test_kotlin_sdk_add_tool(analyze_files) -> None:
@@ -1092,10 +1097,14 @@ def test_kotlin_schema_too_deep_to_load_leaves_params_unknown(analyze_files, mon
 
 
 def test_kotlin_aliased_spring_ai_tool(analyze_files) -> None:
-    aliased = KOTLIN_TOOLS.replace(
-        "import org.springframework.ai.tool.annotation.Tool\n",
-        "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
-    ).replace("@Tool(", "@AiTool(").replace("@Tool\n", "@AiTool\n")
+    aliased = (
+        KOTLIN_TOOLS.replace(
+            "import org.springframework.ai.tool.annotation.Tool\n",
+            "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
+        )
+        .replace("@Tool(", "@AiTool(")
+        .replace("@Tool\n", "@AiTool\n")
+    )
     files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": aliased}
     tools = _tools(analyze_files(files))
     assert set(tools) == {"current_weather", "now"}
@@ -1104,19 +1113,28 @@ def test_kotlin_aliased_spring_ai_tool(analyze_files) -> None:
 
 
 def test_kotlin_aliased_tool_needs_the_starter_and_the_spring_class(analyze_files) -> None:
-    aliased = KOTLIN_TOOLS.replace(
-        "import org.springframework.ai.tool.annotation.Tool\n",
-        "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
-    ).replace("@Tool(", "@AiTool(").replace("@Tool\n", "@AiTool\n")
+    aliased = (
+        KOTLIN_TOOLS.replace(
+            "import org.springframework.ai.tool.annotation.Tool\n",
+            "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
+        )
+        .replace("@Tool(", "@AiTool(")
+        .replace("@Tool\n", "@AiTool\n")
+    )
     assert _tools(analyze_files({"src/main/kotlin/demo/WeatherTools.kt": aliased})) == {}
-    unrelated = KOTLIN_TOOLS.replace(
-        "import org.springframework.ai.tool.annotation.Tool\n", "import com.acme.Tool as AiTool\n"
-    ).replace("@Tool(", "@AiTool(").replace("@Tool\n", "@AiTool\n")
+    unrelated = (
+        KOTLIN_TOOLS.replace(
+            "import org.springframework.ai.tool.annotation.Tool\n",
+            "import com.acme.Tool as AiTool\n",
+        )
+        .replace("@Tool(", "@AiTool(")
+        .replace("@Tool\n", "@AiTool\n")
+    )
     files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": unrelated}
     assert _tools(analyze_files(files)) == {}
 
 
-KOTLIN_ADD_TOOLS = '''
+KOTLIN_ADD_TOOLS = """
 package demo
 
 import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
@@ -1145,7 +1163,7 @@ fun register(server: Server) {
 }
 
 fun stats(request: Any): Any? = null
-'''
+"""
 
 
 def test_kotlin_sdk_add_tools_with_an_inline_list(analyze_files) -> None:
@@ -1198,9 +1216,9 @@ def test_a_long_string_concatenation_is_read_without_recursion(language, kind, r
 
     module = importlib.import_module(reader)
     chain = " + ".join(['"ab"'] * (sys.getrecursionlimit() + 500))
-    decl = f'class A {{ String x = {chain}; }}' if language == "java" else f"val x = {chain}"
+    decl = f"class A {{ String x = {chain}; }}" if language == "java" else f"val x = {chain}"
     src = decl.encode()
     node = _first(parse_source(language, src, 0).root_node, kind)
     assert module._string(node, src) == "ab" * (sys.getrecursionlimit() + 500)
-    other = (b'class A { boolean x = "a" == "b"; }' if language == "java" else b'val x = "a" - "b"')
+    other = b'class A { boolean x = "a" == "b"; }' if language == "java" else b'val x = "a" - "b"'
     assert module._string(_first(parse_source(language, other, 0).root_node, kind), other) is None

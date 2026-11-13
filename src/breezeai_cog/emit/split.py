@@ -58,7 +58,7 @@ _CONTINUATION_CLEARED: tuple[str, ...] = (
 
 #: Statements that are never split: a Markdown document is one whole-file statement, already
 #: capped by its parser (parsers/markdown, 64 KB at a line boundary, loss marked inline), so a
-#: listing shows one row per document with its name and description. BREEZEAI-1457.
+#: listing shows one row per document with its name and description.
 _UNSPLIT_NODE_TYPES: frozenset[str] = frozenset({"document"})
 
 

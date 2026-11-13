@@ -1,4 +1,4 @@
-"""MarkdownParser (BREEZEAI-1457): one File + one whole-file ``document`` statement per
+"""MarkdownParser: one File + one whole-file ``document`` statement per
 Markdown file, classified by name / location / front matter; defensive front matter; secrets
 masked; the 64 KB cut and the 512 KB File-only limit; pipeline totals and the doc-count cap."""
 
@@ -429,7 +429,7 @@ def test_doc_cap_follows_path_order_not_arrival_order() -> None:
         assert kept == ["docs/0.md", "docs/1.md"]
 
 
-# ── review fixes (BREEZEAI-1457) ─────────────────────────────────────────────
+# ── review fixes ─────────────────────────────────────────────
 
 
 def test_pem_header_without_footer_masks_no_prose() -> None:
@@ -583,7 +583,7 @@ def test_front_matter_block_scalar_secret_is_masked() -> None:
     assert "model: opus" in st.text
 
 
-# ── review fixes, round 2 (BREEZEAI-1457) ────────────────────────────────────
+# ── review fixes, round 2 ────────────────────────────────────
 
 
 @pytest.mark.parametrize(

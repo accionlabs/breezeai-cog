@@ -93,8 +93,8 @@ def clone_repo_full(
     return temp_dir
 
 
-#: Unchanged files whose content cross-file facts read when a file next to them changes
-#: (BREEZEAI-1457). Without them the skeleton holds them empty, and a fact proven there — a
+#: Unchanged files whose content cross-file facts read when a file next to them changes.
+#: Without them the skeleton holds them empty, and a fact proven there — a
 #: Spring AI MCP server starter in a build file, a FastMCP server built in another module —
 #: vanishes, so the changed file's tools would be dropped. Bounded: at most this many fetches
 #: of each kind (build files, Python modules), so one kind cannot crowd out the other.

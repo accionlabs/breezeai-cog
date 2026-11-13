@@ -186,7 +186,7 @@ def _top_level_split(text: str, sep: str) -> list[str]:
 def _is_context(type_text: str) -> bool:
     """True for FastMCP's injected ``Context``, optionally nullable: ``Context``,
     ``mcp.server.fastmcp.Context``, ``Context[S, L]``, ``Context | None``, ``Optional[Context]``,
-    ``Union[Context, None]`` (BREEZEAI-1457)."""
+    ``Union[Context, None]``."""
     text = type_text.strip()
     members = _top_level_split(text, "|")
     if len(members) == 1:
@@ -235,7 +235,7 @@ def _annotated_description(metadata: list[Node], source: bytes) -> str | None:
 
 def _field_default(field: Node, source: bytes) -> tuple[bool, Node | None]:
     """``Field(…)`` → ``(has_default, default node)``. ``Field(...)`` / ``Field(default=...)``
-    mark the field required (BREEZEAI-1457); ``default_factory=`` gives a default with no
+    mark the field required; ``default_factory=`` gives a default with no
     literal value."""
     given = _kwarg(field, "default", source)
     if given is None:
@@ -279,7 +279,7 @@ def _params(fn: Node, source: bytes) -> list[ToolParam]:
         default: str | None = None
         required = value is None
         # `= Field(…)` decides the default; without `= value`, a `Field(…)` in `Annotated`
-        # does (`x: Annotated[int, Field(default=5)]` is optional, BREEZEAI-1457).
+        # does (`x: Annotated[int, Field(default=5)]` is optional).
         field = _field_call(value, source) if value is not None else None
         if value is None:
             field = next((f for f in (_field_call(m, source) for m in metadata) if f), None)

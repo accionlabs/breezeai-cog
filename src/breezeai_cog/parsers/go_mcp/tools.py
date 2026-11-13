@@ -99,7 +99,7 @@ def _package_names(root: Node, source: bytes, package: str = _PACKAGE) -> set[st
 
 
 def _unwrap(handler: Node | None, source: bytes, pkgs: set[str]) -> Node | None:
-    """``mcp.NewTypedToolHandler(fn)`` → ``fn`` (BREEZEAI-1457); any other node as is."""
+    """``mcp.NewTypedToolHandler(fn)`` → ``fn``; any other node as is."""
     call = _pkg_call(handler, source, pkgs) if handler is not None else None
     if call is not None and call[0] in _HANDLER_WRAPPERS and len(call[1]) == 1:
         return call[1][0]
