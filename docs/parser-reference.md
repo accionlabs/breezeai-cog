@@ -584,7 +584,7 @@ that cannot be read whole is `None`.
 | `java_mcp` (+ fact `spring-ai.mcp-server`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
 | `java_mcp` | Java | `mcp-java-sdk` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
 | `csharp_mcp` | C# | `mcp-csharp` | `[McpServerTool]` |
-| `go_mcp` | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` that registers it |
+| `go_mcp` | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` / `server.ServerTool` literal that registers it |
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

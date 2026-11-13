@@ -199,6 +199,60 @@ def test_context_paths_are_bounded_and_skip_plain_python() -> None:
     ) == ["app/server.py"]
 
 
+def test_context_paths_build_files_have_their_own_budget_and_caps_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """80 Java modules fill the build-file budget; the FastMCP server module a changed tools
+    file imports is still fetched, and each truncation is logged."""
+    tree = [f"m{i:02}/pom.xml" for i in range(80)] + [f"m{i:02}/A.java" for i in range(80)]
+    tree += ["app/server.py", "app/tools.py"]
+    changed = {f"m{i:02}/A.java": "" for i in range(80)}
+    changed["app/tools.py"] = "from app.server import mcp\n@mcp.tool\ndef f(): ...\n"
+    with caplog.at_level("WARNING", logger=git_mod.__name__):
+        paths = git_mod.context_paths(changed, tree)
+    assert "app/server.py" in paths
+    assert len([p for p in paths if p.endswith("pom.xml")]) == git_mod._MAX_CONTEXT_FILES
+    assert paths[0] == "m00/pom.xml"  # stable order
+    assert any("80 build files" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger=git_mod.__name__):
+        git_mod.context_paths({"app/tools.py": changed["app/tools.py"]}, tree)
+    assert not caplog.records  # under both caps: no warning
+
+
+def test_context_paths_follow_the_python_import_rules() -> None:
+    tools = "from {} import mcp\n@mcp.tool\ndef f(): ...\n"
+    tree = [
+        "svc/app/__init__.py", "svc/app/tools.py", "svc/app/server.py",
+        "other/server.py", "vendor/lib/app/server.py", "proj/pyproject.toml",
+        "proj/src/core/server.py", "proj/src/core/tools.py",
+    ]
+    # Absolute `server` from a package file: not the unrelated `other/server.py`.
+    assert git_mod.context_paths({"svc/app/tools.py": tools.format("server")}, tree) == []
+    # `app.server` resolves under the import root `svc/` only, not by any path suffix.
+    assert git_mod.context_paths({"svc/app/tools.py": tools.format("app.server")}, tree) == [
+        "svc/app/server.py"
+    ]
+    # A declared project's `src/` is an import root.
+    assert git_mod.context_paths(
+        {"proj/src/core/tools.py": tools.format("core.server")}, tree
+    ) == ["proj/src/core/server.py"]
+
+
+def test_context_paths_scale_with_import_depth_not_tree_size() -> None:
+    import time
+
+    tree = [f"pkg{i}/mod{j}/file{k}.py" for i in range(50) for j in range(50) for k in range(20)]
+    changed = {
+        f"pkg{i}/mod0/file0.py": "".join(f"from pkg{i}.mod{j} import x\n" for j in range(30))
+        + "@mcp.tool\ndef f(): ...\n"
+        for i in range(50)
+    }
+    start = time.perf_counter()
+    git_mod.context_paths(changed, tree)
+    assert time.perf_counter() - start < 2.0
+
+
 # --- clone_repo_full ----------------------------------------------------------------
 
 

@@ -19,7 +19,10 @@
   a non-literal ``description=`` → none.
 * ``params`` — from the signature: annotation text, default, ``Annotated[T, Field(description=…)]``
   / ``Annotated[T, "…"]`` and ``= Field(…)`` descriptions; ``self`` / ``cls``, ``*args`` /
-  ``**kwargs`` and the injected ``Context`` are skipped. Required = no default.
+  ``**kwargs``, the injected ``Context`` (also ``Context | None`` / ``Optional[Context]``) and
+  the names in a literal ``exclude_args=[…]`` are skipped (a non-literal ``exclude_args`` →
+  params unknown). Required = no default.
+* ``@x.tool(enabled=False)`` (a literal) → no record: the tool is never served.
 * ``framework`` — ``fastmcp`` when the server's file imports the standalone ``fastmcp``
   package, else ``mcp-python`` (the official SDK's ``mcp.server.fastmcp``); for an imported
   server, the file that builds it decides.
@@ -165,6 +168,38 @@ def _split_annotated(type_text: str) -> str:
     return inner.strip()
 
 
+def _top_level_split(text: str, sep: str) -> list[str]:
+    """``text`` split on ``sep`` outside brackets."""
+    out, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == sep and depth == 0:
+            out.append(text[start:i])
+            start = i + 1
+    out.append(text[start:])
+    return [part.strip() for part in out]
+
+
+def _is_context(type_text: str) -> bool:
+    """True for FastMCP's injected ``Context``, optionally nullable: ``Context``,
+    ``mcp.server.fastmcp.Context``, ``Context[S, L]``, ``Context | None``, ``Optional[Context]``,
+    ``Union[Context, None]`` (BREEZEAI-1457)."""
+    text = type_text.strip()
+    members = _top_level_split(text, "|")
+    if len(members) == 1:
+        head, _, rest = text.partition("[")
+        generic = head.strip().rsplit(".", 1)[-1]
+        if generic in ("Optional", "Union") and rest.endswith("]"):
+            members = _top_level_split(rest[:-1], ",")
+    named = [m for m in members if m not in ("None", "NoneType")]
+    if len(named) != 1:
+        return False
+    return named[0].split("[")[0].strip().rsplit(".", 1)[-1] == "Context"
+
+
 def _field_call(node: Node | None, source: bytes) -> Node | None:
     if node is None or node.type != "call":
         return None
@@ -237,7 +272,7 @@ def _params(fn: Node, source: bytes) -> list[ToolParam]:
         pname = node_text(name, source)
         type_text = node_text(type_node, source) if type_node is not None else None
         base = _split_annotated(type_text) if type_text else None
-        if pname in _SKIPPED_PARAMS or (base and base.split(".")[-1].split("[")[0] == "Context"):
+        if pname in _SKIPPED_PARAMS or (base and _is_context(base)):
             continue
         metadata = _annotated_metadata(type_node, source) if type_node is not None else []
         description = _annotated_description(metadata, source)
@@ -258,6 +293,24 @@ def _params(fn: Node, source: bytes) -> list[ToolParam]:
             default = _short(value, source)
         out.append(param(pname, base, required=required, default=default, description=description))
     return out
+
+
+def _disabled(call: Node, source: bytes) -> bool:
+    """``@x.tool(enabled=False)`` with a literal ``False``."""
+    value = _kwarg(call, "enabled", source)
+    return value is not None and node_text(value, source) == "False"
+
+
+def _excluded_args(call: Node, source: bytes) -> set[str] | None:
+    """The names in a literal ``exclude_args=[…]`` (FastMCP hides them from the schema);
+    ``set()`` when absent, None when it is not a list / tuple of string literals."""
+    value = _kwarg(call, "exclude_args", source)
+    if value is None:
+        return set()
+    if value.type not in ("list", "tuple"):
+        return None
+    names = [_literal(item, source) for item in value.named_children if item.type != "comment"]
+    return None if any(n is None for n in names) else {n for n in names if n is not None}
 
 
 def _detect(dc: DetectContext) -> Detection | None:
@@ -311,6 +364,14 @@ def _detect(dc: DetectContext) -> Detection | None:
                     description = _literal(desc_node, source)
             if not endpoint:
                 continue  # a computed name: the tool exists, but its name is unknown
+            if call is not None and _disabled(call, source):
+                break  # `enabled=False`: registered but never served
+            params: list[ToolParam] | None = _params(fn, source)
+            excluded = _excluded_args(call, source) if call is not None else set()
+            if excluded is None:
+                params = None  # `exclude_args=` not a literal: which params remain is unknown
+            elif excluded and params is not None:
+                params = [p for p in params if p.name not in excluded]
             line = fn.start_point[0] + 1
             owner = functions.get((fn_name, line))
             found.append(
@@ -322,7 +383,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                     handler=fn_name,
                     handler_line=line,
                     description=description,
-                    params=_params(fn, source),
+                    params=params,
                     parent=owner.id if owner is not None else None,
                 )
             )

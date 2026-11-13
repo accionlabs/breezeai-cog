@@ -337,7 +337,7 @@ def _schema_params(node: Node | None, source: bytes) -> list[ToolParam] | None:
         return None
     try:
         schema = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):  # a deeply nested literal must not fail the file
         return None
     if not isinstance(schema, dict):
         return None
