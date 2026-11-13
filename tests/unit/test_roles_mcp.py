@@ -491,6 +491,39 @@ server.registerTool("plain", { description: "P" }, async () => ({ content: [] })
         assert tools[name].params == [], name
 
 
+def test_typescript_zod_wrappers_and_partial_objects(analyze_files) -> None:
+    src = (
+        TS_HEADER
+        + """
+server.tool("wrap", {
+  a: z.optional(z.string().describe("A")),
+  b: z.nullable(z.number()),
+  c: z.nullish(z.boolean()),
+  d: z.optional(someSchema),
+}, async () => ({ content: [] }));
+server.registerTool("part", { inputSchema: z.object({ x: z.string(), y: z.number() }).partial() }, async () => ({ content: [] }));
+server.registerTool("deep", { inputSchema: z.object({ x: z.string() }).strict().deepPartial() }, async () => ({ content: [] }));
+server.registerTool("some", { inputSchema: z.object({ x: z.string(), y: z.number() }).partial({ x: true }) }, async () => ({ content: [] }));
+server.registerTool("ext", { inputSchema: z.object({ x: z.string() }).extend({ y: z.number() }) }, async () => ({ content: [] }));
+server.registerTool("whole", { inputSchema: z.object({ x: z.string() }).describe("in") }, async () => ({ content: [] }));
+"""
+    )
+    tools = _tools(analyze_files({"src/server.ts": src}))
+    assert _params(tools["wrap"]) == [
+        ("a", "string", False, None, "A"),
+        ("b", "number", True, None, None),  # nullable: the key is still required
+        ("c", "boolean", False, None, None),
+        ("d", None, False, None, None),  # the wrapped schema is a variable: type unknown
+    ]
+    assert _params(tools["part"]) == [
+        ("x", "string", False, None, None),
+        ("y", "number", False, None, None),
+    ]
+    assert _params(tools["deep"]) == [("x", "string", False, None, None)]
+    assert tools["some"].params is None and tools["ext"].params is None
+    assert _params(tools["whole"]) == [("x", "string", True, None, None)]
+
+
 def test_typescript_handler_factory_argument_is_not_the_handler(analyze_files) -> None:
     files = {
         "src/client.ts": "export const apiClient = { get() {} };\n",
@@ -678,11 +711,16 @@ func reg(s *Server) {
     s.AddTool(mcp.NewTool("helper", mcp.WithString("q"), commonOpts()), h)
     s.AddTool(mcp.NewTool("raw", mcp.WithRawInputSchema(schema)), h)
     s.AddTool(mcp.NewTool("known", mcp.WithString("q"), mcp.WithReadOnlyHintAnnotation(true)), h)
+    s.AddTool(mcp.NewTool("titled", mcp.WithTitleAnnotation("T"), mcp.WithOutputSchema[Out]()), h)
+    s.AddTool(mcp.NewTool("newer", mcp.WithString("q"), mcp.WithStringEnum("mode", "a", "b")), h)
 }
 """
     tools = _tools(analyze_files({"main.go": src}))
     assert tools["helper"].params is None and tools["raw"].params is None
     assert _params(tools["known"]) == [("q", "string", False, None, None)]
+    # An option the detector does not know may add a parameter: unknown, not a partial list.
+    assert tools["newer"].params is None
+    assert tools["titled"].params == []
 
 
 def test_go_package_tool_var_is_not_paired_through_a_shadowing_local(analyze_files) -> None:
@@ -891,11 +929,20 @@ def test_kotlin_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None
     assert _params(w) == [
         ("city", "String", True, None, "City name"),
         ("units", "String", False, None, "Units"),
-        ("days", "Int", False, "3", None),  # a default makes it optional
-        ("lang", "String?", False, None, None),  # so does a nullable type
-        ("region", "String?", True, "null", "Region"),  # an explicit `required` wins
+        # Spring AI reads `required` from the annotation only: a default or a nullable type
+        # does not make a parameter optional.
+        ("days", "Int", True, "3", None),
+        ("lang", "String?", True, None, None),
+        ("region", "String?", True, "null", "Region"),
     ]
     assert tools["now"].description is None and _params(tools["now"]) == []
+
+
+def test_kotlin_long_default_is_cut(analyze_files) -> None:
+    src = KOTLIN_TOOLS.replace("days: Int = 3,", 'days: String = "' + "x" * 300 + '",')
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": src}
+    days = next(p for p in _tools(analyze_files(files))["current_weather"].params if p.name == "days")
+    assert len(days.default) == 200 and days.default.endswith("…")
 
 
 def test_java_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None:

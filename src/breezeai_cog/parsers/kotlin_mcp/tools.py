@@ -15,10 +15,10 @@ Kotlin SDK).
   (fact :data:`~..java_mcp.tools.FACT`, registered for Kotlin too: ``pom.xml`` /
   ``build.gradle[.kts]`` in the file's folder or an ancestor).
 * ``endpoint`` — ``name =`` when a literal, else the function name (Spring AI's default).
-* ``params`` — ``description`` / ``required`` from the parameter annotation; without
-  ``required``, a nullable type (``String?``) or a default value makes it optional, and
-  ``default`` is the default's source text. ``ToolContext`` and MCP exchange / context
-  parameters are injected, not inputs.
+* ``params`` — ``description`` / ``required`` from the parameter annotation, required by
+  default as in Java: Spring AI's schema does not read Kotlin nullability (``String?``) or a
+  default value. ``default`` is the default's source text (cut at 200 characters).
+  ``ToolContext`` and MCP exchange / context parameters are injected, not inputs.
 
 MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
 
@@ -86,6 +86,8 @@ from ..java_mcp.tools import (
 )
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
+
+_MAX_DEFAULT = 200
 
 KOTLIN_SDK_FRAMEWORK = "mcp-kotlin"
 
@@ -317,14 +319,17 @@ def _params(
             )
             req = _element(ann, "required", source)
             required = node_text(req, source) != "false" if req is not None else None
-        if required is None:
-            required = type_node.type != "nullable_type" and default is None
+        # Spring AI reads `required` from the annotation only (true by default, as in Java):
+        # Kotlin nullability and a default value do not reach its schema.
+        default_text = " ".join(node_text(default, source).split()) if default is not None else None
+        if default_text is not None and len(default_text) > _MAX_DEFAULT:
+            default_text = default_text[: _MAX_DEFAULT - 1] + "…"
         out.append(
             param(
                 node_text(name_node, source),
                 type_text,
-                required=required,
-                default=node_text(default, source) if default is not None else None,
+                required=True if required is None else required,
+                default=default_text,
                 description=description,
             )
         )

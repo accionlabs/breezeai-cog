@@ -45,8 +45,23 @@ _PARAM_TYPES = {
     "WithObject": "object",
     "WithInteger": "integer",
 }
-#: ``NewTool`` options that set the input schema wholesale.
-_SCHEMA_OPTIONS = frozenset({"WithInputSchema", "WithRawInputSchema"})
+#: ``NewTool`` options known to add no parameter: description, title, annotations and the
+#: output schema. Any other option (``WithInputSchema``, ``WithRawInputSchema``, an option this
+#: list does not know) may add one, so the params are unknown.
+_NON_PARAM_OPTIONS = frozenset(
+    {
+        "WithDescription",
+        "WithTitle",
+        "WithTitleAnnotation",
+        "WithToolAnnotation",
+        "WithReadOnlyHintAnnotation",
+        "WithDestructiveHintAnnotation",
+        "WithIdempotentHintAnnotation",
+        "WithOpenWorldHintAnnotation",
+        "WithOutputSchema",
+        "WithRawOutputSchema",
+    }
+)
 _MAX_DEFAULT = 200
 
 
@@ -92,10 +107,13 @@ def _unwrap(handler: Node | None, source: bytes, pkgs: set[str]) -> Node | None:
 
 
 def _pkg_call(node: Node, source: bytes, pkgs: set[str]) -> tuple[str, list[Node]] | None:
-    """``mcp.X(args…)`` → ``("X", args)``."""
+    """``mcp.X(args…)`` (or ``mcp.X[T](args…)``) → ``("X", args)``."""
     if node.type != "call_expression":
         return None
     fn, args = node.child_by_field_name("function"), node.child_by_field_name("arguments")
+    if fn is not None and fn.type in ("index_expression", "generic_type"):
+        # A generic option, ``mcp.WithOutputSchema[Out]()``.
+        fn = fn.child_by_field_name("operand") or fn.child_by_field_name("type")
     if fn is None or fn.type != "selector_expression":
         return None
     operand, field = fn.child_by_field_name("operand"), fn.child_by_field_name("field")
@@ -110,8 +128,8 @@ def _params(
     options: list[Node], source: bytes, pkgs: set[str]
 ) -> tuple[str | None, list[ToolParam] | None]:
     """``(description, params)`` from ``NewTool``'s options. An option that is not an ``mcp``
-    call (a helper, ``opts...``) or sets a raw schema may add params: params unknown (None),
-    never a partial list (BREEZEAI-1457)."""
+    call (a helper, ``opts...``), sets a raw schema or is not a known non-parameter option
+    may add params: params unknown (None), never a partial list."""
     description: str | None = None
     out: list[ToolParam] = []
     unknown = False
@@ -121,7 +139,7 @@ def _params(
             unknown = True
             continue
         name, args = call
-        if name in _SCHEMA_OPTIONS:
+        if name not in _PARAM_TYPES and name not in _NON_PARAM_OPTIONS:
             unknown = True
         if name == "WithDescription" and args:
             description = _string(args[0], source)

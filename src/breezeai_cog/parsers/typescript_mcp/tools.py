@@ -161,18 +161,46 @@ def _chain(node: Node, source: bytes, zod: set[str]) -> list[tuple[str, list[Nod
     return None
 
 
+#: Wrapper factories whose argument is the parameter's own schema (``z.optional(z.string())``).
+#: ``optional`` / ``nullish`` make the key optional; ``nullable`` only allows ``null`` and the
+#: key stays required, as with the ``.nullable()`` method.
+_ZOD_WRAPPERS = frozenset({"optional", "nullish", "nullable"})
+
+
 def _zod_param(name: str, value: Node, source: bytes, zod: set[str]) -> ToolParam | None:
     chain = _chain(value, source, zod)
     if not chain:
         return None
     base, base_args = chain[0]
+    if base in _ZOD_WRAPPERS:
+        # The wrapped schema gives the type (None when it is not a zod chain: a variable).
+        inner = _zod_param(name, base_args[0], source, zod) if len(base_args) == 1 else None
+        outer = _zod_param_chain(name, None, [(base, [])] + chain[1:], source)
+        if inner is None:
+            return outer
+        return param(
+            name,
+            inner.type,
+            required=inner.required and outer.required,
+            default=outer.default if outer.default is not None else inner.default,
+            description=outer.description or inner.description,
+        )
+    return _zod_param_chain(name, base, chain, source)
+
+
+def _zod_param_chain(
+    name: str, base: str | None, chain: list[tuple[str, list[Node]]], source: bytes
+) -> ToolParam:
+    """The param of a zod chain whose base type is ``base`` (None when unknown); ``chain[0]``
+    is the base call, the rest are its methods."""
+    base_args = chain[0][1]
     type_ = base
     if base == "enum" and base_args and base_args[0].type == "array":
         vals = [_string(v, source) for v in base_args[0].named_children]
         if all(v is not None for v in vals):
             type_ = f"enum({','.join(v for v in vals if v is not None)})"
     required, default, description = True, None, None
-    for method, args in chain[1:]:
+    for method, args in chain[1 if base is not None else 0 :]:
         if method in ("optional", "nullish"):
             required = False
         elif method == "default":
@@ -208,7 +236,7 @@ def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] |
         return shape
     chain = _chain(node, source, zod) if node.type == "call_expression" else None
     if chain and chain[0][0] == "object" and chain[0][1]:
-        return _zod_shape(chain[0][1][0], source, zod)
+        return _object_schema(chain, source, zod)
     if node.type == "object":  # JSON schema literal
         pairs = _pairs(node, source)
         props = pairs.get("properties")
@@ -236,6 +264,33 @@ def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] |
             )
         return out
     return None
+
+
+#: ``z.object({…})`` methods that change no key and no key's optionality.
+_OBJECT_NEUTRAL = frozenset({"describe", "strict", "strip", "passthrough"})
+
+
+def _object_schema(
+    chain: list[tuple[str, list[Node]]], source: bytes, zod: set[str]
+) -> list[ToolParam] | None:
+    """Params of ``z.object({…})`` and its methods. ``.partial()`` / ``.deepPartial()`` make
+    every key optional; a method that adds, removes or picks keys (``.extend``, ``.merge``,
+    ``.pick``, ``.omit``, ``.partial({a: true})``, …) leaves the params unknown."""
+    shape = _zod_shape(chain[0][1][0], source, zod)
+    if shape is None:
+        return None
+    all_optional = False
+    for method, args in chain[1:]:
+        if method in ("partial", "deepPartial") and not args:
+            all_optional = True
+        elif method not in _OBJECT_NEUTRAL:
+            return None
+    if not all_optional:
+        return shape
+    return [
+        param(p.name, p.type, required=False, default=p.default, description=p.description)
+        for p in shape
+    ]
 
 
 def _literal_object(obj: Node, source: bytes) -> bool:
