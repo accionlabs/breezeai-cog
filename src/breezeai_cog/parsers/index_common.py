@@ -95,11 +95,17 @@ class ClassHeritage:
     ``methods`` maps method name → declaring file, or ``None`` when the name is declared in
     >1 file for this class (partial-class split / overload ambiguity → honest-null). It is
     empty for builders that don't support inherited-call resolution, so the inheritance tier
-    stays inert for them."""
+    stays inert for them.
+
+    ``returns`` maps method name → the simple name of its declared return type, or ``None``
+    when overloads disagree; void and primitive returns are left out. It lets a call on a call
+    (``builder.dataApi().get()``) resolve through the first call's type. Empty for builders
+    that don't record it."""
 
     extends: str | None
     decorators: list[Decorator]
     methods: dict[str, str | None] = field(default_factory=dict)
+    returns: dict[str, str | None] = field(default_factory=dict)
 
 
 def record_heritage(

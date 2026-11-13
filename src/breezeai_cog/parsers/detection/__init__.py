@@ -21,10 +21,11 @@ def classify_call(
     http_client_ids: "frozenset[str] | None" = None,
     vendor: str | None = None,
     typed_receivers: "Mapping[str, str] | None" = None,
-) -> tuple[str, str, str | None] | None:
+) -> tuple[str, str | None, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
-    * HTTP client call    -> ``("api_call", "<VERB>", None)``
+    * HTTP client call    -> ``("api_call", "<VERB>", None)``; a generic ``request(…)`` whose verb
+      the call does not name -> ``("api_call", None, None)`` (``method`` is an HTTP verb or empty)
     * raw SQL/JPQL query  -> ``("query_statement", "<method>", None)``
     * ORM/DB method call  -> ``("db_method_call", "<method>", "<hint>")``
     * otherwise           -> ``None``
@@ -38,8 +39,8 @@ def classify_call(
     """
     verb = match_api(callee, method, http_client_ids=http_client_ids, language=language)
     if verb is not None:
-        return "api_call", verb, None
-    if is_query(method, arg):
+        return "api_call", (None if verb == "REQUEST" else verb), None
+    if is_query(method, arg, vendor):
         return "query_statement", method, None
     hint = match_db(callee, method, language, typed_db_ids=typed_db_ids, vendor=vendor,
                     typed_receivers=typed_receivers)

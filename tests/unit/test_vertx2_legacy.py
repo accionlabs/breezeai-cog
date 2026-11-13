@@ -1,5 +1,6 @@
-"""Legacy Vert.x 2 idioms (parsers/java_vertx/legacy.py): registration tables, address
-forwarders and HttpClient calls — docs/entry-point-roles/vertx.md."""
+"""Vert.x 2 idioms (parsers/java_vertx/legacy.py: registration tables, HttpClient calls) and
+address forwarders (parsers/java_vertx/forwarders.py, Vert.x 2 and 3+) —
+docs/entry-point-roles/vertx.md."""
 
 from __future__ import annotations
 
@@ -143,15 +144,18 @@ INFO = _java("InfoHandler", "public class InfoHandler implements Handler<Message
                             "{ public void handle(Message<JsonObject> m) { } }")
 
 
-def _caller(body: str) -> dict[str, str]:
+_REGISTER = """
+  private void register(final String address, Handler<Message<JsonObject>> h) {
+    vertx.eventBus().registerHandler(address, h);
+  }"""
+
+
+def _caller(body: str, members: str = "") -> dict[str, str]:
     return _java("Caller", f"""public class Caller extends Verticle {{
   static final String TARGET = "orders/OrderWriter";
   public void start() {{
 {body}
-  }}
-  private void register(final String address, Handler<Message<JsonObject>> h) {{
-    vertx.eventBus().registerHandler(address, h);
-  }}
+  }}{members}
 }}""")
 
 
@@ -160,10 +164,11 @@ def test_address_through_a_helper_or_constructor_is_resolved_at_each_call_site(
     files = {**UTIL, **MESSAGE_HANDLER, **INFO, **_caller("""
     EventBusUtil.send(container, vertx, new JsonObject(), TARGET, 5000L);
     register("orders/info", new InfoHandler());
-    new MessageHandler(vertx, container, "orders/view");""")}
-    # Each call site is a record with its own address. The helpers in other files keep their
-    # own record (address unknown); the in-file `register` wrapper is plumbing, as before.
+    new MessageHandler(vertx, container, "orders/view");""", _REGISTER)}
+    # Each call site is a record with its own address. Each helper keeps its own record
+    # (address unknown), in this file or another.
     assert _bus(analyze_files(files)) == [
+        ("Caller.java", "eventbus_consumer", None, "h", None),
         ("Caller.java", "eventbus_consumer", "orders/info", "handle", "InfoHandler.java"),
         ("Caller.java", "eventbus_consumer", "orders/view", "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
@@ -182,6 +187,67 @@ def test_forwarded_argument_that_is_not_a_constant_leaves_the_address_empty(
         ("Caller.java", "eventbus_consumer", None, "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", None, None, None),
         ("EventBusUtil.java", "eventbus_send", None, None, None),
+        ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
+    ]
+
+
+def _sub(name: str, parent: str, ctors: str, imports: str = V2) -> dict[str, str]:
+    return _java(name, f"""public class {name} extends {parent} {{
+{ctors}
+  public void handle(Message<JsonObject> m) {{ }}
+}}""", imports)
+
+
+def test_subclass_passing_its_address_to_super_is_a_consumer_at_that_call(analyze_files) -> None:
+    files = {
+        **MESSAGE_HANDLER,
+        **_sub("OrderView", "MessageHandler", """  static final String ADDRESS = OrderView.class.getSimpleName();
+  public OrderView(Vertx v, Container c) { super(v, c, ADDRESS); }"""),
+        # No Vert.x import of its own, and two constructors on one address: one record.
+        **_sub("Plain", "MessageHandler", """  public Plain() { super(null, null, "orders/plain"); }
+  public Plain(int x) { super(null, null, "orders/plain"); }""", ""),
+        # A middle class passing its own parameter on; its leaf gives the address.
+        **_java("Mid", """public abstract class Mid extends MessageHandler {
+  public Mid(Vertx v, String a) { super(v, null, a); }
+}"""),
+        **_sub("Leaf", "Mid", '  public Leaf(Vertx v) { super(v, "orders/leaf"); }'),
+        # this(…) to its own constructor, which passes the address on to super(…).
+        **_sub("Twin", "MessageHandler", """  public Twin(Vertx v) { this(v, "orders/twin"); }
+  public Twin(Vertx v, String a) { super(v, null, a); }"""),
+    }
+    # The handler is the subclass's own `handle` (same file: its line, no path); a call passing
+    # a parameter on keeps its record with the address unknown, like any helper's.
+    stmts = analyze_files(files)
+    assert _bus(stmts) == [
+        ("Leaf.java", "eventbus_consumer", "orders/leaf", "handle", None),
+        ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
+        ("Mid.java", "eventbus_consumer", None, "handle", None),
+        ("OrderView.java", "eventbus_consumer", "OrderView", "handle", None),
+        ("Plain.java", "eventbus_consumer", "orders/plain", "handle", None),
+        ("Twin.java", "eventbus_consumer", None, "handle", None),
+        ("Twin.java", "eventbus_consumer", "orders/twin", "handle", None),
+    ]
+    lines = {(s.path.rsplit("/", 1)[-1], s.endpoint): (s.nodeType, s.handlerLine)
+             for s in stmts if s.semanticType == "eventbus_consumer"}
+    assert lines[("OrderView.java", "OrderView")] == ("explicit_constructor_invocation", 12)
+    assert lines[("Plain.java", "orders/plain")] == ("explicit_constructor_invocation", 6)
+    assert lines[("Mid.java", None)][1] is None  # abstract, no `handle` of its own
+
+
+def test_super_of_a_class_that_does_not_register_itself_is_not_a_consumer(analyze_files) -> None:
+    other = {"src/main/java/com/other/MessageHandler.java":
+             "package com.other;\npublic class MessageHandler {\n"
+             "  public MessageHandler(Object v, Object c, String a) { }\n}\n"}
+    files = {
+        **MESSAGE_HANDLER, **INFO, **other,
+        # A same-named class of another package, imported: not the registering one.
+        **_sub("Elsewhere", "MessageHandler",
+               '  public Elsewhere() { super(null, null, "orders/x"); }',
+               "import com.other.MessageHandler;\n" + V2),
+        # A superclass whose constructor stores nothing to register.
+        **_sub("Info2", "InfoHandler", "  public Info2() { super(); }"),
+    }
+    assert _bus(analyze_files(files)) == [
         ("MessageHandler.java", "eventbus_consumer", None, "handle", None),
     ]
 
@@ -376,17 +442,18 @@ def test_send_through_a_constructor_set_address_stays_at_each_send(analyze_files
             ("eventbus_send", line, None) for line in sends], imports
 
 
-def test_vertx3_helper_passing_its_address_on_is_not_followed(analyze_files) -> None:
+def test_vertx3_helper_passing_its_address_on_is_followed(analyze_files) -> None:
     st = analyze_files(_java("Bus", """public class Bus extends AbstractVerticle {
   void listen(String address) { vertx.eventBus().consumer(address, m -> { }); }
   void ping(String address) { vertx.eventBus().send(address, "x"); }
   public void start() { listen("orders.created"); ping("orders.ping"); }
 }""", V3))
-    # Forwarders are a Vert.x 2 rule: a 3.x+ helper keeps its own record (in the helper,
-    # address unknown); its call sites are no records.
-    assert sorted((s.semanticType, s.parentId.rsplit("#", 1)[-1].split("@")[0], s.endpoint) for s in st
-                  if s.semanticType in ("eventbus_consumer", "eventbus_send")) == [
-        ("eventbus_consumer", "listen", None), ("eventbus_send", "ping", None)]
+    # Forwarders hold for Vert.x 3+ too: each call site has its address, each helper keeps its
+    # own record (address unknown).
+    got = sorted(((s.semanticType, s.parentId.rsplit("#", 1)[-1].split("@")[0], s.endpoint or "")
+                  for s in st if s.semanticType in ("eventbus_consumer", "eventbus_send")))
+    assert got == [("eventbus_consumer", "listen", ""), ("eventbus_consumer", "start", "orders.created"),
+                   ("eventbus_send", "ping", ""), ("eventbus_send", "start", "orders.ping")]
 
 
 def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:

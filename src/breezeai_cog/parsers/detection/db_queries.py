@@ -203,9 +203,10 @@ _RECEIVER_HINTS: tuple[tuple[str, str, frozenset[str]], ...] = (
 # method and ``Array.FindAll``. In another language the verb is not evidence of the product,
 # nor of data access, so the receiver has to show it (see ``match_db``). Products absent here
 # are portable: Mongo/Redis/DynamoDB/ES/Neo4j driver verbs appear across languages, and the EF
-# verbs have their own ``_DOTNET`` gate.
+# verbs have their own ``_DOTNET`` gate. The Firebase verbs (``getDocs``, ``onSnapshot``) are the
+# JavaScript SDK's; a Java or Groovy ``getDocs()`` is a getter.
 _PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
-    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS,
+    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS, "firebase": _JSTS,
     "django": _PYTHON, "sqlalchemy": _PYTHON,
 }
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
@@ -220,7 +221,7 @@ _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
 # overrides this. (Write verbs like ``save``/``delete``/``create`` are opt-in via
 # ``_HIGH_COLLISION`` and never reach this fallback.)
 _NON_DB_RECEIVERS = (
-    "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
+    "cache", "cachemanager", "cacheservice", "logger", "emitter", "eventbus", "eventemitter", "state",
     "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
     # HTML Canvas / 2D rendering context — ctx.save()/restore() are draw-state calls, not DB.
     "ctx", "canvas", "context2d",
@@ -357,13 +358,12 @@ _ES_VERBS = frozenset({"search", "bulk", "index", "scroll", "reindex", "count"})
 # not merely something ending in "client" — otherwise ``httpClient.count()`` reads as ES.
 _ES_COLLISION_VERBS = frozenset({"count", "index"})
 
-# Cache/Redis service verbs — too generic alone (Map.get, Set.set), so gated on a
-# cache-specific receiver, mirroring the ES verb/receiver pattern.
+# Redis service verbs — too generic alone (Map.get, Set.set), so gated on a receiver named
+# after Redis, mirroring the ES verb/receiver pattern. A cache's name (``cache``,
+# ``cacheManager``, ``HttpRuntime.Cache``) is not one: it says nothing about where the data
+# lives, and is most often in memory (a Map, an LRU, ASP.NET's cache).
 _CACHE_VERBS = frozenset({"get", "set", "del", "reset", "store"})
-_CACHE_RECEIVERS = frozenset({
-    "cache", "cachemanager", "cacheservice",
-    "redisservice", "redis", "redisclient",
-})
+_REDIS_RECEIVERS = frozenset({"redisservice", "redis", "redisclient"})
 # Terminal receiver segment that identifies an ES client (``this.client`` / ``esClient`` /
 # ``osClient``). Anything ending in ``client`` plus the explicit ES names — but NOT the DB
 # receivers above, so ``xxxCustomRepository.search`` / ``xService.search`` are excluded.
@@ -473,14 +473,9 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "elasticsearch"
         elif receiver.endswith("client") or receiver in _ES_RECEIVERS:
             return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
-    # Cache/Redis service calls — gated on the TERMINAL receiver only (like ES above), and on an
-    # explicit cache/redis receiver NAME. A bare ``endswith("cache")`` is deliberately NOT used:
-    # in-memory ``Map``/``LRUCache`` fields are routinely named ``…Cache`` (e.g. a DataLoader
-    # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
-    cache_receivers = _CACHE_RECEIVERS
-    if language == "scala":
-        cache_receivers = _CACHE_RECEIVERS - {"cache"}
-    if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
+    # Redis service calls — gated on the TERMINAL receiver only (like ES above), and on a name
+    # that says Redis (:data:`_REDIS_RECEIVERS`, a ``…redis`` suffix); never a cache's name.
+    if receiver and (receiver in _REDIS_RECEIVERS or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC or gated:

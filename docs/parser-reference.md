@@ -114,7 +114,9 @@ parse once and reuse the base extraction. Always provide it.
 - **imports.py**: resolve relative/internal imports to repo-relative paths (drives
   `IMPORTS`); external/unresolved → `externalImports`. Set `exports`.
 - **functions.py**: `Function` per function/method (params with types, `returnType`,
-  decorators, `isStatic`, visibility, `calls`). Return `(Function, list[Statement])`.
+  decorators, `isStatic`, visibility, `calls`). Return `(Function, list[Statement])`. A
+  parameter's type is written as in the source, a varargs marker included (Java/Groovy
+  `Handler...`, Go `...string`).
 - **classes.py**: `Class` per class/interface/enum/struct (`extends`/`implements`,
   decorators, `constructorParams`, methods as flat `Function`s). Return
   `(Class, list[Function], list[Statement])`. **Enum members** are emitted as flat
