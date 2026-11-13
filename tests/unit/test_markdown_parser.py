@@ -348,6 +348,37 @@ def test_untyped_docs_past_the_cap_keep_the_file_only() -> None:
     assert meta.totalFiles == 4
 
 
+def test_untyped_docs_past_the_byte_budget_keep_the_file_only() -> None:
+    docs = [_parse(f"docs/{i}.md", "x" * 99 + "\n") for i in range(3)]
+    typed = _parse("CLAUDE.md", "y" * 500 + "\n")
+    sink, meta = _assemble([*docs, typed], max_markdown_bytes=250)
+    by_path = {r.path: r for r in sink.records}
+    assert [len(by_path[f"docs/{i}.md"].statements) for i in range(3)] == [1, 1, 0]
+    assert by_path["docs/2.md"].metadata["statementSkipped"] == "max_markdown_bytes"
+    assert len(by_path["CLAUDE.md"].statements) == 1  # typed docs are always kept
+    assert meta.configs["markdownCapped"] == 1
+
+
+def test_byte_budget_follows_path_order_and_file_size(tmp_path: Path) -> None:
+    from breezeai_cog.core.scanner import ScanEntry
+
+    sizes = {"a.md": 100, "a1.md": MAX_STATEMENT_FILE_BYTES + 1, "b.md": 100, "c.md": 10}
+    for name, size in sizes.items():
+        (tmp_path / name).write_bytes(b"x" * size)
+    entries = [ScanEntry(p, "markdown") for p in reversed(sorted(sizes))]
+    # a1.md keeps no statement, so it costs nothing; c.md is past the budget even though it
+    # would fit on its own: the docs kept are a prefix in path order.
+    assert pipeline._markdown_skips(entries, 0, 150, tmp_path) == {
+        "b.md": "max_markdown_bytes",
+        "c.md": "max_markdown_bytes",
+    }
+    assert pipeline._markdown_skips(entries, 2, 1000, tmp_path) == {
+        "b.md": "max_markdown_statements",
+        "c.md": "max_markdown_statements",
+    }
+    assert pipeline._markdown_skips(entries, 0, 0, tmp_path) is None
+
+
 def test_front_matter_secrets_are_masked_in_the_text() -> None:
     text = (
         "---\nname: x\ndescription: d\napi_token: abc123\npassword: 'hunter2'\n"
@@ -389,10 +420,10 @@ def test_doc_cap_follows_path_order_not_arrival_order() -> None:
     from breezeai_cog.core.scanner import ScanEntry
 
     paths = [f"docs/{i}.md" for i in range(3)]
-    slots = pipeline._markdown_slots([ScanEntry(p, "markdown") for p in reversed(paths)], 2)
+    skips = pipeline._markdown_skips([ScanEntry(p, "markdown") for p in reversed(paths)], 2)
     for order in (paths, list(reversed(paths))):
         sink, _ = _assemble(
-            [_parse(p, "# x\n") for p in order], max_markdown_statements=2, markdown_slots=slots
+            [_parse(p, "# x\n") for p in order], max_markdown_statements=2, markdown_skips=skips
         )
         kept = sorted(r.path for r in sink.records if r.statements)
         assert kept == ["docs/0.md", "docs/1.md"]
