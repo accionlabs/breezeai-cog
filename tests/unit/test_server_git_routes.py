@@ -233,6 +233,17 @@ def test_compare_empty_diff() -> None:
     assert r.json() == {"baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": []}
 
 
+def test_compare_reports_relation_and_merge_base_when_known() -> None:
+    fake = FakeClient()
+    fake._changes.relation, fake._changes.merge_base_sha = "behind", "c" * 40
+    r = _app(fake).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
+    assert r.status_code == 200
+    assert r.json() == {
+        "baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": [],
+        "relation": "behind", "mergeBaseSha": "c" * 40,
+    }
+
+
 def test_compare_requires_both_commits() -> None:
     r = _app(FakeClient()).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD})
     assert r.status_code == 400 and "headCommitId" in r.json()["error"]

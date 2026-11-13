@@ -14,7 +14,7 @@ ingress and is called server-to-server.
 |---|---|---|
 | ``/api/git/check-update`` | ``repoUrl``, ``gitBranch``, ``gitToken?``, ``currentCommitId?`` | the backend's check-update shape (``change``, ``latestCommitId``, ``currentCommitId``, ``fileUpdatedCount``, ``fileDeletedCount``) plus ``latestCommit`` and the file lists |
 | ``/api/git/latest-commit`` | ``repoUrl``, ``gitBranch``, ``gitToken?`` | ``{sha, message, author, date}`` |
-| ``/api/git/compare`` | ``repoUrl``, ``baseCommitId``, ``headCommitId``, ``gitToken?`` | the backend's ``GitDiffResult``: ``{baseSha, headSha, totalFiles, files: [{filename, status, additions, deletions, patch?}]}`` |
+| ``/api/git/compare`` | ``repoUrl``, ``baseCommitId``, ``headCommitId``, ``gitToken?`` | the backend's ``GitDiffResult``: ``{baseSha, headSha, totalFiles, files: [{filename, status, additions, deletions, patch?}], relation?, mergeBaseSha?}`` |
 | ``/api/git/tree`` | ``repoUrl``, ``commitId``, ``gitToken?`` | ``{files, count}`` |
 | ``/api/git/pull-request`` | ``repoUrl``, ``pullRequestId``, ``gitToken?`` | ``{number, title, state, baseBranch, headBranch, baseCommitId, headCommitId, url}`` |
 | ``/api/git/pr-comment`` | ``repoUrl``, ``pullRequestId``, ``body``, ``gitToken?`` | ``{id, url}`` — **the one write**; not retried |
@@ -130,7 +130,9 @@ async def compare(request: Request) -> dict[str, Any]:
     ``filename`` (the new path for a rename), ``status`` (``added`` / ``modified`` /
     ``removed`` / ``renamed``), ``additions``, ``deletions`` and ``patch`` where the
     provider reports them (GitHub: all; GitLab: patch + counts derived from it;
-    Bitbucket: counts only; Azure DevOps: status only)."""
+    Bitbucket: counts only; Azure DevOps: status only). On GitHub the result also carries
+    ``relation`` (``identical`` / ``ahead`` / ``behind`` / ``diverged``: how ``headCommitId``
+    relates to ``baseCommitId``) and ``mergeBaseSha``; other providers omit both."""
     deps: ServerDeps = request.app.state.deps
     settings: Settings = request.app.state.settings
     body = await _body(request)
@@ -139,12 +141,18 @@ async def compare(request: Request) -> dict[str, Any]:
     diff = await run_in_threadpool(
         _with_client, deps, settings, body, lambda c, ref: c.compare(ref, base, head),
     )
-    return {
+    out: dict[str, Any] = {
         "baseSha": base,
         "headSha": head,
         "totalFiles": len(diff.files),
         "files": [f.as_dict() for f in diff.files],
     }
+    # How head relates to base (GitHub only); omitted when the provider does not say.
+    if diff.relation is not None:
+        out["relation"] = diff.relation
+    if diff.merge_base_sha is not None:
+        out["mergeBaseSha"] = diff.merge_base_sha
+    return out
 
 
 @router.post("/tree")
