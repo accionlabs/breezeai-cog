@@ -355,7 +355,8 @@ def _python_mcp(n: int) -> str:
     tools = "".join(
         f"@mcp.tool(name='t{i}')\n"
         f"def t{i}(q: str, n: int = {i}, ctx: Context = None) -> str:\n"
-        f"    \"\"\"Tool {i}.\"\"\"\n"
+        f"    \"\"\"Tool {i}.\n\n    Args:\n        q: The query,\n            continued.\n"
+        f"        n (int): A number.\n    \"\"\"\n"
         f"    return q\n\n\n"
         for i in range(n)
     )

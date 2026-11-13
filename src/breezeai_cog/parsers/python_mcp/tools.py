@@ -18,8 +18,11 @@
 * ``description`` — ``description=`` when a literal, else the docstring (FastMCP's rule);
   a non-literal ``description=`` → none.
 * ``params`` — from the signature: annotation text, default, ``Annotated[T, Field(description=…)]``
-  / ``Annotated[T, "…"]`` and ``= Field(…)`` descriptions; ``self`` / ``cls``, ``*args`` /
-  ``**kwargs``, the injected ``Context`` (also ``Context | None`` / ``Optional[Context]``) and
+  / ``Annotated[T, "…"]`` and ``= Field(…)`` descriptions, else the param's entry in the
+  docstring's Google ``Args:`` / NumPy ``Parameters`` / Sphinx ``:param`` section (the first
+  style that names a param wins, FastMCP 4's order; only exact param names match, each entry cut
+  at 1024 characters; read even when ``description=`` replaces the docstring); ``self`` /
+  ``cls``, ``*args`` / ``**kwargs``, the injected ``Context`` (also ``Context | None`` / ``Optional[Context]``) and
   the names in a literal ``exclude_args=[…]`` are skipped (a non-literal ``exclude_args`` →
   params unknown). Required = no default.
 * ``@x.tool(enabled=False)`` (a literal) → no record: the tool is never served.
@@ -31,10 +34,12 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 
 from tree_sitter import Node
 
+from ...logging import get_logger
 from ...schemas import ToolParam
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
@@ -48,6 +53,20 @@ from .servers import (
 )
 
 _MAX_DEFAULT = 200
+#: A param description read from the docstring is cut here, so one runaway entry cannot push
+#: the tool's ``params`` past the backend's size limit (which drops them all).
+_MAX_PARAM_DOC = 1024
+_GOOGLE_PARAM_SECTIONS = frozenset(
+    {
+        "args",
+        "arguments",
+        "parameters",
+        "params",
+        "keyword args",
+        "keyword arguments",
+        "other parameters",
+    }
+)
 #: ``@x.tool`` — a cheap byte check before any tree walk (``.tools`` / ``.toolbar`` do not match).
 _TOOL_DECORATOR = re.compile(rb"@[ \t]*\w+[ \t]*\.[ \t]*tool\b")
 _SKIPPED_PARAMS = frozenset({"self", "cls"})
@@ -151,6 +170,156 @@ def _docstring(fn: Node, source: bytes) -> str | None:
     return _literal(first, source)
 
 
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _cap_doc(text: str) -> str:
+    return text if len(text) <= _MAX_PARAM_DOC else text[: _MAX_PARAM_DOC - 1] + "…"
+
+
+def _collect(items: list[tuple[str | None, list[str]]], out: dict[str, str]) -> None:
+    """``[(name or None, description lines)]`` → ``out[name] = description`` (an invalid item,
+    name None, and an empty description are dropped; the first entry of a name wins)."""
+    for name, lines in items:
+        text = "\n".join(lines).strip()
+        if name and text and name not in out:
+            out[name] = _cap_doc(text)
+
+
+def _google_entry(text: str) -> tuple[str | None, str]:
+    """``name: desc`` / ``name (type): desc`` → ``(name, desc)``; ``(None, "")`` otherwise."""
+    colon = text.find(":")
+    paren = text.find("(")
+    if 0 <= paren < colon:  # `name (type): desc` — the type may hold a colon
+        close = text.find(")", paren)
+        if close < 0 or not text[close + 1 :].lstrip().startswith(":"):
+            return None, ""
+        name, desc = text[:paren].strip(), text[close + 1 :].lstrip()[1:]
+    elif colon >= 0:
+        name, desc = text[:colon].strip(), text[colon + 1 :]
+    else:
+        return None, ""
+    return (name, desc.strip()) if name.isidentifier() else (None, "")
+
+
+def _google_params(lines: list[str]) -> dict[str, str]:
+    """Google style: an ``Args:`` (…) header, then entries at the first entry's indent; a deeper
+    line continues the entry, a line at or left of the header's indent ends the section."""
+    out: dict[str, str] = {}
+    i, n = 0, len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if not (stripped.endswith(":") and stripped[:-1].strip().lower() in _GOOGLE_PARAM_SECTIONS):
+            i += 1
+            continue
+        header = _indent(lines[i])
+        entry = -1
+        items: list[tuple[str | None, list[str]]] = []
+        i += 1
+        while i < n:
+            line = lines[i]
+            if not line.strip():
+                if items:
+                    items[-1][1].append("")
+                i += 1
+                continue
+            indent = _indent(line)
+            if indent <= header:
+                break
+            if entry < 0:
+                entry = indent
+            if indent <= entry:  # a new item, valid or not: never glued onto the previous one
+                name, desc = _google_entry(line.strip())
+                items.append((name, [desc]))
+            else:
+                items[-1][1].append(line.strip())
+            i += 1
+        _collect(items, out)
+    return out
+
+
+def _is_underline(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.strip("-")
+
+
+def _numpy_params(lines: list[str]) -> dict[str, str]:
+    """NumPy style: ``Parameters`` over a ``----------`` underline, then ``name : type`` entries
+    at the header's indent with deeper description lines, up to the next underlined header."""
+    out: dict[str, str] = {}
+    i, n = 0, len(lines)
+    while i < n:
+        if not (
+            lines[i].strip().lower() in ("parameters", "other parameters")
+            and i + 1 < n
+            and _is_underline(lines[i + 1])
+        ):
+            i += 1
+            continue
+        header = _indent(lines[i])
+        items: list[tuple[str | None, list[str]]] = []
+        i += 2
+        while i < n:
+            line = lines[i]
+            if not line.strip():
+                if items:
+                    items[-1][1].append("")
+                i += 1
+                continue
+            indent = _indent(line)
+            if indent < header or (i + 1 < n and _is_underline(lines[i + 1])):
+                break  # dedent, or the next section's header
+            if indent == header:
+                name = line.split(":", 1)[0].strip()
+                items.append((name if name.isidentifier() else None, []))
+            elif items:
+                items[-1][1].append(line.strip())
+            i += 1
+        _collect(items, out)
+    return out
+
+
+def _sphinx_params(lines: list[str]) -> dict[str, str]:
+    """Sphinx style: ``:param name: desc`` / ``:param type name: desc``, deeper lines continue."""
+    out: dict[str, str] = {}
+    items: list[tuple[str | None, list[str]]] = []
+    current = -1  # the indent of the open ``:param`` item, -1 when none is open
+    for line in lines:
+        stripped = line.strip()
+        if current >= 0 and (not stripped or _indent(line) > current):
+            items[-1][1].append(stripped)
+            continue
+        current = -1
+        if not stripped.startswith(":param"):
+            continue
+        head, sep, desc = stripped[len(":param") :].partition(":")
+        words = head.split()
+        name = words[-1] if sep and words and head[:1].isspace() else None
+        items.append((name if name and name.isidentifier() else None, [desc.strip()]))
+        current = _indent(line)
+    _collect(items, out)
+    return out
+
+
+def _docstring_param_docs(doc: str | None) -> dict[str, str]:
+    """Param descriptions from a docstring's Google ``Args:``, NumPy ``Parameters`` or Sphinx
+    ``:param`` entries, tried in that order — the first style that names a param wins, as
+    FastMCP 4 (griffe) reads them. A line scanner (cost linear in the docstring); ``{}`` on
+    anything it cannot read."""
+    if not doc:
+        return {}
+    try:
+        lines = inspect.cleandoc(doc).splitlines()
+        for style in (_google_params, _numpy_params, _sphinx_params):
+            found = style(lines)
+            if found:
+                return found
+    except Exception as exc:  # a docstring never costs the file its tools
+        get_logger("breezeai_cog.parsers").debug("python_mcp.docstring.skipped", error=str(exc))
+    return {}
+
+
 def _split_annotated(type_text: str) -> str:
     """``Annotated[str, Field(...)]`` → ``str``."""
     inner = type_text.strip()
@@ -251,7 +420,9 @@ def _short(node: Node, source: bytes) -> str:
     return text if len(text) <= _MAX_DEFAULT else text[: _MAX_DEFAULT - 1] + "…"
 
 
-def _params(fn: Node, source: bytes) -> list[ToolParam]:
+def _params(fn: Node, source: bytes, doc_params: dict[str, str]) -> list[ToolParam]:
+    """The signature's params; a param's description is its ``Field`` / ``Annotated`` one, else
+    its entry in ``doc_params`` (the docstring's)."""
     params = fn.child_by_field_name("parameters")
     out: list[ToolParam] = []
     for p in params.named_children if params is not None else []:
@@ -291,6 +462,7 @@ def _params(fn: Node, source: bytes) -> list[ToolParam]:
             default = _short(given, source) if given is not None else None
         elif value is not None:
             default = _short(value, source)
+        description = description or doc_params.get(pname)
         out.append(param(pname, base, required=required, default=default, description=description))
     return out
 
@@ -366,7 +538,9 @@ def _detect(dc: DetectContext) -> Detection | None:
                 continue  # a computed name: the tool exists, but its name is unknown
             if call is not None and _disabled(call, source):
                 break  # `enabled=False`: registered but never served
-            params: list[ToolParam] | None = _params(fn, source)
+            # the docstring itself, not `description` (which `description=` replaces)
+            doc_params = _docstring_param_docs(_docstring(fn, source))
+            params: list[ToolParam] | None = _params(fn, source, doc_params)
             excluded = _excluded_args(call, source) if call is not None else set()
             if excluded is None:
                 params = None  # `exclude_args=` not a literal: which params remain is unknown

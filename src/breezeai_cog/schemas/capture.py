@@ -60,7 +60,9 @@ class Call(BaseModel):
 
 
 class ToolParam(BaseModel):
-    """One input parameter of an ``mcp_tool`` statement, read from its input schema."""
+    """One input parameter of an ``mcp_tool`` statement, read from its input schema. For a
+    Python tool, ``description`` falls back to the param's entry in the docstring's ``Args:`` /
+    ``Parameters`` / ``:param`` section."""
 
     name: str
     type: str | None = None  # as written in the schema / signature (``str``, ``z.number()`` → ``number``)

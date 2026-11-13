@@ -7,6 +7,8 @@ description, optional params with defaults, and a look-alike that must not be re
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from breezeai_cog.schemas import Statement
@@ -578,6 +580,250 @@ def test_python_literal_type_strings_are_not_a_description(analyze_files) -> Non
     )
     [p] = _tools(analyze_files({"app/server.py": src}))["f"].params or []
     assert p.description is None
+
+
+def _py_tool(body: str) -> str:
+    return (
+        "from fastmcp import FastMCP, Context\nfrom pydantic import Field\n\nmcp = FastMCP('x')\n\n\n"
+        + body
+    )
+
+
+def test_python_param_descriptions_from_google_args(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def search(query: str, limit: int = 10, labels: list[str] | None = None) -> str:
+    """Search the graph.
+
+    Args:
+        query: What to look for,
+            across names and descriptions.
+        limit (int): Max hits.
+        labels (list[str] | None): Labels to keep.
+
+    Returns:
+        The hits.
+    """
+    return ""
+''')
+    tool = _tools(analyze_files({"app/server.py": src}))["search"]
+    assert tool.description.startswith("Search the graph.\n\nArgs:")  # the whole docstring
+    assert _params(tool) == [
+        ("query", "str", True, None, "What to look for,\nacross names and descriptions."),
+        ("limit", "int", False, "10", "Max hits."),
+        ("labels", "list[str] | None", False, "None", "Labels to keep."),
+    ]
+
+
+# breezeai-mcp-backend's `get_design_nodes_by_label` docstring, verbatim.
+DESIGN_NODES_BY_LABEL = '''
+@mcp.tool
+async def get_design_nodes_by_label(
+    uuid: str,
+    label: str,
+    filters: dict | str | None = None,
+    limit: int = 100,
+    page: int = 1,
+    sort_name: str | None = None,
+    sort_order: str | None = None,
+) -> str:
+    """
+    List design nodes of one label, optionally filtered — by id, parent, step,
+    action, type, platform or any other attribute.
+
+    Design labels: UserJourney, Flow, Page, Component.
+
+    filters: {field: value} or {field: {op: value}}; ops $eq $eqi $in $ini
+    $contains $containsi $gt $gte $lt $lte. Array fields (userJourneyIds,
+    flowIds, pageIds, stepIds, actionIds, scenarioIds) match when the value is
+    one of the array's elements.
+
+    Examples:
+    - By id:                  label="Flow", filters={"id": "flow-123"}
+    - Several ids:            filters={"id": {"$in": ["uj-1", "uj-2"]}}
+    - Flows of a journey:     label="Flow", filters={"userJourneyIds": "uj-123"}
+    - Pages of a flow:        label="Page", filters={"flowIds": "flow-123"}
+    - Components of a page:   label="Component", filters={"pageIds": "page-123"}
+    - Nodes for a step/action: filters={"stepIds": "step-1"} / {"actionIds": "act-1"}
+    - By type / platform:     filters={"type": "ORGANISM", "platform": "customer portal"}
+
+    Each node carries `platform` (part of the uniqueness key: projectUuid +
+    nameKey + platform).
+
+    Args:
+        uuid: Project UUID (required)
+        label: UserJourney, Flow, Page or Component (required)
+        filters: object or JSON object string (optional)
+        limit / page: paging (default 100 / 1)
+        sort_name / sort_order: e.g. "name" / "asc"
+
+    Returns {data, total}; total > len(data) means more pages exist.
+    """
+    return ""
+'''
+
+
+def test_python_slash_joined_args_entries_match_no_param(analyze_files) -> None:
+    tool = _tools(analyze_files({"app/server.py": _py_tool(DESIGN_NODES_BY_LABEL)}))[
+        "get_design_nodes_by_label"
+    ]
+    docs = {p.name: p.description for p in tool.params or []}
+    assert docs == {
+        "uuid": "Project UUID (required)",
+        "label": "UserJourney, Flow, Page or Component (required)",
+        "filters": "object or JSON object string (optional)",
+        "limit": None,
+        "page": None,
+        "sort_name": None,
+        "sort_order": None,
+    }
+    assert "limit / page" not in docs["filters"]
+
+
+def test_python_param_docs_read_when_description_is_explicit(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool(description="x")
+def f(q: str) -> str:
+    """Ignored as the description.
+
+    Args:
+        q: The query.
+    """
+    return ""
+''')
+    tool = _tools(analyze_files({"app/server.py": src}))["f"]
+    assert tool.description == "x"
+    assert _params(tool) == [("q", "str", True, None, "The query.")]
+
+
+def test_python_param_docs_from_sphinx_and_numpy(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def sphinx(a: str, b: str) -> str:
+    """Sphinx style.
+
+    :param a: First,
+        continued.
+    :param str b: Second.
+    :type a: str
+    :returns: nothing
+    """
+    return ""
+
+
+@mcp.tool
+def numpy(a: str, b: int = 1) -> str:
+    """NumPy style.
+
+    Parameters
+    ----------
+    a : str
+        First,
+        continued.
+    b : int, optional
+        Second.
+
+    Returns
+    -------
+    str
+        The result.
+    """
+    return ""
+''')
+    tools = _tools(analyze_files({"app/server.py": src}))
+    assert [p.description for p in tools["sphinx"].params or []] == [
+        "First,\ncontinued.",
+        "Second.",
+    ]
+    assert [p.description for p in tools["numpy"].params or []] == ["First,\ncontinued.", "Second."]
+
+
+def test_python_field_description_beats_the_docstring(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def f(a: str = Field(description="From Field"), b: str = "", ctx: Context = None, *args, **kwargs) -> str:
+    """Doc.
+
+    Args:
+        a: From the docstring.
+        ctx: The context.
+        args: Extra.
+        kwargs: More.
+    """
+    return ""
+''')
+    assert _params(_tools(analyze_files({"app/server.py": src}))["f"]) == [
+        ("a", "str", True, None, "From Field"),
+        ("b", "str", False, '""', None),  # not in Args
+    ]
+
+
+def test_python_inline_args_entry_is_one_param(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def f(limit: int = 10, page: int = 1) -> str:
+    """Doc.
+
+    Args:
+        limit: max hits page: the page
+    """
+    return ""
+''')
+    assert [
+        p.description for p in _tools(analyze_files({"app/server.py": src}))["f"].params or []
+    ] == [
+        "max hits page: the page",
+        None,
+    ]
+
+
+def test_python_args_entry_is_capped(analyze_files) -> None:
+    long = "word " * 1000
+    src = _py_tool(f'''
+@mcp.tool
+def f(a: str, b: int = 1) -> str:
+    """Doc.
+
+    Args:
+        a: {long}
+        b: Short.
+    """
+    return ""
+''')
+    a, b = _tools(analyze_files({"app/server.py": src}))["f"].params or []
+    assert (a.name, a.type, b.name, b.type, b.description) == ("a", "str", "b", "int", "Short.")
+    assert len(a.description) == 1024 and a.description.endswith("…")
+
+
+def test_python_args_scan_is_linear() -> None:
+    from breezeai_cog.parsers.python_mcp.tools import _docstring_param_docs
+
+    def doc(n: int) -> str:
+        return "Doc.\n\nArgs:\n" + "".join(
+            f"    p{i}: Param {i}.\n        more\n" for i in range(n)
+        )
+
+    start = time.perf_counter()
+    found = _docstring_param_docs(doc(10_000))
+    assert len(found) == 10_000 and found["p9999"] == "Param 9999.\nmore"
+    assert time.perf_counter() - start < 2.0
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        "Doc.\n\n\tArgs:\n\t\tq:\tThe query.\n\t\t\tmore\n",
+        "Doc.\n\nParameters\n----------\n",
+        "Doc.\n\nParameters\n----------\n\nReturns\n-------\n",
+        "Doc.\n\n:param: no name\n    continued\n:param q:\n",
+        "Doc.\n\nArgs:\n",
+        "Doc.\n\nArgs:\n    (broken: x\n    : nothing\n",
+    ],
+)
+def test_python_malformed_docstring_keeps_the_tool(analyze_files, doc: str) -> None:
+    src = _py_tool(f'@mcp.tool\ndef f(q: str) -> str:\n    """{doc}"""\n    return ""\n')
+    tool = _tools(analyze_files({"app/server.py": src}))["f"]
+    assert [p.name for p in tool.params or []] == ["q"]
 
 
 POM_BOM_PARENT = """<project>
