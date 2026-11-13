@@ -21,7 +21,8 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ..treesitter import node_text
-from .file_facts import DEPENDS, keyword
+from ..python_common import keyword
+from .file_facts import DEPENDS
 
 #: fastapi.security classes that reject a call without credentials when ``auto_error`` is on.
 SCHEMES = frozenset({

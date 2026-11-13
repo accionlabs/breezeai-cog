@@ -398,7 +398,7 @@ def _detect(dc: DetectContext) -> Detection | None:
 register_detector(
     Detector(
         name="python-mcp",
-        gate=Gate("python", order=20, skip_fixtures=True),
+        gate=Gate("python", order=50, skip_fixtures=True),
         detect=_detect,
         frameworks=("fastmcp", "mcp-python"),
     )

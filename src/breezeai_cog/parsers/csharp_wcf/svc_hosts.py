@@ -17,7 +17,6 @@ A type named by two ``.svc`` files is ambiguous and has no host (honest-null).
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,14 +24,10 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
+from ..wcf_common import SVC_SERVICE_RE
 from ..wiring import Wiring, resolve_wiring
 
 FACT = "wcf.svc-hosts"
-
-#: ``Service="Ns.Type"`` inside a ``.svc`` ``<%@ ServiceHost … %>`` directive.
-SVC_SERVICE_RE = re.compile(
-    rb'<%@\s*ServiceHost\b[^%]*?\bService\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE
-)
 
 
 @dataclass(frozen=True)

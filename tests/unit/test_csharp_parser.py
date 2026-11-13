@@ -802,3 +802,90 @@ def test_named_attribute_arguments_keep_their_key(tmp_path) -> None:
     assert named_arg('Name = "GetOrder"') == ("Name", '"GetOrder"')
     assert named_arg("api/{page=1}") == (None, "api/{page=1}")
     assert named_arg("a == b") == (None, "a == b")
+    assert named_arg('Name:="GetOrder"') == ("Name", '"GetOrder"')  # VB
+    assert named_arg("y := 2") == ("y", "2")
+
+
+def test_client_names_are_bound_in_their_own_class(tmp_path) -> None:
+    # `_ctx` / `_client` are a DynamoDB context and an HttpClient only in the class that declares
+    # them so; the same names in the class before it are its own types.
+    src = b'''using Amazon.DynamoDBv2.DataModel;
+using System.Net.Http;
+public class Repo {
+  private readonly IMyUnitOfWork _ctx;
+  private readonly IMyApi _client;
+  public async Task Save(object o) { await _ctx.SaveAsync(o); await _client.GetAsync("/a"); }
+}
+public class DynRepo {
+  private readonly IDynamoDBContext _ctx;
+  private readonly HttpClient _client;
+  public async Task Save(object o) { await _ctx.SaveAsync(o); await _client.GetAsync("/b"); }
+}
+'''
+    ctx = ParseContext(path="Repos.cs", abs_path=None, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    got = {(s.startLine, s.semanticType, s.dataAccessHint, s.endpoint) for s in rec.statements
+           if s.semanticType in ("db_method_call", "api_call")}
+    assert got == {(11, "db_method_call", "dynamodb", None), (11, "api_call", None, "/b")}
+
+
+_EF_PROJECTS = {
+    # Shop imports EF once for the project; Web (another project) does not use EF.
+    "Shop/Shop.csproj": '<Project Sdk="Microsoft.NET.Sdk"></Project>\n',
+    "Shop/GlobalUsings.cs": "global using Microsoft.EntityFrameworkCore;\n",
+    "Shop/OrderService.cs": """public class OrderService {
+  private readonly ShopDb _db;
+  private readonly IOrderRepository _orderRepository;
+  public object Open() { return _db.Orders.Include(o => o.Lines).ToList(); }
+  public void Save(Order o) { _orderRepository.Save(o); }
+}
+""",
+    "Shop/BundleConfig.cs": """public class BundleConfig {
+  public static void Register(BundleCollection bundles) {
+    bundles.Add(new ScriptBundle("~/bundles/app").Include("~/Scripts/app.js"));
+  }
+}
+""",
+    "Web/Web.csproj": '<Project Sdk="Microsoft.NET.Sdk"></Project>\n',
+    "Web/Queries.cs": """public class Queries {
+  public object All(IQueryable<Order> q) { return q.Include(o => o.Lines); }
+  public void Save(Order o) { _orderRepository.Save(o); }
+}
+""",
+}
+
+
+def _db_calls(stmts) -> set[tuple]:
+    return {(s.path, s.startLine, s.method, s.dataAccessHint) for s in stmts
+            if s.semanticType == "db_method_call"}
+
+
+def test_a_project_wide_ef_import_names_the_orm(analyze_files) -> None:
+    # `global using` in another file of the project is in scope here as if written in the file;
+    # bundling's Include is not a query; another project's files see nothing of it.
+    assert _db_calls(analyze_files(_EF_PROJECTS)) == {
+        ("Shop/OrderService.cs", 4, "Include", "entity_framework"),
+        ("Shop/OrderService.cs", 5, "Save", "entity_framework"),
+        ("Web/Queries.cs", 3, "Save", "orm"),
+    }
+
+
+def test_an_msbuild_using_names_the_orm(analyze_files) -> None:
+    files = {k: v for k, v in _EF_PROJECTS.items() if k != "Shop/GlobalUsings.cs"}
+    files["Shop/Shop.csproj"] = ('<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+                                 '<Using Include="Microsoft.EntityFrameworkCore" />'
+                                 '</ItemGroup></Project>\n')
+    assert ("Shop/OrderService.cs", 4, "Include", "entity_framework") in _db_calls(analyze_files(files))
+
+
+def test_global_usings_are_kept_per_project(tmp_path) -> None:
+    for rel, text in _EF_PROJECTS.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    for jobs in (1, 2):
+        index = CSharpParser().build_index(tmp_path, list(tmp_path.rglob("*.cs")), jobs=jobs)
+        assert index.usings_for("Shop/OrderService.cs") == {"Microsoft.EntityFrameworkCore"}
+        assert index.usings_for("Web/Queries.cs") == set()
+        assert index.global_usings == {"Microsoft.EntityFrameworkCore"}  # repo-wide union

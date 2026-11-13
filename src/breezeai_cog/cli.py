@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Optional
 
 import typer
 
@@ -32,22 +32,27 @@ app = typer.Typer(
 )
 
 
+def _not_a_directory(location: Path | str) -> NoReturn:
+    typer.secho(
+        f"Error: a parent of '{location}' exists but is not a directory. "
+        "Please remove it and re-run.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(1) from None
+
+
 def _setup_logging_or_exit(settings: Settings) -> None:
     """Call ``setup_logging`` but turn a failure to create the log directory into a clean,
     user-facing error instead of a raw traceback. The log dir defaults to ``<repo>/.cog/logs``;
     a pre-existing ``.cog`` file (``NotADirectoryError``) or a read-only ``.cog`` directory
-    (``PermissionError``) both surface here as ``OSError`` from the handler's ``mkdir``."""
+    (``PermissionError``) both surface here as ``OSError`` from the handler's ``mkdir``. Windows
+    raises ``FileExistsError`` for the ``.cog`` file, so a parent that exists as a file is checked
+    on disk and reported the same way on every OS."""
     try:
         setup_logging(settings)
     except NotADirectoryError:
-        location = settings.log_location or "./logs"
-        typer.secho(
-            f"Error: a parent of '{location}' exists but is not a directory. "
-            "Please remove it and re-run.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(1) from None
+        _not_a_directory(settings.log_location or "./logs")
     except PermissionError:
         location = settings.log_location or "./logs"
         typer.secho(
@@ -59,6 +64,9 @@ def _setup_logging_or_exit(settings: Settings) -> None:
         raise typer.Exit(1) from None
     except OSError as exc:
         location = settings.log_location or "./logs"
+        # Windows reports a file in the way as "already exists", not "not a directory".
+        if any(p.exists() and not p.is_dir() for p in Path(location).parents):
+            _not_a_directory(location)
         typer.secho(
             f"Error: could not set up logging at '{location}': {exc.strerror or exc}.",
             fg=typer.colors.RED,

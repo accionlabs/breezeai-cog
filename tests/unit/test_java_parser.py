@@ -143,13 +143,13 @@ def test_deep_string_concat_does_not_recurse(tmp_path) -> None:
 
 def test_short_concat_still_renders_endpoint() -> None:
     # The depth cap must not regress normal URL/path concatenation rendering.
-    from breezeai_cog.parsers.java.statements import _render_url
+    from breezeai_cog.parsers.java.statements import render_url
     from breezeai_cog.parsers.treesitter import parse_source
 
     src = b'class C { void m() { String u = "http://api/" + id + "/x"; } }'
     root = parse_source("java", src, 0).root_node
     concat = next(n for n in _walk(root) if n.type == "binary_expression")
-    assert _render_url(concat, src) == "http://api/{id}/x"
+    assert render_url(concat, src) == "http://api/{id}/x"
 
 
 def _walk(node):
@@ -452,3 +452,69 @@ def test_nested_class_method_id_carries_the_qualified_owner(tmp_path) -> None:
 def test_payload_type(declared: str, payload: str | None) -> None:
     from breezeai_cog.parsers.java.functions import payload_type
     assert payload_type(declared) == payload
+
+
+
+def test_index_facts_get_the_repo_root_whatever_the_path_spelling(tmp_path, monkeypatch, windows_spelled) -> None:
+    # A Windows path's string never ends with its "/"-separated repo-relative path; index-stage
+    # facts must still receive the repo root.
+    from breezeai_cog.parsers.java import imports
+
+    seen = []
+    monkeypatch.setattr(imports, "collect_additive",
+                        lambda lang, root, source, rel, repo_root: seen.append((rel, repo_root)) or {})
+    (tmp_path / "a").mkdir()
+    src = tmp_path / "a" / "A.java"
+    src.write_text("package a\nclass A {}\n")
+    imports.build_fqcn_index(tmp_path, [windows_spelled(src)], jobs=1)
+    assert seen == [("a/A.java", tmp_path)]
+
+
+def test_varargs_parameter_keeps_its_type() -> None:
+    from breezeai_cog.parsers.java.functions import extract_params
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = (b"class A { A(String... names) {} void f(String url, final @NotNull Handler<Buffer>... h,"
+           b" int[]... m, java.util.Map<String, Object> /* c */ ... x) {} }")
+    methods = [n for n in _walk(parse_source("java", src).root_node)
+               if n.type in ("method_declaration", "constructor_declaration")]
+    params = [[(p.name, p.type, [d.name for d in p.decorators])
+               for p in extract_params(m.child_by_field_name("parameters"), src)] for m in methods]
+    assert params == [
+        [("names", "String...", [])],
+        [("url", "String", []), ("h", "Handler<Buffer>...", ["NotNull"]), ("m", "int[]...", []),
+         ("x", "java.util.Map<String, Object>...", [])],
+    ]
+
+
+def test_enum_methods_and_constructor_extracted(tmp_path) -> None:
+    # An enum's constructor, methods and inner types follow its constants (tree-sitter's
+    # `enum_body_declarations`); they are captured like any class member, with their statements.
+    src = (
+        "package com.x;\n"
+        "public enum Mode {\n"
+        "  ON(\"on\"), OFF(\"off\");\n"
+        "  private final String key;\n"
+        "  Mode(String key) { this.key = key; }\n"
+        "  public String key() { return key; }\n"
+        "  public static Mode of(String k) { for (Mode m : values()) { if (m.key().equals(k)) return m; } return null; }\n"
+        "  static class Holder { void hold() {} }\n"
+        "}\n"
+    ).encode()
+    p = tmp_path / "Mode.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="Mode.java", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    enum = next(c for c in rec.classes if c.name == "Mode")
+    by_name = {f.name: f for f in rec.functions}
+    assert set(by_name) == {"Mode", "key", "of", "hold"}
+    assert by_name["Mode"].type == "constructor" and by_name["Mode"].parentId == enum.id
+    assert by_name["of"].isStatic is True and by_name["of"].returnType == "Mode"
+    assert enum.constructorParams == [ConstructorParam(name="key", type="String")]
+    holder = next(c for c in rec.classes if c.name == "Holder")
+    assert holder.parentId == enum.parentId and by_name["hold"].parentId == holder.id
+    # the method bodies' statements belong to the methods, once each
+    loops = [s for s in rec.statements if s.nodeType == "enhanced_for_statement"]
+    assert [s.parentId for s in loops] == [by_name["of"].id]
+    ids = [s.id for s in rec.statements]
+    assert len(ids) == len(set(ids))

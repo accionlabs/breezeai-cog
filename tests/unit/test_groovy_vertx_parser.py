@@ -149,6 +149,24 @@ def test_constant_addresses_fold(tmp_path) -> None:
     assert None in eps and "runtimeVar" not in eps  # unresolvable var → empty (Q15)
 
 
+def test_class_dot_class_simple_name_stays_empty(tmp_path) -> None:
+    # In Groovy `x.class` on a variable is `x.getClass()`, so `T.class.getSimpleName()` cannot be
+    # told from a variable's runtime class by syntax: it is never folded (unlike Java).
+    src = (
+        b"package a\n"
+        b"import org.vertx.groovy.platform.Verticle\n"
+        b"class N extends Verticle {\n"
+        b"  static final String ADDR = N.class.getSimpleName()\n"
+        b"  def start() {\n"
+        b"    eb.registerHandler(ADDR, h)\n"
+        b"    eb.registerHandler(handler.class.getSimpleName(), h)\n"
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "N.groovy")
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert eps == [None, None]
+
+
 def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
     # A route path that concatenates a runtime variable with a literal (`cfg.path + '/job'`) is
     # still a route, but its address is unknown: endpoint empty — never a {path} placeholder.

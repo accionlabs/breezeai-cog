@@ -36,7 +36,8 @@ Rule            Severity Violation
                          Swagger UI, static files, WebJars, Relay ``node`` fields (§4, §8
                          "every record leads to its handler")
 ``handlerLine`` gap      a named ``handler`` with no ``handlerLine``: declared elsewhere and
-                         not located (no ``handlerPath``), so the record cannot lead to it
+                         not located (no ``handlerPath``), so the record cannot lead to it —
+                         except a view Django serves itself (``TemplateView``, ``serve``)
 ``outbound``    error    an outbound record (``api_call``, a ``route`` link with
                          ``routeKind: navigation``, ``eventbus_send`` / ``_publish``)
                          whose ``endpoint`` is an empty
@@ -52,6 +53,7 @@ from dataclasses import dataclass
 
 from ..schemas import FileRecord, Statement
 from .aspnet_common import FRAMEWORK_SERVED
+from .django_common import DJANGO_SERVED
 
 #: ``mcp_tool`` (BREEZEAI-1457): an MCP server tool is an entry point an AI client calls, held to
 #: the same contract as a route (``method="TOOL"``, ``endpoint`` = the tool name).
@@ -113,8 +115,17 @@ _SERVING_MIDDLEWARE = ("expressMiddleware", "swaggerUi.", "express.static", "ser
                        "graphqlHTTP", "createHandler", "webjars.Routes")
 
 
+def _django_served(s: Statement) -> bool:
+    """A Django URL pattern whose view is Django's own (``TemplateView.as_view(…)``, ``serve``):
+    named, with nothing in the repo to locate."""
+    return (s.framework in ("django", "drf") and s.handler in DJANGO_SERVED
+            and s.handlerLine is None and s.handlerPath is None)
+
+
 def _framework_served(s: Statement) -> bool:
     if any(name in s.text for name in (*FRAMEWORK_SERVED, *_SERVING_MIDDLEWARE)):
+        return True
+    if _django_served(s):
         return True
     # A Relay node field of a server's schema: the GraphQL server resolves it.
     return (s.framework == "graphql" and s.routeKind == "query" and s.responseDTO == "Node"
@@ -135,7 +146,7 @@ def _check(s: Statement) -> list[tuple[str, str]]:
         found.append(("endpoint", bad))
     if not s.handler and s.handlerLine is None and not _framework_served(s):
         found.append(("handler", "no handler and no handlerLine"))
-    if s.handler and s.handlerLine is None:
+    if s.handler and s.handlerLine is None and not _django_served(s):
         found.append(("handlerLine", f"{s.handler!r} not located"))
     if s.handlerPath is not None and (
         not s.handlerPath or s.handlerPath == s.path or s.handlerPath.startswith("/")

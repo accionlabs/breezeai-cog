@@ -1,0 +1,31 @@
+# Django REST framework — entry-point roles
+
+Parser: `src/breezeai_cog/parsers/python_django/` (`python-drf`, built on the Django parser; `router.register(…)` is recorded by the additive `drf-routers` detector in `routers.py`, since a registration often sits in a file that never imports DRF; router prefixes: the `django.urlconf` fact; views, viewsets and their bases in other files: the `django.views` fact) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_drf.py`
+
+DRF routes are Django URL patterns: every row of the [Django table](django.md) applies, with
+`framework: drf` when the view is a DRF view (an `APIView` / `GenericAPIView` / viewset subclass, or
+an `@api_view` function).
+
+**Router addresses** are written in the path syntax the Django table uses: a router included at
+`api/` that registers `orders` gives `/api/orders/` (list) and `/api/orders/<pk>/` (detail), the
+lookup named by the viewset's `lookup_url_kwarg` or `lookup_field` (`pk` by default).
+
+**Handlers.** An action the viewset (or a base in the repo) defines is its handler, at its line. An
+action inherited from DRF (`ModelViewSet.list`) is named by the action and located at the viewset.
+
+| Construct | Role | Record | Why |
+|---|---|---|---|
+| `router.register(prefix, ViewSet)` on a `DefaultRouter` / `SimpleRouter` | Binding, one per action | `route`, `routeKind: route`, `framework: drf`: `list` → `GET /p/`, `create` → `POST /p/`, `retrieve` → `GET /p/<pk>/`, `update` → `PUT /p/<pk>/`, `partial_update` → `PATCH /p/<pk>/`, `destroy` → `DELETE /p/<pk>/`. An empty prefix (`register(r"", V)`) serves at the include's address (`/api/`, `/api/<pk>/`), as DRF drops the leading `/`. The actions are the ones the viewset defines and the ones its DRF bases provide (`ModelViewSet`: all six; `ReadOnlyModelViewSet`: `list`, `retrieve`; the `*ModelMixin`s: theirs) | Each action is one handler |
+| `@action(detail=…, methods=[…], url_path=…)` on a viewset method | Binding, one per method | `/p/<pk>/<url_path>/` (`detail=True`) or `/p/<url_path>/`; `url_path` defaults to the method name, `methods` to `GET`. `permission_classes=[…]` on the `@action` replaces the view's for that action | One handler |
+| `router.register(…)` on a router made from the repo's own subclass of `DefaultRouter` / `SimpleRouter` (`class ApiRouter(DefaultRouter)`, here or imported, through other repo subclasses) | Binding, one per action | as the row above, when no class in the chain assigns `routes` (`routes = […]`, `self.routes = …`), names `trailing_slash`, or overrides `get_routes`, `get_urls`, `get_method_map`, `get_lookup_regex`, `_get_dynamic_route` or `urls`. A subclass that only adds to the routes (a verb on an existing route's mapping) records DRF's standard ones. Otherwise — or a base from another library — no record | It serves DRF's routes; a subclass that rewrites them does not, and its own are not read |
+| `DefaultRouter(trailing_slash=False)` | Wiring | addresses without the trailing `/` | Changes every address of the router |
+| A `prefix` with regex syntax (`r"users/(?P<uid>\d+)/orders"`) | Binding | `endpoint` empty | Not written in path syntax |
+| `path("api/", include(router.urls))` / `urlpatterns += router.urls` / `urlpatterns = router.urls` | Wiring | statement stays plain; the prefix joined into the router's addresses. A router included at two places, or nowhere, has an unknown address | Points at a router |
+| `path(route, OrderList.as_view())` — an `APIView` / generic API view | Binding, one per method | as the Django class-based view row. The generic views' methods: `ListAPIView` → `GET` (`list`); `CreateAPIView` → `POST` (`create`); `RetrieveAPIView` → `GET` (`retrieve`); `UpdateAPIView` → `PUT`, `PATCH`; `DestroyAPIView` → `DELETE`; and their combinations (`ListCreateAPIView`, `RetrieveUpdateDestroyAPIView`, …). An overridden `get` or action (`list`) is the handler | `as_view()` dispatches each verb |
+| `path(route, OrderViewSet.as_view({"get": "list", "post": "create"}))` | Binding, one per entry | `method` = the key, `handler` = the action | The mapping names each handler |
+| `@api_view(["GET", "POST"])` on a function | Binding, one per method | `GET` when no list is given | One handler per verb |
+| `permission_classes = [IsAuthenticated]` on a view (or a base in the repo) / `@permission_classes([…])` | Guard | each class in `guards`. `authRequired: true` for `IsAuthenticated`, `IsAdminUser`, `DjangoModelPermissions`, `DjangoObjectPermissions`; for `IsAuthenticatedOrReadOnly` and `DjangoModelPermissionsOrAnonReadOnly` only on `POST`, `PUT`, `PATCH`, `DELETE`. `AllowAny` is not a guard. A list that is not literal → no guards from it. A view (or a base in the repo) that overrides `get_permissions()` → no permission guards on any of its routes, and no `authRequired`: the repo chooses them per request | DRF checks them before the handler; a class of the app makes no claim |
+| `REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"]` in settings — only when every settings module that sets it agrees | Guard | as above, for DRF views that declare no `permission_classes` | The default DRF applies |
+| `serializer_class = OrderSerializer` | — | `requestDTO` (`POST`, `PUT`, `PATCH`) and `responseDTO` (all but `DELETE`) = `OrderSerializer`, only on actions DRF provides (`list`, `create`, …, not overridden) — the ones certain to use it. A view with `get_serializer_class()` → empty | The declared payload type |
+| The `DefaultRouter` API root view (`/api/`) | None | — | Generated by DRF, lists the other routes |
+| `requests` / `httpx` call | Outbound | `api_call` | Our code calling out |

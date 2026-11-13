@@ -61,14 +61,14 @@ from .emits import Emit, apply
 #: Languages whose base parser calls :func:`run_additive`. Registering a detector for any
 #: other language is an error: nothing would ever run it.
 HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"typescript", "csharp", "java", "kotlin", "python", "scala", "php", "go", "c", "cpp", "cuda"})
+    {"typescript", "csharp", "java", "kotlin", "python", "scala", "php", "go", "c", "cpp", "cuda", "vb"})
 
 #: Languages whose ``build_index`` calls :func:`collect_additive` / :func:`resolve_additive`.
 #: A fact for any other language is an error: it would never be built, and the detector
 #: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
     {"apex", "c", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "kotlin", "php", "python",
-     "ruby", "scala", "typescript"})
+     "ruby", "scala", "typescript", "vb"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
 _MARKERS = (b"register_detector(", b"register_fact(")

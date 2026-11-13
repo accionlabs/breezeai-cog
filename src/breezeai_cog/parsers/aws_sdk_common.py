@@ -1,4 +1,5 @@
-"""AWS SDK messaging addresses, shared by the TypeScript and C# AWS detectors.
+"""AWS SDK messaging addresses, shared by the TypeScript, C# and VB AWS detectors, and the AWS SDK
+for .NET service tables, shared by the C# and VB detectors (one SDK, one set of rules).
 
 A producer call names its destination in a request field (``TopicArn``, ``QueueUrl``,
 ``EventBusName``, ``PhoneNumber``). A literal address is written by name — a queue URL as its
@@ -8,6 +9,8 @@ consumer meet on one address. An injected value is never resolved here."""
 from __future__ import annotations
 
 import re
+
+from ..schemas import SemanticType
 
 # Keys in an SDK argument object that name the destination address.
 ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
@@ -46,3 +49,41 @@ def address_name(key: str, value: str) -> str:
     form = _NAME_FORMS.get(key)
     m = form.match(value) if form is not None else None
     return m["name"] if m is not None else value
+
+
+# ── AWS SDK for .NET (C# and VB) ──────────────────────────────────────────────────────────────
+
+#: Client types → service (the ``framework`` value).
+DOTNET_CLIENT_TYPES = {
+    "IAmazonS3": "aws-s3", "AmazonS3Client": "aws-s3",
+    "ITransferUtility": "aws-s3", "TransferUtility": "aws-s3",
+    "IAmazonSimpleSystemsManagement": "aws-ssm", "AmazonSimpleSystemsManagementClient": "aws-ssm",
+    "IAmazonCognitoIdentityProvider": "aws-cognito",
+    "AmazonCognitoIdentityProviderClient": "aws-cognito",
+    "IAmazonLambda": "aws-lambda", "AmazonLambdaClient": "aws-lambda",
+    "IAmazonSimpleNotificationService": "aws-sns", "AmazonSimpleNotificationServiceClient": "aws-sns",
+    "IAmazonSQS": "aws-sqs", "AmazonSQSClient": "aws-sqs",
+    "IAmazonEventBridge": "aws-eventbridge", "AmazonEventBridgeClient": "aws-eventbridge",
+    "IAmazonCloudWatchEvents": "aws-eventbridge", "AmazonCloudWatchEventsClient": "aws-eventbridge",
+}
+
+#: Services whose every operation is a request/response call.
+DOTNET_API_SERVICES = frozenset({"aws-s3", "aws-ssm", "aws-cognito", "aws-lambda"})
+
+#: Messaging operations (sync and ``Async``) → semantic type, per service.
+DOTNET_MESSAGING: dict[str, dict[str, SemanticType]] = {
+    "aws-sns": {"Publish": "eventbus_publish", "PublishBatch": "eventbus_publish"},
+    "aws-sqs": {"SendMessage": "eventbus_send", "SendMessageBatch": "eventbus_send",
+                "ReceiveMessage": "eventbus_consumer"},
+    "aws-eventbridge": {"PutEvents": "eventbus_publish"},
+}
+
+#: The address the positional overload's first argument stands for
+#: (``PublishAsync(topicArn, message)``, ``SendMessageAsync(queueUrl, body)``).
+DOTNET_POSITIONAL_KEY = {"aws-sns": "TopicArn", "aws-sqs": "QueueUrl"}
+
+#: Client methods that are not service operations: local signing, lifetime, ``object``.
+DOTNET_NOT_OPERATIONS = frozenset({
+    "Dispose", "DetermineServiceOperationEndpoint", "GetPreSignedURL", "GetPreSignedURLAsync",
+    "Equals", "GetHashCode", "ToString", "GetType",
+})

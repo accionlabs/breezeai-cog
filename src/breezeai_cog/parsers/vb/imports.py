@@ -3,20 +3,25 @@
 Like C#, VB ``Imports`` names a **namespace** (or an alias), not a file — so every
 import is recorded external and calls resolve same-file only (precision-first).
 
-The one cross-file fact we *do* index is class heritage (:func:`build_vb_index`): a
-controller can inherit its ``<Route>``/``<Authorize>`` from a base declared in another
-file, and the shared :func:`~breezeai_cog.parsers.aspnet_common.detect_controller_routes`
-walks that chain via ``index.class_heritage``."""
+The index (:func:`build_vb_index`) holds class heritage — a controller can inherit its
+``<Route>``/``<Authorize>`` from a base declared in another file, and the shared
+:func:`~breezeai_cog.parsers.aspnet_common.detect_controller_routes` walks that chain via
+``index.class_heritage`` — and the facts registered for ``vb`` (``register_fact``), collected
+in the same parse."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
+from ...utils import repo_relative
+from ..additive import collect_additive, resolve_additive
 from ..index_common import ClassHeritage, parallel_map, record_heritage
-from ..treesitter import node_text, parse_source
+from ..treesitter import node_text
+from .source import parse_nested, parse_vb
 
 
 def extract_imports(
@@ -40,30 +45,44 @@ class VbIndex:
     of the C# index that ``detect_controller_routes`` reads via ``getattr(index, …)``."""
 
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
-def _vb_index_one(file_s: str) -> dict[str, ClassHeritage | None] | None:
-    """Parse one VB file into its partial ``class_heritage`` map — pure, picklable worker
-    for :func:`parallel_map`. Returns ``None`` on read failure."""
+#: One file's share of the index: its heritage, and each fact's values (one per parse level).
+_IndexFrag = tuple[dict[str, ClassHeritage | None], dict[str, list[Any]]]
+
+
+def _vb_index_one(args: tuple[str, str, str]) -> _IndexFrag | None:
+    """Parse one VB file into its partial ``class_heritage`` map and its registered facts —
+    pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read failure."""
     # Lazy imports: parser.py imports this module, so a top-level import would cycle.
     from .classes import _heritage
     from .functions import attributes_from_blocks
     from .parser import iter_type_declarations
 
+    file_s, rel, root_s = args
+    repo_root = Path(root_s)
     try:
         source = Path(file_s).read_bytes()
     except OSError:
         return None
     try:
-        root = parse_source("vb", source, 0).root_node
+        roots = [parse_vb(source, 0).root_node, *(lv.root for lv in parse_nested(source, 0))]
         heritage: dict[str, ClassHeritage | None] = {}
-        for block, attrs in iter_type_declarations(root):
+        for block, attrs in (t for root in roots for t in iter_type_declarations(root)):
             name_node = block.child_by_field_name("name")
             name = node_text(name_node, source) if name_node is not None else None
             if not name:
                 continue
             record_heritage(heritage, name, _heritage(block, source)[0], attributes_from_blocks(attrs, source))
-        return heritage
+        # A nested type's body is blank in the outer tree: each level is collected on its own.
+        facts: dict[str, list[Any]] = {}
+        for root in roots:
+            for name, value in collect_additive("vb", root, source, rel, repo_root).items():
+                facts.setdefault(name, []).append(value)
+        return heritage, facts
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -76,15 +95,22 @@ def _vb_index_one(file_s: str) -> dict[str, ClassHeritage | None] | None:
 def build_vb_index(repo_root: Path, files, jobs: int = 1) -> VbIndex:
     """Repo-level pre-pass: map each declared VB type's simple name → its heritage (base
     class + attributes), parsing each file across ``jobs`` processes. VB ``Imports`` name
-    namespaces (no namespace→file map), so only heritage is indexed — enough for ASP.NET
-    cross-file base-controller resolution."""
+    namespaces (no namespace→file map), so heritage is indexed — enough for ASP.NET
+    cross-file base-controller resolution — plus the facts registered for ``vb``."""
     index = VbIndex()
-    for frag in parallel_map([str(f) for f in files], _vb_index_one, jobs):
+    collected: dict[str, list[Any]] = {}
+    args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
+    for frag in parallel_map(args, _vb_index_one, jobs):
         if not frag:
             continue
-        for name, ch in frag.items():
+        heritage, facts = frag
+        for name, values in facts.items():
+            collected.setdefault(name, []).extend(values)
+        for name, ch in heritage.items():
             if ch is None:
                 index.class_heritage[name] = None
             else:
                 record_heritage(index.class_heritage, name, ch.extends, ch.decorators)
+    # Registered facts may need the whole index, so they resolve after it is built.
+    index.facts = resolve_additive("vb", collected, index)
     return index

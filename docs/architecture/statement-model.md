@@ -157,26 +157,43 @@ flowchart TD
   D -- no --> N[no meaning]
 ```
 
+`method` on an `api_call` is an HTTP verb or empty. A generic `client.request(…)` whose verb
+the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`) is an
+`api_call` with an empty `method`; where the language parser reads the verb from the arguments
+(`requests.request("GET", url)`, `axios({ method: "post" })`) it is that verb.
+
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
 2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
    it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
-   verb in another language (`stream().findFirst()`) needs a data-access receiver too. A
+   verb, or a Firebase JavaScript SDK verb (`getDocs`, `onSnapshot`), in another language
+   (`stream().findFirst()`, a Groovy `paperKit.getDocs()`) needs a data-access receiver too. A
    receiver whose declared type is the product's client counts for that product's generic verbs:
    in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
-   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call.
+   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call. The name is bound where
+   the call is: a class that declares its own `_ctx` as something else is not DynamoDB.
+   A cache's name is not evidence of a product: `cache.get(key)`, `cacheManager.Set(…)` or
+   `HttpRuntime.Cache.Get(…)` is most often in memory, so only a name that says Redis
+   (`redisClient.get`) or a Redis verb (`hset`, `lpush`) gives `redis`.
 3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
    entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
    `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the
    `NHibernate` namespace → `hibernate`, `Microsoft.EntityFrameworkCore` → `entity_framework`
-   (Java, Kotlin, Groovy, Scala, C#, VB). A `jakarta.persistence` annotation or exception is not
-   enough: other ORMs (Ebean) use them too.
+   (Java, Kotlin, Groovy, Scala, C#, VB). In C# an import made once for the whole project counts
+   as the file's own — a `global using` in any `.cs` file of the same project, or
+   `<Using Include>` in its `.csproj` / `Directory.Build.props` — as the compiler sees it; another
+   project's imports do not. A `jakarta.persistence` annotation or exception is not
+   enough: other ORMs (Ebean) use them too. EF's `Include` / `ThenInclude` on a chain naming a
+   bundle (`new ScriptBundle("~/x").Include("~/Scripts/x.js")`) is ASP.NET bundling, not a query.
 4. **Otherwise `orm`:** data access whose product the file doesn't show. A service that
    receives its repository by injection usually imports only that interface, so it stays `orm`.
 
 The order matters: API is checked first (so Django's `objects.get` is not mistaken for an HTTP
 GET only because of its name), and raw queries before ORM calls (so `createNativeQuery("SELECT …")`
-is a `query_statement`). If no call matches but the statement contains a string with real SQL
+is a `query_statement`). `createQuery` is a raw query only with a query string as its argument
+(`em.createQuery("select p from Person p")`) or in a file importing JPA or Hibernate (step 3
+above): elsewhere the name builds something else, such as a model's `Query.createQuery(key, value)`
+or LINQ's `Provider.CreateQuery(expression)`. If no call matches but the statement contains a string with real SQL
 structure, it becomes a `query_statement`:
 
 ```java
@@ -184,11 +201,55 @@ String q = "SELECT id, total FROM orders WHERE id = ?";
 ```
 → `nodeType: local_variable_declaration`, `semanticType: query_statement`, `name: q`.
 
+### HTTP client names, per language
+
+The HTTP step decides by the receiver's name: a call with an HTTP verb (`get`, `post`, …) whose
+receiver names a client. A part of the receiver chain names one when its name **ends with** a
+client name that starts a word there, because the last word of a name says what it is:
+
+| Receiver | Client? |
+|---|---|
+| `dataApiClient`, `new P3APIClient(uri)`, `DefaultHttpClient`, `this._http`, `$http`, `axios.create()` | yes |
+| `apiClientPool` (a pool), `HttpRuntime.Cache` (a cache), `httpContextProvider`, `fetched` | no |
+| `sky`, `forgot` (`ky` and `got` do not start a word) | no |
+
+Each language reads only its own libraries' names, because the same word is an ordinary name
+elsewhere: `session` is Python's `requests.Session`, but in Java it is often a JSON object, so
+`session.getString("platformId")` reads a field, and in Groovy a Map.
+
+```mermaid
+flowchart LR
+  F["call in a file of language L"] --> H{"a receiver name ends with<br/>one of L's client names?"}
+  H -- yes --> API[api_call]
+  H -- "no, or L has none" --> N[no HTTP meaning]
+```
+
+| Languages | Client names |
+|---|---|
+| all below | `http`, `httpClient`, `restClient`, `apiClient` |
+| JavaScript / TypeScript | `httpService`, `axios`, `fetch`, `superagent`, `got`, `ky`, `ofetch`, `webClient`, and a bare `fetch(…)` |
+| Python | `requests`, `session`, `httpx`, `aiohttp`, `urllib`, `urllib3` |
+| Java, Kotlin, Groovy, Scala | `restTemplate`, `webClient` |
+| C#, VB | `restTemplate` (Spring.NET), `webClient`, and the `HttpClient` verbs `GetAsync`, `GetStringAsync`, `PostAsJsonAsync` … |
+| Go | only the shared names |
+| Ruby | `HTTParty` |
+
+Some clients are recognised by their imported classes instead of a name. Apache HttpClient
+(Java) puts the verb in the request class and sends with a generic `execute`, so the record sits
+where the request is built: `new HttpGet(url)`, with `HttpGet` imported from
+`org.apache.http.client.methods` (or HttpClient 5's `org.apache.hc.client5.http.classic.methods`),
+→ `api_call`, `method: GET`, `endpoint` from `url` when it holds a string. A class of the
+repository's own with the same name is not one.
+
+In C# and VB, a receiver ending in `Session` (ASP.NET session state, NHibernate `ISession`) is
+never a client, not even `HttpContext.Session`.
+
 ### Languages that skip the name match
 
 The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `session`, `repo`).
 Some languages have no naming convention to rely on, so they skip those steps and record such
-calls only through evidence-based detectors (an import, a declared type):
+calls only through evidence-based detectors (an import, a declared type). A language with no
+client names above skips the HTTP step:
 
 | Language | Skips | Recorded instead by |
 |---|---|---|

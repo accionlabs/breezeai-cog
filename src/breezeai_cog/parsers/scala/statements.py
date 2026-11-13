@@ -344,7 +344,8 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
 
     # http4s terminal operations represent a GET only when the sole argument is a bare
     # Uri/String; when it's a Request value the verb lives inside that value (could be
-    # anything), so fall back to the generic "request" sentinel rather than guessing GET.
+    # anything), so fall back to the generic "request" (an api_call with an empty method)
+    # rather than guessing GET.
     # Only typed HTTP receivers get this fallback; Quill/Neo4j/ordinary ``run`` calls
     # remain available to the existing DB detectors.
     if lower_method in {"expect", "fetchas", "run"} and root_receiver in current_http_client_ids():

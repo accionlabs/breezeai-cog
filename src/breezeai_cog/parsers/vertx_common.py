@@ -358,6 +358,14 @@ def join_path(base: str, local: str) -> str:
 #: several (``.handler(BodyHandler.create()).handler(this::create)``); the last one is the
 #: handler, the earlier ones run before it.
 HANDLER_CALLS = frozenset({"handler", "blockingHandler"})
+#: ``router.get("/x").failureHandler(h)``: ``h`` runs only when a handler of the path fails.
+FAILURE_HANDLER_CALL = "failureHandler"
+
+
+def failure_handler_only(chained: list[str]) -> bool:
+    """Does a route call's chain (the names of the calls on it, in order) attach only a failure
+    handler? Such a route serves no request: it is wiring, not a binding."""
+    return FAILURE_HANDLER_CALL in chained and not HANDLER_CALLS.intersection(chained)
 #: Semantic types whose handler is an entry point's handler (outbound reply callbacks are not).
 HANDLER_SEMANTICS = frozenset({"route", "eventbus_consumer", "timer"})
 

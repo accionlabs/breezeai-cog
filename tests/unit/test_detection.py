@@ -13,22 +13,22 @@ from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 
 
 def test_classify_api() -> None:
-    assert classify_call("axios.get", "get") == ("api_call", "GET", None)
-    assert classify_call("fetch", "fetch") == ("api_call", "GET", None)
-    assert classify_call("this.http.post", "post") == ("api_call", "POST", None)
-    assert classify_call("requests.get", "get") == ("api_call", "GET", None)
-    assert classify_call("session.delete", "delete") == ("api_call", "DELETE", None)
+    assert classify_call("axios.get", "get", language="typescript") == ("api_call", "GET", None)
+    assert classify_call("fetch", "fetch", language="typescript") == ("api_call", "GET", None)
+    assert classify_call("this.http.post", "post", language="typescript") == ("api_call", "POST", None)
+    assert classify_call("requests.get", "get", language="python") == ("api_call", "GET", None)
+    assert classify_call("session.delete", "delete", language="python") == ("api_call", "DELETE", None)
 
 
 def test_session_query_chain_is_db_not_http() -> None:
     # `session` is both an HTTP client hint (requests.Session) and a SQLAlchemy DB
     # session. A chain carrying an ORM query-builder marker is data access, not HTTP,
     # even though it rides on `session` and ends in an HTTP verb.
-    assert classify_call("session.query(User).filter(x).delete", "delete") == \
+    assert classify_call("session.query(User).filter(x).delete", "delete", language="python") == \
         ("db_method_call", "delete", "sqlalchemy")
-    assert classify_call("session.query(User).filter(x).delete", "delete")[0] != "api_call"
+    assert classify_call("session.query(User).filter(x).delete", "delete", language="python")[0] != "api_call"
     # a bare session.delete (requests.Session) stays an HTTP call
-    assert classify_call("session.delete", "delete") == ("api_call", "DELETE", None)
+    assert classify_call("session.delete", "delete", language="python") == ("api_call", "DELETE", None)
 
 
 def test_classify_db() -> None:
@@ -106,13 +106,13 @@ def test_classify_db_recall() -> None:
 def test_classify_api_recall() -> None:
     # HTTP clients added for recall parity with the legacy API_CLIENT_NAMES.
     assert classify_call("restTemplate.getForObject", "getForObject") is None  # not an HTTP verb
-    assert classify_call("this.httpService.post", "post") == ("api_call", "POST", None)
-    assert classify_call("webClient.get", "get") == ("api_call", "GET", None)
-    assert classify_call("axios.request", "request") == ("api_call", "REQUEST", None)
-    assert classify_call("$fetch", "$fetch") == ("api_call", "GET", None)
-    assert classify_call("useFetch", "useFetch") == ("api_call", "GET", None)
+    assert classify_call("this.httpService.post", "post", language="typescript") == ("api_call", "POST", None)
+    assert classify_call("webClient.get", "get", language="java") == ("api_call", "GET", None)
+    assert classify_call("axios.request", "request", language="typescript") == ("api_call", None, None)
+    assert classify_call("$fetch", "$fetch", language="typescript") == ("api_call", "GET", None)
+    assert classify_call("useFetch", "useFetch", language="typescript") == ("api_call", "GET", None)
     # bare .request() without a client hint is NOT an API call (precision)
-    assert classify_call("emitter.request", "request") is None
+    assert classify_call("emitter.request", "request", language="typescript") is None
 
 
 def test_classify_none() -> None:
@@ -256,9 +256,8 @@ def test_generic_verb_non_db_receiver_guarded() -> None:
         ("cartItems.remove", "remove"),
     ]:
         assert classify_call(callee, method) is None, callee
-    # An explicit ``cache`` receiver name is tagged redis; a ``…Cache`` suffix is NOT (it is
-    # commonly an in-memory Map — see test_suffix_named_cache_is_not_redis).
-    assert classify_call("cache.delete", "delete") == ("db_method_call", "delete", "redis")
+    # A cache's name is not Redis (see test_cache_name_is_not_redis).
+    assert classify_call("cache.delete", "delete") is None
     assert classify_call("this.userCache.delete", "delete") is None
     # true positives preserved: explicit repo/vendor hint and distinctive methods
     assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
@@ -669,18 +668,12 @@ def test_non_terminal_client_segment_does_not_hijack_es() -> None:
         ("db_method_call", "bulk", "elasticsearch")
 
 
-def test_cache_redis_calls_detected() -> None:
-    # Cache/Redis service .get()/.set()/.del() must be tagged as redis.
-    assert classify_call("this.cacheService.get", "get") == \
-        ("db_method_call", "get", "redis")
-    assert classify_call("this.cacheManager.set", "set") == \
-        ("db_method_call", "set", "redis")
-    assert classify_call("this.cacheService.del", "del") == \
-        ("db_method_call", "del", "redis")
+def test_redis_calls_detected() -> None:
+    # A receiver named after Redis: .get()/.set()/.del() are Redis.
     assert classify_call("this.redisService.get", "get") == \
         ("db_method_call", "get", "redis")
-    assert classify_call("this.cacheService.delete", "delete") == \
-        ("db_method_call", "delete", "redis")
+    assert classify_call("redisClient.set", "set") == ("db_method_call", "set", "redis")
+    assert classify_call("this.redis.del", "del") == ("db_method_call", "del", "redis")
     # plain Map.get / Set.set stay unclassified (no cache receiver)
     assert classify_call("map.get", "get") is None
     assert classify_call("settings.set", "set") is None
@@ -697,11 +690,25 @@ def test_suffix_named_cache_is_not_redis() -> None:
     # a ``…cache`` segment deeper in the chain also stays out (terminal receiver is entries/items)
     assert classify_call("this.responseCache.entries.delete", "delete") is None
     assert classify_call("this.pageCache.items.get", "get") is None
-    # …but explicit cache/redis receiver names still classify.
-    assert classify_call("this.cacheService.get", "get") == \
-        ("db_method_call", "get", "redis")
+    # …but a name that says Redis still classifies.
     assert classify_call("this.userRedis.get", "get") == \
         ("db_method_call", "get", "redis")
+
+
+def test_cache_name_is_not_redis() -> None:
+    # A cache's name does not say where its data lives — in every language, it is most often
+    # in memory: ASP.NET's HttpRuntime / HostingEnvironment cache, a HashMap, a cache service.
+    assert classify_call("HttpRuntime.Cache.Get", "Get", language="csharp") is None
+    assert classify_call("System.Web.Hosting.HostingEnvironment.Cache.Get", "Get",
+                         language="csharp") is None
+    assert classify_call("cacheManager.Set", "Set", language="csharp") is None
+    assert classify_call("cache.Remove", "Remove", language="csharp") is None
+    assert classify_call("cacheManager.Remove", "Remove", language="csharp") is None  # not orm
+    assert classify_call("CacheManager.Remove", "Remove", language="csharp") is None
+    assert classify_call("cache.get", "get", language="groovy") is None
+    assert classify_call("cacheService.get", "get", language="java") is None
+    assert classify_call("this.cacheManager.set", "set", language="typescript") is None
+    assert classify_call("this.cacheService.delete", "delete", language="typescript") is None
 
 
 def test_dataaccess_false_positives() -> None:
@@ -808,9 +815,9 @@ def test_scala_false_positive_gates() -> None:
     from breezeai_cog.parsers.detection.db_queries import match_db
     from breezeai_cog.parsers.detection.api_calls import match_api
 
-    # B1: in-memory Map named cache is not Redis in Scala
+    # B1: a Map named cache is not Redis (in any language)
     assert match_db("cache.get", "get", language="scala") is None
-    assert match_db("cache.get", "get", language="javascript") == "redis"
+    assert match_db("cache.get", "get", language="javascript") is None
 
     # B2: bare aggregate is not MongoDB
     assert match_db("aggregate", "aggregate", language="scala") is None
@@ -829,20 +836,20 @@ def test_scala_false_positive_gates() -> None:
     assert match_db("driver.run", "run") == "neo4j"
 
     # B5: Capitalized Request constructor is not an outbound api_call
-    assert match_api("http4s.Request", "Request") is None
-    assert match_api("Request", "Request") is None
-    assert match_api("axios.request", "request") == "REQUEST"
+    assert match_api("http4s.Request", "Request", language="scala") is None
+    assert match_api("Request", "Request", language="scala") is None
+    assert match_api("axios.request", "request", language="typescript") == "REQUEST"
 
 
 def test_api_hints_ignore_call_arguments() -> None:
     from breezeai_cog.parsers.detection.api_calls import match_api
 
     # A URL literal must not turn an arbitrary receiver into an HTTP client.
-    assert match_api('ws.url("https://api.example/users").get', "get") is None
+    assert match_api('ws.url("https://api.example/users").get', "get", language="scala") is None
     assert match_api('builder.run("https://api.example/users")', "run") is None
     # Receiver hints still work through ordinary member chains.
-    assert match_api("this.http.post", "post") == "POST"
-    assert match_api("axios.get", "get") == "GET"
+    assert match_api("this.http.post", "post", language="typescript") == "POST"
+    assert match_api("axios.get", "get", language="typescript") == "GET"
 
 
 def test_dotnet_session_remove_is_session_state() -> None:
@@ -916,3 +923,86 @@ def test_truncate_needs_sql_structure(text: str, is_sql: bool) -> None:
     from breezeai_cog.parsers.detection.queries import is_query
 
     assert is_query("printf", text) is is_sql
+
+
+def test_bundling_include_is_not_entity_framework() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    bundle = 'new ScriptBundle("~/bundles/app").Include'
+    assert match_db(bundle, "Include", "csharp", vendor="entity_framework") is None
+    assert match_db("bundle.Include", "Include", "csharp", vendor="entity_framework") is None
+    # an EF source in the chain still wins over the name
+    assert match_db("_context.ProductBundles.Include", "Include", "csharp") == "entity_framework"
+
+
+def test_client_hints_apply_only_in_their_own_language() -> None:
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # `session` is Python's requests.Session; in Java / Groovy it is a JSON object or a Map.
+    assert match_api("session.get", "get", language="python") == "GET"
+    for lang in ("java", "groovy"):
+        assert match_api("session.getString", "getString", language=lang) is None
+        assert match_api("session.put", "put", language=lang) is None
+        assert match_api("session.get", "get", language=lang) is None
+    # The .NET HttpClient helper verbs are .NET's only.
+    assert match_api("_http.GetStringAsync", "GetStringAsync", language="csharp") == "GET"
+    assert match_api("http.getString", "getString", language="java") is None
+    # `ky` / `got` are JS libraries, not fragments of a Java name.
+    assert match_api("ky.get", "get", language="typescript") == "GET"
+    assert match_api("yekyJsonArray.get", "get", language="java") is None
+    # A bare `fetch` is the JS function; Ruby's `params.fetch(:id)` reads a hash.
+    assert match_api("fetch", "fetch", language="typescript") == "GET"
+    assert match_api("params.fetch", "fetch", language="ruby") is None
+    # The JVM's own clients still match.
+    assert match_api("restTemplate.delete", "delete", language="kotlin") == "DELETE"
+    assert match_api("this.restTemplate.Delete", "Delete", language="csharp") == "DELETE"  # Spring.NET
+    # A language without hints, or an unknown one, has no name match.
+    assert match_api("axios.get", "get", language=None) is None
+    assert match_api("http.get", "get", language="cpp") is None
+
+
+def test_client_name_must_end_the_receiver_name() -> None:
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # A name ending in a client word is a client …
+    assert match_api("dataApiClient.get", "get", language="java") == "GET"
+    assert match_api("new P3APIClient(uri).get", "get", language="groovy") == "GET"
+    assert match_api("DefaultHttpClient.PostAsync", "PostAsync", language="csharp") == "POST"
+    assert match_api("this._http.post", "post", language="typescript") == "POST"
+    assert match_api("this.http\n      .post", "post", language="typescript") == "POST"
+    assert match_api("this.$http.get", "get", language="typescript") == "GET"
+    assert match_api("http_client.get", "get", language="python") == "GET"
+    assert match_api("httpx.AsyncClient().get", "get", language="python") == "GET"
+    assert match_api("axios.create().get", "get", language="typescript") == "GET"
+    assert match_api("Net::HTTP.get", "get", language="ruby") == "GET"
+    assert match_api("HTTParty.get", "get", language="ruby") == "GET"
+    # … one only containing it is something else: a pool, a cache, a provider, a Map.
+    assert match_api("ApiUtil.apiClientPool.get", "get", language="java") is None
+    assert match_api("HttpRuntime.Cache.Get", "Get", language="csharp") is None
+    assert match_api("httpContextProvider.Get", "Get", language="csharp") is None
+    assert match_api("fetched.get", "get", language="typescript") is None
+    # A short name must start a word: `sky` and `forgot` are not ky / got.
+    assert match_api("sky.get", "get", language="typescript") is None
+    assert match_api("forgot.post", "post", language="typescript") is None
+
+
+def test_create_query_needs_a_query_string_or_an_orm_import() -> None:
+    # JPA / Hibernate: a JPQL/HQL string, or a file importing EntityManager / Session.
+    assert classify_call("em.createQuery", "createQuery", "select p from Person p", "java") == \
+        ("query_statement", "createQuery", None)
+    assert classify_call("em.createQuery", "createQuery", None, "java", vendor="jpa") == \
+        ("query_statement", "createQuery", None)
+    assert classify_call("session.CreateQuery", "CreateQuery", None, "csharp",
+                         vendor="hibernate") == ("query_statement", "CreateQuery", None)
+    # A model's factory method and a LINQ provider build no query.
+    assert classify_call("Query.createQuery", "createQuery", "C01", "groovy") is None
+    assert classify_call("source.Provider.CreateQuery", "CreateQuery", None, "csharp") is None
+    # Raw-query builders with distinctive names need no import.
+    assert classify_call("em.createNativeQuery", "createNativeQuery", None, "java") == \
+        ("query_statement", "createNativeQuery", None)
+
+
+def test_firebase_verbs_only_in_javascript() -> None:
+    assert classify_call("db.getDocs", "getDocs", None, "typescript") == \
+        ("db_method_call", "getDocs", "firebase")
+    assert classify_call("paperKit.getDocs", "getDocs", None, "groovy") is None
+    assert classify_call("letter.getDocs", "getDocs", None, "java") is None

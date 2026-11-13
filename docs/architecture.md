@@ -497,8 +497,9 @@ when adding support for something new.
 | You are adding… | Build a… | Owns the file? | Example |
 |---|---|---|---|
 | A new programming language | **Language parser** | Yes, as the fallback for its extensions | `parsers/java/` |
-| A framework that defines how requests reach the code (routes, handlers) and has a file-level signature no other framework shares | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/`, `parsers/typescript_nestjs/` |
+| A framework that defines how requests reach the code (routes, handlers) and has a file-level signature no other framework shares | **Framework parser** | Yes, when it claims the file | `parsers/java_springboot/`, `parsers/typescript_nestjs/` |
 | A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK), or a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
+| A framework that is also a library other frameworks' files call (Vert.x) | **Low-priority framework parser for ownership + an additive detector for detection** | Only files no other framework claims | `parsers/java_vertx/` (`parser.py` claims, `detector.py` detects) |
 
 ```mermaid
 classDiagram
@@ -575,7 +576,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, Kotlin, PHP, Python, Ruby, Scala, TypeScript), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, Kotlin, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -675,6 +676,7 @@ the file:
   │                                                                                  │
   │  java            10   quartz           java_quartz/jobs.py               ✔       │
   │                  20   struts2          java_struts2/annotations.py       ✔       │
+  │                  60   apache-httpcl…   java_apache_httpclient/…calls.py  ✔       │
   │                  90   vertx            java_vertx/detector.py            ✔       │
   │                                                                                  │
   │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
@@ -691,6 +693,9 @@ the file:
   │                 120   go-lambda        go_lambda/handlers.py             ✔       │
   │                                                                                  │
   │  python          10   celery           python_celery/tasks.py            ✔       │
+  │                  20   flask            python_flask/routes.py            ✔       │
+  │                  30   drf-routers      python_django/routers.py          ✔       │
+  │                  40   django-channels  python_django/channels.py         ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala_akka/events.py                      │
   │                  20   spark            scala_spark/io.py                         │
@@ -706,7 +711,10 @@ the file:
   │                  52   symfony-http-…   php_symfony/http_calls.py                 │
   │                  53   psr-http-calls   php_psr/http_calls.py                     │
   │                                                                                  │
-  │  Kotlin · Groovy · Ruby · VB · C++ · HCL                                         │
+  │  vb              10   aws-sdk-calls    vb_aws/sdk_calls.py               ✔       │
+  │                  20   graphql-client   vb_graphql_client/…ions.py        ✔       │
+  │                                                                                  │
+  │  Kotlin · Groovy · Ruby · HCL                                                    │
   │   └─ no additive hook yet: shared classifiers only                               │
   └──────────────────────────────────────┬───────────────────────────────────────────┘
                                          │
@@ -966,7 +974,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation or attribute macro before a function's name, `void DEPRECATED(…) f(…);`, `void * __attribute__((…)) f(…)`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation or attribute macro before a function's name, `void DEPRECATED(…) f(…);`, `void * __attribute__((…)) f(…)`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo; and a VB file that declares a type inside another type is parsed once per nesting level (the grammar has no nested-type rule): the outer types with the nested ones blanked, then each level on its own — in practice a few files per VB repo. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |
@@ -1075,7 +1083,8 @@ src/breezeai_cog/
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
 │  │  java_spring_config.py, java_web_guards.py, java_security_guards.py, java_variables_common.py,
 │  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
-│  │  php_route_common.py, php_data_access_common.py, php_http_common.py
+│  │  php_route_common.py, php_data_access_common.py, php_http_common.py,
+│  │  python_common.py, django_common.py
 │  │                               helpers shared by several frameworks or libraries
 │  ├─ cfamily_common/              the extraction and index C, C++ and CUDA share
 │  ├─ <lang>/                      language parsers
@@ -1115,7 +1124,7 @@ from another. The same holds between languages: C, C++ and CUDA share their extr
 | **Parser-local** | `parsers/<lang>_<framework>/`, `parsers/<lang>_<library>/`, its test file | That parser only (a library package's detectors: see *Additive detector*) |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
-| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `python_common.py`, `django_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.

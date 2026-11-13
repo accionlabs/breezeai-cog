@@ -59,9 +59,9 @@ def test_inventory_in_run_order() -> None:
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda", "go-mcp"],
-        "java": ["quartz", "struts2", "java-mcp", "vertx"],
+        "java": ["quartz", "struts2", "java-mcp", "apache-httpclient", "vertx"],
         "kotlin": ["kotlin-mcp"],
-        "python": ["celery", "python-mcp"],
+        "python": ["celery", "flask", "drf-routers", "django-channels", "python-mcp"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
@@ -72,6 +72,7 @@ def test_inventory_in_run_order() -> None:
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",
                        "react-navigation", "angularjs", "typescript-mcp"],
+        "vb": ["aws-sdk-calls", "graphql-client"],
     }
 
 
@@ -227,7 +228,7 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="vb"))
+        register_fact(_marked(language="terraform"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:

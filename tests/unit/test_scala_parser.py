@@ -575,3 +575,19 @@ def test_relative_import_does_not_invent_edges(tmp_path: Path) -> None:
     )
     assert rec.importFiles == []
     assert "pekko.NoSuchThing" in rec.externalImports
+
+
+
+def test_index_facts_get_the_repo_root_whatever_the_path_spelling(tmp_path, monkeypatch, windows_spelled) -> None:
+    # A Windows path's string never ends with its "/"-separated repo-relative path; index-stage
+    # facts must still receive the repo root.
+    from breezeai_cog.parsers.scala import imports
+
+    seen = []
+    monkeypatch.setattr(imports, "collect_additive",
+                        lambda lang, root, source, rel, repo_root: seen.append((rel, repo_root)) or {})
+    (tmp_path / "a").mkdir()
+    src = tmp_path / "a" / "A.scala"
+    src.write_text("package a\nclass A {}\n")
+    imports.build_fqcn_index(tmp_path, [windows_spelled(src)], jobs=1)
+    assert seen == [("a/A.scala", tmp_path)]
