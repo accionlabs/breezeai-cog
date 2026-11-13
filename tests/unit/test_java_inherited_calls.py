@@ -252,3 +252,15 @@ def test_a_call_on_an_enum_resolves_to_the_enum_methods(tmp_path: Path) -> None:
     assert calls["a"] == {"of": f"{_ROOT}/Mode.java"}  # declared in the enum's body
     assert calls["c"] == {"label": f"{_ROOT}/Mode.java"}  # on a variable of the enum type
 
+
+def test_a_call_on_an_imported_name_needs_a_declaring_class(tmp_path: Path) -> None:
+    files = {"Mode.java": _MODE, "Constants.java": _CONSTANTS, "Base.java": _BASE,
+             "Root.java": _ROOT_CLASS, "Child.java": _CHILD_STATIC, "web/User.java": _CALLER}
+    calls = _calls(tmp_path, files, "web/User.java")
+    assert calls["b"] == {"valueOf": None}  # generated for every enum, declared nowhere
+    assert calls["d"] == {"equals": None}  # a String constant, not a class
+    assert calls["e"] == {"ns": f"{_ROOT}/Constants.java"}  # a statically imported method
+    assert calls["f"] == {"top": f"{_ROOT}/Root.java"}  # declared by an in-repo ancestor
+    # inside the enum, its own generated methods are declared nowhere either
+    own = _calls(tmp_path, files, "Mode.java")
+    assert own["of"] == {"values": None} and own["label"] == {"name": None}

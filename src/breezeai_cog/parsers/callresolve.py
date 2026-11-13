@@ -90,7 +90,7 @@ def make_resolver(
     See the module docstring for the tier order. ``ext_index`` maps ``(method, this-param
     type)`` → defining file (``None`` = ambiguous, honest-null); ``heritage`` is the
     repo ``class_heritage`` index walked for inherited-method resolution. ``declared_only``
-    makes the receiver-type tier check ``heritage``: the method must be declared by the type or
+    makes the receiver-type and imported-name tiers check ``heritage``: the method must be declared by the type or
     an in-repo ancestor (its file), else no edge. ``owner_defs`` (class simple name → the
     methods a bare / ``this`` call written in it can mean in this file) narrows the same-file
     tier to the calling class, so a same-named method of another class in the file (a nested
@@ -130,6 +130,18 @@ def make_resolver(
             return resolved
         return _lookup(typ, name, "methods")[1]
 
+    def _imported(name: str, receiver: str, resolved: str) -> str | None:
+        """``Name.name()`` on an imported name: the file declaring ``name`` when ``Name`` is a
+        repo class (a method the language generates, such as an enum's ``valueOf``, is declared
+        nowhere). ``heritage`` names every repo class, so an imported name it lacks is a
+        statically imported member (a constant): no file. A class the index cannot tell apart, or
+        no index, keeps the import's file."""
+        if not heritage:
+            return resolved
+        if receiver not in heritage:
+            return None
+        return _declared(name, receiver, resolved)
+
     def _via_call(name: str, receiver: str, owner: str | None) -> str | None:
         """``x.m().name()``: ``name`` on ``m``'s return type → the file that declares it."""
         call = _one_call(receiver)
@@ -166,6 +178,8 @@ def make_resolver(
                 return path
             return None
         if receiver in bindings:  # `Imported.method()` → Imported's file
+            if declared_only:  # … when it (or an in-repo ancestor) declares the method
+                return _imported(name, receiver, bindings[receiver])
             return bindings[receiver]
         # A built-in prototype method (`Array.map`, `String.split`, …) is never declared in the
         # receiver type's own file — resolving it there fabricates a wrong CALLS edge (e.g.
