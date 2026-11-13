@@ -7,6 +7,7 @@ import os
 
 from breezeai_cog.core.ignore import IgnoreEngine
 from breezeai_cog.core.scanner import scan
+from breezeai_cog.parsers.ruby.parser import RubyParser
 
 
 def classify(path: str) -> str | None:
@@ -136,3 +137,108 @@ def test_repoinclude_does_not_override_the_template_gate(tmp_path) -> None:
     )
     assert "page.html" not in [e.path for e in entries]
     assert ("page.html", "template") in skips
+
+
+def test_ruby_project_file_discovery_and_exclusions(tmp_path) -> None:
+    parser = RubyParser()
+    for path in (
+        "tasks/release.rake",
+        "rubocop.gemspec",
+        "Gemfile",
+        "Rakefile",
+        "custom-extensionless-file",
+        "bin/console",
+        ".git/config.rb",
+        ".cog/output.rb",
+    ):
+        file_path = tmp_path / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("source\n")
+
+    entries = list(
+        scan(
+            tmp_path,
+            lambda path: parser.name if parser.matches(path) else None,
+            engine=IgnoreEngine.build(),
+            max_file_size=10_000,
+        )
+    )
+
+    found = {entry.path for entry in entries}
+    assert found == {
+        "tasks/release.rake",
+        "rubocop.gemspec",
+        "Gemfile",
+        "Rakefile",
+    }
+    assert all(entry.language == "ruby" for entry in entries)
+
+
+def test_scanner_classification_is_path_only(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    parser = RubyParser()
+    (tmp_path / "exe").mkdir()
+    (tmp_path / "exe" / "rubocop").write_bytes(b"#!/usr/bin/env ruby\nputs :ruby\n")
+    (tmp_path / "supported.rb").write_bytes(b"puts :ruby\n")
+    (tmp_path / "supported.ru").write_bytes(b"run do\nend\n")
+    original_open = builtins.open
+    opened: list[str] = []
+
+    def tracking_open(file, *args, **kwargs):
+        if str(file) in {
+            str(tmp_path / "exe" / "rubocop"),
+            str(tmp_path / "supported.rb"),
+            str(tmp_path / "supported.ru"),
+        }:
+            opened.append(str(file))
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    entries = list(scan(
+        tmp_path,
+        lambda path: parser.name if parser.matches(path) else None,
+        engine=IgnoreEngine.build(),
+        max_file_size=10_000,
+    ))
+
+    assert [(entry.path, entry.language) for entry in entries] == [
+        ("supported.rb", "ruby"),
+        ("supported.ru", "ruby"),
+    ]
+    assert opened == []
+
+
+def test_unsupported_files_are_not_opened_for_classification(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    unsupported = (
+        "image.svg",
+        "image.png",
+        "font.woff",
+        "notes.md",
+        "view.haml",
+        "style.scss",
+    )
+    for name in unsupported:
+        (tmp_path / name).write_text("unsupported content\n")
+    (tmp_path / "known.rb").write_text("puts :known\n")
+
+    original_open = builtins.open
+    opened: list[str] = []
+
+    def tracking_open(file, *args, **kwargs):
+        if str(file) in {str(tmp_path / name) for name in unsupported}:
+            opened.append(str(file))
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    entries = list(scan(
+        tmp_path,
+        lambda path: "ruby" if path.endswith(".rb") else None,
+        engine=IgnoreEngine.build(),
+        max_file_size=10_000,
+    ))
+
+    assert opened == []
+    assert [(entry.path, entry.language) for entry in entries] == [("known.rb", "ruby")]

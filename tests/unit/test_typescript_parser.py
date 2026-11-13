@@ -809,6 +809,30 @@ def test_direct_axios_still_detected(tmp_path) -> None:
     assert ("GET", "/direct") in _api_calls(tmp_path, "export const raw = () => axios.get('/direct');\n")
 
 
+def test_global_fetch_receivers_are_extracted_as_api_calls(tmp_path) -> None:
+    p = tmp_path / "fetch.ts"
+    source = b'''export function requestAll() {
+  window.fetch('/window');
+  globalThis.fetch('/global');
+  this.fetch('/this');
+  self.fetch('/self');
+}
+'''
+    p.write_bytes(source)
+    record = TypeScriptParser().parse_file(ParseContext(
+        path="fetch.ts", abs_path=p, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+
+    calls = [item for item in record.statements if item.semanticType == "api_call"]
+    assert [(item.method, item.endpoint) for item in calls] == [
+        ("GET", "/window"),
+        ("GET", "/global"),
+        ("GET", "/this"),
+        ("GET", "/self"),
+    ]
+
+
 def test_wrapper_detection_no_false_positives(tmp_path) -> None:
     # A router `{ path, component }` config is not an API call, and an interceptor
     # registration (`.use`) is not an HTTP verb.

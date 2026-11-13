@@ -124,7 +124,7 @@ def scan(
                 language = classify(rel)
                 if language is None:
                     if on_skip is not None:
-                        on_skip(rel, "unsupported")  # no parser for this extension
+                        on_skip(rel, "unsupported")  # no parser for this path
                     continue
                 try:
                     size = entry.stat(follow_symlinks=True).st_size

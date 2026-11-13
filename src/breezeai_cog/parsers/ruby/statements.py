@@ -1,0 +1,245 @@
+"""Flat Ruby statement capture."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterator
+
+from tree_sitter import Node
+
+from ...schemas import Statement
+from ..detection import text_has_query
+from ..statements_common import (
+    classify_statement,
+    emit_enum_members,
+    render_concat,
+    resolve_endpoint,
+)
+from ..treesitter import node_text
+from .mappings import CONTROL_FLOW, EMIT_TYPES
+
+_SCOPE_TYPES = {"class", "module", "method", "singleton_method"}
+_ACTIVE_RECORD_METHODS = frozenset({
+    "find_by", "find_by!", "find_each", "find_in_batches", "where", "where_not",
+    "joins", "includes", "pluck", "destroy_all", "update_all", "left_outer_joins", "take",
+    "find", "all", "create", "create!", "first", "last", "exists",
+    "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
+})
+
+
+def _iter_statements(node: Node, source: bytes) -> Iterator[Node]:
+    for child in node.named_children:
+        if child.type in EMIT_TYPES or (
+            child.type == "string"
+            and node.type in {"program", "body_statement"}
+            and text_has_query(node_text(child, source))
+        ):
+            yield child
+        if child.type in _SCOPE_TYPES:
+            continue
+        yield from _iter_statements(child, source)
+
+
+def _name_of(node: Node, source: bytes) -> str | None:
+    if node.type == "assignment":
+        left = node.child_by_field_name("left")
+        if left is not None:
+            return node_text(left, source)
+    if node.type in {"class", "module"}:
+        constant = next((c for c in node.named_children if c.type == "constant"), None)
+        if constant is not None:
+            return node_text(constant, source)
+    if node.type == "method":
+        ident = next((c for c in node.named_children if c.type == "identifier"), None)
+        if ident is not None:
+            return node_text(ident, source)
+    return None
+
+
+def _render_url(node: Node, source: bytes) -> str | None:
+    if _contains_string_interpolation(node):
+        return None
+    if node.type == "string":
+        parts = node.named_children
+        if any(part.type not in {"string_content", "escape_sequence"} for part in parts):
+            return None
+        return "".join(node_text(part, source) for part in parts)
+    if node.type == "binary":
+        return render_concat(node, source, _render_url)
+    return None
+
+
+def _contains_string_interpolation(node: Node) -> bool:
+    """Return True when this URL expression contains Ruby string interpolation."""
+    return node.type == "interpolation" or any(
+        _contains_string_interpolation(child) for child in node.named_children
+    )
+
+
+def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
+    receiver = call.child_by_field_name("receiver")
+    method_node = call.child_by_field_name("method")
+    method = node_text(method_node, source) if method_node is not None else ""
+    callee = f"{node_text(receiver, source)}.{method}" if receiver is not None else method
+    arguments = call.child_by_field_name("arguments")
+    args = list(arguments.named_children) if arguments is not None else []
+    endpoint, override = resolve_endpoint(args, source, _render_url)
+    if override is not None:
+        method = override
+    return callee, method, endpoint
+
+
+def _call_details_with_redis_evidence(
+    call: Node, source: bytes, typed_db_ids: frozenset[str] | None = None
+) -> tuple[str, str, str | None] | None:
+    details = _call_details(call, source)
+    if details is None:
+        return None
+    receiver = call.child_by_field_name("receiver")
+    receiver_text = node_text(receiver, source).lower() if receiver is not None else ""
+    method = details[1].lower()
+    # Ruby-local exclusions for ordinary methods that collide with HTTP verbs in the
+    # shared classifier. Keep the shared, cross-language classifier unchanged.
+    if method == "fetch" and receiver is None:
+        return None
+    if method == "delete" and receiver_text.split(".")[-1].lstrip("@") in {
+        "session", "cookies",
+    }:
+        return None
+    if receiver_text.endswith("request.session") and method == "options":
+        return None
+    if method == "fetch" and receiver is not None:
+        return None
+    if details[1].lower() in _ACTIVE_RECORD_METHODS:
+        receiver_name = node_text(receiver, source) if receiver is not None else ""
+        if typed_db_ids is None or receiver_name not in typed_db_ids:
+            return None
+    if receiver is not None:
+        receiver_name = node_text(receiver, source)
+        terminal = receiver_name.rsplit(".", 1)[-1].lower().lstrip("@")
+        if terminal in {"cache", "cachemanager", "cacheservice"} or terminal.endswith("cache"):
+            return None
+        if terminal.replace("_", "") in {"redis", "redisclient", "redisservice"} and not (
+            re.search(rb"(?m)^\s*require\s*[\(\s]*['\"]redis['\"]", source)
+            or re.search(rb"\bRedis\s*\.\s*new\b", source)
+        ):
+            return None
+    return details
+
+
+def _is_enum_like_module(body: Node, source: bytes) -> bool:
+    """Return True when the body looks like a Ruby enum module.
+
+    C8 fix: detects modules used as enums (e.g. ``module Status; ACTIVE = 1; end``).
+    A module body is treated as enum-like when it has at least one constant assignment
+    and every non-method, non-class child is a constant assignment or a bare constant.
+    Constants are SCREAMING_SNAKE_CASE (first char uppercase, all uppercase or underscore).
+    """
+    relevant = [
+        c for c in body.named_children
+        if c.type not in {"method", "class", "module", "comment"}
+    ]
+    if not relevant:
+        return False
+    constant_assigns = []
+    for child in relevant:
+        if child.type == "assignment":
+            left = child.child_by_field_name("left")
+            if left is not None and left.type == "constant":
+                name = node_text(left, source)
+                if name and name[0].isupper():
+                    constant_assigns.append(child)
+                    continue
+        # Any other node type disqualifies this module as enum-like
+        return False
+    return len(constant_assigns) > 0
+
+
+def extract_enum_members(
+    body: Node | None,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    limit: int,
+    seen_ids: set[str],
+) -> list[Statement]:
+    """Emit enum_member Statements for constant assignments in an enum-style Ruby module.
+
+    C8 fix: constant assignments like ``ACTIVE = 1`` in enum-style modules are emitted
+    as Statements with ``semanticType = "enum_member"``.
+    """
+    if body is None or not _is_enum_like_module(body, source):
+        return []
+    return emit_enum_members(
+        body,
+        source,
+        path,
+        member_types={"assignment"},
+        parent_id=parent_id,
+        limit=limit,
+        seen_ids=seen_ids,
+    )
+
+
+def extract_statements(
+    body: Node | None,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    capture: bool,
+    limit: int,
+    seen_ids: set[str],
+    typed_db_ids: frozenset[str] | None = None,
+) -> list[Statement]:
+    if not capture or body is None:
+        return []
+    out: list[Statement] = []
+    classifier_db_ids = (
+        frozenset(
+            name
+            for receiver in typed_db_ids
+            for name in (receiver, receiver.rsplit(".", 1)[-1])
+        )
+        if typed_db_ids is not None
+        else None
+    )
+    for node in _iter_statements(body, source):
+        if node.type not in EMIT_TYPES and not (
+            node.type == "string" and text_has_query(node_text(node, source))
+        ):
+            continue
+        classified = classify_statement(
+            node,
+            source,
+            path,
+            parent_id=parent_id,
+            limit=limit,
+            seen_ids=seen_ids,
+            emit_types=EMIT_TYPES,
+            control_flow=CONTROL_FLOW,
+            call_type="call",
+            name_of=_name_of,
+            call_details=lambda call, src: _call_details_with_redis_evidence(
+                call, src, typed_db_ids
+            ),
+            language="ruby",
+            typed_db_ids=classifier_db_ids,
+        )
+        # A wrapper/DSL block is not itself a database query because SQL text occurs
+        # somewhere in its body. Its inner SQL statement is visited independently.
+        if node.type == "call" and any(
+            node_text(node.child_by_field_name("method"), source) == dsl
+            for dsl in ("safety_assured", "class_methods")
+            if node.child_by_field_name("method") is not None
+        ):
+            classified = [s for s in classified if s.semanticType != "query_statement"]
+        # Only Ruby-local evidence supports ActiveRecord and Redis here. The generic
+        # shared classifier's vendor-name hints do not establish another Ruby DB client.
+        classified = [
+            s for s in classified
+            if s.dataAccessHint in {None, "activerecord", "redis"}
+        ]
+        out.extend(classified)
+    return out
