@@ -30,8 +30,9 @@ import re
 
 #: Whole-value guard: any value carrying PEM private-key material is dropped entirely
 #: (matching only the header still leaves the base64 body, so this must win before the
-#: span pass). Covers ``RSA`` / ``EC`` / ``OPENSSH`` / bare ``PRIVATE KEY`` variants.
-_PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+#: span pass). Covers ``RSA`` / ``EC`` / ``OPENSSH`` / bare ``PRIVATE KEY`` variants and an
+#: armored ``PGP PRIVATE KEY BLOCK``.
+_PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
 
 #: In-place span matches. Each branch is fixed-shape and boundary-anchored so no benign
 #: string can match; the ``conn`` / ``cs`` groups drive the partial URL-credential redact.
@@ -48,6 +49,7 @@ _SECRET_RE = re.compile(
   | \b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b                           # Stripe secret / restricted key
   | \bsk-ant-[A-Za-z0-9_\-]{20,}                                       # Anthropic API key
   | \bsk-proj-[A-Za-z0-9_\-]{20,}                                      # OpenAI project key
+  | \bsk-[A-Za-z0-9]{32,}\b                                           # OpenAI legacy key
   | \beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b  # JWT: header.payload.signature
     """,
     re.VERBOSE,
@@ -69,13 +71,14 @@ def redact_secrets(value: str) -> str:
     return _SECRET_RE.sub(_mask, value)
 
 
-#: A PEM private-key header. :func:`redact_text` masks the block it opens line by line.
-_PEM_HEADER_RE = re.compile(r"-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----")
+#: A PEM private-key header (or a PGP armored private-key block's). :func:`redact_text` masks
+#: the block it opens line by line.
+_PEM_HEADER_RE = re.compile(r"-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY((?: BLOCK)?)-----")
 #: A line of an unterminated PEM body: base64 (a short last line only after a full one), or an
 #: encrypted key's ``Proc-Type`` / ``DEK-Info`` header.
 _PEM_LONG_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/]{16,}={0,2}[ \t]*")
 _PEM_SHORT_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/]+={0,2}[ \t]*")
-_PEM_META_LINE = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment):.*")
+_PEM_META_LINE = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment|Version|Hash|Charset):.*")
 
 
 def _mask_lines(span: str) -> str:
@@ -119,7 +122,7 @@ def _redact_pem(text: str) -> str:
     while m is not None:
         nxt = _PEM_HEADER_RE.search(text, m.end())
         limit = nxt.start() if nxt else len(text)
-        footer = f"-----END {m.group(1)}PRIVATE KEY-----"
+        footer = f"-----END {m.group(1)}PRIVATE KEY{m.group(2)}-----"
         end = text.find(footer, m.end(), limit)
         out.append(text[pos : m.end()])
         if end != -1:
@@ -138,6 +141,6 @@ def redact_text(text: str) -> str:
     of a PEM private-key body becomes ``***`` in place (header and footer kept, so the line
     count is unchanged), and the same span patterns as :func:`redact_secrets` (provider tokens,
     JWTs, URL credentials) are masked where they sit. Prose around them is kept."""
-    if "PRIVATE KEY-----" in text:
+    if "PRIVATE KEY" in text:
         text = _redact_pem(text)
     return _SECRET_RE.sub(_mask, text)

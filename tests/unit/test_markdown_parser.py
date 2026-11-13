@@ -673,3 +673,68 @@ def test_code_lookups_are_not_masked_but_literals_are() -> None:
     out = _parse("docs/a.md", text).statements[0].text
     assert kept in out
     assert "hunter2" not in out and "hunter3" not in out
+
+
+def test_pgp_private_key_block_is_masked_line_by_line() -> None:
+    text = (
+        "```\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\n"
+        "lQOYBF0AAAAAAAAAAAAAAAAAAAAAAAAAA\n=abCD\n-----END PGP PRIVATE KEY BLOCK-----\n```\n"
+    )
+    out = _parse("docs/a.md", text).statements[0].text
+    assert "lQOYBF0" not in out and "=abCD" not in out and "GnuPG" not in out
+    assert out.count("\n") == text.count("\n")
+    assert "-----END PGP PRIVATE KEY BLOCK-----" in out
+
+
+def test_openai_legacy_key_in_prose_is_masked() -> None:
+    key = "sk-" + "Ab1" * 16
+    out = _parse("docs/a.md", f"Set the key to {key} before running.\n").statements[0].text
+    assert key not in out and "Set the key to *** before running." in out
+
+
+K8S_ENV = """```yaml
+env:
+  - name: DB_PASSWORD
+    value: s3cr3t1
+  - name: LOG_LEVEL
+    value: debug
+  - value: "s3cr3t2"
+    name: "API_TOKEN"
+  - name: DB_HOST
+    value: db.internal
+```
+"""
+
+
+def test_sibling_name_value_secret_is_masked_in_a_fenced_block() -> None:
+    out = _parse("docs/deploy.md", K8S_ENV).statements[0].text
+    assert "s3cr3t1" not in out and "s3cr3t2" not in out
+    assert "    value: ***" in out and '  - value: "***"' in out
+    assert "value: debug" in out and "value: db.internal" in out
+    assert "name: DB_PASSWORD" in out  # the name is not the secret
+
+
+def test_sibling_name_value_outside_a_fence_is_prose() -> None:
+    text = "- name: DB_PASSWORD\n  value: shown in the docs\n"
+    assert "shown in the docs" in _parse("docs/a.md", text).statements[0].text
+
+
+def test_nested_value_under_a_secret_name_is_not_a_sibling() -> None:
+    text = "```yaml\n- name: API_TOKEN\n  meta:\n    value: keep1\n  other: keep2\n```\n"
+    out = _parse("docs/a.md", text).statements[0].text
+    assert "keep1" in out and "keep2" in out
+
+
+def test_sibling_name_value_secret_is_masked_in_front_matter() -> None:
+    text = (
+        "---\nname: deploy\nenv:\n  - name: DB_PASSWORD\n    value: s3cr3t3\n"
+        "  - name: REGION\n    value: us-east-1\n---\nBody\n"
+    )
+    rec = _parse("docs/a.md", text)
+    out = rec.statements[0].text
+    assert "s3cr3t3" not in out and "value: us-east-1" in out
+    assert rec.metadata["frontmatter"]["env"] == [
+        {"name": "DB_PASSWORD", "value": "***"},
+        {"name": "REGION", "value": "us-east-1"},
+    ]
+    assert rec.statements[0].name == "deploy"

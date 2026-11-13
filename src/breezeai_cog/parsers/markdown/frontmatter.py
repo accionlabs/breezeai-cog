@@ -134,6 +134,11 @@ def _mapping(data: dict[Any, Any], depth: int) -> dict[str, Any]:
         clean = _value(value, depth)
         if clean is not _DROP:
             out[name] = clean
+    # The Kubernetes / Compose environment shape: ``{name: DB_PASSWORD, value: s3cr3t}`` names
+    # the secret in one key and holds it in its sibling.
+    named = data.get("name")
+    if isinstance(named, str) and secret_name(named) and out.get("value") not in (None, ""):
+        out["value"] = "***"
     return out
 
 

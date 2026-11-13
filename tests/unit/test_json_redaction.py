@@ -36,6 +36,9 @@ KEEP = [
     "/usr/local/bin/python3.13",                                        # path
     "The quick brown fox jumps over the lazy dog",                     # prose
     "template-mapping-00-01-03",                                        # dashed code
+    "sk-short-name",                                                     # sk- but not key-shaped
+    "task-" + "a" * 40,                                                  # sk inside a word
+    "-----BEGIN PGP PUBLIC KEY BLOCK-----",                              # public key
     "",                                                                  # empty
 ]
 
@@ -51,6 +54,11 @@ JWT = (
 )
 PEM = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq...\n-----END PRIVATE KEY-----"
 RSA_PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----"
+PGP = (
+    "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\nlQOYBF0...\n=abCD\n"
+    "-----END PGP PRIVATE KEY BLOCK-----"
+)
+OPENAI_LEGACY = "sk-" + "Ab1" * 16
 
 REDACT = [
     ("AKIAIOSFODNN7EXAMPLE", "***"),                                    # AWS access key id
@@ -63,6 +71,8 @@ REDACT = [
     (JWT, "***"),                                                       # JWT
     (PEM, "***"),                                                       # PEM key material (whole value)
     (RSA_PEM, "***"),                                                   # RSA PEM
+    (PGP, "***"),                                                       # PGP armored private key
+    (OPENAI_LEGACY, "***"),                                             # OpenAI legacy key
     # embedded credentials in a URL → partial: scheme + host survive, creds masked
     (
         "postgres://admin:s3cr3t@db.internal:5432/billing",

@@ -580,7 +580,11 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   pairs of any case inside fenced code blocks (at any indent) and on indented code lines,
   except values that are lookups (`os.environ['X']`, `get_token()`, `settings.PASSWORD`);
   and secret-named front-matter values, including indented, block-scalar and flow-collection
-  (`env: {DB_PASSWORD: x}`) values.
+  (`env: {DB_PASSWORD: x}`) values. In fenced blocks and front matter (text and
+  `metadata.frontmatter`), a `value:` whose sibling `name:` is secret-named (the Kubernetes /
+  Compose `- name: DB_PASSWORD` / `value: x` shape) is masked too. PEM covers armored PGP
+  private-key blocks; provider tokens include OpenAI keys (`sk-proj-…` and the legacy
+  `sk-` + 32 or more letters and digits).
 
 ### MCP tool detectors (`parsers/<lang>_mcp/`)
 A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,

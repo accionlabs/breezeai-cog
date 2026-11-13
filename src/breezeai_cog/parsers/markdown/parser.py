@@ -249,19 +249,67 @@ def _mask_code_blocks(text: str) -> str:
     to the end of the document (more masked, never less)."""
     lines = text.split("\n")
     fence: str | None = None  # the opening run of the current fenced block
+    fence_start = 0
     for i, line in enumerate(lines):
         m = _ANY_FENCE.match(line)
         if m:
             run, rest = m.group(1), m.group(2)
             if fence is None:
                 fence = run
+                fence_start = i + 1
                 continue
             if run[0] == fence[0] and len(run) >= len(fence) and not rest.strip():
                 fence = None
+                _mask_name_value(lines, fence_start, i)
                 continue
         if (fence is not None or _INDENTED_CODE.match(line)) and ("=" in line or ":" in line):
             lines[i] = _CODE_ASSIGN.sub(_mask_code_assign, line)
+    if fence is not None:
+        _mask_name_value(lines, fence_start, len(lines))
     return "\n".join(lines)
+
+
+def _mask_name_value(lines: list[str], start: int, end: int) -> None:
+    """Mask, in place, the ``value:`` of a YAML mapping whose ``name:`` is secret-named, in
+    ``lines[start:end]`` — the Kubernetes / Compose environment shape, where the secret's name
+    and its value are sibling keys::
+
+        - name: DB_PASSWORD
+          value: s3cr3t
+
+    Sibling keys are the keys at one column, from a list item's ``- `` (or the first key) to
+    the next item or a shallower key; deeper lines belong to a nested value and are skipped."""
+    col: int | None = None  # key column of the current mapping
+    secret = False
+    value_at: int | None = None
+
+    def flush() -> None:
+        if secret and value_at is not None:
+            m = _FM_KEY.match(lines[value_at])
+            if m is not None:
+                lines[value_at] = f"{m.group(1)}{m.group(2)}{m.group(3)} {_masked_value(m.group(4).strip())}"
+
+    for i in range(start, end):
+        line = lines[i]
+        if ":" not in line or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = _FM_KEY.match(line)
+        if m is None:
+            continue
+        key_col = len(m.group(1))
+        dash = "-" in m.group(1)
+        if col is None or dash or key_col < col:
+            flush()
+            col, secret, value_at = key_col, False, None
+        elif key_col > col:
+            continue
+        key = m.group(2).strip("\"'")
+        value = m.group(4).strip()
+        if key == "name":
+            secret = bool(value) and secret_name(value.strip("\"'"))
+        elif key == "value" and value and value[0] not in "|>{[" and value.strip("\"'") != "***":
+            value_at = i
+    flush()
 
 
 def _redacted(value: str | None) -> str | None:
@@ -295,6 +343,7 @@ def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
         # scalar (``api_token: |`` / ``>``) or a folded plain scalar (BREEZEAI-1457). Measured
         # from the key, so a list item's sibling keys are not.
         block_indent = len(m.group(1))
+    _mask_name_value(out, 1, body_start - 1)
     return out
 
 
