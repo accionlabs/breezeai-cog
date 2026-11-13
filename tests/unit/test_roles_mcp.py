@@ -7,6 +7,7 @@ description, optional params with defaults, and a look-alike that must not be re
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -824,6 +825,113 @@ def test_python_malformed_docstring_keeps_the_tool(analyze_files, doc: str) -> N
     src = _py_tool(f'@mcp.tool\ndef f(q: str) -> str:\n    """{doc}"""\n    return ""\n')
     tool = _tools(analyze_files({"app/server.py": src}))["f"]
     assert [p.name for p in tool.params or []] == ["q"]
+
+
+def test_python_numpy_rule_line_inside_a_description(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def f(query: str, limit: int = 1) -> str:
+    """Doc.
+
+    Parameters
+    ----------
+    query : str
+        The query.
+        ---
+        more
+    limit : int
+        L.
+    """
+    return ""
+''')
+    assert [
+        p.description for p in _tools(analyze_files({"app/server.py": src}))["f"].params or []
+    ] == [
+        "The query.\n---\nmore",
+        "L.",
+    ]
+
+
+def test_python_sphinx_aliases_and_numpy_shared_entry(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def sphinx(a: str, b: str, c: str, d: str, e: str) -> str:
+    """Doc.
+
+    :parameter a: A.
+    :arg str b: B.
+    :argument c: C.
+    :keyword int d: D.
+    :key e: not a param field.
+    """
+    return ""
+
+
+@mcp.tool
+def numpy(x: int, y: int) -> str:
+    """Doc.
+
+    Parameters
+    ----------
+    x, y : int
+        Coordinates.
+    """
+    return ""
+''')
+    tools = _tools(analyze_files({"app/server.py": src}))
+    assert [p.description for p in tools["sphinx"].params or []] == ["A.", "B.", "C.", "D.", None]
+    assert [p.description for p in tools["numpy"].params or []] == ["Coordinates.", "Coordinates."]
+
+
+def test_python_last_docstring_entry_of_a_name_wins(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def f(q: str) -> str:
+    """Doc.
+
+    Args:
+        q: First.
+        q: Second.
+    """
+    return ""
+''')
+    assert _params(_tools(analyze_files({"app/server.py": src}))["f"]) == [
+        ("q", "str", True, None, "Second.")
+    ]
+
+
+def test_python_google_section_without_valid_names_stops_the_search(analyze_files) -> None:
+    src = _py_tool('''
+@mcp.tool
+def f(limit: int = 1, page: int = 1) -> str:
+    """Doc.
+
+    Args:
+        limit / page: paging
+
+    :param limit: From Sphinx.
+    """
+    return ""
+''')
+    tool = _tools(analyze_files({"app/server.py": src}))["f"]
+    assert [p.description for p in tool.params or []] == [None, None]
+
+
+def test_python_docstring_param_docs_stay_under_the_params_limit(analyze_files) -> None:
+    names = [f"p{i}" for i in range(20)]
+    args = "".join(f"        {n}: {'x' * 1000}\n" for n in names)
+    sig = ", ".join(f"{n}: str" for n in names)
+    src = _py_tool(
+        f'@mcp.tool\ndef f({sig}, q: str = Field(description="{"y" * 1000}")) -> str:\n'
+        f'    """Doc.\n\n    Args:\n{args}    """\n    return ""\n'
+    )
+    params = _tools(analyze_files({"app/server.py": src}))["f"].params or []
+    assert [p.name for p in params] == [*names, "q"]
+    assert all(p.type == "str" for p in params)
+    assert sum(1 for p in params[:-1] if p.description) == 12  # 12 KB of 1000-byte entries
+    assert params[-1].description == "y" * 1000  # a Field description is not budgeted
+    size = len(json.dumps([p.model_dump() for p in params]).encode())
+    assert size < 16 * 1024
 
 
 POM_BOM_PARENT = """<project>
