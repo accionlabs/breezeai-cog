@@ -1040,3 +1040,85 @@ def test_kotlin_schema_too_deep_to_load_leaves_params_unknown(analyze_files, mon
     tools = _tools(analyze_files({"src/main/kotlin/demo/Tools.kt": KOTLIN_JAVA_SDK}))
     assert set(tools) == {"calc", "echo"}  # the file still parses
     assert tools["calc"].params is None and tools["echo"].params is None
+
+
+def test_kotlin_aliased_spring_ai_tool(analyze_files) -> None:
+    aliased = KOTLIN_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool\n",
+        "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
+    ).replace("@Tool(", "@AiTool(").replace("@Tool\n", "@AiTool\n")
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": aliased}
+    tools = _tools(analyze_files(files))
+    assert set(tools) == {"current_weather", "now"}
+    assert tools["current_weather"].framework == "spring-ai-mcp"
+    assert _params(tools["current_weather"])[0] == ("city", "String", True, None, "City name")
+
+
+def test_kotlin_aliased_tool_needs_the_starter_and_the_spring_class(analyze_files) -> None:
+    aliased = KOTLIN_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool\n",
+        "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
+    ).replace("@Tool(", "@AiTool(").replace("@Tool\n", "@AiTool\n")
+    assert _tools(analyze_files({"src/main/kotlin/demo/WeatherTools.kt": aliased})) == {}
+    unrelated = KOTLIN_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool\n", "import com.acme.Tool as AiTool\n"
+    ).replace("@Tool(", "@AiTool(").replace("@Tool\n", "@AiTool\n")
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": unrelated}
+    assert _tools(analyze_files(files)) == {}
+
+
+KOTLIN_ADD_TOOLS = '''
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool as McpTool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+fun register(server: Server) {
+    server.addTools(
+        listOf(
+            RegisteredTool(
+                McpTool(
+                    name = "search",
+                    description = "Search",
+                    inputSchema = McpTool.Input(
+                        properties = buildJsonObject { putJsonObject("q") { put("type", "string") } },
+                        required = listOf("q"),
+                    ),
+                ),
+            ) { request -> null },
+            RegisteredTool(tool = McpTool(name = "stats", description = null), handler = ::stats),
+            others(),
+        )
+    )
+    server.addTools(myTools)
+    server.addTools(buildTools())
+}
+
+fun stats(request: Any): Any? = null
+'''
+
+
+def test_kotlin_sdk_add_tools_with_an_inline_list(analyze_files) -> None:
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Server.kt": KOTLIN_ADD_TOOLS}))
+    assert set(tools) == {"search", "stats"}  # a list from a variable or a call is not read
+    search = tools["search"]
+    assert (search.framework, search.description, search.handler, search.handlerLine) == (
+        "mcp-kotlin",
+        "Search",
+        None,
+        20,  # the trailing lambda's line
+    )
+    assert _params(search) == [("q", "string", True, None, None)]
+    stats = tools["stats"]
+    assert (stats.description, stats.handler, stats.handlerLine, stats.params) == (
+        None,
+        "stats",
+        29,
+        [],
+    )
+
+
+def test_kotlin_add_tools_without_the_mcp_sdk_is_not_a_tool(analyze_files) -> None:
+    src = KOTLIN_ADD_TOOLS.replace("io.modelcontextprotocol.kotlin.sdk", "com.acme.agent")
+    assert _tools(analyze_files({"src/main/kotlin/demo/Server.kt": src})) == {}

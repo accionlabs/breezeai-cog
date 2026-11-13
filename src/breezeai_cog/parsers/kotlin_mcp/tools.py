@@ -45,6 +45,13 @@ Official Kotlin SDK (``io.modelcontextprotocol.kotlin.sdk``)::
   ``Tool.Input(…)`` / ``ToolSchema(…)`` whose ``properties`` is a ``buildJsonObject { … }`` of
   ``putJsonObject("name") { put("type", …); put("description", …) }`` and whose ``required`` is
   a ``listOf("…")`` literal; any other schema → None (unknown).
+* ``addTools(listOf(RegisteredTool(Tool(name = …, …)) { … }, …))`` — one record per
+  ``RegisteredTool`` of an inline ``listOf`` / ``mutableListOf`` / ``arrayOf``, read as
+  ``addTool(Tool(…))``; a list from a variable or a call → no record.
+
+Import aliases (``import org.springframework.ai.tool.annotation.Tool as AiTool``) are followed
+for the types above when the aliased class is in an MCP / Spring AI package; an alias of any
+other class (``import com.acme.Tool as Tool``) hides the name instead.
 """
 
 from __future__ import annotations
@@ -94,6 +101,30 @@ register_fact(
         grammar=None,
     )
 )
+
+#: Packages whose classes an import alias may stand for (BREEZEAI-1457).
+_MCP_PACKAGES = ("org.springframework.ai.", "org.springaicommunity.mcp.", "io.modelcontextprotocol.")
+_IMPORT_ALIAS = re.compile(rb"^[ \t]*import[ \t]+([\w.]+)[ \t]+as[ \t]+(\w+)", re.MULTILINE)
+
+
+def _aliases(source: bytes) -> dict[str, str]:
+    """``import a.b.C as D`` → ``{"D": "a.b.C"}``."""
+    return {m.group(2).decode(): m.group(1).decode() for m in _IMPORT_ALIAS.finditer(source)}
+
+
+def _canon(name: str, aliases: dict[str, str]) -> str:
+    """The class a simple type name stands for: an alias of an MCP / Spring AI class → that
+    class's simple name; an alias of any other class → ``""`` (never a match)."""
+    fqcn = aliases.get(name)
+    if fqcn is None:
+        return name
+    return fqcn.rsplit(".", 1)[-1] if fqcn.startswith(_MCP_PACKAGES) else ""
+
+
+def _type_name(node: Node, source: bytes, aliases: dict[str, str]) -> str:
+    """Simple class name of a type reference (``a.b.C`` → ``C``; an alias resolved)."""
+    text = node_text(node, source).split("<")[0]
+    return text.rsplit(".", 1)[-1] if "." in text else _canon(text, aliases)
 
 
 def _string(node: Node | None, source: bytes) -> str | None:
@@ -165,6 +196,15 @@ def _suffix_name(nav: Node, source: bytes) -> str:
     return node_text(name, source) if name is not None else ""
 
 
+def _type_callee(call: Node, source: bytes, aliases: dict[str, str]) -> str:
+    """``_callee_name`` with a called simple name resolved through the import aliases (a
+    constructor call: ``Tool(…)``, ``AliasOfTool(…)``)."""
+    callee = call.named_children[0] if call.named_children else None
+    if callee is not None and callee.type == "simple_identifier":
+        return _canon(node_text(callee, source), aliases)
+    return _callee_name(call, source)
+
+
 def _callee_name(call: Node, source: bytes) -> str:
     """Simple name a ``call_expression`` calls (``McpSchema.Tool(…)`` → ``Tool``)."""
     callee = call.named_children[0] if call.named_children else None
@@ -217,14 +257,15 @@ def _ann_parts(ann: Node) -> tuple[Node | None, Node | None]:
     return next((c for c in ann.named_children if c.type == "user_type"), None), None
 
 
-def _annotations(mods: Node | None, source: bytes) -> dict[str, Node]:
-    """Annotations in a ``modifiers`` / ``parameter_modifiers`` node, by simple name."""
+def _annotations(mods: Node | None, source: bytes, aliases: dict[str, str]) -> dict[str, Node]:
+    """Annotations in a ``modifiers`` / ``parameter_modifiers`` node, by simple name (an
+    import alias resolved)."""
     out: dict[str, Node] = {}
     for a in mods.named_children if mods is not None else []:
         if a.type == "annotation":
             type_, _ = _ann_parts(a)
             if type_ is not None:
-                out[node_text(type_, source).rsplit(".", 1)[-1]] = a
+                out[_type_name(type_, source, aliases)] = a
     return out
 
 
@@ -241,7 +282,9 @@ def _element(annotation: Node, key: str, source: bytes) -> Node | None:
     return None
 
 
-def _params(function: Node, source: bytes, param_annotation: str) -> list[ToolParam]:
+def _params(
+    function: Node, source: bytes, param_annotation: str, aliases: dict[str, str]
+) -> list[ToolParam]:
     params = next((c for c in function.named_children if c.type == "function_value_parameters"), None)
     # (parameter, its modifiers, its default): a modifier precedes its parameter, a default
     # follows it, all as siblings.
@@ -263,9 +306,10 @@ def _params(function: Node, source: bytes, param_annotation: str) -> list[ToolPa
         if name_node is None or type_node is None:
             continue
         type_text = node_text(type_node, source)
-        if type_text.rstrip("?").split("<")[0].rsplit(".", 1)[-1] in _INJECTED:
+        base = type_node.named_children[0] if type_node.type == "nullable_type" else type_node
+        if _type_name(base, source, aliases) in _INJECTED:
             continue
-        ann = _annotations(p_mods, source).get(param_annotation)
+        ann = _annotations(p_mods, source, aliases).get(param_annotation)
         description = required = None
         if ann is not None:
             description = _string(
@@ -294,9 +338,11 @@ _SPRING_TOOL_IMPORT = re.compile(
 _SPRING_TOOL_FQN = "org.springframework.ai.tool.annotation.Tool"
 
 
-def _spring_tool(ann: Node, source: bytes, imported: bool) -> bool:
+def _spring_tool(ann: Node, source: bytes, imported: bool, aliases: dict[str, str]) -> bool:
     type_, _ = _ann_parts(ann)
     text = node_text(type_, source) if type_ is not None else ""
+    if text in aliases:  # import org.springframework.ai.tool.annotation.Tool as AiTool
+        return aliases[text] == _SPRING_TOOL_FQN
     return text == _SPRING_TOOL_FQN or (imported and text == "Tool")
 
 
@@ -310,15 +356,16 @@ def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -
     if not mcp_annotations and not plain:
         return []
     imported = bool(_SPRING_TOOL_IMPORT.search(source))
+    aliases = _aliases(source)
     found: list[Emit] = []
     for function in _walk(dc.root):
         if function.type != "function_declaration":
             continue
         mods = next((c for c in function.named_children if c.type == "modifiers"), None)
-        anns = _annotations(mods, source)
+        anns = _annotations(mods, source, aliases)
         if "McpTool" in anns:
             ann, param_ann = anns["McpTool"], "McpToolParam"
-        elif plain and "Tool" in anns and _spring_tool(anns["Tool"], source, imported):
+        elif plain and "Tool" in anns and _spring_tool(anns["Tool"], source, imported, aliases):
             ann, param_ann = anns["Tool"], "ToolParam"
         else:
             continue
@@ -341,7 +388,7 @@ def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -
                 handler=function_name,
                 handler_line=line,
                 description=_string(_element(ann, "description", source), source),
-                params=_params(function, source, param_ann),
+                params=_params(function, source, param_ann, aliases),
                 parent=owner.id if owner is not None else None,
             )
         )
@@ -351,7 +398,9 @@ def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -
 # ── MCP Java SDK (BREEZEAI-1457) ────────────────────────────────────────────
 
 
-def _builder_chain(node: Node, source: bytes) -> tuple[str, dict[str, list[Node]]] | None:
+def _builder_chain(
+    node: Node, source: bytes, aliases: dict[str, str]
+) -> tuple[str, dict[str, list[Node]]] | None:
     """``X.builder().a(1).b(2).build()`` → ``("X", {"builder": [], "a": [1], …, "build": []})``;
     None when ``node`` is not such a chain ending in ``build()``."""
     calls: list[tuple[str, list[Node]]] = []
@@ -364,7 +413,7 @@ def _builder_chain(node: Node, source: bytes) -> tuple[str, dict[str, list[Node]
         cur = callee.named_children[0]
     if cur is None or len(calls) < 2 or calls[-1][0] != "builder" or calls[0][0] != "build":
         return None
-    return node_text(cur, source).split("<")[0].rsplit(".", 1)[-1], dict(reversed(calls))
+    return _type_name(cur, source, aliases), dict(reversed(calls))
 
 
 def _local_variables(root: Node, source: bytes) -> dict[str, Node | None]:
@@ -396,7 +445,7 @@ def _local_variables(root: Node, source: bytes) -> dict[str, Node | None]:
 
 
 def _tool_fields(
-    node: Node | None, source: bytes, variables: dict[str, Node | None]
+    node: Node | None, source: bytes, variables: dict[str, Node | None], aliases: dict[str, str]
 ) -> tuple[str, str | None, list[ToolParam] | None] | None:
     """``(name, description, params)`` of an MCP ``Tool`` expression: ``McpSchema.Tool(…)``,
     ``McpSchema.Tool.builder()…build()``, or a variable assigned one of them once."""
@@ -404,9 +453,9 @@ def _tool_fields(
         node = variables.get(node_text(node, source))
     if node is None or node.type != "call_expression":
         return None
-    chain = _builder_chain(node, source)
+    chain = _builder_chain(node, source, aliases)
     if chain is None:
-        if _callee_name(node, source) != "Tool":
+        if _type_callee(node, source, aliases) != "Tool":
             return None
         args = _call_args(node, source)
         pos = _positional(args)
@@ -469,13 +518,14 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
         return []
     variables = _local_variables(dc.root, source)
     methods = _methods(dc)
+    aliases = _aliases(source)
     found: list[Emit] = []
     for node in _walk(dc.root):
         if node.type != "call_expression":
             continue
         tool: Node | None = None
         handler: Node | None = None
-        chain = _builder_chain(node, source)
+        chain = _builder_chain(node, source, aliases)
         if chain is not None:
             if not chain[0].endswith("ToolSpecification"):
                 continue
@@ -483,7 +533,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
             handler_args = chain[1].get("callHandler") or []
             tool = tool_args[0] if len(tool_args) == 1 else None
             handler = handler_args[0] if len(handler_args) == 1 else None
-        elif _callee_name(node, source).endswith("ToolSpecification"):
+        elif _type_callee(node, source, aliases).endswith("ToolSpecification"):
             args = _call_args(node, source)
             pos = _positional(args)
             tool = _named(args, "tool") or (pos[0] if pos else None)
@@ -495,7 +545,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
                 continue
         else:
             continue
-        fields = _tool_fields(tool, source, variables)
+        fields = _tool_fields(tool, source, variables, aliases)
         if fields is None:
             continue
         name, description, params = fields
@@ -571,11 +621,13 @@ def _json_properties(node: Node | None, source: bytes) -> dict[str, dict[str, st
     return out
 
 
-def _kotlin_schema_params(node: Node | None, source: bytes) -> list[ToolParam] | None:
+def _kotlin_schema_params(
+    node: Node | None, source: bytes, aliases: dict[str, str]
+) -> list[ToolParam] | None:
     """Params of a ``Tool.Input(…)`` / ``ToolSchema(…)``; None when it cannot be read whole."""
     if node is None or node.type != "call_expression":
         return None
-    if _callee_name(node, source) not in ("Input", "ToolSchema"):
+    if _type_callee(node, source, aliases) not in ("Input", "ToolSchema"):
         return None
     args = _call_args(node, source)
     pos = _positional(args)
@@ -593,46 +645,104 @@ def _kotlin_schema_params(node: Node | None, source: bytes) -> list[ToolParam] |
     ]
 
 
+_LIST_LITERALS = ("listOf", "mutableListOf", "arrayOf")
+
+
+def _kotlin_sdk_tool(
+    node: Node,
+    fields: list[tuple[str | None, Node]],
+    pos: list[Node],
+    handler: Node | None,
+    source: bytes,
+    methods: dict[str, int | None],
+    aliases: dict[str, str],
+) -> Emit | None:
+    """One Kotlin SDK tool: ``fields`` are ``addTool``'s (or its ``Tool(…)``'s) arguments, ``pos``
+    the positional ones (``name``, ``description``, ``inputSchema``)."""
+    name = _string(_named(fields, "name") or (pos[0] if pos else None), source)
+    if not name or handler is None:
+        return None
+    description = _string(_named(fields, "description") or (pos[1] if len(pos) > 1 else None), source)
+    schema = _named(fields, "inputSchema") or (pos[2] if len(pos) > 2 else None)
+    params = _kotlin_schema_params(schema, source, aliases) if schema is not None else []
+    handler_name, handler_line = _handler(handler, source, methods)
+    return tool_emit(
+        node,
+        source,
+        endpoint=name,
+        framework=KOTLIN_SDK_FRAMEWORK,
+        handler=handler_name,
+        handler_line=handler_line,
+        description=description,
+        params=params,
+        node_type=None,
+    )
+
+
+def _registered_tools(node: Node, source: bytes, aliases: dict[str, str]) -> list[tuple[Node, Node, Node | None]]:
+    """``(element, Tool(…) call, handler)`` of each ``RegisteredTool(Tool(…), handler)`` in an
+    ``addTools(listOf(…))`` whose list is written inline; nothing for any other list."""
+    args = _call_args(node, source)
+    pos = _positional(args)
+    lst = _named(args, "toolsToAdd") or (pos[0] if len(pos) == 1 else None)
+    callee = lst.named_children[0] if lst is not None and lst.named_children else None
+    if (
+        lst is None
+        or lst.type != "call_expression"
+        or callee is None
+        or callee.type != "simple_identifier"
+        or node_text(callee, source) not in _LIST_LITERALS
+    ):
+        return []
+    out: list[tuple[Node, Node, Node | None]] = []
+    for element in _positional(_call_args(lst, source)):
+        if element.type != "call_expression" or _type_callee(element, source, aliases) != "RegisteredTool":
+            continue
+        el_args = _call_args(element, source)
+        el_pos = _positional(el_args)  # a trailing lambda is the last one
+        tool = _named(el_args, "tool") or (el_pos[0] if el_pos else None)
+        handler = _named(el_args, "handler") or (el_pos[1] if len(el_pos) > 1 else None)
+        if tool is not None and tool.type == "call_expression" and _type_callee(tool, source, aliases) == "Tool":
+            out.append((element, tool, handler))
+    return out
+
+
 def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
-    """``addTool(name, description, inputSchema) { … }`` of the official Kotlin SDK."""
+    """``addTool(name, description, inputSchema) { … }`` / ``addTools(listOf(RegisteredTool(…)))``
+    of the official Kotlin SDK."""
     source = dc.source
     if b"io.modelcontextprotocol.kotlin.sdk.server" not in source or b"addTool" not in source:
         return []
     methods = _methods(dc)
+    aliases = _aliases(source)
     found: list[Emit] = []
     for node in _walk(dc.root):
-        if node.type != "call_expression" or _callee_name(node, source) != "addTool":
+        if node.type != "call_expression":
             continue
-        args = _call_args(node, source)
-        pos = [v for v in _positional(args) if v.type != "lambda_literal"]
-        lam = next((v for k, v in args if k is None and v.type == "lambda_literal"), None)
-        handler = _named(args, "handler") or lam
-        fields = args
-        first = _named(args, "tool") or (pos[0] if pos else None)
-        if first is not None and first.type == "call_expression" and _callee_name(first, source) == "Tool":
-            fields, pos = _call_args(first, source), []  # addTool(Tool(name = …, …)) { … }
-        name = _string(_named(fields, "name") or (pos[0] if pos else None), source)
-        if not name or handler is None:
-            continue
-        description = _string(
-            _named(fields, "description") or (pos[1] if len(pos) > 1 else None), source
-        )
-        schema = _named(fields, "inputSchema") or (pos[2] if len(pos) > 2 else None)
-        params = _kotlin_schema_params(schema, source) if schema is not None else []
-        handler_name, handler_line = _handler(handler, source, methods)
-        found.append(
-            tool_emit(
-                node,
-                source,
-                endpoint=name,
-                framework=KOTLIN_SDK_FRAMEWORK,
-                handler=handler_name,
-                handler_line=handler_line,
-                description=description,
-                params=params,
-                node_type=None,
-            )
-        )
+        method = _callee_name(node, source)
+        emits: list[Emit | None] = []
+        if method == "addTool":
+            args = _call_args(node, source)
+            pos = [v for v in _positional(args) if v.type != "lambda_literal"]
+            lam = next((v for k, v in args if k is None and v.type == "lambda_literal"), None)
+            handler = _named(args, "handler") or lam
+            fields = args
+            first = _named(args, "tool") or (pos[0] if pos else None)
+            if (
+                first is not None
+                and first.type == "call_expression"
+                and _type_callee(first, source, aliases) == "Tool"
+            ):
+                fields, pos = _call_args(first, source), []  # addTool(Tool(name = …, …)) { … }
+            emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, methods, aliases))
+        elif method == "addTools":
+            for element, tool, handler in _registered_tools(node, source, aliases):
+                emits.append(
+                    _kotlin_sdk_tool(
+                        element, _call_args(tool, source), [], handler, source, methods, aliases
+                    )
+                )
+        found.extend(e for e in emits if e is not None)
     return found
 
 
