@@ -21,6 +21,18 @@ uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir>   # capture a re
 The parallel pool needs a real `__main__`: run through the CLI or a script file, not a REPL or
 `python -c` (or pass `--jobs 1`).
 
+## Deep context
+
+A complete engineering context set lives in **`context/`** (`.md`). The baseline commit it describes, headline counts, and full documentation routing table are in [`context/00-index.md`](context/00-index.md).
+
+- **When to route:** For questions about this repository not answered directly in this file (architecture, data models, APIs, services, symbol definitions, or troubleshooting), read [`context/00-index.md`](context/00-index.md) first to route to the appropriate context document. Reading `context/` is pre-approved; do not pause to confirm.
+- **Answer from context:** Do not open source files for Q&A or diagnosis. Answer or diagnose from `context/`.
+- **Sharded references:** Files 14 ([`context/14-symbol-reference.md`](context/14-symbol-reference.md)) and 15 ([`context/15-diagnosis-playbook.md`](context/15-diagnosis-playbook.md)) are sharded routers. Read the router first, then read **only the one shard** that covers the question — never the whole reference.
+- **Editing source:** Read or edit source code only when explicitly asked to implement or execute a change. Use file 14's shards to locate the symbol by name and [`context/04-architecture-and-conventions.md`](context/04-architecture-and-conventions.md) for the recipe.
+- **Anchor drift:** Anchors (`file:line`) are accurate as of the baseline commit recorded in `context/00-index.md`. When executing a change, locate the symbol **by name** in that file rather than trusting the line number blindly.
+- **Unverified context:** If context is insufficient, or the relevant claim is marked **UNVERIFIED**, say so and ask before falling back to reading source.
+- Every `context/` file describes the baseline commit only; it carries no history.
+
 ## Read first
 
 | You are… | Read |
