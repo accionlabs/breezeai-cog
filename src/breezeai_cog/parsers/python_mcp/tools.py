@@ -22,7 +22,8 @@
   docstring's Google ``Args:`` / NumPy ``Parameters`` / Sphinx ``:param`` section (following
   FastMCP 4 (griffe) for the common forms, a little more lenient on Google headers: the first
   style with an entry wins, a later entry of a name replaces an earlier one; only exact param
-  names match; each entry cut at 1024 characters, 12 KB per tool; read even when
+  names match; each entry cut at 1024 characters, added while the tool's whole ``params`` JSON
+  stays within 15 KB; read even when
   ``description=`` replaces the docstring); ``self`` /
   ``cls``, ``*args`` / ``**kwargs``, the injected ``Context`` (also ``Context | None`` / ``Optional[Context]``) and
   the names in a literal ``exclude_args=[…]`` are skipped (a non-literal ``exclude_args`` →
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import re
 
 from tree_sitter import Node
@@ -45,7 +47,7 @@ from ...logging import get_logger
 from ...schemas import ToolParam
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import param, tool_emit
+from ..mcp_common import clean_doc, param, tool_emit
 from ..treesitter import node_text
 from .servers import (
     mcp_servers,
@@ -58,9 +60,11 @@ _MAX_DEFAULT = 200
 #: A param description read from the docstring is cut here, so one runaway entry cannot push
 #: the tool's ``params`` past the backend's size limit (which drops them all).
 _MAX_PARAM_DOC = 1024
-#: The docstring-sourced descriptions of one tool stop at this many UTF-8 bytes in all, keeping
-#: its ``params`` JSON under the backend's 16 KB limit.
-_MAX_TOOL_PARAM_DOCS = 12 * 1024
+#: Docstring-sourced descriptions are added only while a tool's whole ``params`` JSON (names,
+#: types, defaults and ``Field`` descriptions included) stays within this many UTF-8 bytes: the
+#: backend drops every param of a tool past 16 KB, so a docstring must never cost the ones the
+#: code declares.
+_MAX_TOOL_PARAMS_JSON = 15 * 1024
 #: ``:param x:`` and the field names griffe reads the same way.
 _SPHINX_PARAM_FIELDS = frozenset({"param", "parameter", "arg", "argument", "keyword"})
 _GOOGLE_PARAM_SECTIONS = frozenset(
@@ -451,11 +455,11 @@ def _short(node: Node, source: bytes) -> str:
 
 def _params(fn: Node, source: bytes, doc_params: dict[str, str]) -> list[ToolParam]:
     """The signature's params; a param's description is its ``Field`` / ``Annotated`` one, else
-    its entry in ``doc_params`` (the docstring's) while those stay within
-    ``_MAX_TOOL_PARAM_DOCS`` bytes in all."""
+    its entry in ``doc_params`` (the docstring's), added in signature order while the whole list
+    stays within ``_MAX_TOOL_PARAMS_JSON``."""
     params = fn.child_by_field_name("parameters")
     out: list[ToolParam] = []
-    doc_bytes = 0
+    from_doc: dict[int, str] = {}  # index in ``out`` → its docstring description
     for p in params.named_children if params is not None else []:
         name: Node | None
         type_node: Node | None
@@ -494,12 +498,23 @@ def _params(fn: Node, source: bytes, doc_params: dict[str, str]) -> list[ToolPar
         elif value is not None:
             default = _short(value, source)
         doc = None if description else doc_params.get(pname)
-        if doc is not None and doc_bytes <= _MAX_TOOL_PARAM_DOCS:
-            doc_bytes += len(doc.encode())
-            if doc_bytes <= _MAX_TOOL_PARAM_DOCS:
-                description = doc
+        if doc is not None:
+            from_doc[len(out)] = doc
         out.append(param(pname, base, required=required, default=default, description=description))
+    # `[a,b]`: the items, their commas and the brackets, as the backend's JSON.stringify counts
+    size = sum(_json_bytes(p) for p in out) + max(len(out) - 1, 0) + 2
+    for i, doc in from_doc.items():
+        with_doc = out[i].model_copy(update={"description": clean_doc(doc)})
+        size += _json_bytes(with_doc) - _json_bytes(out[i])
+        if size > _MAX_TOOL_PARAMS_JSON:
+            break  # this one and the rest stay without: one overflow would drop them all
+        out[i] = with_doc
     return out
+
+
+def _json_bytes(p: ToolParam) -> int:
+    """``p`` as the backend measures it: compact JSON, UTF-8, nulls included."""
+    return len(json.dumps(p.model_dump(), ensure_ascii=False, separators=(",", ":")).encode())
 
 
 def _disabled(call: Node, source: bytes) -> bool:

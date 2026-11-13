@@ -928,10 +928,34 @@ def test_python_docstring_param_docs_stay_under_the_params_limit(analyze_files) 
     params = _tools(analyze_files({"app/server.py": src}))["f"].params or []
     assert [p.name for p in params] == [*names, "q"]
     assert all(p.type == "str" for p in params)
-    assert sum(1 for p in params[:-1] if p.description) == 12  # 12 KB of 1000-byte entries
-    assert params[-1].description == "y" * 1000  # a Field description is not budgeted
-    size = len(json.dumps([p.model_dump() for p in params]).encode())
-    assert size < 16 * 1024
+    documented = [bool(p.description) for p in params[:-1]]
+    assert 0 < sum(documented) < len(names)  # added in order until the budget runs out
+    assert documented == sorted(documented, reverse=True)
+    assert params[-1].description == "y" * 1000  # a Field description is always kept
+    size = len(json.dumps([p.model_dump() for p in params], separators=(",", ":")).encode())
+    assert size <= 15 * 1024
+
+
+def test_python_docstring_param_docs_never_push_field_descriptions_past_the_limit(
+    analyze_files,
+) -> None:
+    # Field descriptions count towards the budget: 8 × 1.2 KB declared in code plus 10 × 1 KB
+    # from Args used to make 21 KB, past the backend's 16 KB, which then dropped every param.
+    fields = "".join(
+        f'    f{i}: Annotated[str, Field(description="{"x" * 1200}")],\n' for i in range(8)
+    )
+    plain = "".join(f"    d{i}: str,\n" for i in range(10))
+    args = "".join(f"        d{i}: {'y' * 1000}\n" for i in range(10))
+    src = _py_tool(
+        "from typing import Annotated\nfrom pydantic import Field\n"
+        f'@mcp.tool\ndef big(\n{fields}{plain}) -> str:\n    """Big.\n\n    Args:\n{args}    """\n    return ""\n'
+    )
+    params = _tools(analyze_files({"app/server.py": src}))["big"].params or []
+    assert len(params) == 18
+    assert all(p.description == "x" * 1200 for p in params[:8])
+    assert 0 < sum(1 for p in params[8:] if p.description) < 10
+    size = len(json.dumps([p.model_dump() for p in params], separators=(",", ":")).encode())
+    assert size <= 15 * 1024
 
 
 POM_BOM_PARENT = """<project>
