@@ -7,6 +7,8 @@ description, optional params with defaults, and a look-alike that must not be re
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.schemas import Statement
 
 
@@ -1169,3 +1171,36 @@ def test_kotlin_sdk_add_tools_with_an_inline_list(analyze_files) -> None:
 def test_kotlin_add_tools_without_the_mcp_sdk_is_not_a_tool(analyze_files) -> None:
     src = KOTLIN_ADD_TOOLS.replace("io.modelcontextprotocol.kotlin.sdk", "com.acme.agent")
     assert _tools(analyze_files({"src/main/kotlin/demo/Server.kt": src})) == {}
+
+
+def _first(node, kind: str):
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == kind:
+            return n
+        stack.extend(n.named_children)
+    return None
+
+
+@pytest.mark.parametrize(
+    ("language", "kind", "reader"),
+    [
+        ("java", "binary_expression", "breezeai_cog.parsers.java_mcp.tools"),
+        ("kotlin", "additive_expression", "breezeai_cog.parsers.kotlin_mcp.tools"),
+    ],
+)
+def test_a_long_string_concatenation_is_read_without_recursion(language, kind, reader) -> None:
+    import importlib
+    import sys
+
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    module = importlib.import_module(reader)
+    chain = " + ".join(['"ab"'] * (sys.getrecursionlimit() + 500))
+    decl = f'class A {{ String x = {chain}; }}' if language == "java" else f"val x = {chain}"
+    src = decl.encode()
+    node = _first(parse_source(language, src, 0).root_node, kind)
+    assert module._string(node, src) == "ab" * (sys.getrecursionlimit() + 500)
+    other = (b'class A { boolean x = "a" == "b"; }' if language == "java" else b'val x = "a" - "b"')
+    assert module._string(_first(parse_source(language, other, 0).root_node, kind), other) is None

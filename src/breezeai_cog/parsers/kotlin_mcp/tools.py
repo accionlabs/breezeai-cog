@@ -83,6 +83,7 @@ from ..java_mcp.tools import (
     _json_schema_params,
     _resolve,
     _walk,
+    concat_strings,
 )
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
@@ -135,12 +136,7 @@ def _string(node: Node | None, source: bytes) -> str | None:
     if node is None:
         return None
     if node.type == "additive_expression":
-        parts = [_string(c, source) for c in node.named_children]
-        return (
-            "".join(p for p in parts if p is not None)
-            if all(p is not None for p in parts)
-            else None
-        )
+        return concat_strings(node, source, "additive_expression", _string)
     if node.type == "call_expression":  # """…""".trimIndent()
         callee = node.named_children[0] if node.named_children else None
         if callee is not None and callee.type == "navigation_expression":

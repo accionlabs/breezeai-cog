@@ -199,6 +199,28 @@ def test_detection_is_applied_and_labels_the_file(isolated) -> None:
     assert record.framework == "express"
 
 
+def test_a_failing_detector_does_not_drop_the_others(isolated) -> None:
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    source = b"app.get('/x', h);\n"
+    root = parse_source("typescript", source, 0).root_node
+    call = root.named_children[0].named_children[0]
+
+    def broken(dc):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    def detect(dc):
+        return Detection([Emit(call, {"semanticType": "route", "endpoint": "/x"})])
+
+    isolated["typescript"] = [
+        Detector(name="broken", gate=Gate("typescript", order=1), detect=broken),
+        Detector(name="probe", gate=Gate("typescript", order=2), detect=detect),
+    ]
+    record = _record()
+    run_additive("typescript", root, _ctx(source), record, is_fixture=False)
+    assert [s.endpoint for s in record.statements] == ["/x"]
+
+
 # ---- facts: built from other files while the language index is built ----------------------------
 
 def _collect_marked(root, source: bytes, rel: str, repo_root) -> str:

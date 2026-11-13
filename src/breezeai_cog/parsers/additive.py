@@ -53,7 +53,7 @@ from typing import Any, Callable
 
 from tree_sitter import Node
 
-from ..errors import RegistryError
+from ..errors import ParserTimeout, RegistryError
 from ..schemas import FileRecord
 from .base import ParseContext
 from .emits import Emit, apply
@@ -352,7 +352,16 @@ def run_additive(
     for detector in detectors_for(language):
         if not detector.gate.admits(ctx.source, is_fixture=is_fixture):
             continue
-        found = detector.detect(dc)
+        try:
+            found = detector.detect(dc)
+        except ParserTimeout:
+            raise  # the file's parse budget is spent: handled like any parse timeout
+        except Exception as exc:  # one detector never drops the file's other records
+            from ..logging import get_logger
+            get_logger("breezeai_cog.additive").warning(
+                "additive.detector.failed", path=ctx.path, detector=detector.name,
+                error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
         if found is None:
             continue
         apply(record, found.emits, ctx.source, ctx.path)

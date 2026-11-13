@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -137,18 +138,39 @@ def _string(node: Node | None, source: bytes) -> str | None:
     if node is None:
         return None
     if node.type == "binary_expression":
-        parts = [_string(c, source) for c in node.named_children]
-        return (
-            "".join(p for p in parts if p is not None)
-            if all(p is not None for p in parts)
-            else None
-        )
+        return concat_strings(node, source, "binary_expression", _string)
     if node.type != "string_literal":
         return None
     text = node_text(node, source)
     if text.startswith('"""'):
         return text[3:-3]
     return text[1:-1]  # escapes kept as written
+
+
+def concat_strings(
+    node: Node,
+    source: bytes,
+    kind: str,
+    leaf: Callable[[Node | None, bytes], str | None],
+) -> str | None:
+    """The ``+`` chain of string literals rooted at ``node`` (nodes of type ``kind``), read
+    left to right with an explicit stack: a generated thousand-part concatenation cannot
+    exhaust the recursion limit. None when any operand is not a literal (``leaf`` → None) or
+    an operator is not ``+``."""
+    parts: list[str] = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == kind:
+            if any(not c.is_named and node_text(c, source) != "+" for c in n.children):
+                return None
+            stack.extend(reversed([c for c in n.named_children if "comment" not in c.type]))
+            continue
+        value = leaf(n, source)
+        if value is None:
+            return None
+        parts.append(value)
+    return "".join(parts)
 
 
 def _annotations(node: Node, source: bytes) -> dict[str, Node]:
