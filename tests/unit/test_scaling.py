@@ -89,6 +89,101 @@ def _python(n: int) -> str:
     )
 
 
+def _python_flask(n: int) -> str:
+    body = "".join(
+        f"@bp.route('/items/{i}', methods=['GET', 'POST'])\n@login_required\n"
+        f"def item{i}():\n    return ''\n\n"
+        f"app.add_url_rule('/rule/{i}', view_func=item{i})\n"
+        for i in range(n)
+    )
+    return ("from flask import Flask, Blueprint\nfrom flask_login import login_required\n"
+            "app = Flask(__name__)\nbp = Blueprint('b', __name__, url_prefix='/b')\n"
+            f"app.register_blueprint(bp)\n{body}")
+
+
+def _python_flask_views(n: int) -> str:
+    """``view = Cls.as_view(...)`` variables, each named by an ``add_url_rule``."""
+    body = "".join(
+        f"class V{i}(MethodView):\n    def get(self):\n        return ''\n"
+        f"v{i} = V{i}.as_view('v{i}')\napp.add_url_rule('/v/{i}', view_func=v{i})\n"
+        for i in range(n)
+    )
+    return f"from flask import Flask\nfrom flask.views import MethodView\napp = Flask(__name__)\n{body}"
+
+
+def _python_django_method_decorators(n: int) -> str:
+    """Class-level ``method_decorator``s on views built on a chain of bases."""
+    views = "".join(
+        f"@method_decorator(login_required, name='get')\nclass V{i}(B{i}):\n    pass\n"
+        f"class B{i}(ListView):\n    def get(self, request):\n        pass\n"
+        for i in range(n)
+    )
+    patterns = "".join(f"    path('v{i}/', V{i}.as_view()),\n" for i in range(n))
+    return ("from django.urls import path\nfrom django.views.generic import ListView\n"
+            "from django.utils.decorators import method_decorator\n"
+            "from django.contrib.auth.decorators import login_required\n"
+            f"{views}urlpatterns = [\n{patterns}]\n")
+
+
+def _python_django(n: int) -> str:
+    views = "".join(
+        f"class V{i}(LoginRequiredMixin, ListView):\n    def post(self, request):\n        pass\n"
+        f"@login_required\ndef f{i}(request):\n    pass\n"
+        for i in range(n)
+    )
+    patterns = "".join(f"    path('v{i}/', V{i}.as_view()),\n    path('f{i}/', f{i}),\n" for i in range(n))
+    return ("from django.urls import path\nfrom django.views.generic import ListView\n"
+            "from django.contrib.auth.mixins import LoginRequiredMixin\n"
+            "from django.contrib.auth.decorators import login_required\n"
+            f"{views}urlpatterns = [\n{patterns}]\n")
+
+
+def _python_drf(n: int) -> str:
+    views = "".join(
+        f"class S{i}(viewsets.ModelViewSet):\n    serializer_class = Ser{i}\n"
+        f"    @action(detail=True, methods=['post'])\n    def go(self, request, pk=None):\n        pass\n"
+        for i in range(n)
+    )
+    registers = "".join(f"router.register('s{i}', S{i})\n" for i in range(n))
+    return ("from rest_framework import viewsets\nfrom rest_framework.decorators import action\n"
+            "from rest_framework.routers import DefaultRouter\nrouter = DefaultRouter()\n"
+            f"{views}{registers}urlpatterns = router.urls\n")
+
+
+def _python_drf_router_subclass(n: int) -> str:
+    return _python_drf(n).replace(
+        "router = DefaultRouter()\n",
+        "class ApiRouter(DefaultRouter):\n    def __init__(self):\n        super().__init__()\n"
+        "        self.routes[0].mapping.update({'put': 'bulk_update'})\nrouter = ApiRouter()\n")
+
+
+def _python_flask_rest(n: int) -> str:
+    body = "".join(
+        f"@ns.route('/r{i}/<id>')\nclass R{i}(Resource):\n    def get(self, id):\n        pass\n"
+        f"    def put(self, id):\n        pass\n"
+        f"api.add_resource(R{i}, '/x{i}', '/y{i}')\n"
+        f"@blp.route('/m{i}')\nclass M{i}(MethodView):\n    def post(self):\n        pass\n"
+        for i in range(n)
+    )
+    return ("from flask import Flask\nfrom flask.views import MethodView\n"
+            "from flask_restx import Api, Resource\nfrom flask_smorest import Api as SApi, Blueprint\n"
+            "app = Flask(__name__)\napi = Api(app, prefix='/v1')\nns = api.namespace('things')\n"
+            "blp = Blueprint('b', __name__, url_prefix='/b')\nsapi = SApi(app)\nsapi.register_blueprint(blp)\n"
+            f"{body}")
+
+
+def _python_channels(n: int) -> str:
+    consumers = "".join(f"class C{i}(AsyncWebsocketConsumer):\n    async def connect(self):\n        pass\n"
+                        for i in range(n))
+    patterns = "".join(f"    re_path(r'ws/c{i}/(?P<room>\\w+)/$', C{i}.as_asgi()),\n    path('p{i}/', C{i}),\n"
+                       for i in range(n))
+    return ("from django.urls import path, re_path\n"
+            "from channels.routing import ProtocolTypeRouter, URLRouter\n"
+            "from channels.generic.websocket import AsyncWebsocketConsumer\n"
+            f"{consumers}websocket_urlpatterns = [\n{patterns}]\n"
+            "application = ProtocolTypeRouter({'websocket': URLRouter(websocket_urlpatterns)})\n")
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -251,6 +346,14 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "typescript-express-aws": ("app.ts", _ts_express_aws),
     "typescript-backbone": ("app.ts", _ts_backbone),
     "python": ("mod.py", _python),
+    "python-flask": ("app.py", _python_flask),
+    "python-django": ("urls.py", _python_django),
+    "python-django-method-decorators": ("urls.py", _python_django_method_decorators),
+    "python-flask-views": ("app.py", _python_flask_views),
+    "python-drf": ("urls.py", _python_drf),
+    "python-drf-router-subclass": ("urls.py", _python_drf_router_subclass),
+    "python-flask-rest": ("api.py", _python_flask_rest),
+    "python-channels": ("routing.py", _python_channels),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),

@@ -1,0 +1,618 @@
+"""Role table: docs/entry-point-roles/django.md."""
+
+from __future__ import annotations
+
+from breezeai_cog.parsers.contract import is_entry_point
+
+SETTINGS = "ROOT_URLCONF = 'project.urls'\n"
+URLS = "from django.urls import path, re_path, include\n"
+
+
+def _eps(stmts):
+    return [s for s in stmts if is_entry_point(s)]
+
+
+def _one(stmts, method, endpoint):
+    found = [s for s in _eps(stmts) if s.method == method and s.endpoint == endpoint]
+    assert len(found) == 1, [(s.method, s.endpoint, s.handler) for s in _eps(stmts)]
+    return found[0]
+
+
+def _project(urls: str, **files: str) -> dict[str, str]:
+    return {"project/settings.py": SETTINGS, "project/urls.py": URLS + urls, **files}
+
+
+def test_path_to_a_function_is_one_any_binding(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('orders/<int:pk>/', views.detail)]\n",
+        **{"shop/__init__.py": "", "shop/views.py": "def detail(request, pk):\n    pass\n"}))
+    r = _one(st, "ANY", "/orders/<int:pk>/")
+    assert (r.routeKind, r.framework, r.handler, r.handlerLine, r.handlerPath, r.isRegex) == (
+        "route", "django", "detail", 1, "shop/views.py", False)
+    assert r.path == "project/urls.py"  # the record sits on the pattern, not the view
+
+
+def test_require_decorators_give_one_binding_per_verb(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.views.decorators.http import require_http_methods, require_safe\n"
+        "@require_http_methods(['GET', 'POST'])\ndef a(request):\n    pass\n"
+        "@require_safe\ndef b(request):\n    pass\n"
+        "urlpatterns = [path('a/', a), path('b/', b)]\n"))
+    assert sorted((s.endpoint, s.method) for s in _eps(st)) == [
+        ("/a/", "GET"), ("/a/", "POST"), ("/b/", "GET"), ("/b/", "HEAD")]
+
+
+def test_re_path_literal_becomes_a_path_and_a_real_regex_is_flagged(analyze_files) -> None:
+    st = analyze_files(_project(
+        "def v(request):\n    pass\n"
+        "urlpatterns = [re_path(r'^about/$', v), re_path(r'^posts/(?P<year>[0-9]{4})/$', v)]\n"))
+    assert _one(st, "ANY", "/about/").isRegex is False
+    assert _one(st, "ANY", "/posts/(?P<year>[0-9]{4})/").isRegex is True
+
+
+def test_regex_joined_to_a_converter_has_no_address(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [re_path(r'^(?P<lang>[a-z]+)/', include('shop.urls'))]\n",
+        **{"shop/__init__.py": "", "shop/urls.py": URLS + (
+            "def v(request, pk):\n    pass\nurlpatterns = [path('item/<int:pk>/', v)]\n")}))
+    assert [s.endpoint for s in _eps(st)] == [None]
+
+
+def test_class_based_view_is_one_binding_per_method(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.views import View\n"
+        "class Orders(View):\n"
+        "    def get(self, request):\n        pass\n"
+        "    def post(self, request):\n        pass\n"
+        "urlpatterns = [path('orders/', Orders.as_view())]\n"))
+    assert _one(st, "GET", "/orders/").handlerLine == 4
+    assert _one(st, "POST", "/orders/").handler == "post"
+
+
+def test_methods_inherited_from_a_generic_view_are_located_at_the_class(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.views.generic import CreateView\nfrom django.views import generic\n"
+        "class NewOrder(CreateView):\n    pass\n"
+        "class Old(generic.DeleteView):\n    def delete(self, request):\n        pass\n"
+        "urlpatterns = [path('new/', NewOrder.as_view()), path('old/', Old.as_view())]\n"))
+    assert sorted((s.method, s.handler, s.handlerLine) for s in _eps(st) if s.endpoint == "/new/") == [
+        ("GET", "get", 4), ("POST", "post", 4), ("PUT", "put", 4)]
+    assert sorted((s.method, s.handlerLine) for s in _eps(st) if s.endpoint == "/old/") == [
+        ("DELETE", 7), ("GET", 6), ("POST", 6)]
+
+
+def test_view_inherits_a_method_from_a_base_in_another_file(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop.views import Orders\nurlpatterns = [path('orders/', Orders.as_view())]\n",
+        **{"shop/__init__.py": "",
+           "shop/base.py": "from django.views import View\nclass BaseView(View):\n    def get(self, request):\n        pass\n",
+           "shop/views.py": "from shop.base import BaseView\nclass Orders(BaseView):\n    pass\n"}))
+    r = _one(st, "GET", "/orders/")
+    assert (r.handler, r.handlerLine, r.handlerPath) == ("get", 3, "shop/base.py")
+
+
+def test_dispatch_only_view_is_any(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.views import View\n"
+        "class Hook(View):\n    def dispatch(self, request):\n        pass\n"
+        "urlpatterns = [path('hook/', Hook.as_view())]\n"))
+    assert _one(st, "ANY", "/hook/").handler == "dispatch"
+
+
+def test_view_with_a_base_from_another_library_has_no_method(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from contact_form.views import ContactFormView\n"
+        "class Contact(ContactFormView):\n    pass\n"
+        "urlpatterns = [path('contact/', Contact.as_view())]\n"))
+    r = _one(st, None, "/contact/")
+    assert (r.handler, r.handlerLine) == ("Contact", 3)
+
+
+def test_django_view_used_directly_is_named_and_framework_served(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.views.generic import TemplateView, RedirectView\n"
+        "urlpatterns = [path('', TemplateView.as_view(template_name='home.html')),\n"
+        "               path('old/', RedirectView.as_view(url='/'))]\n"))
+    home, old = _one(st, "GET", "/"), _one(st, "ANY", "/old/")
+    assert (home.handler, home.handlerLine, home.handlerPath) == ("TemplateView", None, None)
+    assert (old.handler, old.handlerLine) == ("RedirectView", None)
+
+
+def test_include_is_wiring(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('api/', include('shop.urls')), path('v2/', include([path('ping/', ping)]))]\n"
+        "def ping(request):\n    pass\n",
+        **{"shop/__init__.py": "", "shop/urls.py": URLS + (
+            "from . import views\nurlpatterns = [path('orders/', views.orders)]\n"),
+           "shop/views.py": "def orders(request):\n    pass\n"}))
+    assert sorted(s.endpoint for s in _eps(st)) == ["/api/orders/", "/v2/ping/"]
+    assert _one(st, "ANY", "/api/orders/").path == "shop/urls.py"
+
+
+def test_include_of_an_imported_module_and_a_namespace_tuple(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import urls as shop_urls\n"
+        "urlpatterns = [path('a/', include(shop_urls)), path('b/', include(('blog.urls', 'blog')))]\n",
+        **{"shop/__init__.py": "", "shop/urls.py": URLS + "def v(r):\n    pass\nurlpatterns = [path('x/', v)]\n",
+           "blog/__init__.py": "", "blog/urls.py": URLS + "def w(r):\n    pass\nurlpatterns = [path('y/', w)]\n"}))
+    assert sorted(s.endpoint for s in _eps(st)) == ["/a/x/", "/b/y/"]
+
+
+def test_urlconf_included_twice_or_not_reached_has_no_address(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('v1/', include('shop.urls')), path('v2/', include('shop.urls'))]\n",
+        **{"shop/__init__.py": "", "shop/urls.py": URLS + "def v(r):\n    pass\nurlpatterns = [path('x/', v)]\n",
+           "lone/__init__.py": "", "lone/urls.py": URLS + "def w(r):\n    pass\nurlpatterns = [path('y/', w)]\n"}))
+    assert sorted((s.handler, s.endpoint) for s in _eps(st)) == [("v", None), ("w", None)]
+
+
+def test_root_urlconf_is_wiring(analyze_files) -> None:
+    st = analyze_files(_project("def home(r):\n    pass\nurlpatterns = [path('', home)]\n"))
+    _one(st, "ANY", "/")
+
+
+def test_library_urls_are_a_mount(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib import admin\n"
+        "urlpatterns = [path('admin/', admin.site.urls), path('accounts/', include('allauth.urls'))]\n"))
+    mounts = sorted((s.endpoint, s.handler, s.routeKind) for s in st if s.semanticType == "route")
+    assert mounts == [("/accounts/", "allauth.urls", "mount"), ("/admin/", "admin.site.urls", "mount")]
+    assert _eps(st) == []
+
+
+def test_patterns_added_later_and_under_debug(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.conf import settings\ndef a(r):\n    pass\n"
+        "urlpatterns = [path('a/', a)]\nurlpatterns += [path('b/', a)]\nurlpatterns.append(path('c/', a))\n"
+        "if settings.DEBUG:\n    urlpatterns += [path('d/', a)]\n"))
+    assert sorted(s.endpoint for s in _eps(st)) == ["/a/", "/b/", "/c/", "/d/"]
+
+
+def test_i18n_patterns_have_no_address(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.conf.urls.i18n import i18n_patterns\ndef a(r):\n    pass\n"
+        "urlpatterns = i18n_patterns(path('about/', a))\n"))
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("ANY", None)]
+
+
+def test_static_is_none(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.conf import settings\nfrom django.conf.urls.static import static\n"
+        "urlpatterns = [] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)\n"))
+    assert [s for s in st if s.semanticType == "route"] == []
+
+
+def test_function_view_decorators_are_guards(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth.decorators import login_required\n"
+        "from django.views.decorators.csrf import csrf_exempt\n"
+        "@csrf_exempt\n@login_required\n@team_only\ndef a(r):\n    pass\n"
+        "urlpatterns = [path('a/', a)]\n"))
+    r = _one(st, "ANY", "/a/")
+    assert (r.guards, r.authRequired) == (["login_required", "team_only"], True)
+
+
+def test_own_login_required_makes_no_claim(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from project.auth import login_required\n@login_required\ndef a(r):\n    pass\n"
+        "urlpatterns = [path('a/', a)]\n", **{"project/auth.py": "def login_required(f):\n    return f\n"}))
+    assert (_one(st, "ANY", "/a/").guards, _one(st, "ANY", "/a/").authRequired) == (["login_required"], None)
+
+
+def test_method_decorator_on_class_and_method_are_guards(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth.decorators import login_required\n"
+        "from django.utils.decorators import method_decorator\nfrom django.views import View\n"
+        "@method_decorator(login_required, name='dispatch')\n"
+        "class A(View):\n"
+        "    @method_decorator(audit)\n    def post(self, r):\n        pass\n"
+        "urlpatterns = [path('a/', A.as_view())]\n"))
+    r = _one(st, "POST", "/a/")
+    assert (r.guards, r.authRequired) == (["login_required", "audit"], True)
+
+
+def test_auth_mixins_are_guards(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin\n"
+        "from django.views.generic import ListView\n"
+        "class A(LoginRequiredMixin, ListView):\n    pass\n"
+        "class B(UserPassesTestMixin, ListView):\n    pass\n"
+        "urlpatterns = [path('a/', A.as_view()), path('b/', B.as_view())]\n"))
+    a, b = _one(st, "GET", "/a/"), _one(st, "GET", "/b/")
+    assert (a.guards, a.authRequired) == (["LoginRequiredMixin"], True)
+    assert (b.guards, b.authRequired) == (["UserPassesTestMixin"], None)
+
+
+def test_access_mixin_is_not_a_guard(analyze_files) -> None:
+    # AccessMixin is the base the auth mixins share: it checks nothing itself. The repo's own
+    # subclass does, in a dispatch of its own — not a guard the code names.
+    st = analyze_files(_project(
+        "from shop.views import A\nurlpatterns = [path('a/', A.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": (
+            "from django.contrib.auth.mixins import AccessMixin\n"
+            "from django.views.generic import ListView\n"
+            "class Conditional(AccessMixin):\n"
+            "    def dispatch(self, request, *args, **kwargs):\n"
+            "        return super().dispatch(request, *args, **kwargs)\n"
+            "class A(Conditional, ListView):\n    pass\n")}))
+    a = _one(st, "GET", "/a/")
+    assert (a.guards, a.authRequired) == (None, None)
+
+
+def test_function_view_is_located_whatever_its_first_parameter_is_called(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\n"
+        "urlpatterns = [path('a/', views.a), path('b/', views.b), path('c/', views.c)]\n",
+        **{"shop/__init__.py": "", "shop/views.py": (
+            "from django.http import HttpResponse\n"
+            "def a(req):\n    return HttpResponse()\n"
+            "def b(*args, **kwargs):\n    pass\n"
+            "def c():\n    pass\n")}))  # takes no argument: Django could not call it
+    assert (_one(st, "ANY", "/a/").handlerPath, _one(st, "ANY", "/a/").handlerLine) == ("shop/views.py", 2)
+    assert (_one(st, "ANY", "/b/").handlerPath, _one(st, "ANY", "/b/").handlerLine) == ("shop/views.py", 4)
+    assert _one(st, "ANY", "/c/").handlerLine is None
+
+
+def test_function_view_rebound_later_in_its_module_is_not_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\n"
+        "urlpatterns = [path('a/', views.a), path('b/', views.b), path('c/', views.c),"
+        " path('d/', views.d), path('e/', views.e)]\n",
+        **{"shop/__init__.py": "", "shop/v2.py": "def a(request):\n    pass\n", "shop/views.py": (
+            "from django.contrib.auth.decorators import login_required\n"
+            "from shop import v2\n"
+            "def a(req):\n    pass\n"
+            "from shop.v2 import a\n"                 # replaces the def: not located
+            "def b(req):\n    pass\n"
+            "b = v2.a\n"                              # replaces it too, though `.a` is an attribute
+            "def c(req):\n    pass\n"
+            "c = login_required(c)\n"                 # wraps it: the def still runs
+            "from shop.v2 import a as d\n"
+            "def d(req):\n    pass\n"                 # defined after the import: this def runs
+            "def e(req):\n    pass\n"
+            "x, e = 1, 2\n")}))                       # a tuple target replaces it
+    assert _one(st, "ANY", "/a/").handlerLine is None
+    assert _one(st, "ANY", "/b/").handlerLine is None
+    assert (_one(st, "ANY", "/c/").handlerPath, _one(st, "ANY", "/c/").handlerLine) == ("shop/views.py", 9)
+    assert (_one(st, "ANY", "/d/").handlerPath, _one(st, "ANY", "/d/").handlerLine) == ("shop/views.py", 13)
+    assert _one(st, "ANY", "/e/").handlerLine is None
+
+
+def test_middleware_guards_every_route_when_settings_agree(analyze_files) -> None:
+    mw = ("MIDDLEWARE = ['django.contrib.sessions.middleware.SessionMiddleware',\n"
+          "              'django.contrib.auth.middleware.LoginRequiredMiddleware']\n")
+    st = analyze_files({
+        "project/settings/base.py": SETTINGS + mw,
+        "project/settings/prod.py": "from .base import *\n" + mw,
+        "project/urls.py": URLS + (
+            "from django.contrib.auth.decorators import login_not_required\n"
+            "def a(r):\n    pass\n@login_not_required\ndef b(r):\n    pass\n"
+            "urlpatterns = [path('a/', a), path('b/', b)]\n"),
+    })
+    a, b = _one(st, "ANY", "/a/"), _one(st, "ANY", "/b/")
+    assert a.guards == ["django.contrib.sessions.middleware.SessionMiddleware",
+                        "django.contrib.auth.middleware.LoginRequiredMiddleware"]
+    assert (a.authRequired, b.authRequired) == (True, None)
+
+
+def test_middleware_settings_that_disagree_are_left_out(analyze_files) -> None:
+    st = analyze_files({
+        "project/settings/base.py": SETTINGS + "MIDDLEWARE = ['a.A']\n",
+        "project/settings/dev.py": "from .base import *\nMIDDLEWARE += ['debug.D']\n",
+        "project/urls.py": URLS + "def a(r):\n    pass\nurlpatterns = [path('a/', a)]\n",
+    })
+    assert _one(st, "ANY", "/a/").guards is None
+
+
+def test_response_decorators_are_not_guards(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.views.decorators.cache import cache_page\n"
+        "@cache_page(60)\ndef a(r):\n    pass\nurlpatterns = [path('a/', a)]\n"))
+    assert _one(st, "ANY", "/a/").guards is None
+
+
+def test_http_client_call_is_outbound(analyze_files) -> None:
+    st = analyze_files(_project(
+        "import requests\ndef a(r):\n    return requests.post('https://example.com/hook')\n"
+        "urlpatterns = [path('a/', a)]\n"))
+    assert [s.method for s in st if s.semanticType == "api_call"] == ["POST"]
+
+
+def test_models_and_admin_are_none(analyze_files) -> None:
+    st = analyze_files({
+        "shop/models.py": "from django.db import models\nclass Order(models.Model):\n    total = models.IntegerField()\n",
+        "shop/admin.py": "from django.contrib import admin\nfrom .models import Order\nadmin.site.register(Order)\n",
+    })
+    assert [s for s in st if s.semanticType == "route"] == []
+
+
+def test_view_wrapped_in_the_urlconf(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from functools import partial\nfrom django.contrib.auth.decorators import login_required\n"
+        "from django.views.decorators.cache import cache_page\n"
+        "def v(request, code=0):\n    pass\n"
+        "urlpatterns = [path('a/', login_required(v)), path('b/', cache_page(60)(v)),\n"
+        "               path('c/', partial(v, code=400))]\n"))
+    a = _one(st, "ANY", "/a/")
+    assert (a.handler, a.handlerLine, a.guards, a.authRequired) == ("v", 5, ["login_required"], True)
+    assert (_one(st, "ANY", "/b/").handler, _one(st, "ANY", "/b/").guards) == ("v", None)
+    assert _one(st, "ANY", "/c/").handler == "v"
+
+
+def test_instance_of_a_view_class_is_any(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.syndication.views import Feed\n"
+        "class Latest(Feed):\n    pass\n"
+        "class Hook:\n    def __call__(self, request):\n        pass\n"
+        "urlpatterns = [path('rss/', Latest()), path('hook/', Hook())]\n"))
+    assert (_one(st, "ANY", "/rss/").handler, _one(st, "ANY", "/rss/").handlerLine) == ("Latest", 3)
+    assert (_one(st, "ANY", "/hook/").handler, _one(st, "ANY", "/hook/").handlerLine) == ("__call__", 6)
+
+
+def test_lambda_view_is_anonymous(analyze_files) -> None:
+    st = analyze_files(_project("urlpatterns = [path('ping/', lambda request: None)]\n"))
+    r = _one(st, "ANY", "/ping/")
+    assert (r.handler, r.handlerLine) == (None, 2)
+
+
+# ── Django Channels ───────────────────────────────────────────────────────────────────────
+
+ASGI = ("from channels.routing import ProtocolTypeRouter, URLRouter\n"
+        "from channels.auth import AuthMiddlewareStack\n"
+        "import chat.routing\n"
+        "application = ProtocolTypeRouter({\n"
+        "    'websocket': AuthMiddlewareStack(URLRouter(chat.routing.websocket_urlpatterns)),\n"
+        "})\n")
+CONSUMERS = ("from channels.generic.websocket import AsyncWebsocketConsumer\n"
+             "class ChatConsumer(AsyncWebsocketConsumer):\n"
+             "    async def connect(self):\n        pass\n")
+
+
+def _channels(routing: str, asgi: str = ASGI, consumers: str = CONSUMERS) -> dict[str, str]:
+    return {"project/asgi.py": asgi, "chat/__init__.py": "", "chat/consumers.py": consumers,
+            "chat/routing.py": "from django.urls import path, re_path\nfrom . import consumers\n" + routing}
+
+
+def test_channels_consumer_is_one_websocket_binding(analyze_files) -> None:
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [re_path(r'ws/chat/(?P<room>\\w+)/$', consumers.ChatConsumer.as_asgi())]\n"))
+    (r,) = _eps(st)
+    assert (r.method, r.routeKind, r.endpoint, r.isRegex, r.framework) == (
+        "WEBSOCKET", "ws", "/ws/chat/(?P<room>\\w+)/", True, "django")
+    assert (r.handler, r.handlerLine, r.handlerPath, r.path) == (
+        "ChatConsumer", 2, "chat/consumers.py", "chat/routing.py")
+
+
+def test_channels_nested_router_joins_its_prefix(analyze_files) -> None:
+    asgi = ASGI.replace("URLRouter(chat.routing.websocket_urlpatterns)",
+                        "URLRouter([path('ws/', URLRouter(chat.routing.websocket_urlpatterns))])")
+    asgi = "from django.urls import path\n" + asgi
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('chat/<str:room>/', consumers.ChatConsumer.as_asgi())]\n", asgi))
+    assert [(r.endpoint, r.isRegex) for r in _eps(st)] == [("/ws/chat/<str:room>/", False)]
+
+
+def test_channels_2_consumer_class_inline_in_the_router(analyze_files) -> None:
+    asgi = ("from django.urls import path\nfrom channels.routing import ProtocolTypeRouter, URLRouter\n"
+            "from chat.consumers import ChatConsumer\n"
+            "application = ProtocolTypeRouter({'websocket': URLRouter([path('chat/stream/', ChatConsumer)])})\n")
+    st = analyze_files({"project/asgi.py": asgi, "chat/__init__.py": "", "chat/consumers.py": CONSUMERS})
+    (r,) = _eps(st)
+    assert (r.method, r.endpoint, r.handler, r.handlerPath) == (
+        "WEBSOCKET", "/chat/stream/", "ChatConsumer", "chat/consumers.py")
+
+
+def test_channels_http_consumer_and_protocol_from_the_router(analyze_files) -> None:
+    consumers = (CONSUMERS + "from channels.generic.http import AsyncHttpConsumer\n"
+                 "class Feed(AsyncHttpConsumer):\n    pass\n"
+                 "from channels.consumer import AsyncConsumer\nclass Raw(AsyncConsumer):\n    pass\n")
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('feed/', consumers.Feed.as_asgi()), path('raw/', consumers.Raw.as_asgi())]\n",
+        consumers=consumers))
+    assert sorted((r.method, r.routeKind, r.endpoint, r.handler) for r in _eps(st)) == [
+        ("ANY", "route", "/feed/", "Feed"), ("WEBSOCKET", "ws", "/raw/", "Raw")]
+
+
+def test_channels_routing_reached_from_nowhere_has_no_address(analyze_files) -> None:
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('chat/', consumers.ChatConsumer.as_asgi()),\n"
+        "                         path('lib/', consumers.Unknown.as_asgi())]\n", asgi=""))
+    # The repo consumer says its protocol; a consumer the code does not show, under no router, does not.
+    assert [(r.method, r.endpoint, r.handler) for r in _eps(st)] == [("WEBSOCKET", None, "ChatConsumer")]
+
+
+def test_channels_list_routed_twice_has_no_address(analyze_files) -> None:
+    asgi = ASGI.replace("URLRouter(chat.routing.websocket_urlpatterns)),",
+                        "URLRouter(chat.routing.websocket_urlpatterns)),\n"
+                        "    'http': URLRouter(chat.routing.websocket_urlpatterns),")
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('chat/', consumers.ChatConsumer.as_asgi())]\n", asgi))
+    assert [r.endpoint for r in _eps(st)] == [None]
+
+
+def test_a_view_that_is_not_a_consumer_is_not_a_channels_binding(analyze_files) -> None:
+    st = analyze_files(_channels(
+        "def page(request):\n    pass\nwebsocket_urlpatterns = [path('page/', page)]\n"))
+    assert _eps(st) == []
+
+
+# ── include() through a dotted chain ─────────────────────────────────────────────────────
+
+_V = URLS + "def v(request):\n    pass\nurlpatterns = [path('x/', v)]\n"
+SHOP = {"shop/__init__.py": "", "shop/api/__init__.py": "", "shop/api/urls.py": _V,
+        "shop/api/v1/__init__.py": "", "shop/api/v1/urls.py": _V}
+
+
+def test_include_through_packages_reaches_the_module(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import api\nurlpatterns = [path('a/', include(api.urls)), path('b/', include(api.v1.urls))]\n",
+        **SHOP))
+    assert sorted(s.endpoint for s in _eps(st)) == ["/a/x/", "/b/x/"]
+
+
+def test_include_through_a_chain_that_is_not_in_the_repo_gives_no_address(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import api\nurlpatterns = [path('a/', include(api.missing.urls))]\n", **SHOP))
+    assert sorted(str(s.endpoint) for s in _eps(st)) == ["None", "None"]  # both urlconfs: reached from nowhere
+
+
+def test_include_through_a_plain_import_of_the_whole_chain(analyze_files) -> None:
+    st = analyze_files(_project(
+        "import shop.api.urls\nurlpatterns = [path('a/', include(shop.api.urls))]\n", **SHOP))
+    assert sorted(str(s.endpoint) for s in _eps(st)) == ["/a/x/", "None"]  # `shop.api.v1.urls`: nothing includes it
+
+
+def test_include_through_a_name_that_is_not_imported_reaches_no_module(analyze_files) -> None:
+    st = analyze_files(_project(
+        "import shop.api.urls\nurlpatterns = [path('a/', include(stranger.api.urls))]\n", **SHOP))
+    routes = [s for s in _eps(st) if s.routeKind == "route"]
+    assert sorted(str(s.endpoint) for s in routes) == ["None", "None"]  # both urlconfs: reached from nowhere
+
+
+def test_django_auth_views_have_their_documented_verbs(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth import views as auth_views\n"
+        "urlpatterns = [path('login/', auth_views.LoginView.as_view()),\n"
+        "               path('pw/done/', auth_views.PasswordChangeDoneView.as_view()),\n"
+        "               path('logout/', auth_views.LogoutView.as_view())]\n"))
+    assert sorted((s.endpoint, str(s.method), s.handler) for s in _eps(st)) == [
+        ("/login/", "GET", "LoginView"), ("/login/", "POST", "LoginView"), ("/login/", "PUT", "LoginView"),
+        ("/logout/", "None", "LogoutView"), ("/pw/done/", "GET", "PasswordChangeDoneView")]
+
+
+def test_view_built_on_a_django_auth_view_inherits_its_verbs(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from django.contrib.auth.views import PasswordResetView\n"
+        "class Reset(PasswordResetView):\n    template_name = 'x.html'\n"
+        "urlpatterns = [path('reset/', Reset.as_view())]\n"))
+    assert sorted((s.method, s.handler, s.handlerLine) for s in _eps(st)) == [
+        ("GET", "get", 3), ("POST", "post", 3), ("PUT", "put", 3)]
+
+
+def test_view_of_the_same_name_from_another_library_is_not_djangos(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from allauth.account.views import LoginView\n"
+        "urlpatterns = [path('login/', LoginView.as_view())]\n"))
+    (r,) = _eps(st)
+    assert (r.method, r.handler) == (None, "LoginView")  # its verbs are not Django's to name
+
+
+_AUTH = ("from django.contrib.auth.decorators import login_required\n"
+         "from django.utils.decorators import method_decorator\nfrom django.views import View\n")
+
+
+def test_class_method_decorator_guards_only_the_method_it_names(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Account.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "@method_decorator(login_required, name='get')\nclass Account(View):\n"
+            "    def get(self, request):\n        pass\n    def post(self, request):\n        pass\n")}))
+    get, post = _one(st, "GET", "/a/"), _one(st, "POST", "/a/")
+    assert (get.guards, get.authRequired) == (["login_required"], True)
+    assert (post.guards, post.authRequired) == (None, None)
+
+
+def test_class_method_decorator_applies_to_a_method_of_a_base_and_to_djangos(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Sub.as_view()), path('t/', views.Page.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "from django.views.generic import TemplateView\n"
+            "class Base(View):\n    def get(self, request):\n        pass\n"
+            "@method_decorator(login_required, name='get')\nclass Sub(Base):\n    pass\n"
+            "@method_decorator(login_required, name='get')\nclass Page(TemplateView):\n    pass\n")}))
+    assert _one(st, "GET", "/a/").guards == ["login_required"]  # the base's get, wrapped by the subclass
+    assert _one(st, "GET", "/t/").guards == ["login_required"]  # Django's own get, wrapped
+
+
+def test_class_method_decorator_of_a_base_does_not_reach_an_override(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Sub.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "@method_decorator(login_required, name='get')\nclass Base(View):\n"
+            "    def get(self, request):\n        pass\n"
+            "class Sub(Base):\n    def get(self, request):\n        pass\n")}))
+    assert (_one(st, "GET", "/a/").guards, _one(st, "GET", "/a/").authRequired) == (None, None)
+
+
+def test_class_method_decorator_with_a_name_that_is_not_a_literal_claims_nothing(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\nurlpatterns = [path('a/', views.Account.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": _AUTH + (
+            "NAME = 'get'\n@method_decorator(login_required, name=NAME)\nclass Account(View):\n"
+            "    def get(self, request):\n        pass\n")}))
+    assert (_one(st, "GET", "/a/").guards, _one(st, "GET", "/a/").authRequired) == (None, None)
+
+
+_ORDERS = "from django.urls import path\ndef lst(request):\n    pass\nurlpatterns = [path('list/', lst)]\n"
+
+
+def test_include_of_an_app_folder_on_sys_path_reaches_the_urlconf(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('orders/', include('orders.urls'))]\n",
+        **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS}))
+    routes = sorted((s.routeKind, s.endpoint) for s in st if s.semanticType == "route")
+    assert routes == [("route", "/orders/list/")]  # the app's urlconf, not a library mount
+
+
+def test_include_of_a_name_that_two_urlconfs_end_with_is_not_followed(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('orders/', include('orders.urls'))]\n",
+        **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS,
+           "legacy/orders/__init__.py": "", "legacy/orders/urls.py": _ORDERS}))
+    routes = sorted((s.routeKind, str(s.endpoint)) for s in st if s.semanticType == "route")
+    assert routes == [("mount", "/orders/"), ("route", "None"), ("route", "None")]  # which one: not known
+
+
+def test_include_of_a_library_stays_a_mount_whatever_the_repo_holds(analyze_files) -> None:
+    st = analyze_files(_project(
+        "urlpatterns = [path('accounts/', include('allauth.urls'))]\n",
+        **{"apps/orders/__init__.py": "", "apps/orders/urls.py": _ORDERS}))
+    routes = sorted((s.routeKind, str(s.endpoint)) for s in st if s.semanticType == "route")
+    assert routes == [("mount", "/accounts/"), ("route", "None")]
+
+
+_VIEW = "from django.views import View\nclass Orders(View):\n    def get(self, request):\n        pass\n"
+
+
+def test_view_re_exported_by_name_from_a_package_is_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import OrderView, Basket\nurlpatterns = [path('o/', OrderView.as_view()), path('b/', Basket.as_view())]\n",
+        **{"shop/__init__.py": "from .views import OrderView\nfrom .carts import CartView as Basket\n",
+           "shop/views.py": _VIEW.replace("Orders", "OrderView"), "shop/carts.py": _VIEW.replace("Orders", "CartView")}))
+    assert (_one(st, "GET", "/o/").handlerPath, _one(st, "GET", "/o/").handlerLine) == ("shop/views.py", 3)
+    assert (_one(st, "GET", "/b/").handlerPath, _one(st, "GET", "/b/").handlerLine) == ("shop/carts.py", 3)
+
+
+def test_view_re_exported_by_a_star_import_is_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import Orders\nimport shop\nurlpatterns = [path('o/', Orders.as_view()), path('f/', shop.index)]\n",
+        **{"shop/__init__.py": "from .views import *\nfrom .pages import *\n", "shop/views.py": _VIEW,
+           "shop/pages.py": "def index(request):\n    pass\n"}))
+    assert _one(st, "GET", "/o/").handlerPath == "shop/views.py"
+    assert (_one(st, "ANY", "/f/").handlerPath, _one(st, "ANY", "/f/").handlerLine) == ("shop/pages.py", 1)
+
+
+def test_base_view_re_exported_by_a_package_gives_the_subclass_its_methods(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop.views import SubView\nurlpatterns = [path('s/', SubView.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/base/__init__.py": "from .generic import *\n",
+           "shop/base/generic.py": _VIEW.replace("Orders", "GenericView"),
+           "shop/views.py": "from shop.base import GenericView\nclass SubView(GenericView):\n    pass\n"}))
+    r = _one(st, "GET", "/s/")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("get", "shop/base/generic.py", 3)
+
+
+def test_name_that_two_star_imports_declare_is_not_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import Orders\nurlpatterns = [path('o/', Orders.as_view())]\n",
+        **{"shop/__init__.py": "from .a import *\nfrom .b import *\n", "shop/a.py": _VIEW, "shop/b.py": _VIEW}))
+    (r,) = _eps(st)
+    assert (r.method, r.handler, r.handlerPath) == (None, "Orders", None)  # which one is exported: not known
+
+
+def test_name_a_package_imports_from_a_library_is_not_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import Orders\nurlpatterns = [path('o/', Orders.as_view())]\n",
+        **{"shop/__init__.py": "from somelib.views import *\nfrom somelib.views import Orders\n"}))
+    (r,) = _eps(st)
+    assert (r.method, r.handler, r.handlerPath) == (None, "Orders", None)

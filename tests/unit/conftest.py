@@ -53,3 +53,32 @@ def analyze_files(tmp_path: Path) -> Callable[..., list[Statement]]:
         return [s for rec in records for s in rec.statements]
 
     return run
+
+
+@pytest.fixture
+def capture_routes(tmp_path: Path) -> Callable[..., dict[str, list[dict[str, object]]]]:
+    """Write ``{relative path: source}`` into a fresh repo and capture it with ``analyze_repo`` at
+    the given ``jobs`` — the index is built in the parent and read in the workers, which a
+    hand-built index cannot show. Returns file path → its ``route`` statements as dicts."""
+
+    def run(files: dict[str, str], jobs: int) -> dict[str, list[dict[str, object]]]:
+        import gzip
+        import json
+
+        from breezeai_cog import analyze_repo
+
+        repo = tmp_path / f"repo{jobs}"
+        for rel, src in files.items():
+            p = repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(src)
+        result = analyze_repo(repo, capture_statements=True, out=tmp_path / f"out{jobs}", jobs=jobs)
+        out: dict[str, list[dict[str, object]]] = {}
+        for line in gzip.open(result.out_path, "rt", encoding="utf-8"):
+            rec = json.loads(line)
+            routes = [s for s in rec.get("statements", []) if s.get("semanticType") == "route"]
+            if routes:
+                out[rec["path"]] = routes
+        return out
+
+    return run
