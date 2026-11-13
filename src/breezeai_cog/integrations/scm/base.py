@@ -135,11 +135,19 @@ class ChangeSet:
     per provider entry (a rename is **one** entry under its new path) — the per-file
     view ``/api/git/compare`` returns; the orchestration in ``server/git.py`` reads only
     ``changed`` / ``deleted``.
+
+    ``relation`` and ``merge_base_sha`` say how ``head`` relates to ``base`` (BREEZEAI-1160):
+    ``relation`` is ``identical`` / ``ahead`` (``base`` is an ancestor of ``head``, the normal
+    case) / ``behind`` (``head`` is older) / ``diverged`` (the two are on different lines of
+    history), and ``merge_base_sha`` is their common ancestor. Only GitHub reports them; every
+    other provider leaves both ``None`` ("unknown"), and ``/api/git/compare`` then omits them.
     """
 
     changed: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     files: list[FileDiff] = field(default_factory=list)
+    relation: str | None = None
+    merge_base_sha: str | None = None
 
     @property
     def is_empty(self) -> bool:

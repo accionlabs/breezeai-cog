@@ -129,12 +129,20 @@ class GitHubSCMClient(AbstractSCMClient):
         """Three-dot compare, paginated (``files`` is capped at 300 per page).
 
         ``files`` carries GitHub's own ``additions`` / ``deletions`` / ``patch`` per
-        file (``patch`` is absent on binary or very large diffs, as GitHub omits it).
+        file (``patch`` is absent on binary or very large diffs, as GitHub omits it). The
+        response's top-level ``status`` (``identical`` / ``ahead`` / ``behind`` / ``diverged``)
+        and ``merge_base_commit`` are kept as ``relation`` / ``merge_base_sha``.
         """
         first = f"/repos/{ref.owner}/{ref.repo}/compare/{base}...{head}"
         out = ChangeSet()
         for resp in self._http.paginate(first, _next_link, {"per_page": "100"}):
-            for f in resp.json().get("files") or []:
+            body = resp.json()
+            if out.relation is None:  # every page repeats it; the first one is enough
+                status = body.get("status")
+                out.relation = status if status in _RELATIONS else None
+                merge_base = (body.get("merge_base_commit") or {}).get("sha")
+                out.merge_base_sha = merge_base if isinstance(merge_base, str) and merge_base else None
+            for f in body.get("files") or []:
                 name = f.get("filename")
                 if not name:
                     continue
@@ -166,6 +174,9 @@ class GitHubSCMClient(AbstractSCMClient):
         host = ref.host or DEFAULT_HOSTS["github"]
         auth = f"x-access-token:{self._token}@" if self._token else ""
         return f"https://{auth}{host}/{ref.owner}/{ref.repo}.git"
+
+
+_RELATIONS = frozenset({"identical", "ahead", "behind", "diverged"})
 
 
 def _next_link(resp: httpx.Response) -> str | None:

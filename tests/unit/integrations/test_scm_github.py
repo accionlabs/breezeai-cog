@@ -79,6 +79,20 @@ def test_compare_maps_statuses_and_follows_link_pages(router, settings) -> None:
     assert router.urls[1] == page2
 
 
+def test_compare_keeps_relation_and_merge_base(router, settings) -> None:
+    router.add(r"/compare/", httpx.Response(200, json={
+        "status": "diverged", "merge_base_commit": {"sha": "c" * 40}, "files": [],
+    }))
+    cs = _client(router, settings).compare(REF, BASE, SHA)
+    assert (cs.relation, cs.merge_base_sha) == ("diverged", "c" * 40)
+
+
+def test_compare_ignores_unknown_relation(router, settings) -> None:
+    router.add(r"/compare/", httpx.Response(200, json={"status": "weird", "files": []}))
+    cs = _client(router, settings).compare(REF, BASE, SHA)
+    assert (cs.relation, cs.merge_base_sha) == (None, None)
+
+
 def test_compare_empty_is_empty_changeset(router, settings) -> None:
     router.add(r"/compare/", httpx.Response(200, json={"files": []}))
     assert _client(router, settings).compare(REF, BASE, SHA).is_empty
