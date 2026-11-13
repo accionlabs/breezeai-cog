@@ -558,10 +558,10 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 | `skill` | `SKILL.md` with front-matter `name` and `description` |
 | `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin root's `agents/`, or with an agent key (`tools`, `model`, `color`) |
 | `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin root's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
-| `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
+| `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md` (in that exact case: `docs/agents.md` is a `doc`), `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
 | `readme` | `README.md` / `.mdx` / `.rst` |
 | `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md` / `.mdx`) |
-| `adr` | under `docs/adr/`, `docs/decisions/` or `adr/`; or `NNNN-*.md` with `## Status` and `## Decision` |
+| `adr` | under `docs/adr/` or `docs/decisions/`; under another `adr/`, named `NNNN-*.md` or with `## Status` and `## Decision`; elsewhere `NNNN-*.md` with both headings. Never a folder's `index` / `README` or a `*template*` file |
 | `doc` | anything else |
 
   A plugin root is the folder holding `.claude-plugin/plugin.json` or

@@ -22,7 +22,11 @@ AGENT_DOCUMENT_KINDS: frozenset[str] = frozenset(
     {"skill", "agent", "command", "agent_instructions", "adr"}
 )
 
-_AGENT_INSTRUCTION_NAMES = frozenset({"CLAUDE.MD", "CLAUDE.LOCAL.MD", "AGENTS.MD", "GEMINI.MD"})
+#: Matched in exact case: the tools read these names as written, and a lower-case
+#: `docs/agents.md` or `docs/providers/claude.md` is prose about an agent, not its instructions.
+_AGENT_INSTRUCTION_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md"})
+#: File stems in a decisions folder that are its index or template, not a decision.
+_ADR_NON_RECORD_STEMS = frozenset({"readme", "index", "_index", "template"})
 _CHANGELOG_NAMES = frozenset({"CHANGELOG", "HISTORY", "RELEASES"})
 _MARKDOWN_SUFFIXES = (".md", ".mdx")
 _ADR_NAME = re.compile(r"^\d{4}-.+\.mdx?$", re.IGNORECASE)
@@ -88,7 +92,7 @@ def classify(
             return "command"
 
     if (
-        upper in _AGENT_INSTRUCTION_NAMES
+        name in _AGENT_INSTRUCTION_NAMES
         or path.endswith(".github/copilot-instructions.md")
         or name == ".cursorrules"
         # `.mdc` is Cursor's rule format and nothing else: a rule wherever it sits (a Cursor
@@ -103,15 +107,25 @@ def classify(
     if stem in _CHANGELOG_NAMES and suffix in ("MD", "MDX"):
         return "changelog"
 
-    if (
-        _contains(dirs, ("docs", "adr"))
-        or _contains(dirs, ("docs", "decisions"))
-        or "adr" in dirs
-        or (_ADR_NAME.match(name) and _has_adr_headings(headings))
-    ):
+    if _is_adr(name, dirs, headings):
         return "adr"
 
     return "doc"
+
+
+def _is_adr(name: str, dirs: tuple[str, ...], headings: list[dict[str, Any]]) -> bool:
+    """A decision record: any file in ``docs/adr/`` or ``docs/decisions/`` but its index or
+    template; in another ``adr/`` folder, only one named ``NNNN-…`` or with ``## Status`` and
+    ``## Decision`` headings; anywhere else, one with both the name and the headings."""
+    stem = name.rsplit(".", 1)[0].lower()
+    if stem in _ADR_NON_RECORD_STEMS or "template" in stem:
+        return False
+    numbered = _ADR_NAME.match(name) is not None
+    if _contains(dirs, ("docs", "adr")) or _contains(dirs, ("docs", "decisions")):
+        return True
+    if "adr" in dirs:
+        return numbered or _has_adr_headings(headings)
+    return numbered and _has_adr_headings(headings)
 
 
 def _has_any(front_matter: dict[str, Any], keys: tuple[str, ...]) -> bool:

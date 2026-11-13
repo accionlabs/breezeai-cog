@@ -133,6 +133,21 @@ def test_markdown_owns_md_mdx_mdc_and_readme_rst() -> None:
         ("arch/0007-split.md", "# Split\n## Status\nAccepted\n## Decision\nSplit it\n", "adr"),
         ("arch/0007-split.md", "# Split\n## Notes\n", "doc"),
         ("docs/setup.md", "# Setup\n", "doc"),
+        # Instruction file names match in their exact case: lower-case ones are prose.
+        ("CLAUDE.local.md", "# rules\n", "agent_instructions"),
+        ("docs/providers/claude.md", "# Claude provider\n", "doc"),
+        ("docs/agents.md", "# Agents\n", "doc"),
+        ("Gemini.md", "# Gemini\n", "doc"),
+        # A decisions folder's index and template are not decisions.
+        ("docs/adr/index.md", "# Decisions\n", "doc"),
+        ("docs/adr/template.md", "# Title\n## Status\n## Decision\n", "doc"),
+        ("docs/decisions/0000-adr-template.md", "# Title\n", "doc"),
+        # A bare `adr/` folder needs the numbered name or the Status + Decision headings.
+        ("adr/0003-queue.md", "# Queue\n", "adr"),
+        ("adr/queue.md", "# Queue\n## Status\nAccepted\n## Decision\nUse it\n", "adr"),
+        ("adr/overview.md", "# About our ADRs\n", "doc"),
+        ("tools/adr/index.md", "# Index\n", "doc"),
+        ("adr/template.md", "# T\n## Status\n## Decision\n", "doc"),
         ("page.mdx", "# Page\n<Comp />\n", "doc"),
     ],
 )
