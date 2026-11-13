@@ -216,3 +216,39 @@ def test_a_call_inside_an_anonymous_class_keeps_the_file_wide_answer(tmp_path: P
     # in the anonymous Handler, `alert` may be its own: it stays credited to this file as before,
     # and `this.log` (the anonymous instance) is not resolved through Data's base class
     assert calls["d"] == {"alert": f"{_ROOT}/Data.java", "log": None}
+
+
+_MODE = """package com.acme;
+public enum Mode {
+    ON, OFF;
+    public static Mode of(String k) { return values()[0]; }
+    public String label() { return name(); }
+}
+"""
+_CONSTANTS = """package com.acme;
+public class Constants { public static final String NS = "urn:x"; public static String ns() { return NS; } }
+"""
+_CHILD_STATIC = """package com.acme;
+public class Child extends Base { }
+"""
+_CALLER = """package com.acme.web;
+import static com.acme.Constants.NS;
+import static com.acme.Constants.ns;
+import com.acme.Mode;
+import com.acme.Child;
+public class User {
+    void a(String k) { Mode.of(k); }
+    void b(String k) { Mode.valueOf(k); }
+    void c(Mode m) { m.label(); }
+    void d(String x) { NS.equals(x); }
+    void e() { ns(); }
+    void f() { Child.top(); }
+}
+"""
+
+
+def test_a_call_on_an_enum_resolves_to_the_enum_methods(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {"Mode.java": _MODE, "web/User.java": _CALLER}, "web/User.java")
+    assert calls["a"] == {"of": f"{_ROOT}/Mode.java"}  # declared in the enum's body
+    assert calls["c"] == {"label": f"{_ROOT}/Mode.java"}  # on a variable of the enum type
+

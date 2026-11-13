@@ -18,6 +18,7 @@ from tree_sitter import Node
 
 from ..index_common import ClassHeritage, record_distinct
 from ..treesitter import node_text
+from .functions import class_members
 
 _CLASS_DECLS = ("class_declaration", "interface_declaration", "enum_declaration",
                 "record_declaration", "annotation_type_declaration")
@@ -81,8 +82,8 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
 
     found: list[tuple[str, Node]] = []
 
-    def walk(node: Node, outer: str) -> None:
-        for child in node.named_children:
+    def walk(nodes: list[Node], outer: str) -> None:
+        for child in nodes:
             if child.type in _CLASS_DECLS:
                 nm = child.child_by_field_name("name")
                 if nm is None:
@@ -91,9 +92,9 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
                 found.append((qualified, child))
                 body = child.child_by_field_name("body")
                 if body is not None:
-                    walk(body, qualified)
+                    walk(class_members(body), qualified)
 
-    walk(root, "")
+    walk(root.named_children, "")
     local_names = {q.rsplit(".", 1)[-1] for q, _ in found}
     out: list[HeritageFrag] = []
     for qualified, node in found:
@@ -111,7 +112,7 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
                 candidates = (f"{package}.{base}" if package else base,
                               *(f"{w}.{base}" for w in wildcards))
         body = node.child_by_field_name("body")
-        decls = [m for m in (body.named_children if body else ())
+        decls = [m for m in (class_members(body) if body else ())
                  if m.type == "method_declaration"]
         returns: dict[str, str | None] = {}
         names: list[str] = []

@@ -9,7 +9,7 @@ from ...schemas import Class, ConstructorParam, Function, Statement
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
-from .functions import build_method, extract_annotations, extract_params, modifiers_node
+from .functions import build_method, class_members, extract_annotations, extract_params, modifiers_node
 from .statements import extract_statements
 
 _TYPE = {
@@ -78,7 +78,7 @@ def build_class(
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
-        for member in body.named_children:
+        for member in class_members(body):
             if member.type in ("method_declaration", "constructor_declaration"):
                 fn, fn_statements = build_method(
                     member, source, path,

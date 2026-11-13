@@ -124,26 +124,36 @@ def class_method_names(root: Node, source: bytes) -> dict[str, set[str]]:
                 body = child.child_by_field_name("body")
                 if nm is None or body is None:
                     continue
-                own = {node_text(n, source) for m in body.named_children
+                own = {node_text(n, source) for m in class_members(body)
                        if m.type == "method_declaration"
                        and (n := m.child_by_field_name("name")) is not None}
-                if child.type == "enum_declaration":  # enum methods follow the constants
-                    decls = next((c for c in body.named_children
-                                  if c.type == "enum_body_declarations"), None)
-                    if decls is not None:
-                        own |= {node_text(n, source) for m in decls.named_children
-                                if m.type == "method_declaration"
-                                and (n := m.child_by_field_name("name")) is not None}
                 names = own | outer
                 out.setdefault(node_text(nm, source), set()).update(names)
                 walk(body, names)
-                if child.type == "enum_declaration" and decls is not None:
+                decls = _enum_declarations(body)
+                if decls is not None:
                     walk(decls, names)
             elif child.type != "class_body":  # an anonymous class is not a named scope
                 walk(child, outer)
 
     walk(root, set())
     return out
+
+
+def _enum_declarations(body: Node) -> Node | None:
+    return next((c for c in body.named_children if c.type == "enum_body_declarations"), None)
+
+
+def class_members(body: Node) -> list[Node]:
+    """The members of a class body. An enum's fields, constructors, methods and inner types sit
+    after its constants in an ``enum_body_declarations`` node; they are members all the same."""
+    members: list[Node] = []
+    for child in body.named_children:
+        if child.type == "enum_body_declarations":
+            members.extend(child.named_children)
+        else:
+            members.append(child)
+    return members
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:
