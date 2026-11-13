@@ -239,6 +239,45 @@ def test_access_mixin_is_not_a_guard(analyze_files) -> None:
     assert (a.guards, a.authRequired) == (None, None)
 
 
+def test_function_view_is_located_whatever_its_first_parameter_is_called(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\n"
+        "urlpatterns = [path('a/', views.a), path('b/', views.b), path('c/', views.c)]\n",
+        **{"shop/__init__.py": "", "shop/views.py": (
+            "from django.http import HttpResponse\n"
+            "def a(req):\n    return HttpResponse()\n"
+            "def b(*args, **kwargs):\n    pass\n"
+            "def c():\n    pass\n")}))  # takes no argument: Django could not call it
+    assert (_one(st, "ANY", "/a/").handlerPath, _one(st, "ANY", "/a/").handlerLine) == ("shop/views.py", 2)
+    assert (_one(st, "ANY", "/b/").handlerPath, _one(st, "ANY", "/b/").handlerLine) == ("shop/views.py", 4)
+    assert _one(st, "ANY", "/c/").handlerLine is None
+
+
+def test_function_view_rebound_later_in_its_module_is_not_located(analyze_files) -> None:
+    st = analyze_files(_project(
+        "from shop import views\n"
+        "urlpatterns = [path('a/', views.a), path('b/', views.b), path('c/', views.c),"
+        " path('d/', views.d), path('e/', views.e)]\n",
+        **{"shop/__init__.py": "", "shop/v2.py": "def a(request):\n    pass\n", "shop/views.py": (
+            "from django.contrib.auth.decorators import login_required\n"
+            "from shop import v2\n"
+            "def a(req):\n    pass\n"
+            "from shop.v2 import a\n"                 # replaces the def: not located
+            "def b(req):\n    pass\n"
+            "b = v2.a\n"                              # replaces it too, though `.a` is an attribute
+            "def c(req):\n    pass\n"
+            "c = login_required(c)\n"                 # wraps it: the def still runs
+            "from shop.v2 import a as d\n"
+            "def d(req):\n    pass\n"                 # defined after the import: this def runs
+            "def e(req):\n    pass\n"
+            "x, e = 1, 2\n")}))                       # a tuple target replaces it
+    assert _one(st, "ANY", "/a/").handlerLine is None
+    assert _one(st, "ANY", "/b/").handlerLine is None
+    assert (_one(st, "ANY", "/c/").handlerPath, _one(st, "ANY", "/c/").handlerLine) == ("shop/views.py", 9)
+    assert (_one(st, "ANY", "/d/").handlerPath, _one(st, "ANY", "/d/").handlerLine) == ("shop/views.py", 13)
+    assert _one(st, "ANY", "/e/").handlerLine is None
+
+
 def test_middleware_guards_every_route_when_settings_agree(analyze_files) -> None:
     mw = ("MIDDLEWARE = ['django.contrib.sessions.middleware.SessionMiddleware',\n"
           "              'django.contrib.auth.middleware.LoginRequiredMiddleware']\n")

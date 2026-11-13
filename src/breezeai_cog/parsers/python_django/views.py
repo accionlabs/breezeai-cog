@@ -337,16 +337,79 @@ def _positional_to_base_init(call: Node, source: bytes) -> bool:
     return len(args) > (0 if written == "super().__init__" else 1)
 
 
-def _takes_request(fdef: Node, source: bytes) -> bool:
-    """Whether a function has a parameter named ``request`` — Django's convention for a view."""
+def _bound_names(stmt: Node, source: bytes) -> list[tuple[str, Node | None]]:
+    """The names a module-level import or assignment binds: (name, the assigned value — None for
+    an import)."""
+    if stmt.type in ("import_statement", "import_from_statement"):
+        mod = stmt.child_by_field_name("module_name")
+        out: list[tuple[str, Node | None]] = []
+        for item in stmt.named_children:
+            if item == mod:
+                continue
+            if item.type == "aliased_import":
+                alias = item.child_by_field_name("alias")
+                if alias is not None:
+                    out.append((node_text(alias, source), None))
+            elif item.type == "dotted_name":  # ``import a.b`` binds ``a``
+                out.append((node_text(item, source).split(".", 1)[0], None))
+        return out
+    assign = stmt.named_children[0] if stmt.type == "expression_statement" and stmt.named_children else stmt
+    if assign.type != "assignment":
+        return []
+    left, right = assign.child_by_field_name("left"), assign.child_by_field_name("right")
+    targets = [left] if left is not None and left.type == "identifier" else \
+        [t for t in (left.named_children if left is not None else []) if t.type == "identifier"]
+    return [(node_text(t, source), right) for t in targets]
+
+
+def _rebound(root: Node, source: bytes) -> set[str]:
+    """Functions a later module-level import or assignment replaces (``def index(req): …`` then
+    ``from .v2 import index``): which object a urlconf reaches is then not the ``def``. An
+    assignment that wraps the function (``index = login_required(index)``) keeps it — the ``def``
+    is still what runs."""
+    defined: set[str] = set()
+    out: set[str] = set()
+    for stmt in root.named_children:
+        inner = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" else stmt
+        if inner is not None and inner.type in ("function_definition", "class_definition"):
+            name = field_text(inner, "name", source)
+            out.discard(name)  # defined again: this definition is the one
+            if inner.type == "function_definition":
+                defined.add(name)
+            else:
+                defined.discard(name)
+            continue
+        for name, value in _bound_names(stmt, source):
+            if name in defined and not (value is not None and _mentions(value, name, source)):
+                out.add(name)
+    return out
+
+
+def _mentions(node: Node, name: str, source: bytes) -> bool:
+    """Whether ``node`` reads the variable ``name`` — not ``x.name`` (an attribute) or ``f(name=…)``
+    (a keyword)."""
+    if node.type == "identifier":
+        return node_text(node, source) == name
+    if node.type == "attribute":
+        obj = node.child_by_field_name("object")
+        return obj is not None and _mentions(obj, name, source)
+    if node.type == "keyword_argument":
+        value = node.child_by_field_name("value")
+        return value is not None and _mentions(value, name, source)
+    return any(_mentions(c, name, source) for c in node.named_children)
+
+
+#: Parameters that can take the first positional argument (``req``, ``req: HttpRequest``, ``*args``).
+_POSITIONAL = frozenset({"identifier", "typed_parameter", "default_parameter", "typed_default_parameter",
+                         "list_splat_pattern"})
+
+
+def _takes_request(fdef: Node) -> bool:
+    """Whether a function can take the request Django passes a view as its first positional
+    argument, whatever the parameter is called (``request``, ``req``, ``_``, ``*args``)."""
     params = fdef.child_by_field_name("parameters")
-    for param in params.named_children if params is not None else ():
-        name = param
-        if param.type in ("typed_parameter", "default_parameter", "typed_default_parameter"):
-            name = param.child_by_field_name("name") or (param.named_children[0] if param.named_children else param)
-        if name.type == "identifier" and node_text(name, source) == "request":
-            return True
-    return False
+    first = params.named_children[0] if params is not None and params.named_children else None
+    return first is not None and first.type in _POSITIONAL
 
 
 def _reexports(root: Node, source: bytes, rel: str, repo_root: Path
@@ -421,8 +484,8 @@ def export_of(views: Mapping[str, FileViews], file: str, name: str) -> tuple[str
 
 
 def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileViews:
-    """The module-level classes and the functions that can be views — decorated, or taking
-    ``request`` — of one file (see :class:`FileViews`)."""
+    """The module-level classes and the functions that can be views — decorated, or able to take
+    the request as their first positional argument — of one file (see :class:`FileViews`)."""
     origins = Origins(root, source)
     imports = ImportRefs(root, source, repo_root, rel, plain=True)  # resolved only for the bases that need it
     defs: list[tuple[Node, Node | None]] = []
@@ -431,6 +494,7 @@ def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> F
         if inner is not None and inner.type in ("function_definition", "class_definition"):
             defs.append((inner, stmt if stmt.type == "decorated_definition" else None))
     local = {field_text(d, "name", source) for d, _ in defs if d.type == "class_definition"}
+    rebound = _rebound(root, source)
     out = FileViews()
     if rel.rpartition("/")[2] == "__init__.py" and repo_root is not None:
         out.reexports, out.stars = _reexports(root, source, rel, repo_root)
@@ -439,8 +503,10 @@ def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> F
         if inner.type == "class_definition":
             out.classes[name] = _class(inner, decorated, source, rel, local, imports, origins, repo_root)
             continue
-        if decorated is None and not _takes_request(inner, source):
-            continue  # a helper: no urlconf names it as a view, and it has nothing a view needs
+        if decorated is None and not _takes_request(inner):
+            continue  # takes no argument: Django could not call it as a view
+        if name in rebound:
+            continue  # replaced later in the module: the ``def`` is not what a urlconf reaches
         decorators = _decorators(decorated, source, origins) if decorated is not None else []
         out.functions[name] = FunctionView(
             line=inner.start_point[0] + 1,
