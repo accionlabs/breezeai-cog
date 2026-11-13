@@ -22,9 +22,9 @@ CERTAIN_AUTH = frozenset({
     "django.contrib.auth.mixins.LoginRequiredMixin",
     "django.contrib.auth.mixins.PermissionRequiredMixin",
 })
-#: The auth mixins that are guards when a class-based view inherits them.
-AUTH_MIXINS = frozenset({"LoginRequiredMixin", "PermissionRequiredMixin", "UserPassesTestMixin",
-                         "AccessMixin"})
+#: The auth mixins that are guards when a class-based view inherits them. Not ``AccessMixin``:
+#: the base they share, which checks nothing itself (a subclass's ``dispatch`` does).
+AUTH_MIXINS = frozenset({"LoginRequiredMixin", "PermissionRequiredMixin", "UserPassesTestMixin"})
 AUTH_MIXIN_MODULE = "django.contrib.auth.mixins"
 #: Django 5.1's middleware that requires a login for every view not marked
 #: ``@login_not_required``.

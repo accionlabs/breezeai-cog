@@ -223,6 +223,22 @@ def test_auth_mixins_are_guards(analyze_files) -> None:
     assert (b.guards, b.authRequired) == (["UserPassesTestMixin"], None)
 
 
+def test_access_mixin_is_not_a_guard(analyze_files) -> None:
+    # AccessMixin is the base the auth mixins share: it checks nothing itself. The repo's own
+    # subclass does, in a dispatch of its own — not a guard the code names.
+    st = analyze_files(_project(
+        "from shop.views import A\nurlpatterns = [path('a/', A.as_view())]\n",
+        **{"shop/__init__.py": "", "shop/views.py": (
+            "from django.contrib.auth.mixins import AccessMixin\n"
+            "from django.views.generic import ListView\n"
+            "class Conditional(AccessMixin):\n"
+            "    def dispatch(self, request, *args, **kwargs):\n"
+            "        return super().dispatch(request, *args, **kwargs)\n"
+            "class A(Conditional, ListView):\n    pass\n")}))
+    a = _one(st, "GET", "/a/")
+    assert (a.guards, a.authRequired) == (None, None)
+
+
 def test_middleware_guards_every_route_when_settings_agree(analyze_files) -> None:
     mw = ("MIDDLEWARE = ['django.contrib.sessions.middleware.SessionMiddleware',\n"
           "              'django.contrib.auth.middleware.LoginRequiredMiddleware']\n")
