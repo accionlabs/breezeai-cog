@@ -236,7 +236,8 @@ def test_rails_auth_required_only_for_authentication_callbacks(analyze_files) ->
     assert got == {
         "/devise": (["authenticate_user!"], True),
         "/login": (["require_login"], True),
-        "/authz": (["authorize"], True),
+        # authorization (Pundit / CanCan) is a guard, but a policy can admit guests
+        "/authz": (["authorize"], None),
         # non-authentication callbacks stay in guards but never assert authRequired
         "/plain": (["set_locale", "set_order", "load_resource"], None),
         "/mixed": (["set_locale", "authenticate"], True),
@@ -409,9 +410,29 @@ def test_rails_legacy_filter_syntax_matches_action_syntax(analyze_files) -> None
     ]))
     got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
     assert got == {
-        "/s": (["authenticate", "load", "tail", "first"], True),
-        "/i": (["tail", "first"], None),  # authenticate skipped on index
-        "/p": (["authenticate", "tail", "first"], True),
+        "/s": (["first", "authenticate", "load", "tail"], True),
+        "/i": (["first", "tail"], None),  # authenticate skipped on index
+        "/p": (["first", "authenticate", "tail"], True),
+    }
+
+
+def test_rails_prepended_callbacks_run_before_inherited_ones(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/x', to: 'items#show'")),
+        _controller("application_controller.rb",
+                    "class ApplicationController < ActionController::Base\n"
+                    "  before_action :set_locale\nend\n"),
+        _controller("items_controller.rb",
+                    "class ItemsController < ApplicationController\n"
+                    "  before_action :load_item\n"
+                    "  prepend_before_action :authenticate_user!\n"
+                    "  prepend_before_action :a, :b\n"
+                    "  prepend_before_action :load_item\n"
+                    "  def show; end\nend\n"),
+    ]))
+    # each name is prepended in turn (b ahead of a); prepending a declared one moves it
+    assert _guards(st, "/x") == {
+        "/x": ["load_item", "b", "a", "authenticate_user!", "set_locale"],
     }
 
 
