@@ -49,12 +49,14 @@ Callback = tuple[str, tuple[str, ...] | None, tuple[str, ...]]
 #: One ``skip_before_action``: (the callbacks it names, or None when unreadable — all of them;
 #: the actions it is limited to, or None for all; the actions it leaves the callback on).
 Skip = tuple[tuple[str, ...] | None, tuple[str, ...] | None, tuple[str, ...]]
-#: A class body's callbacks and skips, in declaration order: one of the two is set.
-_Op = tuple[Callback | None, Skip | None]
+#: A class body's callbacks and skips, in declaration order: one of the two is set. The flag
+#: marks a ``prepend_before_action`` callback, which goes to the front of the chain.
+_Op = tuple[Callback | None, Skip | None, bool]
 
 #: ``*_filter`` is the pre-Rails-5.1 spelling of every ``*_action`` callback; same behaviour.
 _BEFORE = {"before_action", "prepend_before_action", "append_before_action",
            "before_filter", "prepend_before_filter", "append_before_filter"}
+_PREPEND = {"prepend_before_action", "prepend_before_filter"}
 _SKIP = {"skip_before_action", "skip_before_filter"}
 
 #: What one controller contributes: (parent constant as written, lexical scopes innermost
@@ -70,10 +72,11 @@ _CONSTANT = re.compile(r"(::)?[A-Z]\w*(::[A-Z]\w*)*")
 #: ``require_logged_in_user_or_400``). The list is exact on purpose: a name that only mentions a
 #: user (``load_user``, ``find_user_from_rss_token``) or asks for the opposite
 #: (``require_no_user_or_redirect``) is a guard but does not establish that login is required.
+#: ``authorize`` is left out: it checks permission (Pundit, CanCan), and a policy can admit guests.
 _DEVISE_AUTH = re.compile(r"authenticate_[a-z0-9_]+!|authenticated?\([a-z0-9_:]+\)")
 _LOGIN_FAMILY = re.compile(r"require_logged_in_(user|moderator|admin)(_or_\d+)?")
 _AUTH_CALLBACKS = frozenset({
-    "authenticate", "authenticate_user", "authorize", "ensure_logged_in", "login_required",
+    "authenticate", "authenticate_user", "ensure_logged_in", "login_required",
     "require_login", "require_user",
 })
 
@@ -182,21 +185,27 @@ def _class_ops(cls: Node, source: bytes) -> list[_Op]:
             continue
         if name in _BEFORE:
             entries = _callbacks(stmt, source) if stmt.type == "call" else None
-            out.extend((e, None) for e in entries or [])
+            out.extend((e, None, name in _PREPEND) for e in entries or [])
         elif name in _SKIP:
-            out.append((None, _skip(stmt, source) if stmt.type == "call" else (None, None, ())))
+            out.append((None, _skip(stmt, source) if stmt.type == "call" else (None, None, ()),
+                        False))
     return out
 
 
 def _run(callbacks: list[Callback], ops: list[_Op]) -> list[Callback]:
     """``callbacks`` (inherited) followed by a class's own callbacks and skips, in order. Declaring
     a callback again replaces the earlier one of that name (Rails moves it to the end, with the
-    new ``only:`` / ``except:``), so a guard is never listed twice."""
+    new ``only:`` / ``except:``), so a guard is never listed twice. A prepended callback goes to
+    the front instead, ahead of inherited ones; ``prepend_before_action :a, :b`` prepends ``a``
+    then ``b``, so ``b`` runs first."""
     out = list(callbacks)
-    for callback, skip in ops:
+    for callback, skip, prepend in ops:
         if callback is not None:
             out = [c for c in out if c[0] != callback[0]]
-            out.append(callback)
+            if prepend:
+                out.insert(0, callback)
+            else:
+                out.append(callback)
         elif skip is not None:
             out = _apply_skip(out, skip)
     return out
