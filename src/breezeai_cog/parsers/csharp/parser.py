@@ -43,7 +43,7 @@ from .imports import (
 )
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-from .statements import collect_datastore_receivers, collect_http_client_ids
+from .statements import ReceiverNames, reset_receiver_names, set_receiver_names
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -79,15 +79,13 @@ class CSharpParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
-        # Names holding an HttpClient, for the shared outbound-call classifier — set for this
-        # file's extraction only (reset in a finally so a reused worker never leaks them).
-        # Names declared as a DynamoDB client, for the shared db-call classifier — same lifetime.
-        ids: frozenset[str] = frozenset()
-        receivers: dict[str, str] = {}
-        if ctx.capture_statements:
-            types = type_map(root, ctx.source)
-            ids = collect_http_client_ids(root, ctx.source, types)
-            receivers = collect_datastore_receivers(root, ctx.source, types)
+        # Names holding an HttpClient or a DynamoDB client, for the shared call classifiers —
+        # bound by scope and set by extract_statements for each body it walks; the file-level
+        # values are the top-level statements' own. Reset in a finally so a reused worker never
+        # leaks them.
+        names = ReceiverNames(root, ctx.source) if ctx.capture_statements else None
+        ids, receivers = names.at(root) if names else (frozenset(), {})
+        scoped = set_receiver_names(names or None)
         token = set_http_client_ids(ids)
         stores = set_datastore_receivers(receivers or None)
         vendor = begin_datastore_vendor()  # set by _extract from the imports; never leaks
@@ -97,6 +95,7 @@ class CSharpParser(BaseParser):
             end_datastore_vendor(vendor)
             reset_datastore_receivers(stores)
             reset_http_client_ids(token)
+            reset_receiver_names(scoped)
 
     def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
@@ -107,7 +106,10 @@ class CSharpParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index
         )
-        set_datastore_vendor(external)
+        # The ORM may be imported once for the whole project (``global using`` in another file,
+        # ``<Using Include>`` in the .csproj): those namespaces are in scope here too.
+        index = ctx.resolution_index if isinstance(ctx.resolution_index, CSharpIndex) else None
+        set_datastore_vendor(external + sorted(index.usings_for(path)) if index else external)
         local_names = defined_names(root, source)
         # A `using static Ns.Type` puts Type's members in scope unqualified, so a bare
         # `M()` needs them bound; `local_names` keeps a same-file declaration winning.

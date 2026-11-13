@@ -1,4 +1,4 @@
-"""ASP.NET Web Forms page/control detection.
+"""ASP.NET Web Forms pages, from the code-behind — C# (``.aspx.cs``) and VB (``.aspx.vb``) alike.
 
 A Web Forms page (``Foo.aspx``) and user control (``Foo.ascx``) are the app's user-facing
 entry points, but — unlike MVC controllers or minimal APIs — they carry no routing
@@ -6,18 +6,18 @@ entry points, but — unlike MVC controllers or minimal APIs — they carry no r
 is convention-based: for each code-behind file it emits ONE synthetic, file-parented
 ``route`` statement, mirroring how the React detector treats config/markup routes.
 
-* ``.aspx.cs`` → ``routeKind=page``   (a navigable page)
-* ``.ascx.cs`` → no record            (a user control: part of the pages that load it)
-* ``.master.cs`` → no record          (a layout, not a route)
+* ``.aspx.cs`` / ``.aspx.vb`` → ``routeKind=page``   (a navigable page)
+* ``.ascx.*`` → no record            (a user control: part of the pages that load it)
+* ``.master.*`` → no record          (a layout, not a route)
 
 A page's links to its master page and to the controls it loads are structural links, recorded in
 ``importFiles`` by the parser — never as route records (contract §5).
 
 ``endpoint`` is derived from the code-behind path (``CMS/Enrollment.aspx.cs`` →
-``/CMS/Enrollment.aspx``); ``handler`` is the code-behind class. Because no AST node backs
-the route, ``nodeType`` is a synthetic marker (like the controller detector's ``attribute``).
-Accurate URLs (``MapPageRoute``), page→control mount edges, and navigation are a phase-2
-markup pass and intentionally out of scope here."""
+``/CMS/Enrollment.aspx``), or the page's ``MapPageRoute`` URLs; ``handler`` is the code-behind
+class. Because no AST node backs the route, ``nodeType`` is ``synthetic``. Everything here reads
+the ``FileRecord`` and the path, never the tree, so both languages share it.
+"""
 
 from __future__ import annotations
 
@@ -32,12 +32,13 @@ from ..emits import Emit
 #: (no backing AST node — the markup isn't parsed); the page/control distinction lives in routeKind.
 _KIND_BY_SUFFIX: dict[str, tuple[str, str]] = {
     ".aspx.cs": ("page", "synthetic"),
+    ".aspx.vb": ("page", "synthetic"),
 }
 
 
 def _endpoint(path: str) -> str:
     """Code-behind path → page URL: ``CMS/Enrollment.aspx.cs`` → ``/CMS/Enrollment.aspx``."""
-    markup = path[: -len(".cs")]  # drop the trailing ".cs"
+    markup = path[: -len(".cs")]  # drop the trailing ".cs" / ".vb" (both three bytes)
     return "/" + markup.lstrip("/")
 
 
@@ -46,7 +47,10 @@ def _page_class(record: FileRecord, path: str) -> Class | None:
     (``CMS/Enrollment.aspx.cs`` → class ``Enrollment``); fall back to the first class."""
     stem = path.rsplit("/", 1)[-1].split(".", 1)[0]  # Enrollment.aspx.cs → Enrollment
     by_name = {c.name: c for c in record.classes}
-    return by_name.get(stem) or (record.classes[0] if record.classes else None)
+    # VB names are case-insensitive: ``orders.aspx.vb`` may declare ``Orders``.
+    by_lower = {c.name.lower(): c for c in record.classes}
+    return (by_name.get(stem) or by_lower.get(stem.lower())
+            or (record.classes[0] if record.classes else None))
 
 
 def detect_webforms_pages(

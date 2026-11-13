@@ -374,7 +374,7 @@ def _server_comments(path: str) -> tuple[bytes, bytes] | None:
     owns it (``@*`` in a plain ``.html`` JavaScript string is just text). ``<!-- -->`` is different:
     an HTML comment, markup only, never inside a script body."""
     low = path.lower()
-    if low.endswith((".cshtml", ".razor")):
+    if low.endswith((".cshtml", ".razor", ".vbhtml")):
         return _RAZOR_COMMENT
     if low.endswith((".aspx", ".ascx", ".master")):
         return _WEBFORMS_COMMENT
@@ -444,7 +444,7 @@ def _shadow_scripts(markup: bytes, path: str = "") -> tuple[bytes, bool]:
 #     with it loaded — recorded as a fact so the script's own parse can read it (``_collect``);
 #   * a Razor view's layout chain (``Layout = "…"`` in the view, else the nearest ``_ViewStart``),
 #     resolved with ASP.NET's own view-location rule (``_find_layout``).
-_MARKUP_EXTS = (".cshtml", ".razor", ".html", ".htm", ".aspx", ".ascx", ".master")
+_MARKUP_EXTS = (".cshtml", ".razor", ".vbhtml", ".html", ".htm", ".aspx", ".ascx", ".master")
 _SCRIPT_TAG = _SCRIPT_OPEN
 #: ``<asp:ScriptReference Path="~/Scripts/jquery.js" />`` — a ScriptManager's script list
 _SCRIPT_REFERENCE = re.compile(rb"<asp:ScriptReference\b" + _OPEN_ATTRS, re.IGNORECASE | re.DOTALL)
@@ -455,7 +455,8 @@ _JQUERY_BUNDLE = re.compile(
 #: the first ``*.js`` path in an attribute value — also inside ``@Url.Content("~/js/x.js")``
 _JS_PATH = re.compile(rb"(?:https?:)?[\w.~/\-]*[\w\-]\.js(?![\w])", re.IGNORECASE)
 _LAYOUT_ASSIGN = re.compile(rb'\bLayout\s*=\s*"([^"]+)"')
-_LAYOUT_NULL = re.compile(rb"\bLayout\s*=\s*null\b")
+#: ``Layout = null`` (C#) / ``Layout = Nothing`` (VB): the view has no layout.
+_LAYOUT_NULL = re.compile(rb"\bLayout\s*=\s*null\b|(?i:\bLayout\s*=\s*Nothing\b)")
 _LAYOUT_DEPTH = 3  # a layout may itself have a parent layout
 
 
@@ -508,15 +509,15 @@ def _within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _find_layout(name: str, base: Path, repo_root: Path) -> Path | None:
+def _find_layout(name: str, base: Path, repo_root: Path, ext: str = ".cshtml") -> Path | None:
     """The layout file ``name`` refers to, searched like ASP.NET does: the view's directory and each
     ancestor up to the repo root, directly and under a ``Shared`` folder (``Pages/Shared``,
-    ``Views/Shared``)."""
+    ``Views/Shared``). A bare name takes the view's own extension (``ext``)."""
     rel = Path(name.strip().lstrip("~").lstrip("/"))
     if not rel.name or ".." in rel.parts:
         return None
-    if rel.suffix.lower() != ".cshtml":
-        rel = rel.with_name(rel.name + ".cshtml")
+    if rel.suffix.lower() not in (".cshtml", ".vbhtml"):
+        rel = rel.with_name(rel.name + ext)
     anc = base
     while _within(anc, repo_root):
         for sub in ("", "Shared"):
@@ -529,13 +530,13 @@ def _find_layout(name: str, base: Path, repo_root: Path) -> Path | None:
     return None
 
 
-def _view_start_layouts(base: Path, repo_root: Path) -> list[str]:
+def _view_start_layouts(base: Path, repo_root: Path, ext: str = ".cshtml") -> list[str]:
     """``Layout`` names from the nearest ``_ViewStart`` that assigns one (it applies to every view
     beneath it)."""
     anc = base
     while _within(anc, repo_root):
         try:
-            names = _layout_names((anc / "_ViewStart.cshtml").read_bytes())
+            names = _layout_names((anc / f"_ViewStart{ext}").read_bytes())
         except OSError:
             names = []
         if names:
@@ -546,9 +547,11 @@ def _view_start_layouts(base: Path, repo_root: Path) -> list[str]:
     return []
 
 
-def _chain_loads_jquery(names: list[str], base: Path, repo_root: Path, depth: int = 0) -> bool:
+def _chain_loads_jquery(
+    names: list[str], base: Path, repo_root: Path, depth: int = 0, ext: str = ".cshtml",
+) -> bool:
     for name in names:
-        layout = _find_layout(name, base, repo_root)
+        layout = _find_layout(name, base, repo_root, ext)
         if layout is None:
             continue
         try:
@@ -558,7 +561,7 @@ def _chain_loads_jquery(names: list[str], base: Path, repo_root: Path, depth: in
         if _page_loads_jquery(bytes(_sweep(data, layout.name)[0])):
             return True
         if depth < _LAYOUT_DEPTH and _chain_loads_jquery(
-            _layout_names(data), layout.parent, repo_root, depth + 1
+            _layout_names(data), layout.parent, repo_root, depth + 1, ext
         ):
             return True
     return False
@@ -567,12 +570,13 @@ def _chain_loads_jquery(names: list[str], base: Path, repo_root: Path, depth: in
 def layout_loads_jquery(markup: bytes, rel: str, repo_root: Path) -> bool:
     """Does the Razor view at ``rel`` render inside a layout that loads jQuery? Partials count too:
     they are rendered into pages, and ``_ViewStart`` applies to the views under it. ``Layout = null``
-    opts out."""
+    (VB: ``Nothing``) opts out. A VB view (``.vbhtml``) looks for ``.vbhtml`` layouts."""
     if _LAYOUT_NULL.search(markup):
         return False
     base = (repo_root / rel).parent
-    names = _layout_names(markup) or _view_start_layouts(base, repo_root)
-    return _chain_loads_jquery(names, base, repo_root)
+    ext = ".vbhtml" if rel.lower().endswith(".vbhtml") else ".cshtml"
+    names = _layout_names(markup) or _view_start_layouts(base, repo_root, ext)
+    return _chain_loads_jquery(names, base, repo_root, ext=ext)
 
 
 def _collect(root: Any, source: bytes, rel: str, repo_root: Path | None) -> frozenset[str] | None:

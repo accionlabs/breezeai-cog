@@ -79,12 +79,15 @@ def _page_address(path: str) -> str | None:
 
 def _page_endpoint(template: str | None, path: str) -> str | None:
     """The page's endpoint. A Blazor template is the whole address. A Razor Page's absolute
-    template (``/x``) is kept; none, or a relative one (``{id:int}``), is joined to the page's
-    own address — empty when that is unknown, never the bare template."""
+    template (``/x``, or ``~/x`` — ASP.NET reads both as an override of the page's address and
+    serves ``~/x`` at ``/x``) is kept; none, or a relative one (``{id:int}``), is joined to the
+    page's own address — empty when that is unknown, never the bare template."""
     if path.lower().endswith(".razor") or (template or "").startswith("/"):
         return template
+    if (template or "").startswith("~/"):
+        return (template or "")[1:]
     if (template or "").startswith("~"):
-        return None  # an app-relative form this rule does not cover: empty, not a guess
+        return None  # ``~`` / ``~x``: no override and no valid relative route — empty, not a guess
     address = _page_address(path)
     if address is None or not template:
         return address

@@ -158,13 +158,18 @@ flowchart TD
    verb in another language (`stream().findFirst()`) needs a data-access receiver too. A
    receiver whose declared type is the product's client counts for that product's generic verbs:
    in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
-   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call.
+   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call. The name is bound where
+   the call is: a class that declares its own `_ctx` as something else is not DynamoDB.
 3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
    entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
    `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the
    `NHibernate` namespace → `hibernate`, `Microsoft.EntityFrameworkCore` → `entity_framework`
-   (Java, Kotlin, Groovy, Scala, C#, VB). A `jakarta.persistence` annotation or exception is not
-   enough: other ORMs (Ebean) use them too.
+   (Java, Kotlin, Groovy, Scala, C#, VB). In C# an import made once for the whole project counts
+   as the file's own — a `global using` in any `.cs` file of the same project, or
+   `<Using Include>` in its `.csproj` / `Directory.Build.props` — as the compiler sees it; another
+   project's imports do not. A `jakarta.persistence` annotation or exception is not
+   enough: other ORMs (Ebean) use them too. EF's `Include` / `ThenInclude` on a chain naming a
+   bundle (`new ScriptBundle("~/x").Include("~/Scripts/x.js")`) is ASP.NET bundling, not a query.
 4. **Otherwise `orm`:** data access whose product the file doesn't show. A service that
    receives its repository by injection usually imports only that interface, so it stays `orm`.
 

@@ -3,6 +3,7 @@ call detection."""
 
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Mapping
 
 from tree_sitter import Node
@@ -11,13 +12,18 @@ from ...schemas import Decorator, Statement
 from ..statements_common import (
     classify_statement,
     render_concat,
+    reset_datastore_receivers,
+    reset_http_client_ids,
     resolve_endpoint,
+    set_datastore_receivers,
+    set_http_client_ids,
     strip_leading_base,
     url_placeholder,
 )
 from ..treesitter import node_text
 from .attributes import extract_attributes
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
+from .scopes import Binding, Classify, TypeScopes
 
 # C# declaration node types that may carry attributes ([NotMapped], [Required], etc.)
 _ATTRIBUTED_DECL_TYPES = {"field_declaration", "property_declaration"}
@@ -126,81 +132,48 @@ def _request_message(args: list[Node], source: bytes) -> tuple[str | None, Node 
 _HTTP_CLIENT_TYPES = {"HttpClient"}
 
 
-def collect_http_client_ids(root: Node, source: bytes, types: dict[str, str]) -> frozenset[str]:
-    """Names in this file that hold an ``HttpClient`` — declared with that type (field,
-    property, parameter, local; ``types`` from ``type_map``), or initialised from
-    ``new HttpClient(…)`` / ``factory.CreateClient(…)`` — so a call on a client whose name has
-    no ``http`` hint (``client.GetAsync``, ``_api.PostAsJsonAsync``) is still an outbound call."""
-    ids = {name for name, typ in types.items()
-           if typ.split("<", 1)[0].rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES}
-
-    def walk(n: Node) -> None:
-        if n.type == "property_declaration":
-            typ, name = n.child_by_field_name("type"), n.child_by_field_name("name")
-            if typ is not None and name is not None and \
-                    node_text(typ, source).rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES:
-                ids.add(node_text(name, source))
-        elif n.type == "variable_declarator":
-            # By position: a tree-sitter Node is a new object on every lookup, so `is` never matches.
-            name = n.child_by_field_name("name")
-            value = n.named_children[1] if len(n.named_children) > 1 else None
-            if name is not None and value is not None and _creates_client(value, source):
-                ids.add(node_text(name, source))
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return frozenset(ids)
-
-
-def _creates_client(value: Node, source: bytes) -> bool:
-    """``new HttpClient(…)`` or ``….CreateClient(…)`` (IHttpClientFactory)."""
-    if value.type == "object_creation_expression":
-        typ = value.child_by_field_name("type")
-        return typ is not None and node_text(typ, source).rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES
-    if value.type == "invocation_expression":
-        fn = value.child_by_field_name("function")
-        name = fn.child_by_field_name("name") if fn is not None and \
-            fn.type == "member_access_expression" else None
-        return name is not None and node_text(name, source) == "CreateClient"
-    return False
-
-
 def type_name(typ: str) -> str:
     """The simple name of a declared type: ``Amazon.S3.IAmazonS3?`` → ``IAmazonS3``,
     ``Lazy<T>`` → ``Lazy``."""
     return typ.split("<", 1)[0].rstrip("?").rsplit(".", 1)[-1]
 
 
-def collect_typed_names(
-    root: Node, source: bytes, types: dict[str, str], wanted: Mapping[str, str],
-) -> dict[str, str]:
-    """Names in this file that hold one of the ``wanted`` types (simple type name → label):
-    declared with it (field, parameter, local — ``types`` from ``type_map`` — or property), or
-    initialised from ``new T(…)`` (``var client = new AmazonS3Client()``) → their label."""
-    found = {name: wanted[type_name(typ)] for name, typ in types.items()
-             if type_name(typ) in wanted}
+def typed(wanted: Mapping[str, str]) -> Classify:
+    """A declaration → the label of its ``wanted`` type (simple type name → label): its declared
+    type, or for ``var`` the type it is created as (``var s3 = new AmazonS3Client()``)."""
+    def classify(b: Binding) -> str | None:
+        if b.type is not None:
+            return wanted.get(type_name(b.type))
+        if b.init is not None and b.init.type == "object_creation_expression":
+            t = b.init.child_by_field_name("type")
+            return wanted.get(type_name(_raw(t))) if t is not None else None
+        return None
+    return classify
 
-    def walk(n: Node) -> None:
-        if n.type == "property_declaration":
-            typ, name = n.child_by_field_name("type"), n.child_by_field_name("name")
-            if typ is not None and name is not None and \
-                    type_name(node_text(typ, source)) in wanted:
-                found[node_text(name, source)] = wanted[type_name(node_text(typ, source))]
-        elif n.type == "variable_declarator" and len(n.named_children) > 1:
-            # Children are the name, then the initialiser (node objects are not identical
-            # across lookups, so compare by position, not ``is``).
-            name, value = n.named_children[0], n.named_children[1]
-            if value.type == "object_creation_expression":
-                typ = value.child_by_field_name("type")
-                label = wanted.get(type_name(node_text(typ, source))) if typ is not None else None
-                if label is not None:
-                    found.setdefault(node_text(name, source), label)
-        for c in n.named_children:
-            walk(c)
 
-    walk(root)
-    return found
+def _http_client(b: Binding) -> str | None:
+    """``http`` for a declaration that holds an ``HttpClient``: declared with that type, or a
+    ``var`` initialised from ``new HttpClient(…)`` / ``factory.CreateClient(…)``."""
+    if b.type is not None:
+        return "http" if type_name(b.type) in _HTTP_CLIENT_TYPES else None
+    return "http" if b.init is not None and _creates_client(b.init) else None
+
+
+def _creates_client(value: Node) -> bool:
+    """``new HttpClient(…)`` or ``….CreateClient(…)`` (IHttpClientFactory)."""
+    if value.type == "object_creation_expression":
+        typ = value.child_by_field_name("type")
+        return typ is not None and type_name(_raw(typ)) in _HTTP_CLIENT_TYPES
+    if value.type == "invocation_expression":
+        fn = value.child_by_field_name("function")
+        name = fn.child_by_field_name("name") if fn is not None and \
+            fn.type == "member_access_expression" else None
+        return name is not None and _raw(name) == "CreateClient"
+    return False
+
+
+def _raw(node: Node) -> str:
+    return (node.text or b"").decode("utf-8", "replace")
 
 
 #: AWS SDK for .NET DynamoDB client types → ``dataAccessHint``. Their names are distinctive, so
@@ -214,14 +187,48 @@ _DATASTORE_TYPES = {
 _DATASTORE_TYPES_WITH_IMPORT = {**_DATASTORE_TYPES, "Table": "dynamodb"}
 
 
-def collect_datastore_receivers(root: Node, source: bytes, types: dict[str, str]) -> dict[str, str]:
-    """Names declared as a datastore client type → product, for the shared db-call classifier
-    (``_ctx.SaveAsync(order)`` on an ``IDynamoDBContext`` is DynamoDB; on anything else it is
-    not data access)."""
-    if b"DynamoDB" not in source:
-        return {}
-    wanted = _DATASTORE_TYPES_WITH_IMPORT if b"Amazon.DynamoDBv2" in source else _DATASTORE_TYPES
-    return collect_typed_names(root, source, types, wanted)
+class ReceiverNames:
+    """The names that hold an ``HttpClient`` or a datastore client, for the shared call
+    classifier — bound by scope (:mod:`.scopes`), so each body sees its own: ``_ctx`` is a
+    DynamoDB context in the class that declares it so, and nothing in the class next to it that
+    declares ``_ctx`` as its own unit of work.
+
+    The shared classifier takes names, not nodes, so :func:`extract_statements` sets them
+    (``set_http_client_ids`` / ``set_datastore_receivers``) for each body it walks."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        self.scopes = TypeScopes(root, source)
+        self._http = self.scopes.candidates(_http_client)
+        self._store: Classify | None = None
+        self._stores: frozenset[str] = frozenset()
+        if b"DynamoDB" in source:
+            self._store = typed(_DATASTORE_TYPES_WITH_IMPORT if b"Amazon.DynamoDBv2" in source
+                                else _DATASTORE_TYPES)
+            self._stores = self.scopes.candidates(self._store)
+
+    def __bool__(self) -> bool:
+        return bool(self._http or self._stores)
+
+    def at(self, node: Node) -> tuple[frozenset[str], dict[str, str]]:
+        """(HttpClient names, datastore name → product) as bound at ``node``."""
+        http = frozenset(self.scopes.labels_at(node, _http_client, self._http)) \
+            if self._http else frozenset()
+        stores = self.scopes.labels_at(node, self._store, self._stores) \
+            if self._store is not None and self._stores else {}
+        return http, stores
+
+
+#: The file's receiver names while it is extracted (set by the C# parser; reset in a finally).
+_receiver_names: contextvars.ContextVar[ReceiverNames | None] = contextvars.ContextVar(
+    "csharp_receiver_names", default=None)
+
+
+def set_receiver_names(names: ReceiverNames | None) -> "contextvars.Token[ReceiverNames | None]":
+    return _receiver_names.set(names)
+
+
+def reset_receiver_names(token: "contextvars.Token[ReceiverNames | None]") -> None:
+    _receiver_names.reset(token)
 
 
 def _span(node: Node) -> tuple[int, int]:
@@ -266,6 +273,21 @@ def extract_statements(
 ) -> list[Statement]:
     if not capture or body is None:
         return []
+    names = _receiver_names.get()
+    if not names:
+        return _extract(body, source, path, parent_id, limit, seen_ids, descend_all, barriers)
+    http, stores = names.at(body)
+    token, store_token = set_http_client_ids(http), set_datastore_receivers(stores or None)
+    try:
+        return _extract(body, source, path, parent_id, limit, seen_ids, descend_all, barriers)
+    finally:
+        reset_datastore_receivers(store_token)
+        reset_http_client_ids(token)
+
+
+def _extract(body: Node, source: bytes, path: str, parent_id: str, limit: int,
+             seen_ids: set[str], descend_all: bool,
+             barriers: frozenset[tuple[int, int]]) -> list[Statement]:
     out: list[Statement] = []
     for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(

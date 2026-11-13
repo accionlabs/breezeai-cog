@@ -1,6 +1,15 @@
 # WCF and ASMX — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/csharp_wcf/`, `dotnet_servicehost/` (`.svc` / `.asmx` markup) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_wcf.py`
+Parsers: `src/breezeai_cog/parsers/csharp_wcf/` (C#), `vb_wcf/` (VB), `dotnet_servicehost/` (`.svc` / `.asmx` markup); shared rules in `wcf_common.py` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_wcf.py`, `tests/unit/test_vb_wcf.py`
+
+VB services get the same records (`<ServiceContract>`, `<OperationContract>`, `<WebGet>`, `<WebInvoke>`,
+`<WebMethod>`), with three differences:
+- **Handler:** an interface operation's handler is the method whose `Implements IOrders.GetOrder`
+  clause names it, in any file; it may be named differently from the operation.
+- **Host:** only the `.svc` / `.asmx` beside the class (`X.svc.vb`), or beside an interface's one
+  implementing class. VB prefixes the project's root namespace implicitly, so a `Service=` name is
+  not matched repo-wide.
+- **`UriTemplate`:** a string literal only; a `Const` leaves the endpoint empty.
 
 | Construct | Role | Record | Why |
 |---|---|---|---|

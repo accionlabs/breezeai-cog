@@ -575,7 +575,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, PHP, Python, Ruby, Scala, TypeScript), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -706,7 +706,10 @@ the file:
   │                  52   symfony-http-…   php_symfony/http_calls.py                 │
   │                  53   psr-http-calls   php_psr/http_calls.py                     │
   │                                                                                  │
-  │  Kotlin · Groovy · Ruby · VB · C++ · HCL                                         │
+  │  vb              10   aws-sdk-calls    vb_aws/sdk_calls.py               ✔       │
+  │                  20   graphql-client   vb_graphql_client/…ions.py        ✔       │
+  │                                                                                  │
+  │  Kotlin · Groovy · Ruby · HCL                                                    │
   │   └─ no additive hook yet: shared classifiers only                               │
   └──────────────────────────────────────┬───────────────────────────────────────────┘
                                          │
@@ -966,7 +969,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation or attribute macro before a function's name, `void DEPRECATED(…) f(…);`, `void * __attribute__((…)) f(…)`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation or attribute macro before a function's name, `void DEPRECATED(…) f(…);`, `void * __attribute__((…)) f(…)`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo; and a VB file that declares a type inside another type is parsed once per nesting level (the grammar has no nested-type rule): the outer types with the nested ones blanked, then each level on its own — in practice a few files per VB repo. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |

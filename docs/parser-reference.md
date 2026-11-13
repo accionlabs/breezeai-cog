@@ -455,11 +455,23 @@ register_detector(Detector(
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.
-- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `java`, `python`, `scala`, `php`, `go`); `order` must be
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `vb`, `java`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
   language extras (`bindings` for TypeScript, `types` for Scala).
+- A detector that keys on a receiver's declared type (an SDK client) binds the name **where the
+  call is**, by the language's scope rules — never one `name → type` map per file, where the last
+  class's field wins for every class. For C#, `csharp/scopes.py`: `TypeScopes` records each
+  declaration under its scope in one walk, and `receiver_label` looks a receiver up from the
+  member's locals and parameters (a local of another type shadows the field) to the type's fields
+  and properties, its same-file bases and outer types; `this.x` looks at the type only. The
+  shared call classifiers take names, not nodes, so the C# parser sets their `HttpClient` and
+  datastore names for each body it walks (`csharp/statements.py`, `ReceiverNames`). For VB,
+  `vb/scopes.py`: `receiver_type` looks a receiver up from the enclosing lambda and member to each
+  enclosing type's fields and properties, case-insensitively; a declaration whose type can't be
+  read hides the name instead of letting it fall through to a field. `iter_calls` also reads a
+  generic call (`x.M(Of T)(…)`), which the grammar misparses, as one call.
 - Add the detector to the inventory in `tests/unit/test_additive.py`.
 
 **Facts from other files.** When the detection needs a fact that lives in *another* file — a
@@ -488,7 +500,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     ...
 ```
 
-- The language must be in `INDEX_HOOKED_LANGUAGES` (`csharp`, `go`, `graphql`, `groovy`, `java`, `python`, `ruby`, `scala`, `typescript`): those are the languages
+- The language must be in `INDEX_HOOKED_LANGUAGES` (`apex`, `c`, `cpp`, `csharp`, `cuda`, `go`, `graphql`, `groovy`, `java`, `php`, `python`, `ruby`, `scala`, `typescript`, `vb`): those are the languages
   whose `build_index` calls `collect_additive` / `resolve_additive`. The gate is required. Both
   are checked at registration.
 - **Files another parser owns.** `sources=(".svc",)` (and optionally `grammar="graphql"`) makes

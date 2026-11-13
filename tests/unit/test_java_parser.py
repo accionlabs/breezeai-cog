@@ -452,3 +452,19 @@ def test_nested_class_method_id_carries_the_qualified_owner(tmp_path) -> None:
 def test_payload_type(declared: str, payload: str | None) -> None:
     from breezeai_cog.parsers.java.functions import payload_type
     assert payload_type(declared) == payload
+
+
+
+def test_index_facts_get_the_repo_root_whatever_the_path_spelling(tmp_path, monkeypatch, windows_spelled) -> None:
+    # A Windows path's string never ends with its "/"-separated repo-relative path; index-stage
+    # facts must still receive the repo root.
+    from breezeai_cog.parsers.java import imports
+
+    seen = []
+    monkeypatch.setattr(imports, "collect_additive",
+                        lambda lang, root, source, rel, repo_root: seen.append((rel, repo_root)) or {})
+    (tmp_path / "a").mkdir()
+    src = tmp_path / "a" / "A.java"
+    src.write_text("package a\nclass A {}\n")
+    imports.build_fqcn_index(tmp_path, [windows_spelled(src)], jobs=1)
+    assert seen == [("a/A.java", tmp_path)]
