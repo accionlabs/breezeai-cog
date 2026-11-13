@@ -18,7 +18,7 @@ from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
-from .functions import defined_names, type_map
+from .functions import class_method_names, defined_names, type_map
 from .imports import JavaIndex, build_fqcn_index, extract_imports
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -67,6 +67,7 @@ class JavaParser(BaseParser):
             bindings, defined_names(root, source), path, type_map(root, source),
             heritage=idx.class_heritage if isinstance(idx, JavaIndex) else None,
             declared_only=True,
+            owner_defs=class_method_names(root, source),
         )
         functions: list[Function] = []
         classes = []

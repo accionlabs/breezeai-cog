@@ -86,9 +86,11 @@ def _calls(
     calls: list[Call] = []
     seen: set[str] = set()
 
-    def visit(node: Node) -> None:
+    def visit(node: Node, inner: bool) -> None:
         # Descend into every scope, including inline lambdas — their calls belong to
-        # the nearest named enclosing function (see build_function).
+        # the nearest named enclosing function (see build_function). Inside an anonymous or
+        # local class body (`inner`), `this` and a bare name may mean that class's own members,
+        # so the call is not credited to the enclosing class's own methods.
         for child in node.named_children:
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
@@ -98,14 +100,50 @@ def _calls(
                     receiver = node_text(obj, source) if obj is not None else None
                     if name and name not in seen:
                         seen.add(name)
-                        path = resolve(name, receiver, owner)
+                        path = resolve(name, receiver, None if inner else owner)
                         if path is None and receiver is None and owner is not None:
                             path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
                         calls.append(Call(name=name, path=path))
-            visit(child)
+            visit(child, inner or child.type == "class_body")
 
-    visit(body)
+    visit(body, False)
     return calls
+
+
+def class_method_names(root: Node, source: bytes) -> dict[str, set[str]]:
+    """Class simple name → the methods a bare call in it can mean in this file: its own and its
+    enclosing classes' (an inner class may call its outer class's methods). An anonymous class's
+    methods belong to no named class, so a bare call in a named method never lands on them."""
+    out: dict[str, set[str]] = {}
+
+    def walk(node: Node, outer: set[str]) -> None:
+        for child in node.named_children:
+            if child.type in ("class_declaration", "interface_declaration", "enum_declaration",
+                              "record_declaration"):
+                nm = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
+                if nm is None or body is None:
+                    continue
+                own = {node_text(n, source) for m in body.named_children
+                       if m.type == "method_declaration"
+                       and (n := m.child_by_field_name("name")) is not None}
+                if child.type == "enum_declaration":  # enum methods follow the constants
+                    decls = next((c for c in body.named_children
+                                  if c.type == "enum_body_declarations"), None)
+                    if decls is not None:
+                        own |= {node_text(n, source) for m in decls.named_children
+                                if m.type == "method_declaration"
+                                and (n := m.child_by_field_name("name")) is not None}
+                names = own | outer
+                out.setdefault(node_text(nm, source), set()).update(names)
+                walk(body, names)
+                if child.type == "enum_declaration" and decls is not None:
+                    walk(decls, names)
+            elif child.type != "class_body":  # an anonymous class is not a named scope
+                walk(child, outer)
+
+    walk(root, set())
+    return out
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:

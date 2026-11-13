@@ -165,3 +165,54 @@ def test_a_call_on_a_call_resolves_through_the_return_type(tmp_path: Path) -> No
     assert calls["e"]["missing"] is None                        # not declared on the type
     assert calls["f"]["get"] == f"{_ROOT}/DataApiHandler.java"  # own method's return type
     assert calls["g"]["get"] is None                            # two calls deep: not followed
+
+
+_NOTICE = """package com.acme;
+public class Notice {
+    protected void alert(String m) {}
+    protected void log(String m) {}
+}
+"""
+_DATA = """package com.acme;
+public class Data extends Notice {
+    private final Handler h = new Handler() {
+        @Override protected void alert(String m) {}
+    };
+    void a() { alert("x"); }
+    void b() { this.alert("x"); }
+    void c() { own(); }
+    void own() {}
+    void d() {
+        new Handler() {
+            void run() { alert("y"); this.log("z"); }
+        };
+    }
+    class Inner {
+        void e() { own(); alert("q"); }
+    }
+}
+"""
+_HANDLER = """package com.acme;
+public abstract class Handler {
+    protected void alert(String m) {}
+}
+"""
+
+
+def test_a_bare_call_is_not_shadowed_by_another_class_in_the_file(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {"Notice.java": _NOTICE, "Data.java": _DATA,
+                              "Handler.java": _HANDLER}, "Data.java")
+    # `alert` is declared here only by an anonymous Handler: Data's own call is the inherited one
+    assert calls["a"] == {"alert": f"{_ROOT}/Notice.java"}
+    assert calls["b"] == {"alert": f"{_ROOT}/Notice.java"}
+    assert calls["c"] == {"own": f"{_ROOT}/Data.java"}
+    # an inner class reaches its outer class's methods; its own unknown name goes up Inner's chain
+    assert calls["e"] == {"own": f"{_ROOT}/Data.java", "alert": None}
+
+
+def test_a_call_inside_an_anonymous_class_keeps_the_file_wide_answer(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {"Notice.java": _NOTICE, "Data.java": _DATA,
+                              "Handler.java": _HANDLER}, "Data.java")
+    # in the anonymous Handler, `alert` may be its own: it stays credited to this file as before,
+    # and `this.log` (the anonymous instance) is not resolved through Data's base class
+    assert calls["d"] == {"alert": f"{_ROOT}/Data.java", "log": None}

@@ -80,6 +80,7 @@ def make_resolver(
     heritage: dict[str, ClassHeritage | None] | None = None,
     builtin_methods: frozenset[str] = frozenset(),
     declared_only: bool = False,
+    owner_defs: dict[str, set[str]] | None = None,
 ) -> CallResolver:
     """``(name, receiver, owner=None) -> repo path | None``. ``receiver`` is the callee's
     qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -90,7 +91,11 @@ def make_resolver(
     type)`` → defining file (``None`` = ambiguous, honest-null); ``heritage`` is the
     repo ``class_heritage`` index walked for inherited-method resolution. ``declared_only``
     makes the receiver-type tier check ``heritage``: the method must be declared by the type or
-    an in-repo ancestor (its file), else no edge."""
+    an in-repo ancestor (its file), else no edge. ``owner_defs`` (class simple name → the
+    methods a bare / ``this`` call written in it can mean in this file) narrows the same-file
+    tier to the calling class, so a same-named method of another class in the file (a nested
+    or anonymous one) does not shadow an inherited method; without an ``owner`` (or for an
+    unknown one) the whole file's ``local_defs`` apply."""
     types = types or {}
 
     def _inherited(name: str, owner: str) -> str | None:
@@ -140,9 +145,14 @@ def make_resolver(
         ret = _lookup(cls, method, "returns")[1]
         return _lookup(ret, name, "methods")[1] if ret else None
 
+    def _own(owner: str | None) -> set[str]:
+        if owner_defs is not None and owner is not None and owner in owner_defs:
+            return owner_defs[owner]
+        return local_defs
+
     def resolve(name: str, receiver: str | None, owner: str | None = None) -> str | None:
         if receiver in ("self", "this"):
-            if name in local_defs:  # same-file method
+            if name in _own(owner):  # same-file method
                 return path
             if owner is not None:  # inherited base-class method
                 return _inherited(name, owner)
@@ -152,7 +162,7 @@ def make_resolver(
         if receiver is None:
             if name in bindings:  # imported function
                 return bindings[name]
-            if name in local_defs:  # same-file function/class
+            if name in _own(owner):  # same-file function/class
                 return path
             return None
         if receiver in bindings:  # `Imported.method()` → Imported's file
