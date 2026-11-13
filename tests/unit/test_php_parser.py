@@ -68,10 +68,8 @@ class Controller extends BaseController {
             if statement.nodeType in {"property_declaration", "const_declaration"}] == [
         "VERSION", "name",
     ]
-    assert [(p["name"], p["visibility"], p["isConst"], p["type"]) for p in record.classes[0].properties] == [
-        ("VERSION", "public", True, None),
-        ("name", "private", False, "?string"),
-    ]
+    # Members are statements only; the Class carries no duplicate member list.
+    assert "properties" not in record.classes[0].model_dump(by_alias=True)
     assert all(statement.parentId for statement in record.statements)
     assert FileRecord.model_validate(record.model_dump(by_alias=True))
 
