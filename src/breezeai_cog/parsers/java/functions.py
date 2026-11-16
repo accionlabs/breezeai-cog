@@ -56,26 +56,41 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
         if p.type in ("formal_parameter", "spread_parameter"):
             tnode = p.child_by_field_name("type")
             nnode = p.child_by_field_name("name")
-            if nnode is None:  # spread_parameter holds a variable_declarator
+            suffix = ""
+            if p.type == "spread_parameter":
+                # ``Handler... h``: the grammar names neither the type nor the name here; the
+                # type is the child that is not a modifier or the declarator, written with ``...``.
                 decl = next((c for c in p.named_children if c.type == "variable_declarator"), None)
                 nnode = decl.child_by_field_name("name") if decl is not None else None
+                tnode = next((c for c in p.named_children
+                              if c.type not in ("modifiers", "variable_declarator", "line_comment",
+                                                 "block_comment")), None)
+                suffix = "..."
             out.append(Parameter(
                 name=node_text(nnode, source) if nnode is not None else "",
-                type=node_text(tnode, source) if tnode is not None else "",
+                type=node_text(tnode, source) + suffix if tnode is not None else "",
                 decorators=extract_annotations(modifiers_node(p), source),
             ))
     return out
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
+) -> list[Call]:
+    """The calls in a method body. ``owner`` is the simple name of the class it is declared in:
+    a call on ``this`` or ``super``, or a bare call (Java's implicit ``this``), may resolve to an
+    inherited method."""
     if body is None:
         return []
     calls: list[Call] = []
     seen: set[str] = set()
 
-    def visit(node: Node) -> None:
+    def visit(node: Node, inner: bool) -> None:
         # Descend into every scope, including inline lambdas — their calls belong to
-        # the nearest named enclosing function (see build_function).
+        # the nearest named enclosing function (see build_function). Inside an anonymous or
+        # local class body (`inner`), `this` and a bare name may mean that class's own members,
+        # so the call is not credited to the enclosing class's own methods.
         for child in node.named_children:
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
@@ -85,11 +100,60 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
                     receiver = node_text(obj, source) if obj is not None else None
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
-            visit(child)
+                        path = resolve(name, receiver, None if inner else owner)
+                        if path is None and receiver is None and owner is not None:
+                            path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
+                        calls.append(Call(name=name, path=path))
+            visit(child, inner or child.type == "class_body")
 
-    visit(body)
+    visit(body, False)
     return calls
+
+
+def class_method_names(root: Node, source: bytes) -> dict[str, set[str]]:
+    """Class simple name → the methods a bare call in it can mean in this file: its own and its
+    enclosing classes' (an inner class may call its outer class's methods). An anonymous class's
+    methods belong to no named class, so a bare call in a named method never lands on them."""
+    out: dict[str, set[str]] = {}
+
+    def walk(node: Node, outer: set[str]) -> None:
+        for child in node.named_children:
+            if child.type in ("class_declaration", "interface_declaration", "enum_declaration",
+                              "record_declaration"):
+                nm = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
+                if nm is None or body is None:
+                    continue
+                own = {node_text(n, source) for m in class_members(body)
+                       if m.type == "method_declaration"
+                       and (n := m.child_by_field_name("name")) is not None}
+                names = own | outer
+                out.setdefault(node_text(nm, source), set()).update(names)
+                walk(body, names)
+                decls = _enum_declarations(body)
+                if decls is not None:
+                    walk(decls, names)
+            elif child.type != "class_body":  # an anonymous class is not a named scope
+                walk(child, outer)
+
+    walk(root, set())
+    return out
+
+
+def _enum_declarations(body: Node) -> Node | None:
+    return next((c for c in body.named_children if c.type == "enum_body_declarations"), None)
+
+
+def class_members(body: Node) -> list[Node]:
+    """The members of a class body. An enum's fields, constructors, methods and inner types sit
+    after its constants in an ``enum_body_declarations`` node; they are members all the same."""
+    members: list[Node] = []
+    for child in body.named_children:
+        if child.type == "enum_body_declarations":
+            members.extend(child.named_children)
+        else:
+            members.append(child)
+    return members
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:
@@ -180,7 +244,7 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

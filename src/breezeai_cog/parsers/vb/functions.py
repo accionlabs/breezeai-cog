@@ -2,9 +2,15 @@
 
 VB nests modifiers under a ``modifiers`` wrapper, types under an ``as_clause``, and
 attributes under ``attribute_block`` nodes; calls use ``invocation`` / ``member_access``.
+
+The grammar's type argument list is ``Of T`` without its parentheses, so in ``List(Of Customer)``
+the ``(`` is an ``ERROR`` inside the type and the ``)`` an ``ERROR`` right after it: a type's text
+is read by :func:`type_text`, which takes those closing parentheses back from the source.
 """
 
 from __future__ import annotations
+
+import re
 
 from tree_sitter import Node
 
@@ -40,21 +46,25 @@ def _attribute(node: Node, source: bytes) -> Decorator:
     arglist = next((c for c in node.named_children if c.type == "argument_list"), None)
     if arglist is not None:
         for arg in arglist.named_children:
-            if arg.type != "argument":
-                continue
-            lit = _find_string(arg)
-            args.append(node_text(lit, source).strip('"') if lit is not None else node_text(arg, source))
+            if arg.type == "argument":
+                args.append(_attribute_arg(arg, source))
     return Decorator(name=name, args=args)
 
 
-def _find_string(node: Node) -> Node | None:
-    if node.type == "string_literal":
-        return node
-    for c in node.named_children:
-        found = _find_string(c)
-        if found is not None:
-            return found
-    return None
+#: A whole VB string literal (``""`` is an escaped quote).
+_VB_STRING = re.compile(r'^"((?:[^"]|"")*)"$', re.DOTALL)
+
+
+def _attribute_arg(arg: Node, source: bytes) -> str:
+    """One attribute argument as the C# reader keeps it: a named argument as written
+    (``Name:="GetOrder"``), a positional string literal unquoted (``{id}``), anything else
+    (``"a" & "b"``, ``Order.Last``) as written."""
+    text = node_text(arg, source).strip()
+    first = arg.named_children[0] if arg.named_children else None
+    if first is not None and first.type == "identifier":  # ``Key:=value``
+        return text
+    m = _VB_STRING.match(text)
+    return m.group(1).replace('""', '"') if m else text
 
 
 def attributes_from_blocks(blocks: list[Node], source: bytes) -> list[Decorator]:
@@ -70,6 +80,31 @@ def extract_attributes(node: Node, source: bytes) -> list[Decorator]:
     return attributes_from_blocks(blocks, source)
 
 
+def _is_sub(node: Node, source: bytes) -> bool:
+    """Whether a method is a ``Sub``, which returns nothing — whatever the grammar put in its
+    ``return_type`` when a parameter list misparses (a type after a generic parameter)."""
+    name = node.child_by_field_name("name")
+    head = source[node.start_byte:name.start_byte] if name is not None else b""
+    return re.search(rb"(?i)\bSub[ \t]+$", head) is not None
+
+
+def type_text(node: Node, source: bytes) -> str | None:
+    """A type node's text with the closing parentheses its generic arguments lost to the grammar
+    (``Task(Of List(Of Customer``, then ``))`` in the source → ``Task(Of List(Of Customer))``);
+    only ``)`` directly after the node (spaces between) are taken, as many as are missing. None
+    when they are not there: a partial type is not a type."""
+    end = node.end_byte
+    missing = node_text(node, source).count("(") - node_text(node, source).count(")")
+    while missing > 0:
+        j = end
+        while j < len(source) and source[j] in b" \t":
+            j += 1
+        if source[j:j + 1] != b")":
+            return None
+        end, missing = j + 1, missing - 1
+    return source[node.start_byte:end].decode("utf-8", "replace") if missing == 0 else None
+
+
 def as_clause_type(container: Node, source: bytes) -> str | None:
     """The declared type of a node's ``As <type>`` clause (param/field), else None."""
     as_clause = next((c for c in container.named_children if c.type == "as_clause"), None)
@@ -77,7 +112,7 @@ def as_clause_type(container: Node, source: bytes) -> str | None:
         tnode = as_clause.child_by_field_name("type") or next(
             (c for c in as_clause.named_children if c.type in ("type", "primitive_type")), None)
         if tnode is not None:
-            return node_text(tnode, source)
+            return type_text(tnode, source)
     return None
 
 
@@ -124,6 +159,24 @@ def _calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> 
     return calls
 
 
+#: ``Function Name`` / ``Sub Name`` in a declaration header.
+_HEADER_NAME = re.compile(rb"\b(?:Function|Sub)[ \t]+(?:\[([^\]\n]+)\]|([A-Za-z_]\w*))", re.IGNORECASE)
+
+
+def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
+    """``(name, header_broken)`` of a method or constructor. When the grammar fails inside the
+    header (an ``ERROR`` before the ``name`` field), that field points into the body — e.g. at
+    ``IsNullOrWhiteSpace`` from the first ``If`` — so the name is read from the header text
+    instead, and ``header_broken`` tells the caller not to trust the parsed parameters."""
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        return None, False
+    if not any(c.type == "ERROR" and c.start_byte < name_node.start_byte for c in node.named_children):
+        return node_text(name_node, source), False
+    m = _HEADER_NAME.search(source, node.start_byte, name_node.start_byte)
+    return (next(g for g in m.groups() if g).decode("utf-8", "replace") if m else None), True
+
+
 def defined_names(root: Node, source: bytes) -> set[str]:
     names: set[str] = set()
     types = {
@@ -133,7 +186,11 @@ def defined_names(root: Node, source: bytes) -> set[str]:
 
     def walk(n: Node) -> None:
         for c in n.named_children:
-            if c.type in types:
+            if c.type in ("method_declaration", "constructor_declaration"):
+                name, _ = method_name(c, source)
+                if name is not None:
+                    names.add(name)
+            elif c.type in types:
                 nm = c.child_by_field_name("name")
                 if nm is not None:
                     names.add(node_text(nm, source))
@@ -176,18 +233,22 @@ def build_method(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
     is_ctor = node.type == "constructor_declaration"
-    name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source) if name_node is not None else ("New" if is_ctor else "<anonymous>")
+    declared, header_broken = method_name(node, source)
+    name = declared or ("New" if is_ctor else "<anonymous>")
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # A nested type's methods carry its dotted owner (``Outer.Inner``) in their id.
+    fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
-    ret = node.child_by_field_name("return_type")
+    # A broken header's parameter list and return type are read from the wrong text: empty.
+    ret = None if header_broken or _is_sub(node, source) else node.child_by_field_name("return_type")
+    params_node = None if header_broken else node.child_by_field_name("parameters")
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -196,9 +257,9 @@ def build_method(
         type="constructor" if is_ctor else "method",
         visibility=visibility,
         isStatic=is_static,
-        params=extract_params(node.child_by_field_name("parameters"), source),
+        params=extract_params(params_node, source),
         decorators=extract_attributes(node, source),
-        returnType=node_text(ret, source) if ret is not None else None,
+        returnType=type_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
         calls=_calls(node, source, resolve),

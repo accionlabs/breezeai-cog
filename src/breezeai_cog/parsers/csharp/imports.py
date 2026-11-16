@@ -59,8 +59,11 @@ class CSharpIndex:
     #: "Namespace.TypeName" → set of repo-relative files declaring it (a set so a name
     #: declared in >1 file — partial classes, collisions — is detected as ambiguous).
     types: dict[str, set[str]] = field(default_factory=dict)
-    #: namespaces brought into scope for *every* file via ``global using`` / ImplicitUsings.
-    global_usings: set[str] = field(default_factory=set)
+    #: project dir (as in ``project_roots``; None outside any project) → the namespaces its
+    #: ``.cs`` files bring into scope for the whole project with ``global using Ns;``. Stored
+    #: once, per project — the compiler scopes them to the project; :attr:`global_usings` is
+    #: their repo-wide union.
+    project_global_usings: dict[str | None, set[str]] = field(default_factory=dict)
     #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
     #: longest-first so the nearest ancestor of a file is its owning project.
     project_roots: list[str] = field(default_factory=list)
@@ -89,6 +92,18 @@ class CSharpIndex:
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def global_usings(self) -> set[str]:
+        """Every project's ``global using`` namespaces, as one repo-wide set."""
+        return set().union(*self.project_global_usings.values())
+
+    def usings_for(self, path: str) -> set[str]:
+        """The namespaces ``path``'s project brings into scope for every file in it: its
+        ``global using`` directives and its MSBuild ``<Using Include>``."""
+        proj = self.project_of(path)
+        return (self.project_global_usings.get(proj, set())
+                | (self.project_usings.get(proj, set()) if proj is not None else set()))
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -257,14 +272,16 @@ def _index_file(
     by_fqn: dict[str, ClassHeritage | None],
     method_files: dict[tuple[str, str], str | None],
     repo_root: Path | None = None,
+    project: str | None = None,
 ) -> None:
-    """Add one file's ``global using`` namespaces + declared types + members to ``index``.
-    Heritage is accumulated into ``by_fqn`` (fully-qualified names) for later projection."""
+    """Add one file's ``global using`` namespaces (under its ``project``) + declared types +
+    members to ``index``. Heritage is accumulated into ``by_fqn`` (fully-qualified names) for
+    later projection."""
     for child in root.named_children:
         if child.type == "using_directive":
             kind, name, _ = _classify_using(child, source)
             if kind == "global" and name:
-                index.global_usings.add(name)
+                index.project_global_usings.setdefault(project, set()).add(name)
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
@@ -474,16 +491,14 @@ _Fragment = tuple[
 ]
 
 
-def _index_one(args: tuple[str, str]) -> _Fragment | None:
-    """Parse one file into a **partial** index fragment — pure, no shared state, so it is
-    safe to run in a worker process (module-level + picklable, for :func:`parallel_map`).
-    Returns ``None`` on read error."""
-    file_s, rel = args
-    # Derive repo_root from the absolute path and the repo-relative path (registered facts
-    # resolve paths against it — e.g. ``~/`` in a MapPageRoute against its app root).
-    repo_root: Path | None = None
-    if file_s.endswith("/" + rel):
-        repo_root = Path(file_s[: -len(rel) - 1])
+def _index_one(args: tuple[str, str, str | None, str]) -> _Fragment | None:
+    """Parse one file (with its owning project) into a **partial** index fragment — pure, no
+    shared state, so it is safe to run in a worker process (module-level + picklable, for
+    :func:`parallel_map`). Returns ``None`` on read error."""
+    file_s, rel, project, root_s = args
+    # The repo root, passed in rather than derived from the path string (``\\`` on Windows);
+    # registered facts resolve paths against it — e.g. ``~/`` in a MapPageRoute.
+    repo_root = Path(root_s)
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -493,7 +508,7 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
         frag = CSharpIndex()
         by_fqn: dict[str, ClassHeritage | None] = {}
         method_files: dict[tuple[str, str], str | None] = {}
-        _index_file(root, source, rel, frag, by_fqn, method_files, repo_root)
+        _index_file(root, source, rel, frag, by_fqn, method_files, repo_root, project)
         return frag, by_fqn, method_files, collect_additive("csharp", root, source, rel, repo_root)
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
@@ -513,7 +528,8 @@ def _merge_fragment(
     """Reduce one file fragment into the shared index using the same collapse rules as the
     serial build (so the result is identical regardless of fragment order)."""
     fidx, fby, fmf, _ = frag
-    index.global_usings |= fidx.global_usings
+    for proj, names in fidx.project_global_usings.items():
+        index.project_global_usings.setdefault(proj, set()).update(names)
     for tname, tfiles in fidx.types.items():
         index.types.setdefault(tname, set()).update(tfiles)
     for ekey, efile in fidx.ext_methods.items():
@@ -551,7 +567,9 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
     by_fqn: dict[str, ClassHeritage | None] = {}   # partials merged per fully-qualified name
     method_files: dict[tuple[str, str], str | None] = {}
     # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
-    fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
+    fragments = parallel_map(
+        [(str(f), rel, index.project_of(rel), str(repo_root)) for f, rel in zip(files, rels)],
+        _index_one, jobs)
     # REDUCE: fold fragments into the shared index (deterministic, order-independent).
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("csharp", fact_files, repo_root, jobs)

@@ -160,7 +160,9 @@ framework must have the **higher** priority.
 | Claim too narrow | A claim on one import form only (`import io.vertx.core.Vertx`) misses wildcard imports, re-exports or fully-qualified use. | Gap — files fall back to the base parser and lose their routes. |
 
 How to check: for each pair of frameworks in the language, look for real files that match both
-claim strings (`grep -l` on a dogfood repo), and see which parser won (`FileRecord.framework`).
+claim strings (`grep -l` on a dogfood repo), and see which parser won (`registry.select(path, source).name`).
+`FileRecord.framework` is not the parser: it is a label a framework parser or an additive detector
+sets only when it finds its own entry points, so it can name a detector or be absent.
 
 ### 5. Derived data: no false positives
 

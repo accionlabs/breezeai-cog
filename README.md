@@ -23,7 +23,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Language | Extensions | Framework / detector support |
 |---|---|---|
 | TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, AngularJS 1.x (ngRoute and ui-router routes, controller/component/directive registrations, `$resource`; additive), Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
-| Python | `.py` | FastAPI |
+| Python | `.py` | FastAPI; Django (`urlpatterns` → one route per view and verb, class-based views and their bases followed across files, `include()` chains from `ROOT_URLCONF`, auth decorators / mixins and agreed `MIDDLEWARE` as guards); Django REST framework (router registrations → one route per viewset action and `@action`, generic API views, `@api_view`, `permission_classes` as guards, `serializer_class` as DTOs); Flask (additive — routes, `add_url_rule`, `MethodView`, blueprint prefixes followed across files, `before_request` hooks and Flask-Login as guards) |
 | PHP | `.php .phtml` | Laravel, CodeIgniter 4, Slim, Symfony; WordPress hooks, Laravel Event/Bus and Symfony EventDispatcher/Messenger (additive) |
 | Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
 | Java | `.java` `struts.xml` | Spring Boot (incl. `@Scheduled` / `@Schedules` and `TaskScheduler` / `ScheduledTaskRegistrar` timers, Kafka / RabbitMQ / JMS / SQS listeners and Spring Cloud Stream `@StreamListener`, Spring Security URL rules as route guards), JAX-RS, Struts2 (`struts.xml` actions and its includes, Convention-plugin `@Action` / `@Namespace` annotations and un-annotated Convention actions; 2.0 – 7.x), Vert.x 2 – 4 (routes, sub-routers, EventBus, service proxies, timers; Vert.x 2 registration tables, address helpers and `HttpClient` calls; additive, so also in Spring / JAX-RS classes) |
@@ -56,15 +56,26 @@ on for Razor Pages / Blazor (`@page` routes and `@code` methods live in the mark
 SFC `<script>` blocks and JSP pages. Full details: [Template Capture](docs/template-capture.md).
 
 † **Groovy is best-effort / second-tier.** It reliably captures the package / import /
-class / interface / enum / trait / method / field skeleton, but the grammar
-([dekobon-tree-sitter-groovy](https://pypi.org/project/dekobon-tree-sitter-groovy/)) degrades
-on some expression bodies (named-argument commas, parenthesised enum constants) and does not
-parse **nested type declarations** (a `class`/`enum` inside a class body). Degradation is
-always to *missing* nodes, never wrong ones — the parser fabricates nothing it cannot verify.
+class / interface / enum / trait / method / field skeleton, nested types included. The
+grammar ([dekobon-tree-sitter-groovy](https://github.com/dekobon/tree-sitter-groovy), pinned to
+a fork carrying fixes still under upstream review) has known gaps inside method bodies and
+enums. A declaration whose header fails to parse is dropped rather than emitted, but these
+shapes still give a wrong statement record:
+
+| Code | What is captured |
+|---|---|
+| `// note` then `String name = load()` | two statements, `String` and `name = load()`; the `load` call is kept |
+| `Map<String, Object> errors` (generic or array type, no initializer) | one declaration statement that also holds the next line |
+| `(long) (y)` | the cast is read as a call, and the statement can run on into the next line |
+| `A { … },` (an enum constant with a body) | the constants after it are lost; they can surface as a field |
+| `println name`, `log.info "x"` (a call without parentheses) | no call; the line becomes separate statements. Only a bare name with literal or closure arguments (`println "x"`) parses as a call, and cog does not record it yet |
 
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external
 backend allow-list must add these values before ingestion can rely on them being retained.
+
+Python framework values `flask`, `django` and `drf` are emitted the same way and need the same
+Target Spec §2.4 and backend allow-list entries.
 
 PHP framework values (`laravel`, `codeigniter`, `slim`, `symfony`, and `wordpress`) are also
 emitted as open framework strings. WordPress action/filter registrations use

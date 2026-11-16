@@ -15,13 +15,14 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
-from ..treesitter import parse_source
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import VbIndex, build_vb_index, extract_imports
+from .source import parse_nested, parse_vb
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -65,7 +66,7 @@ class VbParser(BaseParser):
         return build_vb_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("vb", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_vb(ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
@@ -85,33 +86,46 @@ class VbParser(BaseParser):
 
         internal, external, _, bindings = extract_imports(root, source)
         set_datastore_vendor(external)
-        resolve = make_resolver(
-            bindings, defined_names(root, source), path, type_map(root, source)
-        )
+        # Types nested in another type, one parse per nesting level (see .source).
+        nested = parse_nested(source, ctx.parse_timeout_micros)
+        trees = [root, *(level.root for level in nested)]
+        names: set[str] = set()
+        types: dict[str, str] = {}
+        for tree in trees:
+            names |= defined_names(tree, source)
+            for k, v in type_map(tree, source).items():
+                types.setdefault(k, v)
+        resolve = make_resolver(bindings, names, path, types)
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
 
-        for block, attrs in iter_type_declarations(root):
+        declared: list[tuple[Node, list[Node], str | None]] = [
+            (block, attrs, None) for block, attrs in iter_type_declarations(root)]
+        for level in nested:
+            declared += [(block, attrs, level.owner(block))
+                         for block, attrs in iter_type_declarations(level.root)]
+        for block, attrs, owner in declared:
             cls, methods, cls_statements = build_class(
                 block, source, path,
                 parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit,
-                pending_attrs=attrs, resolve=resolve,
+                pending_attrs=attrs, resolve=resolve, owner=owner,
             )
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_statements)
 
         if capture:
-            statements.extend(
-                comment_statements_for(
-                    root, source, path, file_id=fid, functions=functions, classes=classes,
-                    statements=statements, control_flow=CONTROL_FLOW,
-                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+            for tree in trees:
+                statements.extend(
+                    comment_statements_for(
+                        tree, source, path, file_id=fid, functions=functions, classes=classes,
+                        statements=statements, control_flow=CONTROL_FLOW,
+                        comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                    )
                 )
-            )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -123,3 +137,8 @@ class VbParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors (parsers/additive.py), on every nesting level's tree: a nested
+        # type's calls are only in its level's parse.
+        for tree in trees:
+            run_additive("vb", tree, ctx, record, is_fixture=self.is_fixture_file(path))
+        return record

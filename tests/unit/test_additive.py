@@ -59,8 +59,8 @@ def test_inventory_in_run_order() -> None:
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda"],
-        "java": ["quartz", "struts2", "vertx"],
-        "python": ["celery"],
+        "java": ["quartz", "struts2", "apache-httpclient", "vertx"],
+        "python": ["celery", "flask", "drf-routers", "django-channels"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
@@ -71,6 +71,7 @@ def test_inventory_in_run_order() -> None:
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",
                        "react-navigation", "angularjs"],
+        "vb": ["aws-sdk-calls", "graphql-client"],
     }
 
 

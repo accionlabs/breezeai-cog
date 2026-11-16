@@ -3,7 +3,8 @@
 Differs from Java's model in three ways the dekobon grammar dictates:
 * modifiers (``public``/``private``/``static``/``abstract``/``final``/``def``) are
   **inline children** of the declaration, not wrapped in a ``modifiers`` node;
-* names are a ``name`` field holding a plain ``identifier``;
+* names are a ``name`` field holding an ``identifier``, or a ``quoted_identifier`` for a
+  string-named method (Spock's ``def "order is created"()``);
 * a call is a ``method_invocation`` whose ``function`` field is either a bare
   ``identifier`` (``foo()``) or a ``field_access`` (``obj.foo()``).
 
@@ -18,7 +19,7 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import MEMBER_ACCESS, extract_statements
 
 _VISIBILITY = ("public", "private", "protected")
 
@@ -35,6 +36,28 @@ def has_declaration_error(node: Node) -> bool:
     (§ reliability: absent beats wrong). A messy method *body* (an error nested deeper) is
     fine — the header is trustworthy — so we check only direct children."""
     return any(c.type == "ERROR" or c.is_missing for c in node.children)
+
+
+_INTERPOLATIONS = ("gstring_dollar_interpolation", "gstring_brace_interpolation")
+
+
+def name_text(name_node: Node | None, source: bytes) -> str:
+    """A method name as Groovy reads it. A string name (``def "order is created"()``, called
+    as ``this."order is created"()``) is a ``quoted_identifier``; its name is the text inside
+    the quotes."""
+    if name_node is None:
+        return ""
+    name = node_text(name_node, source)
+    if name_node.type == "quoted_identifier":
+        for quote in ('"""', "'''", '"', "'"):
+            if len(name) >= 2 * len(quote) and name.startswith(quote) and name.endswith(quote):
+                return name[len(quote):-len(quote)]
+    return name
+
+
+def decl_name(node: Node, source: bytes) -> str:
+    """A declaration's name; a string-named method's is the text inside its quotes."""
+    return name_text(node.child_by_field_name("name"), source)
 
 
 def _flags(node: Node) -> tuple[str, bool, bool]:
@@ -87,19 +110,27 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _callee(call: Node, source: bytes) -> tuple[str, str | None]:
-    """(method_name, receiver) for a ``method_invocation``. ``function`` is a bare
-    ``identifier`` (receiver ``None``) or a ``field_access`` (``obj.method``)."""
+def _callee(call: Node, source: bytes) -> tuple[str, str | None, bool]:
+    """(method_name, receiver, resolvable) for a ``method_invocation``. ``function`` is a bare
+    ``identifier`` (receiver ``None``) or a member access: ``obj.method``, ``obj?.method`` or
+    ``list*.method``. A spread call runs the method on each element, so the receiver's own type
+    says nothing about it: it is not resolvable."""
+    if call.type == "command_chain":  # ``println "done"`` — the call's name is its receiver field
+        name = call.child_by_field_name("receiver")
+        return (node_text(name, source), None, True) if name is not None else ("", None, False)
     fn = call.child_by_field_name("function")
     if fn is None:
-        return "", None
-    if fn.type == "field_access":
-        obj = fn.child_by_field_name("object")
-        field = fn.child_by_field_name("field")
-        method = node_text(field, source) if field is not None else ""
+        return "", None, False
+    fields = MEMBER_ACCESS.get(fn.type)
+    if fields is not None:
+        obj = fn.child_by_field_name(fields[0])
+        member = fn.child_by_field_name(fields[1])
+        if member is not None and any(c.type in _INTERPOLATIONS for c in member.named_children):
+            return "", None, False  # ``this."find$field"()`` — only known at run time
+        method = name_text(member, source) if member is not None else ""
         receiver = node_text(obj, source) if obj is not None else None
-        return method, receiver
-    return node_text(fn, source), None
+        return method, receiver, fn.type != "spread_dot_expression"
+    return node_text(fn, source), None, True
 
 
 def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
@@ -112,11 +143,12 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
         # Descend into every scope, including inline closures — their calls belong to
         # the nearest named enclosing function (mirrors Java lambda handling).
         for child in node.named_children:
-            if child.type == "method_invocation":
-                name, receiver = _callee(child, source)
+            if child.type in ("method_invocation", "command_chain"):
+                name, receiver, resolvable = _callee(child, source)
                 if name and name not in seen:
                     seen.add(name)
-                    calls.append(Call(name=name, path=resolve(name, receiver)))
+                    path = resolve(name, receiver) if resolvable else None
+                    calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)
@@ -139,10 +171,8 @@ def defined_names(root: Node, source: bytes) -> set[str]:
         for c in n.named_children:
             if has_declaration_error(c):
                 continue  # corrupt header → fabricated name; don't feed same-file resolution
-            if c.type in types:
-                nm = c.child_by_field_name("name")
-                if nm is not None:
-                    names.add(node_text(nm, source))
+            if c.type in types and c.child_by_field_name("name") is not None:
+                names.add(decl_name(c, source))
             walk(c)
 
     walk(root)
@@ -184,6 +214,9 @@ def type_map(root: Node, source: bytes) -> dict[str, str]:
                 for d in c.named_children:
                     if d.type == "variable_declarator":
                         add(d.child_by_field_name("name"), tnode, override=False)
+                # A typed local (``RestTemplate rt = …``) holds its names directly.
+                for name_node in c.children_by_field_name("name"):
+                    add(name_node, tnode, override=False)
             walk(c)
 
     walk(root)
@@ -203,7 +236,7 @@ def build_method(
     limit: int,
     resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
-    name = node_text(node.child_by_field_name("name"), source)
+    name = decl_name(node, source)
     start, end = line_span(node)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
     # identified unambiguously; `class_name` stays simple for call resolution.

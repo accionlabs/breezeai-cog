@@ -19,9 +19,10 @@ from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
 from ..constfold import Token, resolve_all
-from ..index_common import parallel_map, record_distinct, seed_same_package
+from ..index_common import ClassHeritage, parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
 from .constants import collect_constants
+from .heritage import HeritageFrag, build_heritage, collect_heritage
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -41,22 +42,25 @@ class JavaIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    #: Simple class name → its in-repo base and declared methods, for inherited-method calls
+    #: (``heritage.py``); ``None`` when the name is declared more than once.
+    class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}``, and what
-#: registered facts collect from it.
-_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]]
+#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}``, what
+#: registered facts collect from it, and its classes' heritage.
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any], list[HeritageFrag]]
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
+def _fqcn_index_one(args: tuple[str, str, str]) -> _IndexFrag | None:
     """Parse one Java file (once) → its ``{package.TypeName: rel}`` FQCN entries **and** its
     ``static final String`` constants as ``{Class.FIELD: tokens}`` (qualified only — a bare
     field name is meaningless cross-file). Pure, picklable worker; ``None`` on read failure."""
-    file_s, rel = args
-    repo_root = Path(file_s[: -len(rel) - 1]) if file_s.endswith("/" + rel) else None
+    file_s, rel, root_s = args
+    repo_root = Path(root_s)  # passed in, not derived from the path string ("\\" on Windows)
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -80,7 +84,8 @@ def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
         # Qualified `Class.FIELD` keys only (drop bare names — they collide across files).
         const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
         return (fqcn_frag, const_frag,
-                collect_additive("java", root, source, rel, repo_root))
+                collect_additive("java", root, source, rel, repo_root),
+                collect_heritage(root, source, package))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -96,15 +101,18 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     declared in >1 file with a differing value collapses to ``None`` (ambiguous → honest-null;
     the constant is then simply not folded)."""
     files, fact_files = split_fact_sources("java", list(files))
-    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    rels = [repo_relative(f, repo_root) for f in files]
+    args = [(str(f), rel, str(repo_root)) for f, rel in zip(files, rels)]
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("java", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     raw_consts: dict[str, list[Token] | None] = {}
-    for frag in parallel_map(args, _fqcn_index_one, jobs):
+    heritage: list[tuple[str, HeritageFrag]] = []
+    for file_rel, frag in zip(rels, parallel_map(args, _fqcn_index_one, jobs)):
         if frag is None:
             continue
-        fqcn_frag, const_frag, facts = frag
+        fqcn_frag, const_frag, facts, classes = frag
+        heritage.extend((file_rel, c) for c in classes)
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
         for name, rel in fqcn_frag.items():
@@ -112,7 +120,7 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
     consts = resolve_all(raw_consts)
-    index = JavaIndex(fqcn=fqcn, consts=consts)
+    index = JavaIndex(fqcn=fqcn, consts=consts, class_heritage=build_heritage(heritage, fqcn))
     # Registered facts may need the whole index, so they resolve after it is built.
     return replace(index, facts=resolve_additive("java", collected, index))
 
