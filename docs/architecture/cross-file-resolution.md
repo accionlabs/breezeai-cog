@@ -268,6 +268,21 @@ class OrdersService {
 If the call were `this.items.map(...)`, `map` is a built-in array method, so `path` stays empty,
 even if `items` has an in-repo type.
 
+**Whose type a variable has.** Most languages keep one map of declared types per file. Java and
+Groovy look a variable up in the calling method first, because two methods often use one name for
+different types:
+
+| Rule | Example | `calls[].path` |
+|---|---|---|
+| The method's own parameters and locals (loop, `catch`, lambda and closure variables included) win | `void a(Order x) { x.ship() }` and `void b(Customer x) { x.ship() }` in one file | each its own type: `Order`, `Customer` |
+| A parameter hides a field of the same name | field `Repo repo`, `void run(Audit repo) { repo.save() }` | `Audit` |
+| A local hides a field only after it is declared, so a field and a local of different types → unknown | field `Repo repo`, `Audit repo = …; repo.save()` | null |
+| `this.name` is always the field | `this.repo.save()` in the same method | `Repo` |
+| A name declared two ways in one method, or untyped (`var x = f()`, `def x`, `x -> …`) → unknown | `x -> x.ship()` | null |
+| `var x = new T(…)` / `def x = new T(…)` is a `T` | `var a = new Audit(); a.save()` | `Audit` |
+| A field of the class and of its enclosing classes; not of another class in the file | inner class using an outer field | the field's type |
+| A name the method and its classes never declare (an inherited field) takes the file's type for that name, only while every typed declaration of it in the file agrees | constructor `Service(Repo repo) { super(repo) }`, `run() { repo.save() }` | `Repo` |
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |

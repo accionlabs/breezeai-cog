@@ -11,8 +11,9 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
 * **Phase 2 — receiver type:** ``obj.method()`` where ``obj``'s declared type resolves to
   an in-repo file → that file. With ``declared_only`` (and ``heritage``), only when that type
   declares ``method`` — else the nearest in-repo ancestor that does, else ``None``: a method
-  the type inherits from a library, or a variable whose type differs in another method of the
-  file, has no in-repo target.
+  the type inherits from a library has no in-repo target. A caller that passes the calling
+  method's own variable types (:func:`method_types`) has ``obj`` looked up there, so a
+  same-named variable of another method, or a field a local hides, does not lend its type.
 * **Extension:** ``recv.M()`` where ``recv``'s type is not an in-repo member call and ``M``
   is an in-repo extension method on that type (``static M(this T …)``) → the defining file,
   via ``ext_index[(M, T)]`` (simple type names). Only fires when Phase 2 found nothing, so
@@ -37,7 +38,7 @@ import re
 from collections.abc import Mapping
 from typing import Callable
 
-from .index_common import ClassHeritage, walk_heritage
+from .index_common import ClassHeritage, record_distinct, walk_heritage
 
 CallResolver = Callable[..., str | None]
 
@@ -63,6 +64,33 @@ def _one_call(receiver: str) -> tuple[str | None, str] | None:
     return (m.group(1), m.group(2)) if depth == 0 else None
 
 
+def method_types(
+    fields: Mapping[str, str | None],
+    params: list[tuple[str, str | None]],
+    locals_: list[tuple[str, str | None]],
+) -> dict[str, str | None]:
+    """The variable types one method's calls resolve with: name → written type, or ``None``
+    when the name is known but its type is not (untyped, or declared two ways) — the resolver
+    then leaves the call unresolved instead of using a type the name does not have here.
+
+    ``fields`` are the enclosing class's (and its outer classes') fields, ``params`` the
+    method's own parameters, ``locals_`` every other name declared in its body (locals, loop
+    and catch variables, lambda and closure parameters), in source order. A parameter hides
+    a field for the whole method; a local whose type differs from the field it shares a name
+    with is ambiguous, since calls before its declaration still mean the field. Each field is
+    also kept under ``this.<name>``: ``this.repo`` always means the field."""
+    out: dict[str, str | None] = {f"this.{n}": t for n, t in fields.items()}
+    out.update(fields)
+    for name, typ in params:
+        out[name] = typ
+    declared: dict[str, str | None] = {}
+    for name, typ in locals_:
+        record_distinct(declared, name, typ)  # two types, or an untyped one → None
+    for name, typ in declared.items():
+        out[name] = typ if name not in out or out[name] == typ else None
+    return out
+
+
 def _base_type(t: str | None) -> str | None:
     """Simple type name: strip generics/array/qualifier — ``a.b.Foo<Bar>[]`` → ``Foo``."""
     if not t:
@@ -75,7 +103,7 @@ def make_resolver(
     bindings: dict[str, str],
     local_defs: set[str],
     path: str,
-    types: dict[str, str] | None = None,
+    types: Mapping[str, str | None] | None = None,
     *,
     ext_index: dict[tuple[str, str], str | None] | None = None,
     heritage: Mapping[str, ClassHeritage | None] | None = None,
@@ -83,10 +111,11 @@ def make_resolver(
     declared_only: bool = False,
     owner_defs: dict[str, set[str]] | None = None,
 ) -> CallResolver:
-    """``(name, receiver, owner=None) -> repo path | None``. ``receiver`` is the callee's
-    qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
+    """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
+    callee's qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
     expression); ``owner`` is the simple name of the class the call is written in (needed
-    only by the inheritance tier).
+    only by the inheritance tier); ``scope`` is the calling method's own variable types
+    (:func:`method_types`), used in place of the file-wide ``types`` when given.
 
     See the module docstring for the tier order. ``ext_index`` maps ``(method, this-param
     type)`` → defining file (``None`` = ambiguous, honest-null); ``heritage`` is the
@@ -98,6 +127,14 @@ def make_resolver(
     or anonymous one) does not shadow an inherited method; without an ``owner`` (or for an
     unknown one) the whole file's ``local_defs`` apply."""
     types = types or {}
+
+    def _type_of(key: str, scope: Mapping[str, str | None] | None) -> tuple[bool, str | None]:
+        """``(known, type)`` of a variable: the calling method's own scope first; a name it does
+        not declare (an inherited field) falls back to the file-wide ``types``."""
+        if scope is not None and key in scope:
+            return True, scope[key]
+        bare = key[len("this."):] if key.startswith("this.") else key
+        return (True, types[bare]) if bare in types else (False, None)
 
     def _inherited(name: str, owner: str) -> str | None:
         """Nearest in-repo ancestor of ``owner`` that declares ``name`` → its file."""
@@ -143,7 +180,9 @@ def make_resolver(
             return None
         return _declared(name, receiver, resolved)
 
-    def _via_call(name: str, receiver: str, owner: str | None) -> str | None:
+    def _via_call(
+        name: str, receiver: str, owner: str | None, scope: Mapping[str, str | None] | None,
+    ) -> str | None:
         """``x.m().name()``: ``name`` on ``m``'s return type → the file that declares it."""
         call = _one_call(receiver)
         if call is None or heritage is None:
@@ -152,7 +191,9 @@ def make_resolver(
         if qual is None or qual == "this":
             cls = owner
         else:
-            cls = _base_type(types.get(qual)) or (qual if qual in heritage else None)
+            # a variable (even one of unknown type) hides a class of the same name
+            known, typ = _type_of(qual, scope)
+            cls = _base_type(typ) if known else (qual if qual in heritage else None)
         if cls is None:
             return None
         ret = _lookup(cls, method, "returns")[1]
@@ -163,7 +204,10 @@ def make_resolver(
             return owner_defs[owner]
         return local_defs
 
-    def resolve(name: str, receiver: str | None, owner: str | None = None) -> str | None:
+    def resolve(
+        name: str, receiver: str | None, owner: str | None = None,
+        scope: Mapping[str, str | None] | None = None,
+    ) -> str | None:
         if receiver in ("self", "this"):
             if name in _own(owner):  # same-file method
                 return path
@@ -178,7 +222,8 @@ def make_resolver(
             if name in _own(owner):  # same-file function/class
                 return path
             return None
-        if receiver in bindings:  # `Imported.method()` → Imported's file
+        # `Imported.method()` → Imported's file — unless a variable of the method has that name
+        if receiver in bindings and (scope is None or receiver not in scope):
             if declared_only:  # … when it (or an in-repo ancestor) declares the method
                 return _imported(name, receiver, bindings[receiver])
             return bindings[receiver]
@@ -189,11 +234,12 @@ def make_resolver(
         if name in builtin_methods:
             return None
         if declared_only and receiver.endswith(")"):  # `builder.dataApi().get()`
-            return _via_call(name, receiver, owner)
-        # Phase 2: `repo.method()` / `this.repo.method()` → type of repo → its file
+            return _via_call(name, receiver, owner, scope)
+        # Phase 2: `repo.method()` / `this.repo.method()` → type of repo → its file. A method
+        # scope keeps fields under `this.<name>` too; the file-wide map has bare names only.
         var = receiver[len("this."):] if receiver.startswith("this.") else receiver
         if var and "." not in var:
-            typ = _base_type(types.get(var))
+            typ = _base_type(_type_of(receiver, scope)[1])
             if typ:
                 resolved = bindings.get(typ) or (path if typ in local_defs else None)
                 if resolved is not None:
