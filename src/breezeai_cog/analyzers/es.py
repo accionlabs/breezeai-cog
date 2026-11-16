@@ -55,12 +55,12 @@ def _index_name_from_path(filepath: str) -> str:
     return base.rsplit(".", 1)[0] if "." in base else base
 
 
-def _field(name: str, defn: dict, parent_full: str | None, *, is_multi: bool = False) -> dict:
+def _field(name: str, defn: dict[str, Any], parent_full: str | None, *, is_multi: bool = False) -> dict[str, Any]:
     full = f"{parent_full}.{name}" if parent_full else name
     typ = defn.get("type") or ("object" if "properties" in defn else None)
     copy_to = defn.get("copy_to")
     copy_to = [copy_to] if isinstance(copy_to, str) else list(copy_to or [])
-    field = {
+    field: dict[str, Any] = {
         "name": name,
         "fullPath": full,
         "parentPath": parent_full,
@@ -80,8 +80,8 @@ def _field(name: str, defn: dict, parent_full: str | None, *, is_multi: bool = F
     return field
 
 
-def _flatten(properties: dict | None, parent_full: str | None = None) -> list[dict]:
-    out: list[dict] = []
+def _flatten(properties: dict[str, Any] | None, parent_full: str | None = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for name, defn in (properties or {}).items():
         if not isinstance(defn, dict):
             continue
@@ -96,8 +96,8 @@ def _flatten(properties: dict | None, parent_full: str | None = None) -> list[di
     return out
 
 
-def _aliases(aliases_obj: dict | None) -> list[dict]:
-    out: list[dict] = []
+def _aliases(aliases_obj: dict[str, Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for name, defn in (aliases_obj or {}).items():
         defn = defn or {}
         filt = defn.get("filter")
@@ -109,7 +109,7 @@ def _aliases(aliases_obj: dict | None) -> list[dict]:
     return out
 
 
-def _parse_mapping(text: str, filepath: str) -> list[dict]:
+def _parse_mapping(text: str, filepath: str) -> list[dict[str, Any]]:
     obj = json.loads(text)
     if not isinstance(obj, dict):
         raise BuildError(f"[es/mapping] {filepath}: expected an object keyed by index name")
@@ -126,7 +126,7 @@ def _parse_mapping(text: str, filepath: str) -> list[dict]:
             "fields": _flatten(props),
         }]
 
-    indices = []
+    indices: list[dict[str, Any]] = []
     for index_name, body in obj.items():
         if not isinstance(body, dict):
             continue
@@ -141,15 +141,18 @@ def _parse_mapping(text: str, filepath: str) -> list[dict]:
     return indices
 
 
-def _pick_index_settings(body: dict) -> dict | None:
+def _pick_index_settings(body: dict[str, Any]) -> dict[str, Any] | None:
     settings = body.get("settings")
     idx = settings.get("index") if isinstance(settings, dict) else None
     if not isinstance(idx, dict):
         idx = body.get("index") if isinstance(body.get("index"), dict) else None
     if idx is None:
         return None
-    analysis = idx.get("analysis") if isinstance(idx.get("analysis"), dict) else {}
-    default = (analysis.get("analyzer") or {}).get("default") or {}
+    analysis = idx.get("analysis")
+    if not isinstance(analysis, dict):
+        analysis = {}
+    analyzer = analysis.get("analyzer")
+    default = (analyzer or {}).get("default") or {}
     return {
         "shards": _to_int(idx.get("number_of_shards")),
         "replicas": _to_int(idx.get("number_of_replicas")),
@@ -157,7 +160,7 @@ def _pick_index_settings(body: dict) -> dict | None:
     }
 
 
-def _parse_settings(text: str, filepath: str) -> dict[str, dict]:
+def _parse_settings(text: str, filepath: str) -> dict[str, dict[str, Any]]:
     obj = json.loads(text)
     if isinstance(obj, str):  # double-encoded
         obj = json.loads(obj)
@@ -171,7 +174,7 @@ def _parse_settings(text: str, filepath: str) -> dict[str, dict]:
         picked = _pick_index_settings(obj)
         return {_index_name_from_path(filepath): {**picked, "sourcePath": filepath}} if picked else {}
 
-    result: dict[str, dict] = {}
+    result: dict[str, dict[str, Any]] = {}
     for index_name, body in obj.items():
         if not isinstance(body, dict):
             continue
@@ -200,12 +203,12 @@ def build_es_records(uploads: list[dict[str, Any]]) -> dict[str, Any]:
         raise BuildError("No valid Elasticsearch mapping or setting JSON could be classified")
 
     if mapping_files:
-        indices: list[dict] = []
+        indices: list[dict[str, Any]] = []
         for u in mapping_files:
             indices.extend(_parse_mapping(u["text"], u["name"]))
         if not indices:
             raise BuildError("No Elasticsearch indices could be extracted from the uploaded file(s)")
-        settings_by_index: dict[str, dict] = {}
+        settings_by_index: dict[str, dict[str, Any]] = {}
         for u in setting_files:
             try:
                 settings_by_index.update(_parse_settings(u["text"], u["name"]))

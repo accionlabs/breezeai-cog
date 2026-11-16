@@ -77,3 +77,53 @@ def test_repo_web_and_api_url_helpers() -> None:
     s = _s(scm_instances={"ado.acme.com": "azure_devops"}, scm_instance_base_url_mapping={"ado.acme.com": "https://ado.acme.com"})
     assert repo_web_url(ref) == "https://ado.acme.com/DefaultCollection/proj/_git/repo"
     assert repo_api_url(ref, s) == "https://ado.acme.com/DefaultCollection/proj/_apis/git/repositories/repo"
+
+
+def test_bitbucket_server_derives_its_api_base_from_the_context_path() -> None:
+    settings = _s(scm_instances={"stash.payroll.co.jp": "bitbucket_server"})
+    out = parse_pr_url(
+        "https://stash.payroll.co.jp/stash/projects/P3/repos/cog/pull-requests/42/overview",
+        settings,
+    )
+    api = "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
+    web = "https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+    assert out == PrUrlInfo("bitbucket_server", web, "42", PrLinks(
+        web, f"{api}/pull-requests/42/diff", f"{api}/pull-requests/42/comments",
+        f"{api}/pull-requests/42/decline",
+    ))
+
+
+def test_bitbucket_server_mapped_base_url_wins_over_the_derived_one() -> None:
+    settings = _s(
+        scm_instances={"stash.payroll.co.jp": "bitbucket_server"},
+        scm_instance_base_url_mapping={
+            "stash.payroll.co.jp": "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+        },
+    )
+    ref = RepoRef("bitbucket_server", "P3", "cog",
+                  host="stash.payroll.co.jp", context_path="/stash")
+    assert repo_api_url(ref, settings) == (
+        "https://stash.payroll.co.jp/proxied/rest/api/1.0/projects/P3/repos/cog"
+    )
+    # The web URL still follows the instance's own context path.
+    assert repo_web_url(ref) == "https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+
+
+def test_bitbucket_server_provider_override_works_without_scm_instances() -> None:
+    """`gitProvider` is what makes an unregistered Data Center host addressable."""
+    url = ("https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+           "/pull-requests/42/overview")
+    assert parse_pr_url(url, _s()) is None
+    out = parse_pr_url(url, _s(), provider="bitbucket_server")
+    assert out is not None and out.source == "bitbucket_server"
+    assert out.links.diff == (
+        "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
+        "/pull-requests/42/diff"
+    )
+
+
+def test_a_provider_override_for_any_other_slug_is_ignored() -> None:
+    """The four clouds are identified from the URL; a slug there would be a second
+    source of truth that could disagree with the host."""
+    out = parse_pr_url("https://github.com/acme/widgets/pull/123", _s(), provider="gitlab")
+    assert out is not None and out.source == "github"

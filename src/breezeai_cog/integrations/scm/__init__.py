@@ -8,7 +8,7 @@ HTTP plumbing. The operations differ because this service needs source acquisiti
 from .base import SUPPORTED_PROVIDERS, AbstractSCMClient, ChangeSet, CommitInfo, FileDiff, PrComment, PullRequestInfo, RepoRef, count_patch_lines
 from .factory import SCMClientFactory
 from .errors import SCMAPIError, SCMCredentialError, SCMError, UnsupportedSCMProviderError
-from .repository import parse_repo_url
+from .repository import parse_bitbucket_server_url, parse_repo_url
 
 __all__ = [
     "SUPPORTED_PROVIDERS",
@@ -25,5 +25,6 @@ __all__ = [
     "SCMCredentialError",
     "SCMError",
     "UnsupportedSCMProviderError",
+    "parse_bitbucket_server_url",
     "parse_repo_url",
 ]
