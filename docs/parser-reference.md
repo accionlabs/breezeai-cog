@@ -602,25 +602,31 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 - **Volume.** Every Markdown file the scan keeps becomes a File node, so a docs-heavy
   repository can leave prose folders it does not need in the graph out with `.repoignore`.
 
-### MCP tool detectors (`parsers/<lang>_mcp/`)
+### MCP tool detectors (one package per framework)
 A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,
 `endpoint` = the tool name), recorded by additive detectors under the
-[entry-point contract](architecture/entry-points.md); the per-construct rules are in
-[`entry-point-roles/mcp.md`](entry-point-roles/mcp.md). The shared fields (`description`,
-`params` = `[{name, type, required, default, description}]`) are built by
-`parsers/mcp_common.py`. `params` is `[]` only for a tool with no (or an empty) schema; a schema
-that cannot be read whole is `None`.
+[entry-point contract](architecture/entry-points.md#mcp-tools), which has the rules every MCP
+framework shares; the per-construct rules are in each framework's table in
+[`entry-point-roles/`](entry-point-roles/README.md). The shared fields (`description`, and
+`params` in the shape of a function's `params`) are built by `parsers/mcp_common.py`. A tool is
+emitted once, by the package of the framework its construct belongs to.
 
-| Detector | Language | `framework` | Server proof |
+| Package (detector) | Language | `framework` | Server proof |
 |---|---|---|---|
-| `python_mcp` (+ fact `mcp.servers`) | Python | `fastmcp`, `mcp-python` | `@<server>.tool` on a name built with `FastMCP(…)`, typed `FastMCP`, or imported from where it is built |
-| `typescript_mcp` | TypeScript / JavaScript | `mcp-sdk-ts` | `.tool(…)` / `.registerTool(…)` on `new McpServer(…)` or a parameter typed `McpServer` |
-| `java_mcp` (+ fact `spring-ai.mcp-server`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
-| `java_mcp` | Java | `mcp-java-sdk` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
-| `kotlin_mcp` (+ fact `spring-ai.mcp-server`, for Kotlin) | Kotlin | `spring-ai-mcp`, `mcp-java-sdk` | The `java_mcp` rules in Kotlin syntax (`@McpTool`; `@Tool` only with an MCP server starter in `pom.xml` / `build.gradle[.kts]`; `required` from the annotation only, as in Java) |
-| `kotlin_mcp` | Kotlin | `mcp-kotlin` | `addTool(name, description, inputSchema) { … }`, or `addTools(listOf(RegisteredTool(Tool(…)) { … }, …))` with the list written inline, in a file importing `io.modelcontextprotocol.kotlin.sdk.server`; import aliases of MCP / Spring AI classes followed (both rows) |
-| `csharp_mcp` | C# | `mcp-csharp` | `[McpServerTool]`; without `Name =` the endpoint is the SDK-derived name (snake_case, `Async` dropped on an async method) |
-| `go_mcp` | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` / `server.ServerTool` literal that registers it |
+| `python_fastmcp` (`python-fastmcp`) | Python | `fastmcp` | `@<server>.tool` on a name built with `FastMCP(…)` of the standalone `fastmcp` package, typed `FastMCP`, or imported from where it is built |
+| `python_mcp` (`python-mcp`) | Python | `python-mcp` | The same, the server built with the official SDK's `mcp.server.fastmcp` |
+| `typescript_mcp` (`typescript-mcp`) | TypeScript / JavaScript | `typescript-mcp` | `.tool(…)` / `.registerTool(…)` on `new McpServer(…)` or a parameter typed `McpServer` |
+| `java_springai` (`java-springai`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
+| `java_mcp` (`java-mcp`) | Java | `java-mcp` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
+| `kotlin_springai` (`kotlin-springai`) | Kotlin | `spring-ai-mcp` | The `java_springai` rules in Kotlin syntax (`required` from the annotation only, as in Java); import aliases of Spring AI classes followed |
+| `kotlin_mcp` (`kotlin-mcp`) | Kotlin | `kotlin-mcp`, `java-mcp` | `addTool(name, description, inputSchema) { … }`, or `addTools(listOf(RegisteredTool(Tool(…)) { … }, …))` with the list written inline, in a file importing `io.modelcontextprotocol.kotlin.sdk.server` (`kotlin-mcp`); the MCP Java SDK's tool specifications in Kotlin syntax (`java-mcp`); import aliases of MCP classes followed |
+| `csharp_mcp` (`csharp-mcp`) | C# | `csharp-mcp` | `[McpServerTool]`; without `Name =` the endpoint is the SDK-derived name (snake_case, `Async` dropped on an async method) |
+| `go_mcpgo` (`go-mcpgo`) | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` / `server.ServerTool` literal that registers it. `go_mcp` and the value `go-mcp` are kept for the official Go SDK |
+
+Code two packages share is in a common module next to them, not in either package:
+`python_mcp_common.py` (the `@<server>.tool` reader and the `mcp.servers` fact, for
+`python_fastmcp` and `python_mcp`) and `jvm_mcp_common.py` (the `spring-ai.mcp-server` fact, the
+JSON-schema reader and the string-literal readers, for the four Java / Kotlin packages).
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

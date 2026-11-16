@@ -79,8 +79,8 @@ SemanticType = Literal[
     "iac_variable_value",
     # MCP server tool — an entry point an AI client calls. ``endpoint`` = the
     # tool name the client calls (after any rename), ``method="TOOL"``, ``framework`` = the SDK
-    # (fastmcp | mcp-python | mcp-sdk-ts | spring-ai-mcp | mcp-java-sdk | mcp-kotlin | mcp-csharp |
-    # mcp-go), plus ``description`` and ``params``. Treated like a route by the entry-point contract.
+    # (fastmcp | python-mcp | typescript-mcp | spring-ai-mcp | java-mcp | kotlin-mcp |
+    # csharp-mcp | mcp-go), plus ``description`` and ``params``. Treated like a route by the entry-point contract.
     "mcp_tool",
     # Markdown documents — one whole-file statement per ``.md`` / ``.mdx`` /
     # ``.mdc`` file (``nodeType="synthetic"``, the full text, unembedded; a long one is split

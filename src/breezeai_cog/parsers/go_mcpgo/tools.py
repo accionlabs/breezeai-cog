@@ -404,7 +404,7 @@ def _detect(dc: DetectContext) -> Detection | None:
 # An entry-point emitter, so fixture/test files are skipped.
 register_detector(
     Detector(
-        name="go-mcp",
+        name="go-mcpgo",
         gate=Gate("go", order=130, guard=b"mark3labs/mcp-go", skip_fixtures=True),
         detect=_detect,
         frameworks=(FRAMEWORK,),

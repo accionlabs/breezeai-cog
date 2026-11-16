@@ -3,10 +3,10 @@
 ::
 
     const server = new McpServer({ name: "x" })     # or a parameter typed McpServer
-    server.tool("add", "Add two numbers",           → mcp_tool  mcp-sdk-ts  TOOL  add
+    server.tool("add", "Add two numbers",           → mcp_tool  typescript-mcp  TOOL  add
                 { a: z.number().describe("first"), b: z.number().optional() },
                 async ({ a, b }) => …)
-    server.registerTool("echo",                     → mcp_tool  mcp-sdk-ts  TOOL  echo
+    server.registerTool("echo",                     → mcp_tool  typescript-mcp  TOOL  echo
                 { description: "Echo", inputSchema: { msg: z.string() } }, echoHandler)
 
 * **Server receiver** — the call's object must be a name (or ``this.x``) assigned
@@ -39,7 +39,7 @@ from ..emits import Emit
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
 
-FRAMEWORK = "mcp-sdk-ts"
+FRAMEWORK = "typescript-mcp"
 _CALLBACKS = (
     "arrow_function",
     "function_expression",

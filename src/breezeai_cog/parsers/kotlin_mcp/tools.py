@@ -1,40 +1,9 @@
-"""Additive detector: tools of a Kotlin MCP server (Spring AI, the MCP Java SDK, the official
-Kotlin SDK).
-
-::
-
-    @McpTool(name = "weather", description = "Current weather")     → mcp_tool  spring-ai-mcp  TOOL  weather
-    fun weather(@McpToolParam(description = "City") city: String): String
-
-    @Tool(description = "Current weather")                          → mcp_tool  (only in an MCP server)
-    fun weather(@ToolParam(description = "City") city: String, units: String? = null, ctx: ToolContext)
-
-* The rules of the Java detector (``java_mcp``), in Kotlin syntax: ``@McpTool`` always;
-  Spring AI's ``@Tool`` (imported from ``org.springframework.ai.tool.annotation`` or written
-  fully qualified) only in a module whose build file declares a Spring AI MCP server starter
-  (fact :data:`~..java_mcp.tools.FACT`, registered for Kotlin too: ``pom.xml`` /
-  ``build.gradle[.kts]`` in the file's folder or an ancestor).
-* ``endpoint`` — ``name =`` when a literal, else the function name (Spring AI's default).
-* ``params`` — ``description`` / ``required`` from the parameter annotation, required by
-  default as in Java: Spring AI's schema does not read Kotlin nullability (``String?``) or a
-  default value. ``default`` is the default's source text (cut at 200 characters).
-  ``ToolContext`` and MCP exchange / context parameters are injected, not inputs.
-
-MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
-
-    McpServerFeatures.SyncToolSpecification(                        → mcp_tool  mcp-java-sdk  TOOL  calc
-        McpSchema.Tool("calc", "Calculator", SCHEMA_JSON)) { exchange, args -> … }
-    McpServerFeatures.SyncToolSpecification.builder()               → (Async… and the builders alike)
-        .tool(McpSchema.Tool.builder().name("calc").build()).callHandler(::calc).build()
-
-* As in Java: the tool is a ``Tool`` constructor or builder, inline or a ``val`` / ``var``
-  declared once in the file; a non-literal name → no record; ``params`` from a JSON-schema
-  string literal (``.trimIndent()`` allowed), else None (unknown); a callable reference
-  (``::calc``, ``this::calc``) names the handler, a lambda gives only its line.
+"""Additive detector: tools of a Kotlin MCP server built with the official Kotlin SDK or the
+MCP Java SDK.
 
 Official Kotlin SDK (``io.modelcontextprotocol.kotlin.sdk``)::
 
-    server.addTool(name = "calc", description = "Calculator",       → mcp_tool  mcp-kotlin  TOOL  calc
+    server.addTool(name = "calc", description = "Calculator",       → mcp_tool  kotlin-mcp  TOOL  calc
         inputSchema = Tool.Input(properties = buildJsonObject {
             putJsonObject("a") { put("type", "number") } }, required = listOf("a"))) { request -> … }
 
@@ -49,113 +18,49 @@ Official Kotlin SDK (``io.modelcontextprotocol.kotlin.sdk``)::
   ``RegisteredTool`` of an inline ``listOf`` / ``mutableListOf`` / ``arrayOf``, read as
   ``addTool(Tool(…))``; a list from a variable or a call → no record.
 
-Import aliases (``import org.springframework.ai.tool.annotation.Tool as AiTool``) are followed
-for the types above when the aliased class is in an MCP / Spring AI package; an alias of any
-other class (``import com.acme.Tool as Tool``) hides the name instead.
+MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
+
+    McpServerFeatures.SyncToolSpecification(                        → mcp_tool  java-mcp  TOOL  calc
+        McpSchema.Tool("calc", "Calculator", SCHEMA_JSON)) { exchange, args -> … }
+    McpServerFeatures.SyncToolSpecification.builder()               → (Async… and the builders alike)
+        .tool(McpSchema.Tool.builder().name("calc").build()).callHandler(::calc).build()
+
+* As in Java (``java_mcp``): the tool is a ``Tool`` constructor or builder, inline or a
+  ``val`` / ``var`` declared once in the file; a non-literal name → no record; ``params`` from a
+  JSON-schema string literal (``.trimIndent()`` allowed), else None (unknown); a callable
+  reference (``::calc``, ``this::calc``) names the handler, a lambda gives only its line.
+
+Import aliases (``import io.modelcontextprotocol.kotlin.sdk.Tool as McpTool``) are followed for
+the types above when the aliased class is in an MCP package; an alias of any other class
+(``import com.acme.Tool as Tool``) hides the name instead.
+
+Only registrations are read here. A Spring AI ``@McpTool`` / ``@Tool`` function belongs to
+``kotlin_springai``.
 """
 
 from __future__ import annotations
 
-import re
-from typing import Any
-
 from tree_sitter import Node
 
 from ...schemas import Parameter
-from ..additive import (
-    DetectContext,
-    Detection,
-    Detector,
-    FactSpec,
-    Gate,
-    index_fact,
-    register_detector,
-    register_fact,
-)
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..java_mcp.tools import (
-    _INJECTED,
-    FACT,
-    FRAMEWORK,
-    SDK_FRAMEWORK,
-    _collect,
-    _in_mcp_module,
-    _json_schema_params,
-    _resolve,
-    _walk,
-    concat_strings,
+from ..jvm_mcp_common import (
+    JAVA_MCP,
+    json_schema_params,
+    kotlin_aliases,
+    kotlin_call_args,
+    kotlin_canon,
+    kotlin_string,
+    kotlin_suffix_name,
+    kotlin_type_name,
+    walk,
 )
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
 
-_MAX_DEFAULT = 200
-
-KOTLIN_SDK_FRAMEWORK = "mcp-kotlin"
-
-# The Spring AI MCP server starter, read from the same build files as for Java.
-register_fact(
-    FactSpec(
-        name=FACT,
-        language="kotlin",
-        gate=(b"mcp-server",),
-        collect=_collect,
-        resolve=_resolve,
-        sources=(".xml", ".gradle", ".kts"),
-        grammar=None,
-    )
-)
-
-#: Packages whose classes an import alias may stand for.
-_MCP_PACKAGES = (
-    "org.springframework.ai.",
-    "org.springaicommunity.mcp.",
-    "io.modelcontextprotocol.",
-)
-_IMPORT_ALIAS = re.compile(rb"^[ \t]*import[ \t]+([\w.]+)[ \t]+as[ \t]+(\w+)", re.MULTILINE)
-
-
-def _aliases(source: bytes) -> dict[str, str]:
-    """``import a.b.C as D`` → ``{"D": "a.b.C"}``."""
-    return {m.group(2).decode(): m.group(1).decode() for m in _IMPORT_ALIAS.finditer(source)}
-
-
-def _canon(name: str, aliases: dict[str, str]) -> str:
-    """The class a simple type name stands for: an alias of an MCP / Spring AI class → that
-    class's simple name; an alias of any other class → ``""`` (never a match)."""
-    fqcn = aliases.get(name)
-    if fqcn is None:
-        return name
-    return fqcn.rsplit(".", 1)[-1] if fqcn.startswith(_MCP_PACKAGES) else ""
-
-
-def _type_name(node: Node, source: bytes, aliases: dict[str, str]) -> str:
-    """Simple class name of a type reference (``a.b.C`` → ``C``; an alias resolved)."""
-    text = node_text(node, source).split("<")[0]
-    return text.rsplit(".", 1)[-1] if "." in text else _canon(text, aliases)
-
-
-def _string(node: Node | None, source: bytes) -> str | None:
-    """A Kotlin string literal without templates (``+`` of literals, ``.trimIndent()``
-    allowed); escapes kept as written."""
-    if node is None:
-        return None
-    if node.type == "additive_expression":
-        return concat_strings(node, source, "additive_expression", _string)
-    if node.type == "call_expression":  # """…""".trimIndent()
-        callee = node.named_children[0] if node.named_children else None
-        if callee is not None and callee.type == "navigation_expression":
-            if _suffix_name(callee, source) == "trimIndent" and not _call_args(node, source):
-                return _string(callee.named_children[0], source)
-        return None
-    if node.type != "string_literal":
-        return None
-    if any(c.type != "string_content" for c in node.named_children):
-        return None  # a "$template"
-    text = node_text(node, source)
-    if text.startswith('"""'):
-        return text[3:-3]
-    return text[1:-1]
-
+#: ``framework`` of a tool registered through the official Kotlin SDK.
+KOTLIN_MCP = "kotlin-mcp"
 
 _KOTLIN_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b"}
 
@@ -183,19 +88,10 @@ def _unescape(text: str) -> str | None:
 
 def _literal_text(node: Node | None, source: bytes) -> str | None:
     """A string literal's value: escapes decoded in a ``"…"`` string, none in a raw one."""
-    raw = _string(node, source)
+    raw = kotlin_string(node, source)
     if raw is None or node is None:
         return None
     return raw if b'"""' in source[node.start_byte : node.end_byte] else _unescape(raw)
-
-
-def _suffix_name(nav: Node, source: bytes) -> str:
-    """The member a ``navigation_expression`` selects (``a.b.c`` → ``c``)."""
-    suffix = nav.named_children[-1] if nav.named_children else None
-    if suffix is None or suffix.type != "navigation_suffix":
-        return ""
-    name = next((c for c in suffix.named_children if c.type == "simple_identifier"), None)
-    return node_text(name, source) if name is not None else ""
 
 
 def _type_callee(call: Node, source: bytes, aliases: dict[str, str]) -> str:
@@ -203,7 +99,7 @@ def _type_callee(call: Node, source: bytes, aliases: dict[str, str]) -> str:
     constructor call: ``Tool(…)``, ``AliasOfTool(…)``)."""
     callee = call.named_children[0] if call.named_children else None
     if callee is not None and callee.type == "simple_identifier":
-        return _canon(node_text(callee, source), aliases)
+        return kotlin_canon(node_text(callee, source), aliases)
     return _callee_name(call, source)
 
 
@@ -215,27 +111,8 @@ def _callee_name(call: Node, source: bytes) -> str:
     if callee.type == "simple_identifier":
         return node_text(callee, source)
     if callee.type == "navigation_expression":
-        return _suffix_name(callee, source)
+        return kotlin_suffix_name(callee, source)
     return ""
-
-
-def _call_args(call: Node, source: bytes) -> list[tuple[str | None, Node]]:
-    """``(name or None, value)`` of a call's arguments, a trailing lambda last (unnamed)."""
-    suffix = next((c for c in call.named_children if c.type == "call_suffix"), None)
-    out: list[tuple[str | None, Node]] = []
-    for part in suffix.named_children if suffix is not None else []:
-        if part.type == "value_arguments":
-            for arg in part.named_children:
-                if arg.type != "value_argument" or not arg.named_children:
-                    continue
-                named = any(c.type == "=" for c in arg.children)
-                key = node_text(arg.named_children[0], source) if named else None
-                out.append((key, arg.named_children[-1]))
-        elif part.type == "annotated_lambda":
-            lam = next((c for c in part.named_children if c.type == "lambda_literal"), None)
-            if lam is not None:
-                out.append((None, lam))
-    return out
 
 
 def _named(args: list[tuple[str | None, Node]], key: str) -> Node | None:
@@ -246,165 +123,7 @@ def _positional(args: list[tuple[str | None, Node]]) -> list[Node]:
     return [v for k, v in args if k is None]
 
 
-# ── Spring AI ────────────────────────────────────────────────────────────────
-
-
-def _ann_parts(ann: Node) -> tuple[Node | None, Node | None]:
-    """``(user_type, value_arguments)`` of an annotation (``@A`` / ``@A(…)`` / ``@param:A``)."""
-    inv = next((c for c in ann.named_children if c.type == "constructor_invocation"), None)
-    if inv is not None:
-        type_ = next((c for c in inv.named_children if c.type == "user_type"), None)
-        args = next((c for c in inv.named_children if c.type == "value_arguments"), None)
-        return type_, args
-    return next((c for c in ann.named_children if c.type == "user_type"), None), None
-
-
-def _annotations(mods: Node | None, source: bytes, aliases: dict[str, str]) -> dict[str, Node]:
-    """Annotations in a ``modifiers`` / ``parameter_modifiers`` node, by simple name (an
-    import alias resolved)."""
-    out: dict[str, Node] = {}
-    for a in mods.named_children if mods is not None else []:
-        if a.type == "annotation":
-            type_, _ = _ann_parts(a)
-            if type_ is not None:
-                out[_type_name(type_, source, aliases)] = a
-    return out
-
-
-def _element(annotation: Node, key: str, source: bytes) -> Node | None:
-    _, args = _ann_parts(annotation)
-    for a in args.named_children if args is not None else []:
-        if a.type != "value_argument" or not a.named_children:
-            continue
-        if any(c.type == "=" for c in a.children):
-            if node_text(a.named_children[0], source) == key:
-                return a.named_children[-1]
-        elif key == "value":
-            return a.named_children[-1]  # a lone value: @ToolParam("…")
-    return None
-
-
-def _params(
-    function: Node, source: bytes, param_annotation: str, aliases: dict[str, str]
-) -> list[Parameter]:
-    params = next(
-        (c for c in function.named_children if c.type == "function_value_parameters"), None
-    )
-    # (parameter, its modifiers, its default): a modifier precedes its parameter, a default
-    # follows it, all as siblings.
-    entries: list[list[Node | None]] = []
-    mods: Node | None = None
-    for c in params.named_children if params is not None else []:
-        if c.type == "parameter_modifiers":
-            mods = c
-        elif c.type == "parameter":
-            entries.append([c, mods, None])
-            mods = None
-        elif c.type not in ("line_comment", "multiline_comment") and entries:
-            entries[-1][2] = c
-    out: list[Parameter] = []
-    for p, p_mods, default in entries:
-        assert p is not None
-        name_node = next((c for c in p.named_children if c.type == "simple_identifier"), None)
-        type_node = next((c for c in p.named_children if c.type != "simple_identifier"), None)
-        if name_node is None or type_node is None:
-            continue
-        type_text = node_text(type_node, source)
-        base = type_node.named_children[0] if type_node.type == "nullable_type" else type_node
-        if _type_name(base, source, aliases) in _INJECTED:
-            continue
-        ann = _annotations(p_mods, source, aliases).get(param_annotation)
-        description = required = None
-        if ann is not None:
-            description = _string(
-                _element(ann, "description", source) or _element(ann, "value", source), source
-            )
-            req = _element(ann, "required", source)
-            required = node_text(req, source) != "false" if req is not None else None
-        # Spring AI reads `required` from the annotation only (true by default, as in Java):
-        # Kotlin nullability and a default value do not reach its schema.
-        default_text = " ".join(node_text(default, source).split()) if default is not None else None
-        if default_text is not None and len(default_text) > _MAX_DEFAULT:
-            default_text = default_text[: _MAX_DEFAULT - 1] + "…"
-        out.append(
-            param(
-                node_text(name_node, source),
-                type_text,
-                required=True if required is None else required,
-                default=default_text,
-                description=description,
-            )
-        )
-    return out
-
-
-#: ``@Tool`` is Spring AI's only when imported from its package.
-_SPRING_TOOL_IMPORT = re.compile(
-    rb"import\s+org\.springframework\.ai\.tool\.annotation\.(?:Tool\b(?!\s+as\b)|\*)"
-)
-_SPRING_TOOL_FQN = "org.springframework.ai.tool.annotation.Tool"
-
-
-def _spring_tool(ann: Node, source: bytes, imported: bool, aliases: dict[str, str]) -> bool:
-    type_, _ = _ann_parts(ann)
-    text = node_text(type_, source) if type_ is not None else ""
-    if text in aliases:  # import org.springframework.ai.tool.annotation.Tool as AiTool
-        return aliases[text] == _SPRING_TOOL_FQN
-    return text == _SPRING_TOOL_FQN or (imported and text == "Tool")
-
-
-def _annotated_tools(dc: DetectContext, functions: dict[tuple[str, int], Any]) -> list[Emit]:
-    """Spring AI ``@McpTool`` / ``@Tool`` functions."""
-    source = dc.source
-    mcp_annotations = b"McpTool" in source
-    plain = b"springframework.ai" in source and _in_mcp_module(
-        dc.record.path, index_fact(dc.ctx.resolution_index, FACT)
-    )
-    if not mcp_annotations and not plain:
-        return []
-    imported = bool(_SPRING_TOOL_IMPORT.search(source))
-    aliases = _aliases(source)
-    found: list[Emit] = []
-    for function in _walk(dc.root):
-        if function.type != "function_declaration":
-            continue
-        mods = next((c for c in function.named_children if c.type == "modifiers"), None)
-        anns = _annotations(mods, source, aliases)
-        if "McpTool" in anns:
-            ann, param_ann = anns["McpTool"], "McpToolParam"
-        elif plain and "Tool" in anns and _spring_tool(anns["Tool"], source, imported, aliases):
-            ann, param_ann = anns["Tool"], "ToolParam"
-        else:
-            continue
-        name_node = next(
-            (c for c in function.named_children if c.type == "simple_identifier"), None
-        )
-        if name_node is None:
-            continue
-        function_name = node_text(name_node, source)
-        named = _element(ann, "name", source)
-        endpoint = _string(named, source) if named is not None else function_name
-        if not endpoint:
-            continue
-        line = function.start_point[0] + 1
-        owner = functions.get((function_name, line))
-        found.append(
-            tool_emit(
-                ann,
-                source,
-                endpoint=endpoint,
-                framework=FRAMEWORK,
-                handler=function_name,
-                handler_line=line,
-                description=_string(_element(ann, "description", source), source),
-                params=_params(function, source, param_ann, aliases),
-                parent=owner.id if owner is not None else None,
-            )
-        )
-    return found
-
-
-# ── MCP Java SDK ────────────────────────────────────────────
+# ── MCP Java SDK ─────────────────────────────────────────────────────────────
 
 
 def _builder_chain(
@@ -418,18 +137,18 @@ def _builder_chain(
         callee = cur.named_children[0] if cur.named_children else None
         if callee is None or callee.type != "navigation_expression":
             return None
-        calls.append((_suffix_name(callee, source), _positional(_call_args(cur, source))))
+        calls.append((kotlin_suffix_name(callee, source), _positional(kotlin_call_args(cur, source))))
         cur = callee.named_children[0]
     if cur is None or len(calls) < 2 or calls[-1][0] != "builder" or calls[0][0] != "build":
         return None
-    return _type_name(cur, source, aliases), dict(reversed(calls))
+    return kotlin_type_name(cur, source, aliases), dict(reversed(calls))
 
 
 def _local_variables(root: Node, source: bytes) -> dict[str, Node | None]:
     """``val`` / ``var`` declared once in the file → their initializer (None when declared
     twice)."""
     out: dict[str, Node | None] = {}
-    for node in _walk(root):
+    for node in walk(root):
         if node.type != "property_declaration":
             continue
         decl = next((c for c in node.named_children if c.type == "variable_declaration"), None)
@@ -466,33 +185,33 @@ def _tool_fields(
     if chain is None:
         if _type_callee(node, source, aliases) != "Tool":
             return None
-        args = _call_args(node, source)
+        args = kotlin_call_args(node, source)
         pos = _positional(args)
-        name = _string(_named(args, "name") or (pos[0] if pos else None), source)
+        name = kotlin_string(_named(args, "name") or (pos[0] if pos else None), source)
         if not name:
             return None
         if _named(args, "name") is not None:
             schema = _named(args, "inputSchema")
-            desc = _string(_named(args, "description"), source)
+            desc = kotlin_string(_named(args, "description"), source)
             return (
                 name,
                 desc,
-                _json_schema_params(_literal_text(schema, source)) if schema else None,
+                json_schema_params(_literal_text(schema, source)) if schema else None,
             )
         if len(pos) == 3:  # Tool(name, description, inputSchema)
-            return name, _string(pos[1], source), _json_schema_params(_literal_text(pos[2], source))
+            return name, kotlin_string(pos[1], source), json_schema_params(_literal_text(pos[2], source))
         return name, None, None  # other overloads: positions differ by SDK version
     root, calls = chain
     if root != "Tool":
         return None
     name_args = calls.get("name") or []
-    name = _string(name_args[0], source) if len(name_args) == 1 else None
+    name = kotlin_string(name_args[0], source) if len(name_args) == 1 else None
     if not name:
         return None
     desc_args = calls.get("description") or []
-    description = _string(desc_args[0], source) if len(desc_args) == 1 else None
+    description = kotlin_string(desc_args[0], source) if len(desc_args) == 1 else None
     schema_args = calls.get("inputSchema")
-    params = _json_schema_params(_literal_text(schema_args[-1], source)) if schema_args else []
+    params = json_schema_params(_literal_text(schema_args[-1], source)) if schema_args else []
     return name, description, params
 
 
@@ -511,7 +230,7 @@ def _handler(
     elif node.type == "navigation_expression":
         suffix = node.named_children[-1] if node.named_children else None
         if suffix is not None and node_text(suffix, source).startswith("::"):
-            name = _suffix_name(node, source)
+            name = kotlin_suffix_name(node, source)
     if name:
         return name, methods.get(name)
     return None, None
@@ -531,9 +250,9 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
         return []
     variables = _local_variables(dc.root, source)
     methods = _methods(dc)
-    aliases = _aliases(source)
+    aliases = kotlin_aliases(source)
     found: list[Emit] = []
-    for node in _walk(dc.root):
+    for node in walk(dc.root):
         if node.type != "call_expression":
             continue
         tool: Node | None = None
@@ -547,7 +266,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
             tool = tool_args[0] if len(tool_args) == 1 else None
             handler = handler_args[0] if len(handler_args) == 1 else None
         elif _type_callee(node, source, aliases).endswith("ToolSpecification"):
-            args = _call_args(node, source)
+            args = kotlin_call_args(node, source)
             pos = _positional(args)
             tool = _named(args, "tool") or (pos[0] if pos else None)
             rest = [v for v in pos if v is not tool and v.type != "null_literal"]
@@ -568,7 +287,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
                 node,
                 source,
                 endpoint=name,
-                framework=SDK_FRAMEWORK,
+                framework=JAVA_MCP,
                 handler=handler_name,
                 handler_line=handler_line,
                 description=description,
@@ -588,14 +307,14 @@ def _string_list(node: Node | None, source: bytes) -> list[str] | None:
         return None
     if _callee_name(node, source) not in ("listOf", "arrayOf", "setOf"):
         return None
-    out = [_string(v, source) for v in _positional(_call_args(node, source))]
+    out = [kotlin_string(v, source) for v in _positional(kotlin_call_args(node, source))]
     return [v for v in out if v is not None] if all(v is not None for v in out) else None
 
 
 def _lambda_statements(call: Node, source: bytes) -> list[Node] | None:
     """The statements of a call's trailing lambda (``f { a; b }``); None without one."""
     lam = next(
-        (v for k, v in reversed(_call_args(call, source)) if v.type == "lambda_literal"), None
+        (v for k, v in reversed(kotlin_call_args(call, source)) if v.type == "lambda_literal"), None
     )
     if lam is None:
         return None
@@ -623,16 +342,16 @@ def _json_properties(node: Node | None, source: bytes) -> dict[str, dict[str, st
     for stmt in statements:
         if stmt.type != "call_expression" or _callee_name(stmt, source) != "putJsonObject":
             return None
-        pos = [v for v in _positional(_call_args(stmt, source)) if v.type != "lambda_literal"]
-        name = _string(pos[0], source) if len(pos) == 1 else None
+        pos = [v for v in _positional(kotlin_call_args(stmt, source)) if v.type != "lambda_literal"]
+        name = kotlin_string(pos[0], source) if len(pos) == 1 else None
         inner = _lambda_statements(stmt, source)
         if not name or inner is None:
             return None
         spec: dict[str, str] = {}
         for put in inner:
             if put.type == "call_expression" and _callee_name(put, source) == "put":
-                kv = _positional(_call_args(put, source))
-                key = _string(kv[0], source) if len(kv) == 2 else None
+                kv = _positional(kotlin_call_args(put, source))
+                key = kotlin_string(kv[0], source) if len(kv) == 2 else None
                 value = _literal_text(kv[1], source) if len(kv) == 2 else None
                 if key is not None and value is not None:
                     spec[key] = value
@@ -648,7 +367,7 @@ def _kotlin_schema_params(
         return None
     if _type_callee(node, source, aliases) not in ("Input", "ToolSchema"):
         return None
-    args = _call_args(node, source)
+    args = kotlin_call_args(node, source)
     pos = _positional(args)
     props_node = _named(args, "properties") or (pos[0] if pos else None)
     required_node = _named(args, "required") or (pos[1] if len(pos) > 1 else None)
@@ -680,10 +399,10 @@ def _kotlin_sdk_tool(
 ) -> Emit | None:
     """One Kotlin SDK tool: ``fields`` are ``addTool``'s (or its ``Tool(…)``'s) arguments, ``pos``
     the positional ones (``name``, ``description``, ``inputSchema``)."""
-    name = _string(_named(fields, "name") or (pos[0] if pos else None), source)
+    name = kotlin_string(_named(fields, "name") or (pos[0] if pos else None), source)
     if not name or handler is None:
         return None
-    description = _string(
+    description = kotlin_string(
         _named(fields, "description") or (pos[1] if len(pos) > 1 else None), source
     )
     schema = _named(fields, "inputSchema") or (pos[2] if len(pos) > 2 else None)
@@ -693,7 +412,7 @@ def _kotlin_sdk_tool(
         node,
         source,
         endpoint=name,
-        framework=KOTLIN_SDK_FRAMEWORK,
+        framework=KOTLIN_MCP,
         handler=handler_name,
         handler_line=handler_line,
         description=description,
@@ -707,7 +426,7 @@ def _registered_tools(
 ) -> list[tuple[Node, Node, Node | None]]:
     """``(element, Tool(…) call, handler)`` of each ``RegisteredTool(Tool(…), handler)`` in an
     ``addTools(listOf(…))`` whose list is written inline; nothing for any other list."""
-    args = _call_args(node, source)
+    args = kotlin_call_args(node, source)
     pos = _positional(args)
     lst = _named(args, "toolsToAdd") or (pos[0] if len(pos) == 1 else None)
     callee = lst.named_children[0] if lst is not None and lst.named_children else None
@@ -720,13 +439,13 @@ def _registered_tools(
     ):
         return []
     out: list[tuple[Node, Node, Node | None]] = []
-    for element in _positional(_call_args(lst, source)):
+    for element in _positional(kotlin_call_args(lst, source)):
         if (
             element.type != "call_expression"
             or _type_callee(element, source, aliases) != "RegisteredTool"
         ):
             continue
-        el_args = _call_args(element, source)
+        el_args = kotlin_call_args(element, source)
         el_pos = _positional(el_args)  # a trailing lambda is the last one
         tool = _named(el_args, "tool") or (el_pos[0] if el_pos else None)
         handler = _named(el_args, "handler") or (el_pos[1] if len(el_pos) > 1 else None)
@@ -746,15 +465,15 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
     if b"io.modelcontextprotocol.kotlin.sdk.server" not in source or b"addTool" not in source:
         return []
     methods = _methods(dc)
-    aliases = _aliases(source)
+    aliases = kotlin_aliases(source)
     found: list[Emit] = []
-    for node in _walk(dc.root):
+    for node in walk(dc.root):
         if node.type != "call_expression":
             continue
         method = _callee_name(node, source)
         emits: list[Emit | None] = []
         if method == "addTool":
-            args = _call_args(node, source)
+            args = kotlin_call_args(node, source)
             pos = [v for v in _positional(args) if v.type != "lambda_literal"]
             lam = next((v for k, v in args if k is None and v.type == "lambda_literal"), None)
             handler = _named(args, "handler") or lam
@@ -765,13 +484,13 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
                 and first.type == "call_expression"
                 and _type_callee(first, source, aliases) == "Tool"
             ):
-                fields, pos = _call_args(first, source), []  # addTool(Tool(name = …, …)) { … }
+                fields, pos = kotlin_call_args(first, source), []  # addTool(Tool(name = …, …)) { … }
             emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, methods, aliases))
         elif method == "addTools":
             for element, tool, handler in _registered_tools(node, source, aliases):
                 emits.append(
                     _kotlin_sdk_tool(
-                        element, _call_args(tool, source), [], handler, source, methods, aliases
+                        element, kotlin_call_args(tool, source), [], handler, source, methods, aliases
                     )
                 )
         found.extend(e for e in emits if e is not None)
@@ -779,20 +498,19 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    functions = {(f.name, f.startLine): f for f in dc.record.functions}
-    found = _annotated_tools(dc, functions) + _sdk_tools(dc) + _kotlin_sdk_tools(dc)
+    found = _sdk_tools(dc) + _kotlin_sdk_tools(dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))
-    return Detection(found, label=found[0].fields.get("framework") or FRAMEWORK)
+    return Detection(found, label=found[0].fields.get("framework") or KOTLIN_MCP)
 
 
 # An entry-point emitter, so fixture/test files are skipped.
 register_detector(
     Detector(
         name="kotlin-mcp",
-        gate=Gate("kotlin", order=30, guard=b"Tool", skip_fixtures=True),
+        gate=Gate("kotlin", order=40, guard=b"Tool", skip_fixtures=True),
         detect=_detect,
-        frameworks=(FRAMEWORK, SDK_FRAMEWORK, KOTLIN_SDK_FRAMEWORK),
+        frameworks=(JAVA_MCP, KOTLIN_MCP),
     )
 )

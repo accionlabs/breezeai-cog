@@ -5,7 +5,7 @@
     [McpServerToolType]
     public static class EchoTool
     {
-        [McpServerTool(Name = "echo"), Description("Echoes the message")]   → mcp_tool  mcp-csharp  TOOL  echo
+        [McpServerTool(Name = "echo"), Description("Echoes the message")]   → mcp_tool  csharp-mcp  TOOL  echo
         public static string Echo([Description("The message")] string message, int times = 1,
                                   CancellationToken ct = default) => …
 
@@ -34,7 +34,7 @@ from ..emits import Emit
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
 
-FRAMEWORK = "mcp-csharp"
+FRAMEWORK = "csharp-mcp"
 _INJECTED = frozenset(
     {
         "CancellationToken",
