@@ -10,7 +10,9 @@
                 { description: "Echo", inputSchema: { msg: z.string() } }, echoHandler)
 
 * **Server receiver** — the call's object must be a name (or ``this.x``) assigned
-  ``new McpServer(…)`` in this file, or a parameter typed ``McpServer``.
+  ``new McpServer(…)`` in this file, or a parameter typed ``McpServer``; a name shadowed at
+  the call by another parameter or local of an enclosing scope
+  (``function f(server: Foo) { server.tool(…) }``) is not the server.
 * ``tool(name, [description], [paramsShape], [annotations], callback)`` — every overload: the
   description is the string after the name; an object is the params shape only when its values
   are zod chains, so an annotations object (``{ readOnlyHint: true }``) is never read as params.
@@ -127,6 +129,79 @@ def _servers(root: Node, source: bytes) -> set[str]:
                 if node.type == "public_field_definition":
                     out.add(f"this.{text}")
     return out
+
+
+_FUNCTION_SCOPES = frozenset(
+    {
+        "function_declaration",
+        "function_expression",
+        "function",
+        "arrow_function",
+        "method_definition",
+        "generator_function_declaration",
+        "generator_function",
+    }
+)
+_PARAMETERS = ("required_parameter", "optional_parameter")
+
+
+def _mcp_typed(node: Node, source: bytes) -> bool:
+    ann = node.child_by_field_name("type")
+    return ann is not None and node_text(ann, source).lstrip(": ").rsplit(".", 1)[-1] == "McpServer"
+
+
+def _new_mcp_server(node: Node | None, source: bytes) -> bool:
+    if node is None or node.type != "new_expression":
+        return False
+    ctor = node.child_by_field_name("constructor")
+    return ctor is not None and node_text(ctor, source).rsplit(".", 1)[-1] == "McpServer"
+
+
+def _binds(pattern: Node | None, name: str, source: bytes) -> bool:
+    """True when the binding pattern ``pattern`` (a name, a destructuring) declares ``name``."""
+    if pattern is None:
+        return False
+    if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
+        return node_text(pattern, source) == name
+    if pattern.type in ("assignment_pattern", "object_assignment_pattern"):
+        return _binds(pattern.child_by_field_name("left"), name, source)
+    if pattern.type == "pair_pattern":
+        return _binds(pattern.child_by_field_name("value"), name, source)
+    if pattern.type in ("object_pattern", "array_pattern", "rest_pattern"):
+        return any(_binds(c, name, source) for c in pattern.named_children)
+    return False
+
+
+def _shadowed(call: Node, name: str, source: bytes) -> bool:
+    """True when the receiver ``name`` of ``call`` is, at the call, a binding other than the
+    ``McpServer``: a parameter of an enclosing function not typed ``McpServer``
+    (``function f(server: Foo) { server.tool(…) }``), or a ``let`` / ``const`` / ``var`` of an
+    enclosing block not assigned ``new McpServer(…)``. The nearest binding wins; module-level
+    bindings are the ones :func:`_servers` reads."""
+    node = call.parent
+    while node is not None and node.type != "program":
+        if node.type in _FUNCTION_SCOPES:
+            single = node.child_by_field_name("parameter")  # `server => …`
+            if single is not None and _binds(single, name, source):
+                return True
+            params = node.child_by_field_name("parameters")
+            for p in params.named_children if params is not None else ():
+                if p.type in _PARAMETERS:
+                    if _binds(p.child_by_field_name("pattern"), name, source):
+                        return not _mcp_typed(p, source)
+                elif _binds(p, name, source):
+                    return True
+        elif node.type == "statement_block":
+            for stmt in node.named_children:
+                if stmt.type not in ("lexical_declaration", "variable_declaration"):
+                    continue
+                for decl in stmt.named_children:
+                    if decl.type == "variable_declarator" and _binds(
+                        decl.child_by_field_name("name"), name, source
+                    ):
+                        return not _new_mcp_server(decl.child_by_field_name("value"), source)
+        node = node.parent
+    return False
 
 
 def _zod_names(dc: DetectContext) -> set[str]:
@@ -367,6 +442,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             method not in ("tool", "registerTool")
             or obj is None
             or node_text(obj, source) not in servers
+            or (obj.type == "identifier" and _shadowed(call, node_text(obj, source), source))
         ):
             continue
         args_node = call.child_by_field_name("arguments")

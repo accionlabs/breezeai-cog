@@ -1600,3 +1600,27 @@ def test_a_long_string_concatenation_is_read_without_recursion(language, kind, r
     assert module._string(node, src) == "ab" * (sys.getrecursionlimit() + 500)
     other = b'class A { boolean x = "a" == "b"; }' if language == "java" else b'val x = "a" - "b"'
     assert module._string(_first(parse_source(language, other, 0).root_node, kind), other) is None
+
+
+def test_typescript_shadowed_server_name_is_not_the_server(analyze_files) -> None:
+    src = (
+        TS_HEADER
+        + """
+server.tool("top", "Top level", async () => ({ content: [] }));
+function f(server: Registry) { server.tool("fakeParam", async () => ({ content: [] })); }
+const g = (server) => server.tool("fakeArrow", async () => ({ content: [] }));
+function h({ server }) { server.tool("fakeDestructured", async () => ({ content: [] })); }
+function k() {
+  const server = new Registry();
+  server.tool("fakeLocal", async () => ({ content: [] }));
+}
+function register(server: McpServer) {
+  server.tool("typed", "Typed param", async () => ({ content: [] }));
+}
+function inner() {
+  const server = new McpServer({ name: "inner", version: "1" });
+  server.tool("innerLocal", async () => ({ content: [] }));
+}
+"""
+    )
+    assert set(_tools(analyze_files({"src/server.ts": src}))) == {"top", "typed", "innerLocal"}
