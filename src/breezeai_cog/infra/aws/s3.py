@@ -62,16 +62,37 @@ def _default_client(settings: Settings) -> Any:
 
 _EOF = object()
 _QUEUE_CHUNKS = 64  # bounded: backpressure on the writer, never unbounded memory
+# The reader gives up when the writer sends nothing for this long (a caller that never
+# closes the stream, e.g. after an exception mid-export), so the upload thread cannot
+# hang for the life of the process.
+_READER_IDLE_TIMEOUT_S = 600.0
+_POLL_S = 0.5
 
 
 class _QueueReader(io.RawIOBase):
     """Read end: blocks until the writer sends data or EOF."""
 
-    def __init__(self, chunks: queue.Queue[Any]) -> None:
+    def __init__(self, chunks: queue.Queue[Any], idle_timeout: float = _READER_IDLE_TIMEOUT_S) -> None:
         super().__init__()
         self._chunks = chunks
         self._buf = b""
         self._eof = False
+        self._idle_timeout = idle_timeout
+        self.abandoned = threading.Event()  # set by the owner to stop a waiting reader
+
+    def _next_chunk(self) -> Any:
+        waited = 0.0
+        while True:
+            if self.abandoned.is_set():
+                raise BrokenPipeError("upload stream abandoned")
+            try:
+                return self._chunks.get(timeout=_POLL_S)
+            except queue.Empty:
+                waited += _POLL_S
+                if waited >= self._idle_timeout:
+                    raise TimeoutError(
+                        f"no data from the writer for {self._idle_timeout:.0f}s; stream was never closed"
+                    ) from None
 
     def readable(self) -> bool:
         return True
@@ -84,14 +105,23 @@ class _QueueReader(io.RawIOBase):
                 if not part:
                     return b"".join(parts)
                 parts.append(part)
-        while not self._buf and not self._eof:
-            chunk = self._chunks.get()
-            if chunk is _EOF:
-                self._eof = True
-            else:
+        # Fill the request: callers (boto3's upload_fileobj reads 8 MB up front to choose
+        # multipart) treat a short read as end of stream, so keep going until `size` bytes
+        # or EOF rather than returning one small gzip chunk.
+        out = bytearray()
+        while len(out) < size:
+            if not self._buf:
+                if self._eof:
+                    break
+                chunk = self._next_chunk()
+                if chunk is _EOF:
+                    self._eof = True
+                    break
                 self._buf = chunk
-        out, self._buf = self._buf[:size], self._buf[size:]
-        return out
+            take = size - len(out)
+            out += self._buf[:take]
+            self._buf = self._buf[take:]
+        return bytes(out)
 
     def readinto(self, b: Any) -> int:
         data = self.read(len(b))
@@ -100,7 +130,7 @@ class _QueueReader(io.RawIOBase):
 
 
 class _QueueWriter(io.RawIOBase):
-    """Write end: blocks when the queue is full; drops data once the reader is closed."""
+    """Write end: blocks when the queue is full; raises BrokenPipeError once the reader is closed."""
 
     def __init__(self, chunks: queue.Queue[Any], reader: _QueueReader) -> None:
         super().__init__()
@@ -111,7 +141,9 @@ class _QueueWriter(io.RawIOBase):
         return True
 
     def _put(self, item: Any) -> None:
-        while not self._reader.closed:
+        while True:
+            if self._reader.closed:
+                raise BrokenPipeError("upload reader is closed")
             try:
                 self._chunks.put(item, timeout=0.1)
                 return
@@ -126,7 +158,10 @@ class _QueueWriter(io.RawIOBase):
 
     def close(self) -> None:
         if not self.closed:
-            self._put(_EOF)
+            try:
+                self._put(_EOF)
+            except BrokenPipeError:
+                pass  # reader already gone; write() surfaced the failure
         super().close()
 
 
@@ -222,6 +257,10 @@ class AWSStreamUpload(InfraStream):
             if error is not None:
                 raise error from exc
             raise
+
+    def abort(self) -> None:
+        """Stop the background upload without finishing it (the caller failed mid-export)."""
+        self._reader.abandoned.set()
 
     def close(self) -> str:
         """Finish the upload and return the S3 key."""

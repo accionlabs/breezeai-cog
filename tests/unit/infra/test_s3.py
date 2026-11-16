@@ -13,6 +13,16 @@ def create_test_settings():
     )
 
 
+def _draining_mock():
+    """A Mock client whose upload_fileobj drains the stream to EOF like boto3 does.
+
+    A client that returns without reading closes the reader, and the next write then
+    (correctly) raises BrokenPipeError."""
+    client = Mock()
+    client.upload_fileobj.side_effect = lambda fileobj, *a, **k: fileobj.read()
+    return client
+
+
 class ReadingS3Client:
     """Fake S3 client that drains the pipe like boto3 does.
 
@@ -35,7 +45,7 @@ class ReadingS3Client:
 
 def test_write_line():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     stream = AWSStreamUpload(
         "test.json",
@@ -51,7 +61,7 @@ def test_write_line():
 
 def test_close():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     stream = AWSStreamUpload(
         "test.json",
@@ -66,7 +76,7 @@ def test_close():
 
 def test_upload_calls_s3():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     stream = AWSStreamUpload(
         "test.json",
@@ -82,7 +92,7 @@ def test_upload_calls_s3():
 
 def test_upload_uses_correct_s3_arguments():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     stream = AWSStreamUpload(
         "test.json",
@@ -106,7 +116,7 @@ def test_zero_retry_attempts_raises_error():
     settings = create_test_settings()
     settings.storage_retry_attempts = 0
 
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     with pytest.raises(
         ValueError,
@@ -123,7 +133,7 @@ def test_missing_bucket_raises_error():
     settings = create_test_settings()
     settings.aws_s3_bucket = None
 
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     with pytest.raises(
         ValueError,
@@ -138,7 +148,7 @@ def test_missing_bucket_raises_error():
 
 def test_upload_error_is_raised_on_close():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     mock_client.upload_fileobj.side_effect = RuntimeError("S3 upload failed")
 
@@ -154,7 +164,7 @@ def test_upload_error_is_raised_on_close():
 
 def test_write_after_close_raises_error():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     stream = AWSStreamUpload(
         "test.json",
@@ -173,7 +183,7 @@ def test_write_after_close_raises_error():
 
 def test_close_twice_does_not_upload_twice():
     settings = create_test_settings()
-    mock_client = Mock()
+    mock_client = _draining_mock()
 
     stream = AWSStreamUpload(
         "test.json",
@@ -241,3 +251,61 @@ def test_error_while_reading_stream_propagates_on_close():
 
     with pytest.raises(ConnectionError, match="connection reset"):
         stream.close()
+
+
+def test_reader_fills_requested_size_across_small_chunks():
+    import queue
+    from breezeai_cog.infra.aws.s3 import _EOF, _QueueReader
+
+    q: queue.Queue = queue.Queue()
+    for _ in range(10):
+        q.put(b"x" * 100)
+    q.put(_EOF)
+    reader = _QueueReader(q)
+    assert len(reader.read(450)) == 450  # not one 100-byte chunk
+    assert len(reader.read(1000)) == 550  # short only at EOF
+    assert reader.read(10) == b""
+
+
+def test_write_after_reader_closed_raises_broken_pipe():
+    import queue
+    from breezeai_cog.infra.aws.s3 import _QueueReader, _QueueWriter
+
+    q: queue.Queue = queue.Queue(maxsize=2)
+    reader = _QueueReader(q)
+    writer = _QueueWriter(q, reader)
+    reader.close()
+    with pytest.raises(BrokenPipeError):
+        writer.write(b"data")
+    writer.close()  # closing after the reader is gone does not raise
+
+
+def test_abort_stops_waiting_reader():
+    import queue
+    import threading
+    from breezeai_cog.infra.aws.s3 import _QueueReader
+
+    reader = _QueueReader(queue.Queue())
+    errors: list[BaseException] = []
+
+    def run():
+        try:
+            reader.read(10)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=run)
+    t.start()
+    reader.abandoned.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert isinstance(errors[0], BrokenPipeError)
+
+
+def test_reader_idle_timeout():
+    import queue
+    from breezeai_cog.infra.aws.s3 import _QueueReader
+
+    reader = _QueueReader(queue.Queue(), idle_timeout=0.5)
+    with pytest.raises(TimeoutError):
+        reader.read(10)
