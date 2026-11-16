@@ -34,6 +34,7 @@ them behave exactly as the base tiers.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Callable
 
 from .index_common import ClassHeritage, walk_heritage
@@ -77,7 +78,7 @@ def make_resolver(
     types: dict[str, str] | None = None,
     *,
     ext_index: dict[tuple[str, str], str | None] | None = None,
-    heritage: dict[str, ClassHeritage | None] | None = None,
+    heritage: Mapping[str, ClassHeritage | None] | None = None,
     builtin_methods: frozenset[str] = frozenset(),
     declared_only: bool = False,
     owner_defs: dict[str, set[str]] | None = None,
