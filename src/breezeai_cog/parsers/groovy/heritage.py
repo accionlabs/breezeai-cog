@@ -14,9 +14,10 @@ repository, each mapped to the file that declares it:
   parent interfaces) declare is ambiguous, so it maps to ``None``.
 
 A class whose body has a parse error anywhere may have lost members to it, so its methods are
-not known:
-it is recorded as ``None``, like an ambiguous name, and so is every class whose in-repo parent
-chain reaches it; a call on one keeps the type's file.
+not known: it is recorded as ``None``, like an ambiguous name, and so is every class whose
+in-repo parent chain reaches it. A call on one keeps the type's file only when that class
+declares the method there (``unknown_methods``, built from the members the parse kept; a
+method the grammar read as a constructor counts).
 
 ``callresolve.py`` then sends ``obj.m()`` on an ``obj`` of this type to the file of the class or
 nearest in-repo ancestor that declares ``m``, and leaves it empty when none does: a method from
@@ -42,6 +43,9 @@ _CLASS_DECLS = ("class_declaration", "interface_declaration", "enum_declaration"
                 "trait_declaration")
 _TYPE_NODES = ("type_identifier", "generic_type", "qualified_type", "scoped_type_identifier")
 _VISIBILITY = frozenset({"public", "private", "protected"})
+#: Statement keywords error recovery can leave as a constructor's name.
+_STATEMENT_WORDS = frozenset({"catch", "finally", "for", "if", "else", "while", "do", "switch",
+                              "synchronized", "try", "return"})
 _NO_RETURN = frozenset({"void", "boolean", "byte", "char", "short", "int", "long", "float",
                         "double", "def", "var", "Object"})
 
@@ -242,6 +246,11 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
                 if (node.type in ("interface_declaration", "trait_declaration")
                         or nm is None or node_text(nm, source) != own_name):
                     complete = False
+                    # still the class's method, for the check a class whose methods are not
+                    # all known gets (`unknown_methods`) — unless error recovery made a
+                    # statement keyword into one (`catch (Exception e) { … }`)
+                    if nm is not None and node_text(nm, source) not in _STATEMENT_WORDS:
+                        add(node_text(nm, source), None)
             elif member.type == "method_declaration":
                 nm = member.child_by_field_name("name")
                 if nm is None:
@@ -315,7 +324,7 @@ def build_heritage(
             inherited = trait_methods(frag, {simple}) if frag.complete else None
         except _Unknown:
             inherited = None
-        if inherited is None:  # its methods are not known: a call on it keeps the type's file
+        if inherited is None:  # its methods are not known (see `unknown_methods`)
             out[simple] = None
             unknown.add(simple)
             continue

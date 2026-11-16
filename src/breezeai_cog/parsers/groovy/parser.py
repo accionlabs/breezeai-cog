@@ -80,16 +80,24 @@ class GroovyParser(BaseParser):
         )
         set_datastore_vendor(external)
         heritage: Mapping[str, ClassHeritage | None] | None = None
+        unknown: Mapping[tuple[str, str], frozenset[str] | None] | None = None
         if isinstance(idx, GroovyIndex):  # `import a.Foo as Bar`: `Bar.m()` is looked up as `Foo`
             known = idx.class_heritage
-            aliases = {a: known[real] for a, real in import_aliases(root, source).items()
-                       if real in known}
+            renamed = {a: real for a, real in import_aliases(root, source).items() if real in known}
+            aliases = {a: known[real] for a, real in renamed.items()}
             heritage = ChainMap(aliases, known) if aliases else known
+            unknown = idx.unknown_methods
+            unknown_aliases = {(bindings[a], a): unknown[(bindings[a], real)]
+                               for a, real in renamed.items()
+                               if a in bindings and (bindings[a], real) in unknown}
+            if unknown_aliases:
+                unknown = ChainMap(unknown_aliases, idx.unknown_methods)
         shared = make_resolver(  # calls[].path: imports, same file, receiver type (declared only)
             bindings, defined_names(root, source), path, type_map(root, source),
             heritage=heritage,
             declared_only=True,
             owner_defs=class_method_names(root, source),
+            unknown_methods=unknown,
         )
 
         def resolve(name: str, receiver: str | None, owner: str | None = None,

@@ -68,6 +68,7 @@ class JavaParser(BaseParser):
             heritage=idx.class_heritage if isinstance(idx, JavaIndex) else None,
             declared_only=True,
             owner_defs=class_method_names(root, source),
+            unknown_methods=idx.unknown_methods if isinstance(idx, JavaIndex) else None,
         )
         functions: list[Function] = []
         classes = []

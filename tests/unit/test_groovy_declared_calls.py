@@ -144,15 +144,30 @@ def test_two_traits_declaring_one_method_leave_it_empty(tmp_path: Path) -> None:
     assert calls["onD"] == {"ping": f"{_ROOT}/D.groovy"}
 
 
-def test_a_class_name_two_files_share_keeps_the_type_file(tmp_path: Path) -> None:
+def test_a_class_name_two_files_share_keeps_the_type_file_for_a_method_it_declares(
+    tmp_path: Path,
+) -> None:
+    # The import names the file; only a method that file's Report declares resolves there.
     files = {
-        "a/Report.groovy": "package com.acme.a\nclass Report { void print() { } }\n",
-        "b/Report.groovy": "package com.acme.b\nclass Report { }\n",
+        "a/Report.groovy": "package com.acme.a\nclass Report { void render() { } }\n",
+        "b/Report.groovy": "package com.acme.b\nclass Report extends Base { void print() { } }\n",
+        "b/Base.groovy": "package com.acme.b\nclass Base { void render() { } }\n",
         "Use.groovy": "package com.acme\nimport com.acme.b.Report\nclass Use {\n"
-                      "    void run(Report r) {\n        r.render()\n    }\n}\n",
+                      "    void run(Report r) {\n        r.print()\n        r.render()\n    }\n}\n",
     }
     calls = _calls(tmp_path, files, "Use.groovy")["run"]
-    assert calls == {"render": f"{_ROOT}/b/Report.groovy"}
+    assert calls == {"print": f"{_ROOT}/b/Report.groovy", "render": None}
+
+
+def test_a_method_of_another_class_in_the_type_s_file_does_not_count(tmp_path: Path) -> None:
+    # `Report` is ambiguous; its file declares render() only on the nested Row.
+    files = {
+        "Report.groovy": "package com.acme\nclass Report extends BaseReport {\n"
+                         "    static class Row { void render() { } }\n}\n",
+        "test/Report.groovy": "package com.acme.test\nclass Report { }\n",
+        "Use.groovy": "package com.acme\nclass Use {\n    void run(Report r) { r.render() }\n}\n",
+    }
+    assert _calls(tmp_path, files, "Use.groovy")["run"] == {"render": None}
 
 
 def test_a_class_whose_body_does_not_parse_keeps_the_type_file(tmp_path: Path) -> None:
@@ -183,17 +198,19 @@ def test_an_interface_method_resolves_to_the_parent_interface_declaring_it(tmp_p
 
 def test_a_parse_error_inside_a_method_makes_the_class_methods_unknown(tmp_path: Path) -> None:
     # The grammar has no typed local without an initializer (`Map<…> names`); the error it leaves
-    # in load() reads the `catch` as a constructor and drops find() from the tree, with no ERROR
-    # among the class's members.
+    # in load() reads the `catch` as a constructor and moves find() out of the class, with no
+    # ERROR among the class's members. load() is still the class's; find() is not known to be.
     files = {
         "Registry.groovy": "package com.acme\nclass Registry {\n"
                            "    void load() {\n        Map<String, List<String>> names\n"
                            "        try {\n            names = read()\n"
                            "        } catch (Exception e) {\n            names = [:]\n        }\n    }\n"
                            "    String find(String name) { name }\n}\n",
-        "Use.groovy": "package com.acme\nclass Use {\n    void run(Registry r) { r.find('x') }\n}\n",
+        "Use.groovy": "package com.acme\nclass Use {\n"
+                      "    void run(Registry r) { r.load(); r.find('x'); r.catch(1) }\n}\n",
     }
-    assert _calls(tmp_path, files, "Use.groovy")["run"] == {"find": f"{_ROOT}/Registry.groovy"}
+    assert _calls(tmp_path, files, "Use.groovy")["run"] == {
+        "load": f"{_ROOT}/Registry.groovy", "find": None, "catch": None}
 
 
 def test_a_method_the_grammar_splits_into_a_constructor_makes_the_methods_unknown(tmp_path: Path) -> None:
@@ -202,9 +219,11 @@ def test_a_method_the_grammar_splits_into_a_constructor_makes_the_methods_unknow
     files = {
         "LifeCycle.groovy": "package com.acme\ninterface LifeCycle {\n    void start()\n"
                             "    default String banner() { 'x' }\n}\n",
-        "Use.groovy": "package com.acme\nclass Use {\n    void run(LifeCycle l) { l.banner() }\n}\n",
+        "Use.groovy": "package com.acme\nclass Use {\n"
+                      "    void run(LifeCycle l) { l.banner(); l.start(); l.stop() }\n}\n",
     }
-    assert _calls(tmp_path, files, "Use.groovy")["run"] == {"banner": f"{_ROOT}/LifeCycle.groovy"}
+    assert _calls(tmp_path, files, "Use.groovy")["run"] == {
+        "banner": f"{_ROOT}/LifeCycle.groovy", "start": f"{_ROOT}/LifeCycle.groovy", "stop": None}
 
 
 def test_a_call_on_an_import_alias_is_looked_up_as_the_class(tmp_path: Path) -> None:
@@ -218,15 +237,36 @@ def test_a_call_on_an_import_alias_is_looked_up_as_the_class(tmp_path: Path) -> 
     assert calls == {"isWar": f"{_ROOT}/util/Env.groovy", "isJar": None}
 
 
-def test_a_subclass_of_a_class_whose_methods_are_not_known_keeps_the_type_file(tmp_path: Path) -> None:
+def test_a_subclass_of_a_class_whose_methods_are_not_known_keeps_only_its_own(tmp_path: Path) -> None:
+    # build() is declared in Builder.groovy, not in the subclass's file.
     files = {
         "Builder.groovy": "package com.acme\nclass Builder {\n"
                           "    private static Map<String, String> m = Util.<String, String> newMap()\n"
                           "    Object build() { null }\n}\n",
-        "MongoBuilder.groovy": "package com.acme\nclass MongoBuilder extends Builder { }\n",
-        "Use.groovy": "package com.acme\nclass Use {\n    void run(MongoBuilder b) { b.build() }\n}\n",
+        "MongoBuilder.groovy": "package com.acme\nclass MongoBuilder extends Builder {\n"
+                               "    void index() { }\n}\n",
+        "Use.groovy": "package com.acme\nclass Use {\n"
+                      "    void run(MongoBuilder b) { b.build(); b.index() }\n}\n",
     }
-    assert _calls(tmp_path, files, "Use.groovy")["run"] == {"build": f"{_ROOT}/MongoBuilder.groovy"}
+    assert _calls(tmp_path, files, "Use.groovy")["run"] == {
+        "build": None, "index": f"{_ROOT}/MongoBuilder.groovy"}
+
+
+def test_a_method_from_a_library_parent_of_a_class_with_a_parse_error_has_no_path(
+    tmp_path: Path,
+) -> None:
+    # The class's body does not parse, so its methods are not all known; run() is not among
+    # them (a library parent declares it), so the call does not land on the class's file.
+    files = {
+        "Job.groovy": "package com.acme\nimport com.lib.AbstractBatch\n"
+                      "class Job extends AbstractBatch {\n"
+                      "    private static Map<String, String> m = Util.<String, String> newMap()\n"
+                      "    void prepare() { }\n}\n",
+        "Main.groovy": "package com.acme\nclass Main {\n"
+                       "    void go() { Job proc = new Job(); proc.run(); proc.prepare() }\n}\n",
+    }
+    assert _calls(tmp_path, files, "Main.groovy")["go"] == {
+        "run": None, "prepare": f"{_ROOT}/Job.groovy"}
 
 
 _PARENT = "package com.acme\nclass Parent {\n    void audit() { }\n    void shared() { }\n}\n"

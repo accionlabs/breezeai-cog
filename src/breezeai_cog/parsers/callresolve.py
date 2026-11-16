@@ -11,7 +11,10 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
 * **Phase 2 — receiver type:** ``obj.method()`` where ``obj``'s declared type resolves to
   an in-repo file → that file. With ``declared_only`` (and ``heritage``), only when that type
   declares ``method`` — else the nearest in-repo ancestor that does, else ``None``: a method
-  the type inherits from a library has no in-repo target. A caller that passes the calling
+  the type inherits from a library has no in-repo target. A type ``heritage`` cannot describe
+  (a simple name two classes share, or a class whose methods are not all known) keeps the
+  type's file only when the class of that name in that file declares ``method``
+  (``unknown_methods``). A caller that passes the calling
   method's own variable types (:func:`method_types`) has ``obj`` looked up there, so a
   same-named variable of another method, or a field a local hides, does not lend its type.
 * **Extension:** ``recv.M()`` where ``recv``'s type is not an in-repo member call and ``M``
@@ -110,6 +113,7 @@ def make_resolver(
     builtin_methods: frozenset[str] = frozenset(),
     declared_only: bool = False,
     owner_defs: dict[str, set[str]] | None = None,
+    unknown_methods: Mapping[tuple[str, str], frozenset[str] | None] | None = None,
 ) -> CallResolver:
     """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
     callee's qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -125,7 +129,10 @@ def make_resolver(
     methods a bare / ``this`` call written in it can mean in this file) narrows the same-file
     tier to the calling class, so a same-named method of another class in the file (a nested
     or anonymous one) does not shadow an inherited method; without an ``owner`` (or for an
-    unknown one) the whole file's ``local_defs`` apply."""
+    unknown one) the whole file's ``local_defs`` apply. ``unknown_methods`` (``(file, class
+    simple name)`` → the methods that class declares there, for each class ``heritage`` maps to
+    ``None``: :func:`~.index_common.methods_where_unknown`) lets such a type keep its file only
+    for a method declared there; without it the type's file is kept for any method."""
     types = types or {}
 
     def _type_of(key: str, scope: Mapping[str, str | None] | None) -> tuple[bool, str | None]:
@@ -163,9 +170,15 @@ def make_resolver(
 
     def _declared(name: str, typ: str, resolved: str) -> str | None:
         """The file declaring ``typ.name``: ``typ`` itself, else its nearest in-repo ancestor.
-        A type the index cannot tell apart (two classes, one simple name) is left as resolved."""
-        if heritage is None or heritage.get(typ) is None:
+        A type the index cannot describe (two classes, one simple name; methods not all known)
+        keeps the resolved file when the class of that name there declares ``name``."""
+        if heritage is None:
             return resolved
+        if heritage.get(typ) is None:
+            if unknown_methods is None:
+                return resolved
+            declared = unknown_methods.get((resolved, typ))
+            return resolved if declared is not None and name in declared else None
         return _lookup(typ, name, "methods")[1]
 
     def _imported(name: str, receiver: str, resolved: str) -> str | None:
