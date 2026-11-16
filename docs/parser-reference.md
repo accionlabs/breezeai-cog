@@ -547,7 +547,8 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   `semanticType` = the kind, `text` = the file with secrets masked (cut at 64 KB on a line
   boundary, marked inline; masking keeps every line, so `endLine` is the file's line),
   `name` / `description` from the front matter. Over 512 KB: the File record only. `doc`,
-  `readme` and `changelog` statements past `max_markdown_statements` (count, default 2000) or
+  `readme` and `changelog` statements past `max_markdown_statements` (a count of the docs that
+  keep a statement, agent documents and files over 512 KB not counted; default 2000) or
   past `max_markdown_bytes` (default 32 MB, each file costing its size up to the 64 KB cap) are
   dropped, both decided in path order, and the File records `statementSkipped` with the cap's
   name; `configs.markdownCapped` counts them. An incremental `analyze-diff` holds unchanged

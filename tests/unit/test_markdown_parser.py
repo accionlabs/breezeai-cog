@@ -318,9 +318,18 @@ class _Sink:
         self.meta = meta
 
 
-def _assemble(records, **kw) -> tuple[_Sink, ProjectMetaData]:
+def _assemble(
+    records, *, max_markdown_statements: int = 0, root: Path | None = None, **kw
+) -> tuple[_Sink, ProjectMetaData]:
+    """``pipeline._assemble`` over ``records``, the doc-count cap decided from their paths as
+    the pipeline does from the scan (unless ``markdown_skips`` is given)."""
+    from breezeai_cog.core.scanner import ScanEntry
+
+    if max_markdown_statements and "markdown_skips" not in kw:
+        entries = [ScanEntry(r.path, r.language) for r in records]
+        kw["markdown_skips"] = pipeline._markdown_skips(entries, max_markdown_statements, 0, root)
     sink = _Sink()
-    meta = pipeline._assemble(Path("."), iter((r.language, r) for r in records), sink, **kw)
+    meta = pipeline._assemble(root or Path("."), iter((r.language, r) for r in records), sink, **kw)
     return sink, meta
 
 
@@ -348,10 +357,20 @@ def test_untyped_docs_past_the_cap_keep_the_file_only() -> None:
     assert meta.totalFiles == 4
 
 
-def test_untyped_docs_past_the_byte_budget_keep_the_file_only() -> None:
-    docs = [_parse(f"docs/{i}.md", "x" * 99 + "\n") for i in range(3)]
-    typed = _parse("CLAUDE.md", "y" * 500 + "\n")
-    sink, meta = _assemble([*docs, typed], max_markdown_bytes=250)
+def test_untyped_docs_past_the_byte_budget_keep_the_file_only(tmp_path: Path) -> None:
+    from breezeai_cog.core.scanner import ScanEntry
+
+    texts = {f"docs/{i}.md": "x" * 99 + "\n" for i in range(3)}
+    texts["CLAUDE.md"] = "y" * 500 + "\n"
+    for path, text in texts.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text)
+    skips = pipeline._markdown_skips(
+        [ScanEntry(p, "markdown") for p in texts], 0, 250 + 501, tmp_path
+    )
+    docs = [_parse(f"docs/{i}.md", texts[f"docs/{i}.md"]) for i in range(3)]
+    typed = _parse("CLAUDE.md", texts["CLAUDE.md"])
+    sink, meta = _assemble([*docs, typed], markdown_skips=skips)
     by_path = {r.path: r for r in sink.records}
     assert [len(by_path[f"docs/{i}.md"].statements) for i in range(3)] == [1, 1, 0]
     assert by_path["docs/2.md"].metadata["statementSkipped"] == "max_markdown_bytes"
@@ -372,8 +391,8 @@ def test_byte_budget_follows_path_order_and_file_size(tmp_path: Path) -> None:
         "b.md": "max_markdown_bytes",
         "c.md": "max_markdown_bytes",
     }
+    # a1.md takes no place under the count cap either.
     assert pipeline._markdown_skips(entries, 2, 1000, tmp_path) == {
-        "b.md": "max_markdown_statements",
         "c.md": "max_markdown_statements",
     }
     assert pipeline._markdown_skips(entries, 0, 0, tmp_path) is None
@@ -422,9 +441,7 @@ def test_doc_cap_follows_path_order_not_arrival_order() -> None:
     paths = [f"docs/{i}.md" for i in range(3)]
     skips = pipeline._markdown_skips([ScanEntry(p, "markdown") for p in reversed(paths)], 2)
     for order in (paths, list(reversed(paths))):
-        sink, _ = _assemble(
-            [_parse(p, "# x\n") for p in order], max_markdown_statements=2, markdown_skips=skips
-        )
+        sink, _ = _assemble([_parse(p, "# x\n") for p in order], markdown_skips=skips)
         kept = sorted(r.path for r in sink.records if r.statements)
         assert kept == ["docs/0.md", "docs/1.md"]
 
@@ -878,3 +895,30 @@ def test_prose_without_a_secret_literal_is_kept(line: str) -> None:
 def test_prose_env_pair_inside_inline_code_is_masked_once() -> None:
     out = _parse("docs/a.md", "Use `DB_PASSWORD=hunter2` here.\n").statements[0].text
     assert out == "Use `DB_PASSWORD=***` here.\n"
+
+
+def test_doc_cap_counts_only_non_agent_docs_with_a_statement(tmp_path: Path) -> None:
+    """Skills, agent instructions and files over the 512 KB File-only limit take no place
+    under ``max_markdown_statements``; the cap is on the docs that keep a statement."""
+    from breezeai_cog.core.scanner import ScanEntry
+
+    files = {
+        "a/SKILL.md": SKILL,
+        "b/CLAUDE.md": "# rules\n",
+        "c/big.md": "x" * (MAX_STATEMENT_FILE_BYTES + 1),
+        "d/one.md": "# one\n",
+        "e/two.md": "# two\n",
+        "f/three.md": "# three\n",
+    }
+    for path, text in files.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text)
+    entries = [ScanEntry(p, "markdown") for p in files]
+    assert pipeline._markdown_skips(entries, 2, 0, tmp_path) == {
+        "f/three.md": "max_markdown_statements"
+    }
+    records = [_parse(p, t, repo_root=tmp_path) for p, t in files.items()]
+    sink, meta = _assemble(records, max_markdown_statements=2, root=tmp_path)
+    kept = {r.path for r in sink.records if r.statements}
+    assert kept == {"a/SKILL.md", "b/CLAUDE.md", "d/one.md", "e/two.md"}
+    assert meta.configs["markdownCapped"] == 1

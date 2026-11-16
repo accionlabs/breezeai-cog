@@ -69,7 +69,7 @@ def run_diff_stream(
     An incremental run (``filter_set`` given) holds every unchanged file as an empty skeleton,
     so the docs' byte budget (``max_markdown_bytes``, costed from file sizes on disk) cannot be
     measured as a full run would: it is not applied, and a changed doc keeps its statement.
-    The count cap (``max_markdown_statements``) reads only paths and still applies."""
+    The count cap (``max_markdown_statements``) is decided from paths and still applies."""
     if filter_set is not None and settings.max_markdown_bytes:
         settings = settings.model_copy(update={"max_markdown_bytes": 0})
     sink = _InfraStreamSink(upload, filter_set)

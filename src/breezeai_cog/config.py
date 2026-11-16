@@ -71,9 +71,10 @@ class Settings(BaseSettings):
     # absolute worst case is already bounded by `max_file_size`). (emit/split.py)
     max_statement_parts: int = Field(default=0, ge=0)
     # Cap on non-agent Markdown docs (semanticType ``doc`` / ``readme`` / ``changelog``): one
-    # keeps its whole-file statement only when it is among the first N documentation files in
-    # path order (deterministic under parallel parsing); past it a doc keeps its File record
-    # (metadata + outline) only. Agent documents (skill / agent / command / agent_instructions /
+    # keeps its whole-file statement only when it is among the first N such docs in path order
+    # (deterministic under parallel parsing; agent documents and files over 512 KB, which keep
+    # no statement, are not counted); past it a doc keeps its File record (metadata + outline)
+    # only. Agent documents (skill / agent / command / agent_instructions /
     # adr) are always captured. Bounds a docs-heavy monorepo. 0 = unbounded. (core/pipeline.py)
     max_markdown_statements: int = Field(default=2000, ge=0)
     # Byte budget for the same docs' statement text, decided like the count cap: documentation
