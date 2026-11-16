@@ -546,7 +546,8 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 - **Statement.** Under statement capture, one whole-file `Statement`: `nodeType="document"`,
   `semanticType` = the kind, `text` = the file with secrets masked (cut at 64 KB on a line
   boundary, marked inline; masking keeps every line, so `endLine` is the file's line),
-  `name` / `description` from the front matter. Over 512 KB: the File record only. `doc`,
+  `name` / `description` from the front matter. From 512 KB to 2 MB: the File record only;
+  over the scanner's `max_file_size` (2 MB by default) the file is skipped like any other. `doc`,
   `readme` and `changelog` statements past `max_markdown_statements` (a count of the docs that
   keep a statement, agent documents and files over 512 KB not counted; default 2000) or
   past `max_markdown_bytes` (default 32 MB, each file costing its size up to the 64 KB cap) are
