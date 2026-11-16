@@ -117,13 +117,19 @@ def _guards_by_action(analyze_files, controller_body: str) -> dict[str, tuple]:
 
 
 GUARDED = (["authenticate_user!"], True)
-OPEN = (None, None)
+OPEN = (None, False)
+UNKNOWN = (None, None)
 
 
 def test_skip_only_removes_the_guard_from_those_actions(analyze_files) -> None:
     got = _guards_by_action(analyze_files, "  before_action :authenticate_user!\n"
                             "  skip_before_action :authenticate_user!, only: [:new, :create]\n")
     assert got == {"new": OPEN, "create": OPEN, "destroy": GUARDED}
+
+
+def test_recognized_auth_callback_requires_auth_without_exclusions(analyze_files) -> None:
+    got = _guards_by_action(analyze_files, "  before_action :authenticate_user!\n")
+    assert got == {"new": GUARDED, "create": GUARDED, "destroy": GUARDED}
 
 
 def test_skip_except_keeps_the_guard_only_on_those_actions(analyze_files) -> None:
@@ -144,7 +150,7 @@ def test_conditional_or_unreadable_skip_removes_the_guard_everywhere(analyze_fil
                  "  skip_before_action :authenticate_user!, only: ACTIONS\n",
                  "  skip_before_action callback_name\n"):
         got = _guards_by_action(analyze_files, "  before_action :authenticate_user!\n" + skip)
-        assert got == {"new": OPEN, "create": OPEN, "destroy": OPEN}, skip
+        assert got == {"new": UNKNOWN, "create": UNKNOWN, "destroy": UNKNOWN}, skip
 
 
 def test_skip_applies_to_a_parents_callback(analyze_files) -> None:

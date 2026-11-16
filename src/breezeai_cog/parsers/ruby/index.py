@@ -44,6 +44,8 @@ class RubyIndex:
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
+    #: All declared class constants, used for lexical model receiver resolution.
+    class_names: frozenset[str] = frozenset()
 
     def __contains__(self, name: object) -> bool:
         return name in self.models
@@ -147,6 +149,7 @@ def build_ruby_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> R
 
     index = RubyIndex(
         models=frozenset(model_index),
+        class_names=model_index.class_names,
         associations=model_index.associations,
     )
     # Registered facts may need the whole index, so they resolve after it is built.

@@ -133,6 +133,20 @@ def test_rails_parser_claims_only_rails_sources(tmp_path: Path) -> None:
         "engines/foo/config/routes.rb",
         b"Foo::Engine.routes.draw do\nend\n",
     )
+    assert parser.claims(
+        "config/routes/fasp.rb",
+        b"namespace :fasp do\n  resources :projects\nend\n",
+    )
+    assert parser.claims(
+        "config/routes/api.rb",
+        b"scope '/v2' do\n  resources :records\nend\n",
+    )
+    assert parser.claims("config/routes/verbs.rb", b"get '/health'\n")
+    assert not parser.claims("config/routes/helper.rb", b"class Helper; end\n")
+    assert not parser.claims(
+        "lib/routes_helper.rb",
+        b"namespace :hidden do\n  resources :items\nend\n",
+    )
     assert not parser.claims("app.rb", b"class PlainRuby\nend")
     assert not parser.claims("lib/calc.rb", b"# Nothing to do with ApplicationController.\nclass Calculator; end")
     assert not parser.claims("lib/calc.rb", b'DOC = "ApplicationController"\nclass Calculator; end')
@@ -164,6 +178,69 @@ def test_rails_drawn_route_files_require_an_explicit_main_draw(analyze_files) ->
 def test_rails_split_route_file_without_main_routes_is_not_emitted(analyze_files) -> None:
     statements = analyze_files({"config/routes/api.rb": "get '/x', to: 'x#show'\n"})
     assert not any(item.semanticType == "route" for item in statements)
+
+
+def test_rails_split_resource_files_are_claimed_and_emitted(analyze_files) -> None:
+    statements = analyze_files(
+        {
+            "config/routes.rb": (
+                "Rails.application.routes.draw do\n"
+                "  draw :fasp\n"
+                "  draw :api\n"
+                "  draw :explicit\n"
+                "  draw :helper\n"
+                "end\n"
+            ),
+            "config/routes/fasp.rb": (
+                "namespace :fasp do\n"
+                "  resources :projects\n"
+                "end\n"
+            ),
+            "config/routes/api.rb": (
+                "scope '/v2' do\n"
+                "  resources :records\n"
+                "end\n"
+            ),
+            "config/routes/explicit.rb": "get '/health', to: 'health#show'\n",
+            "config/routes/helper.rb": "class RouteHelper\n  def call; end\nend\n",
+            "lib/routes_helper.rb": (
+                "namespace :hidden do\n"
+                "  resources :items\n"
+                "end\n"
+            ),
+        }
+    )
+    routes = [item for item in statements if item.semanticType == "route"]
+    fasp_routes = [
+        item
+        for item in routes
+        if item.endpoint and item.endpoint.startswith("/fasp/projects")
+    ]
+    api_routes = [
+        item for item in routes if item.endpoint and item.endpoint.startswith("/v2/records")
+    ]
+
+    assert len(fasp_routes) == 8
+    assert {item.endpoint for item in fasp_routes} >= {
+        "/fasp/projects",
+        "/fasp/projects/:id",
+    }
+    assert len(api_routes) == 8
+    assert {item.endpoint for item in api_routes} >= {
+        "/v2/records",
+        "/v2/records/:id",
+    }
+    assert [
+        (item.method, item.endpoint, item.handler)
+        for item in routes
+        if item.endpoint == "/health"
+    ] == [
+        ("GET", "/health", None),
+    ]
+    assert not any(
+        item.endpoint and item.endpoint.startswith(("/hidden/", "/items"))
+        for item in routes
+    )
 
 
 def test_rails_handler_lookup_uses_the_controller_namespace(analyze_files) -> None:
@@ -303,9 +380,9 @@ def test_rails_before_action_guards_from_the_controller(analyze_files) -> None:
     })
     got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
     assert got == {
-        "/users/:id": (["authenticate", "load_user", "admin_only"], None),
-        "/users": (["authenticate"], None),
-        "/users/:id/ban": (["authenticate", "load_user", "admin_only"], None),
+        "/users/:id": (["authenticate", "load_user", "admin_only"], True),
+        "/users": (["authenticate"], True),
+        "/users/:id/ban": (["authenticate", "load_user", "admin_only"], True),
         # namespace :admin → Admin::StatsController, not the top-level StatsController
         "/admin/stats": (["require_admin"], None),
         "/open": (["set_locale"], None),
@@ -363,6 +440,75 @@ end
     has("GET", "/data/:id", None)
     # "data" has no singular the rules are sure of → nested routes have no known address
     has("GET", None, None)
+
+
+def test_rails_module_scope_preserves_nested_resource_paths(analyze_files) -> None:
+    statements = analyze_files(
+        {
+            "config/routes.rb": (
+                "Rails.application.routes.draw do\n"
+                "  draw :api\n"
+                "end\n"
+            ),
+            "config/routes/api.rb": (
+                "namespace :api do\n"
+                "  namespace :v1 do\n"
+                "    resources :statuses, only: [:index, :create, :show, :update, :destroy] do\n"
+                "      scope module: :statuses do\n"
+                "        resources :reblogged_by, controller: :reblogged_by_accounts, only: :index\n"
+                "        resources :favourited_by, controller: :favourited_by_accounts, only: :index\n"
+                "      end\n"
+                "    end\n"
+                "  end\n"
+                "end\n"
+            ),
+            "app/controllers/api/v1/statuses/reblogged_by_accounts_controller.rb": (
+                "module Api\n"
+                "  module V1\n"
+                "    module Statuses\n"
+                "      class RebloggedByAccountsController < ApplicationController\n"
+                "        def index; end\n"
+                "      end\n"
+                "    end\n"
+                "  end\n"
+                "end\n"
+            ),
+            "app/controllers/api/v1/statuses/favourited_by_accounts_controller.rb": (
+                "module Api\n"
+                "  module V1\n"
+                "    module Statuses\n"
+                "      class FavouritedByAccountsController < ApplicationController\n"
+                "        def index; end\n"
+                "      end\n"
+                "    end\n"
+                "  end\n"
+                "end\n"
+            ),
+        }
+    )
+    routes = [item for item in statements if item.semanticType == "route"]
+    reblogged = next(
+        item
+        for item in routes
+        if item.handlerPath and item.handlerPath.endswith("reblogged_by_accounts_controller.rb")
+    )
+    favourited = next(
+        item
+        for item in routes
+        if item.handlerPath and item.handlerPath.endswith("favourited_by_accounts_controller.rb")
+    )
+
+    assert reblogged.method == "GET"
+    assert reblogged.endpoint == "/api/v1/statuses/:status_id/reblogged_by"
+    assert reblogged.handler == "index"
+    assert reblogged.handlerPath == (
+        "app/controllers/api/v1/statuses/reblogged_by_accounts_controller.rb"
+    )
+    assert favourited.endpoint == "/api/v1/statuses/:status_id/favourited_by"
+    assert favourited.handlerPath == (
+        "app/controllers/api/v1/statuses/favourited_by_accounts_controller.rb"
+    )
+
 
 def test_rails_routes_skip_spec_files_but_not_config_routes(tmp_path: Path) -> None:
     source = b'Rails.application.routes.draw do\n  get "/x", to: "a#b"\nend\n'
@@ -513,6 +659,20 @@ def test_rails_interpolated_paths_are_null_and_static_routes_remain_correct(
         ("GET", "/admin/static", None),
         ("GET", "/admin/literal/#{id}", None),
     ]
+
+
+def test_rails_resources_skip_nonliteral_names(tmp_path: Path) -> None:
+    source = b'''Rails.application.routes.draw do
+  resources NAME
+  resources resource_name()
+  resources *RESOURCE_NAMES
+  resources ["users"]
+  resources "dynamic-#{name}"
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+
+    assert not any(item.semanticType == "route" for item in record.statements)
 
 
 def test_rails_resource_symbol_and_string_array_options(tmp_path: Path) -> None:

@@ -275,6 +275,8 @@ def build_function(
     limit: int,
     resolve: CallResolver = noop_resolver,
     typed_db_ids: frozenset[str] | None = None,
+    classifier_db_ids: frozenset[str] | None = None,
+    extra_typed_db_ids: frozenset[str] | None = None,
     visibility: str | None = None,
     is_static: bool = False,
     annotation_cache: AnnotationCache | None = None,
@@ -312,12 +314,22 @@ def build_function(
         calls=_calls_in_block(body, source, resolve),
     )
     scoped_typed_db_ids = set(typed_db_ids) if typed_db_ids else set()
+    scoped_extra_ids = set(extra_typed_db_ids or ())
     for p_name, p_type in param_types.items():
         if p_type in scoped_typed_db_ids or p_type.rsplit("::", 1)[-1] in scoped_typed_db_ids:
             scoped_typed_db_ids.add(p_name)
+            scoped_extra_ids.add(p_name)
     fn_typed_ids = frozenset(scoped_typed_db_ids) if scoped_typed_db_ids else None
     statements = extract_statements(
-        body, source, path, parent_id=fid, capture=capture, limit=limit,
-        seen_ids=seen_ids, typed_db_ids=fn_typed_ids,
+        body,
+        source,
+        path,
+        parent_id=fid,
+        capture=capture,
+        limit=limit,
+        seen_ids=seen_ids,
+        typed_db_ids=fn_typed_ids,
+        classifier_db_ids=classifier_db_ids,
+        extra_typed_db_ids=frozenset(scoped_extra_ids),
     )
     return [fn], statements

@@ -864,6 +864,81 @@ def test_ruby_model_index_identifies_activerecord_receivers(tmp_path: Path) -> N
     assert not any("Tempfile" in k for k in hints), hints
 
 
+def test_ruby_classifier_model_ids_are_built_once_for_multiple_methods(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from breezeai_cog.parsers.ruby import parser as ruby_parser_module
+
+    source = b"""class User < ApplicationRecord; end
+class Post < ApplicationRecord; end
+class Account < ApplicationRecord; end
+class Session < ApplicationRecord; end
+
+class Lookups
+  def by_user
+    User.find(1)
+  end
+
+  def by_post
+    Post.where(active: true)
+  end
+
+  def create_account
+    Account.create(name: "example")
+  end
+
+  def by_session
+    Session.find_by(token: "example")
+  end
+
+  def with_model_evidence
+    user = User.find(1)
+    user.save
+  end
+
+  def without_model_evidence
+    user.save
+  end
+end
+"""
+    path = tmp_path / "lookups.rb"
+    path.write_bytes(source)
+    original_classifier_model_ids = ruby_parser_module.classifier_model_ids
+    classifier_model_sets: list[frozenset[str]] = []
+
+    def count_classifier_builds(
+        model_ids: frozenset[str],
+    ) -> frozenset[str]:
+        models = frozenset(model_ids)
+        classifier_model_sets.append(models)
+        return original_classifier_model_ids(models)
+
+    monkeypatch.setattr(ruby_parser_module, "classifier_model_ids", count_classifier_builds)
+    record = RubyParser().parse_file(
+        ParseContext(
+            path="lookups.rb",
+            abs_path=path,
+            source=source,
+            repo_root=tmp_path,
+            capture_statements=True,
+        )
+    )
+
+    assert len(classifier_model_sets) == 1
+    assert {"User", "Post", "Account", "Session"} <= classifier_model_sets[0]
+    db_statements = [
+        statement.text.strip()
+        for statement in record.statements
+        if statement.semanticType == "db_method_call"
+    ]
+    assert any("User.find(1)" in text for text in db_statements)
+    assert any("Post.where(active: true)" in text for text in db_statements)
+    assert any("Account.create" in text for text in db_statements)
+    assert any("Session.find_by" in text for text in db_statements)
+    assert sum(text == "user.save" for text in db_statements) == 1
+
+
 def test_ruby_active_record_calls_require_model_inheritance(tmp_path: Path) -> None:
     source = b'''class Severity
   def self.find_by(value)
@@ -1308,7 +1383,9 @@ def test_ruby_model_index_resolves_namespaced_superclasses_across_files(tmp_path
     assert any("Receipt.find_by" in call for call in db_calls), db_calls
 
 
-def test_ruby_model_index_rejects_ambiguous_terminal_names(tmp_path: Path) -> None:
+def test_ruby_model_index_resolves_top_level_model_with_terminal_collisions(
+    tmp_path: Path,
+) -> None:
     model_file = tmp_path / "app" / "models" / "models.rb"
     model_file.parent.mkdir(parents=True)
     model_file.write_bytes(
@@ -1357,7 +1434,92 @@ def test_ruby_model_index_rejects_ambiguous_terminal_names(tmp_path: Path) -> No
     assert any("Admin::User.find_by" in call for call in db_calls), db_calls
     assert any("::User.find_by" in call for call in db_calls), db_calls
     assert not any("Legacy::User.find_by" in call for call in db_calls), db_calls
-    assert not any("User.find_by" in call and "::User" not in call for call in db_calls), db_calls
+    assert any("User.find_by" in call and "::User" not in call for call in db_calls), db_calls
+
+
+def test_ruby_model_receivers_resolve_terminal_names_lexically(tmp_path: Path) -> None:
+    models_file = tmp_path / "app" / "models" / "models.rb"
+    models_file.parent.mkdir(parents=True)
+    models_file.write_bytes(
+        b"class Membership < ActiveRecord::Base\n"
+        b"  def self.lookup\n    Membership.find(1)\n  end\nend\n"
+        b"module First\n  class Shared < ActiveRecord::Base\n  end\nend\n"
+        b"module Second\n  class Shared < ActiveRecord::Base\n  end\nend\n"
+        b"module First\n  class Plain\n  end\nend\n"
+        b"module Second\n  class Plain\n  end\nend\n"
+        b"module First\n  class Conflict < ActiveRecord::Base\n  end\nend\n"
+        b"module Second\n  class Conflict\n  end\nend\n"
+        b"class Account < ApplicationRecord\n"
+        b"  def self.lookup\n    Account.find(1)\n  end\nend\n"
+    )
+    resources_file = tmp_path / "app" / "resources" / "membership.rb"
+    resources_file.parent.mkdir(parents=True)
+    resources_file.write_bytes(
+        b"module Avo\n  module Resources\n"
+        b"    class Membership\n"
+        b"      def lookup\n"
+        b"        Membership.where(active: true)\n"
+        b"        ::Membership.create(name: 'global')\n"
+        b"      end\n"
+        b"    end\n"
+        b"  end\nend\n"
+    )
+    service_file = tmp_path / "app" / "services" / "lookups.rb"
+    service_file.parent.mkdir(parents=True)
+    service_file.write_bytes(
+        b"class Lookups\n  def run\n"
+        b"    Membership.find(1)\n"
+        b"    Membership.where(active: true)\n"
+        b"    Membership.create(name: 'member')\n"
+        b"    Shared.find(1)\n"
+        b"    Plain.where(active: true)\n"
+        b"    Conflict.where(active: true)\n"
+        b"    First::Conflict.find(1)\n"
+        b"    ::Membership.find(2)\n"
+        b"  end\nend\n"
+    )
+
+    parser = RubyParser()
+    files = [models_file, resources_file, service_file]
+    index = parser.build_index(tmp_path, files, jobs=1)
+
+    def database_calls(path: Path) -> set[str]:
+        record = parser.parse_file(ParseContext(
+            path=path.relative_to(tmp_path).as_posix(),
+            abs_path=path,
+            source=path.read_bytes(),
+            repo_root=tmp_path,
+            capture_statements=True,
+            resolution_index=index,
+        ))
+        return {
+            statement.text
+            for statement in record.statements
+            if statement.semanticType == "db_method_call"
+        }
+
+    model_calls = database_calls(models_file)
+    resource_calls = database_calls(resources_file)
+    service_calls = database_calls(service_file)
+
+    assert "Membership" not in index.models
+    assert "::Membership" in index.models
+    assert "Shared" in index.models
+    assert "Plain" not in index.models
+    assert "Membership.find(1)" in model_calls
+    assert "Account.find(1)" in model_calls
+    assert "::Membership.create(name: 'global')" in resource_calls
+    assert not any("Membership.where" in call for call in resource_calls)
+    assert {
+        "Membership.find(1)",
+        "Membership.where(active: true)",
+        "Membership.create(name: 'member')",
+        "Shared.find(1)",
+        "First::Conflict.find(1)",
+        "::Membership.find(2)",
+    } <= service_calls
+    assert not any("Plain.where" in call for call in service_calls)
+    assert not any("Conflict.where" in call for call in service_calls)
 
 
 def test_ruby_model_index_does_not_apply_alias_to_other_qualified_receiver(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from tree_sitter import Node
 
@@ -11,7 +11,6 @@ from ...schemas import Statement
 from ..detection import text_has_query
 from ..statements_common import (
     classify_statement,
-    emit_enum_members,
     render_concat,
     resolve_endpoint,
 )
@@ -25,6 +24,50 @@ _ACTIVE_RECORD_METHODS = frozenset({
     "find", "all", "create", "create!", "first", "last", "exists",
     "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
 })
+
+
+class _ClassifierDbIdView(frozenset[str]):
+    """Membership view combining file-wide model IDs with one scope's additional IDs."""
+
+    _base: frozenset[str]
+    _extra: frozenset[str]
+
+    def __new__(cls, base: frozenset[str], extra: frozenset[str]) -> _ClassifierDbIdView:
+        view = super().__new__(cls)
+        view._base = base
+        view._extra = extra
+        return view
+
+    def __contains__(self, value: object) -> bool:
+        return value in self._base or value in self._extra
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._base
+        yield from (name for name in self._extra if name not in self._base)
+
+    def __len__(self) -> int:
+        return len(self._base) + sum(name not in self._base for name in self._extra)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (set, frozenset)):
+            return len(self) == len(other) and all(name in other for name in self)
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self))
+
+
+def _expand_classifier_db_ids(receiver_ids: Iterable[str]) -> frozenset[str]:
+    return frozenset(
+        name
+        for receiver in receiver_ids
+        for name in (receiver, receiver.rsplit(".", 1)[-1])
+    )
+
+
+def classifier_model_ids(model_ids: Iterable[str]) -> frozenset[str]:
+    """Build the reusable classifier IDs for the models visible in one Ruby file."""
+    return _expand_classifier_db_ids(model_ids)
 
 
 def _iter_statements(node: Node, source: bytes) -> Iterator[Node]:
@@ -126,62 +169,6 @@ def _call_details_with_redis_evidence(
             return None
     return details
 
-
-def _is_enum_like_module(body: Node, source: bytes) -> bool:
-    """Return True when the body looks like a Ruby enum module.
-
-    C8 fix: detects modules used as enums (e.g. ``module Status; ACTIVE = 1; end``).
-    A module body is treated as enum-like when it has at least one constant assignment
-    and every non-method, non-class child is a constant assignment or a bare constant.
-    Constants are SCREAMING_SNAKE_CASE (first char uppercase, all uppercase or underscore).
-    """
-    relevant = [
-        c for c in body.named_children
-        if c.type not in {"method", "class", "module", "comment"}
-    ]
-    if not relevant:
-        return False
-    constant_assigns = []
-    for child in relevant:
-        if child.type == "assignment":
-            left = child.child_by_field_name("left")
-            if left is not None and left.type == "constant":
-                name = node_text(left, source)
-                if name and name[0].isupper():
-                    constant_assigns.append(child)
-                    continue
-        # Any other node type disqualifies this module as enum-like
-        return False
-    return len(constant_assigns) > 0
-
-
-def extract_enum_members(
-    body: Node | None,
-    source: bytes,
-    path: str,
-    *,
-    parent_id: str,
-    limit: int,
-    seen_ids: set[str],
-) -> list[Statement]:
-    """Emit enum_member Statements for constant assignments in an enum-style Ruby module.
-
-    C8 fix: constant assignments like ``ACTIVE = 1`` in enum-style modules are emitted
-    as Statements with ``semanticType = "enum_member"``.
-    """
-    if body is None or not _is_enum_like_module(body, source):
-        return []
-    return emit_enum_members(
-        body,
-        source,
-        path,
-        member_types={"assignment"},
-        parent_id=parent_id,
-        limit=limit,
-        seen_ids=seen_ids,
-    )
-
-
 def extract_statements(
     body: Node | None,
     source: bytes,
@@ -192,19 +179,22 @@ def extract_statements(
     limit: int,
     seen_ids: set[str],
     typed_db_ids: frozenset[str] | None = None,
+    classifier_db_ids: frozenset[str] | None = None,
+    extra_typed_db_ids: frozenset[str] | None = None,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    classifier_db_ids = (
-        frozenset(
-            name
-            for receiver in typed_db_ids
-            for name in (receiver, receiver.rsplit(".", 1)[-1])
+    if typed_db_ids is None:
+        scoped_classifier_ids = None
+    elif classifier_db_ids is None:
+        scoped_classifier_ids = _expand_classifier_db_ids(typed_db_ids)
+    elif extra_typed_db_ids:
+        scoped_classifier_ids = _ClassifierDbIdView(
+            classifier_db_ids, _expand_classifier_db_ids(extra_typed_db_ids)
         )
-        if typed_db_ids is not None
-        else None
-    )
+    else:
+        scoped_classifier_ids = classifier_db_ids
     for node in _iter_statements(body, source):
         if node.type not in EMIT_TYPES and not (
             node.type == "string" and text_has_query(node_text(node, source))
@@ -225,7 +215,7 @@ def extract_statements(
                 call, src, typed_db_ids
             ),
             language="ruby",
-            typed_db_ids=classifier_db_ids,
+            typed_db_ids=scoped_classifier_ids,
         )
         # A wrapper/DSL block is not itself a database query because SQL text occurs
         # somewhere in its body. Its inner SQL statement is visited independently.

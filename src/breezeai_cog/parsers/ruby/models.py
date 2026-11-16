@@ -61,18 +61,26 @@ class RubyModelIndex(frozenset[str]):
     """The ActiveRecord model constants, carrying proven associations."""
 
     associations: dict[str, dict[str, tuple[str, str]]]
+    class_names: frozenset[str]
 
     def __new__(
         cls,
         models: set[str] | frozenset[str],
         associations: dict[str, dict[str, tuple[str, str]]] | None = None,
+        class_names: set[str] | frozenset[str] | None = None,
     ) -> Self:
         instance = super().__new__(cls, models)
         instance.associations = associations or {}
+        instance.class_names = frozenset(class_names or ())
         return instance
 
-    def __reduce__(self) -> tuple[type, tuple[set[str], dict[str, dict[str, tuple[str, str]]]]]:
-        return (RubyModelIndex, (set(self), self.associations))
+    def __reduce__(
+        self,
+    ) -> tuple[
+        type,
+        tuple[set[str], dict[str, dict[str, tuple[str, str]]], set[str]],
+    ]:
+        return (RubyModelIndex, (set(self), self.associations, set(self.class_names)))
 
 
 def _singularize(name: str) -> str:
@@ -220,24 +228,30 @@ def resolve_model_names(
 def model_receiver_ids(
     model_names: set[str] | frozenset[str], class_names: list[str]
 ) -> frozenset[str]:
-    """Include only unambiguous short aliases, retaining qualified model identities."""
+    """Include short aliases only when all declarations with that name are models."""
     declarations_by_terminal: dict[str, set[str]] = {}
     for name in class_names:
-        declarations_by_terminal.setdefault(name.rsplit("::", 1)[-1], set()).add(name)
+        normalized = name.lstrip(":")
+        declarations_by_terminal.setdefault(normalized.rsplit("::", 1)[-1], set()).add(
+            normalized
+        )
 
     ids: set[str] = set()
     for name in model_names:
-        terminal = name.rsplit("::", 1)[-1]
-        if "::" not in name and len(declarations_by_terminal.get(terminal, ())) > 1:
-            # Keep the top-level model addressable only by an explicit absolute constant;
-            # an unqualified terminal is ambiguous with the other declaration(s).
-            ids.add(f"::{name}")
+        normalized = name.lstrip(":")
+        terminal = normalized.rsplit("::", 1)[-1]
+        if "::" in normalized:
+            ids.add(normalized)
+            ids.add(f"::{normalized}")
         else:
-            ids.add(name)
-        if len(declarations_by_terminal.get(terminal, ())) == 1:
+            ids.add(f"::{normalized}")
+
+        candidates = declarations_by_terminal.get(terminal, set())
+        if not candidates or all(
+            candidate in model_names or f"::{candidate}" in model_names
+            for candidate in candidates
+        ):
             ids.add(terminal)
-        if "::" in name:
-            ids.add(f"::{name}")
     return frozenset(ids)
 
 
@@ -386,7 +400,7 @@ def _model_index_from_info(
                 if simple_cls not in by_model_assoc:
                     by_model_assoc[simple_cls] = by_model_assoc[cls_name]
 
-    return RubyModelIndex(all_models, by_model_assoc)
+    return RubyModelIndex(all_models, by_model_assoc, set(class_names))
 
 
 def build_model_index(
@@ -519,6 +533,49 @@ def extract_param_types(
         return cache.annotations(method_node, source).param_types
     cache = AnnotationCache()
     return cache.annotations(method_node, source).param_types
+
+
+def _is_model_constant(name: str, models: set[str] | frozenset[str]) -> bool:
+    normalized = name.lstrip(":")
+    return normalized in models or f"::{normalized}" in models
+
+
+def _resolve_model_constant(
+    receiver: str,
+    call: Node,
+    source: bytes,
+    models: set[str] | frozenset[str],
+    class_names: set[str] | frozenset[str],
+) -> str | None:
+    """Resolve a constant receiver against lexical declarations and model identities."""
+    normalized = receiver.lstrip(":")
+    if receiver.startswith("::"):
+        return normalized if _is_model_constant(normalized, models) else None
+
+    declarations = class_names
+    namespaces: list[str] = []
+    current = call.parent
+    while current is not None:
+        if current.type in {"class", "module"}:
+            scope = _qualified_name(current, source)
+            if scope is not None:
+                namespaces.append(scope.lstrip(":"))
+        current = current.parent
+
+    for namespace in namespaces:
+        candidate = f"{namespace}::{normalized}"
+        if candidate in declarations:
+            return candidate if _is_model_constant(candidate, models) else None
+    if normalized in declarations:
+        return normalized if _is_model_constant(normalized, models) else None
+
+    # When every declared class with this terminal is a model, model_receiver_ids
+    # includes the short alias. Otherwise an unresolved collision stays unclassified.
+    if receiver in models or normalized in models:
+        return normalized
+    return None
+
+
 def models_from_parents(per_file: Sequence[list[tuple[str, str]]]) -> frozenset[str]:
     """Reduce per-file ``(class, superclass)`` pairs to the model constants (order-independent)."""
     by_name: dict[str, set[str]] = {}
@@ -548,6 +605,8 @@ def model_receivers(
     enclosing_class: str | None = None,
     is_instance_method: bool = False,
     annotation_cache: AnnotationCache | None = None,
+    class_names: frozenset[str] | set[str] | None = None,
+    extra_receiver_ids: set[str] | None = None,
 ) -> frozenset[str]:
     """Receivers in one scope that carry a proven ActiveRecord model's identity.
 
@@ -566,6 +625,12 @@ def model_receivers(
     names: set[str] = set(models)
     var_models: dict[str, str] = {}
     assocs = associations or {}
+    declared_names = frozenset(name.lstrip(":") for name in class_names or ())
+
+    def add_receiver(name: str) -> None:
+        names.add(name)
+        if extra_receiver_ids is not None and name not in models:
+            extra_receiver_ids.add(name)
 
     is_model = enclosing_class is not None and (
         enclosing_class in models or enclosing_class.rsplit("::", 1)[-1] in models
@@ -574,20 +639,20 @@ def model_receivers(
     if is_model and enclosing_class is not None:
         model_name = enclosing_class if enclosing_class in models else enclosing_class.rsplit("::", 1)[-1]
         if is_instance_method:
-            names.add("self")
+            add_receiver("self")
             var_models["self"] = model_name
         class_assocs = assocs.get(enclosing_class) or assocs.get(enclosing_class.rsplit("::", 1)[-1]) or {}
         for assoc_name, (kind, target) in class_assocs.items():
             if (target in models or target.rsplit("::", 1)[-1] in models) and kind in {"belongs_to", "has_one"}:
-                names.add(assoc_name)
+                add_receiver(assoc_name)
                 var_models[assoc_name] = target
-                names.add(f"self.{assoc_name}")
+                add_receiver(f"self.{assoc_name}")
 
     if root.type in {"method", "singleton_method"}:
         param_types = extract_param_types(root, source, annotation_cache)
         for p_name, p_type in param_types.items():
             if p_type in models or p_type.rsplit("::", 1)[-1] in models:
-                names.add(p_name)
+                add_receiver(p_name)
                 var_models[p_name] = p_type
         if is_model and class_assocs:
             params_node = root.child_by_field_name("parameters")
@@ -604,7 +669,7 @@ def model_receivers(
                         if param_name in class_assocs:
                             _kind, target = class_assocs[param_name]
                             if target in models or target.rsplit("::", 1)[-1] in models:
-                                names.add(param_name)
+                                add_receiver(param_name)
                                 var_models[param_name] = target
                         else:
                             for assoc_name, (kind, target) in class_assocs.items():
@@ -613,22 +678,33 @@ def model_receivers(
                                     and param_name == _singularize(assoc_name)
                                     and (target in models or target.rsplit("::", 1)[-1] in models)
                                 ):
-                                    names.add(param_name)
+                                    add_receiver(param_name)
                                     var_models[param_name] = target
                                     break
 
     def _add_model_var(var_name: str, model_type: str) -> None:
-        names.add(var_name)
+        add_receiver(var_name)
         var_models[var_name] = model_type
         v_assocs = assocs.get(model_type) or assocs.get(model_type.rsplit("::", 1)[-1]) or {}
         for a_name, (_k, tgt) in v_assocs.items():
             if tgt in models or tgt.rsplit("::", 1)[-1] in models:
-                names.add(f"{var_name}.{a_name}")
+                add_receiver(f"{var_name}.{a_name}")
 
     for v_name, m_type in list(var_models.items()):
         _add_model_var(v_name, m_type)
 
     def visit(node: Node) -> None:
+        if node.type == "call":
+            receiver_node = node.child_by_field_name("receiver")
+            if receiver_node is not None and receiver_node.type in {
+                "constant", "scope_resolution",
+            }:
+                receiver_name = node_text(receiver_node, source)
+                if _resolve_model_constant(
+                    receiver_name, node, source, models, declared_names
+                ) is not None:
+                    add_receiver(receiver_name)
+
         if node.type == "assignment":
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
@@ -644,8 +720,10 @@ def model_receivers(
                     verb = node_text(verb_node, source)
                     left_name = node_text(left, source)
                     if rec.type in {"constant", "scope_resolution"}:
-                        base = node_text(rec, source).lstrip(":")
-                        if (base in models or base.rsplit("::", 1)[-1] in models) and verb in _MODEL_PRODUCERS:
+                        base = _resolve_model_constant(
+                            node_text(rec, source), right, source, models, declared_names
+                        )
+                        if base is not None and verb in _MODEL_PRODUCERS:
                             _add_model_var(left_name, base)
                     elif rec.type == "identifier":
                         base = node_text(rec, source)

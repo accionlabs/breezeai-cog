@@ -37,7 +37,13 @@ class RailsParser(RubyParser):
     def claims(self, path: str, source: bytes) -> bool:
         normalized = path.replace("\\", "/")
         if normalized.startswith("config/routes/") and normalized.endswith(".rb"):
-            return re.search(rb"(?m)^\s*(?:get|post|put|patch|delete|match|root)\b", source) is not None
+            return (
+                re.search(
+                    rb"(?m)^\s*(?:get|post|put|patch|delete|match|root|resources?|namespace|scope)\b",
+                    source,
+                )
+                is not None
+            )
         if not any(
             marker in source.lower()
             for marker in (b"rails", b"engine", b"controller", b"actioncontroller")

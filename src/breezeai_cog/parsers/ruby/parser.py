@@ -20,6 +20,7 @@ from .imports import extract_imports
 from .index import RubyIndex, build_ruby_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .models import (
+    RUBY_INDEX_PARSE_TIMEOUT_MICROS,
     AnnotationCache,
     RubyModelIndex,
     declared_associations,
@@ -29,7 +30,7 @@ from .models import (
     model_receivers,
     resolve_model_names,
 )
-from .statements import extract_statements
+from .statements import classifier_model_ids, extract_statements
 
 _RUBY_FIXTURE_MARKERS: tuple[str, ...] = ("_spec.", "_test.")
 _RUBY_FIXTURE_DIRS: frozenset[str] = frozenset({"spec", "test", "tests"})
@@ -41,6 +42,7 @@ class RubyParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+    build_index_accepts_timeout = True
 
     def fixture_markers(self) -> tuple[str, ...]:
         # RSpec / Minitest file naming (``cookies_spec.rb``, ``user_test.rb``): the file is a
@@ -61,7 +63,7 @@ class RubyParser(BaseParser):
         return True
 
     def build_index(
-        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = RUBY_INDEX_PARSE_TIMEOUT_MICROS,
     ) -> RubyIndex:
         """Repo-level pre-pass: the ActiveRecord model constants (see ``models.py``) and the
         registered facts of the Ruby files (Rails controller callbacks, …).
@@ -91,23 +93,28 @@ class RubyParser(BaseParser):
         index = ctx.resolution_index
         if isinstance(index, RubyIndex):
             models = set(index.models)
+            class_names = set(index.class_names)
             associations = dict(index.associations)
         elif isinstance(index, RubyModelIndex):
             models = set(index)
+            class_names = set(index.class_names)
             associations = dict(index.associations)
         elif isinstance(index, frozenset):
             models = set(index)
+            class_names = set()
             associations = {}
         else:
             models = set()
+            class_names = set()
             associations = {}
 
         # Augment with models and associations declared directly in this file
         file_class_names = declared_class_names(root, source)
+        class_names.update(file_class_names)
         file_parents = declared_parents(root, source)
         if file_parents:
             file_models = resolve_model_names(file_parents, file_class_names)
-            models |= set(model_receiver_ids(file_models, file_class_names))
+            models |= set(model_receiver_ids(file_models, list(class_names)))
         file_assocs = declared_associations(root, source)
         for cls_name, assoc_name, kind, target_model in file_assocs:
             if cls_name in models or cls_name.rsplit("::", 1)[-1] in models:
@@ -128,10 +135,22 @@ class RubyParser(BaseParser):
                         associations[simple_cls] = associations[cls_name]
 
         effective_models = frozenset(models)
+        effective_class_names = frozenset(class_names)
+        classifier_db_ids = classifier_model_ids(effective_models) if capture else None
         annotation_cache = AnnotationCache()
-        typed_db_ids = model_receivers(
-            root, source, effective_models, associations, annotation_cache=annotation_cache
-        ) or None
+        root_extra_ids: set[str] = set()
+        typed_db_ids = (
+            model_receivers(
+                root,
+                source,
+                effective_models,
+                associations,
+                annotation_cache=annotation_cache,
+                class_names=effective_class_names,
+                extra_receiver_ids=root_extra_ids if capture else None,
+            )
+            or None
+        )
 
         functions: list[Function] = []
         classes = []
@@ -150,9 +169,11 @@ class RubyParser(BaseParser):
                     limit=limit,
                     resolve_for_scope=resolve_for_scope,
                     typed_db_ids=typed_db_ids,
+                    classifier_db_ids=classifier_db_ids,
                     models=effective_models,
                     associations=associations,
                     annotation_cache=annotation_cache,
+                    class_names=effective_class_names,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)
@@ -165,6 +186,7 @@ class RubyParser(BaseParser):
                     if scope_id not in visibility_scopes:
                         visibility_scopes[scope_id] = _visibility_by_scope(parent, source)
                     visibility = visibility_scopes[scope_id].get((node.start_byte, node.end_byte))
+                method_extra_ids: set[str] = set()
                 method_receivers = model_receivers(
                     node,
                     source,
@@ -173,6 +195,8 @@ class RubyParser(BaseParser):
                     enclosing_class=None,
                     is_instance_method=False,
                     annotation_cache=annotation_cache,
+                    class_names=effective_class_names,
+                    extra_receiver_ids=method_extra_ids if capture else None,
                 )
                 fns, fn_stmts = build_function(
                     node,
@@ -185,6 +209,8 @@ class RubyParser(BaseParser):
                     limit=limit,
                     resolve=resolve,
                     typed_db_ids=method_receivers,
+                    classifier_db_ids=classifier_db_ids,
+                    extra_typed_db_ids=frozenset(method_extra_ids),
                     visibility=visibility,
                     annotation_cache=annotation_cache,
                 )
@@ -193,8 +219,16 @@ class RubyParser(BaseParser):
 
         statements.extend(
             extract_statements(
-                root, source, path, parent_id=fid, capture=capture, limit=limit,
-                seen_ids=seen_ids, typed_db_ids=typed_db_ids,
+                root,
+                source,
+                path,
+                parent_id=fid,
+                capture=capture,
+                limit=limit,
+                seen_ids=seen_ids,
+                typed_db_ids=typed_db_ids,
+                classifier_db_ids=classifier_db_ids,
+                extra_typed_db_ids=frozenset(root_extra_ids),
             )
         )
 

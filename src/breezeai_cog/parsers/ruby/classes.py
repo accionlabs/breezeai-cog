@@ -17,7 +17,7 @@ from .functions import (
     extract_params,
 )
 from .models import AnnotationCache, _qualified_name, model_class_identity, model_receivers
-from .statements import extract_enum_members, extract_statements
+from .statements import extract_statements
 
 
 def _name_of_class(node: Node, source: bytes) -> str:
@@ -222,9 +222,11 @@ def build_class(
     limit: int,
     resolve_for_scope: Callable[[Node], CallResolver],
     typed_db_ids: frozenset[str] | None = None,
+    classifier_db_ids: frozenset[str] | None = None,
     models: frozenset[str] | set[str] | None = None,
     associations: dict[str, dict[str, tuple[str, str]]] | None = None,
     annotation_cache: AnnotationCache | None = None,
+    class_names: frozenset[str] | set[str] | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     name = _name_of_class(node, source)
     resolve = resolve_for_scope(node)
@@ -238,30 +240,55 @@ def build_class(
     nested_classes: list[Class] = []
     effective_models = models if models is not None else (typed_db_ids or frozenset())
     effective_assocs = associations or {}
+    effective_class_names = class_names or frozenset()
     annotation_cache = annotation_cache or AnnotationCache()
     scope_name = model_class_identity(qualified_name, list(effective_models))
 
     if body is not None:
         method_visibilities = _visibility_by_scope(body, source)
         module_function_methods = _module_function_methods(body, source)
-        class_receivers = model_receivers(
-            node, source, effective_models, effective_assocs, enclosing_class=scope_name, is_instance_method=False
-        ) or typed_db_ids
-        statements.extend(extract_statements(
-            body, source, path, parent_id=cid, capture=capture, limit=limit,
-            seen_ids=seen_ids, typed_db_ids=class_receivers,
-        ))
-        # C8: emit enum_member statements for enum-style Ruby modules
-        if capture and node.type == "module":
-            statements.extend(extract_enum_members(
-                body, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
-            ))
+        class_extra_ids: set[str] = set()
+        class_receivers = (
+            model_receivers(
+                node,
+                source,
+                effective_models,
+                effective_assocs,
+                enclosing_class=scope_name,
+                is_instance_method=False,
+                class_names=effective_class_names,
+                extra_receiver_ids=class_extra_ids if capture else None,
+            )
+            or typed_db_ids
+        )
+        statements.extend(
+            extract_statements(
+                body,
+                source,
+                path,
+                parent_id=cid,
+                capture=capture,
+                limit=limit,
+                seen_ids=seen_ids,
+                typed_db_ids=class_receivers,
+                classifier_db_ids=classifier_db_ids,
+                extra_typed_db_ids=frozenset(class_extra_ids),
+            )
+        )
+
         for child in _conditional_definitions(body, source):
             if child.type in {"method", "singleton_method"}:
+                method_extra_ids: set[str] = set()
                 method_receivers = model_receivers(
-                    child, source, effective_models, effective_assocs,
-                    enclosing_class=scope_name, is_instance_method=(child.type == "method"),
+                    child,
+                    source,
+                    effective_models,
+                    effective_assocs,
+                    enclosing_class=scope_name,
+                    is_instance_method=(child.type == "method"),
                     annotation_cache=annotation_cache,
+                    class_names=effective_class_names,
+                    extra_receiver_ids=method_extra_ids if capture else None,
                 )
                 fns, fn_stmts = build_function(
                     child,
@@ -275,11 +302,19 @@ def build_class(
                     limit=limit,
                     resolve=resolve,
                     typed_db_ids=method_receivers,
-                    visibility=(_inline_visibility(child, source)
-                            or method_visibilities.get((child.start_byte, child.end_byte))
-                            or (_visibility_by_scope(child.parent, source).get(
+                    classifier_db_ids=classifier_db_ids,
+                    extra_typed_db_ids=frozenset(method_extra_ids),
+                    visibility=(
+                        _inline_visibility(child, source)
+                        or method_visibilities.get((child.start_byte, child.end_byte))
+                        or (
+                            _visibility_by_scope(child.parent, source).get(
                                 (child.start_byte, child.end_byte)
-                            ) if child.parent is not None else None)),
+                            )
+                            if child.parent is not None
+                            else None
+                        )
+                    ),
                     is_static=(
                         node.type == "module"
                         and (child.start_byte, child.end_byte) in module_function_methods
@@ -299,9 +334,11 @@ def build_class(
                     limit=limit,
                     resolve_for_scope=resolve_for_scope,
                     typed_db_ids=typed_db_ids,
+                    classifier_db_ids=classifier_db_ids,
                     models=effective_models,
                     associations=effective_assocs,
                     annotation_cache=annotation_cache,
+                    class_names=effective_class_names,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
@@ -319,10 +356,17 @@ def build_class(
                 for singleton_method in singleton_body.named_children:
                     if singleton_method.type != "method":
                         continue
+                    method_extra_ids: set[str] = set()
                     method_receivers = model_receivers(
-                        singleton_method, source, effective_models, effective_assocs,
-                        enclosing_class=scope_name, is_instance_method=False,
+                        singleton_method,
+                        source,
+                        effective_models,
+                        effective_assocs,
+                        enclosing_class=scope_name,
+                        is_instance_method=False,
                         annotation_cache=annotation_cache,
+                        class_names=effective_class_names,
+                        extra_receiver_ids=method_extra_ids if capture else None,
                     )
                     fns, fn_stmts = build_function(
                         singleton_method,
@@ -336,6 +380,8 @@ def build_class(
                         limit=limit,
                         resolve=resolve,
                         typed_db_ids=method_receivers,
+                        classifier_db_ids=classifier_db_ids,
+                        extra_typed_db_ids=frozenset(method_extra_ids),
                         visibility=singleton_visibilities.get(
                             (singleton_method.start_byte, singleton_method.end_byte)
                         ),
