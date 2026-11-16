@@ -97,7 +97,9 @@ def clone_repo_full(
 #: Without them the skeleton holds them empty, and a fact proven there — a
 #: Spring AI MCP server starter in a build file, a FastMCP server built in another module —
 #: vanishes, so the changed file's tools would be dropped. Bounded: at most this many fetches
-#: of each kind (build files, Python modules), so one kind cannot crowd out the other.
+#: of each kind (build files, Python modules), so one kind cannot crowd out the other. When a
+#: cap cuts, or a context file cannot be read, the incremental analysis is abandoned for a full
+#: clone (:class:`IncompleteDiffContext`) rather than re-ingesting tools without their proof.
 _MAX_CONTEXT_FILES = 50
 _BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts")
 #: ``@x.tool`` in a Python file: a FastMCP tool whose server may be imported.
@@ -180,44 +182,72 @@ def _python_module_files(path: str, dots: str, module: str, index: _TreeIndex) -
     return list(hits) if len(hits) == 1 else []
 
 
-def _capped(paths: dict[str, None], kind: str) -> list[str]:
+class IncompleteDiffContext(Exception):
+    """An incremental diff could not get every unchanged file its changed files' cross-file
+    facts read (a cap cut, or a fetch failed). Parsing it would drop facts proven there — an
+    MCP server's tools, re-ingested without their server — so the caller analyzes the whole
+    commit instead. Carries the compare's ``deleted`` paths for that full run."""
+
+    def __init__(self, reason: str, deleted: list[str]) -> None:
+        super().__init__(reason)
+        self.deleted = deleted
+
+
+def _capped(paths: dict[str, None], kind: str) -> tuple[list[str], bool]:
     out = list(paths)
-    if len(out) > _MAX_CONTEXT_FILES:
+    cut = len(out) > _MAX_CONTEXT_FILES
+    if cut:
         logger.warning(
-            "Context fetch capped: %d %s needed, fetching the first %d; facts proven in the "
-            "rest may be missing from this incremental analysis",
+            "Context fetch capped: %d %s needed, more than the %d an incremental analysis fetches",
             len(out),
             kind,
             _MAX_CONTEXT_FILES,
         )
-    return out[:_MAX_CONTEXT_FILES]
+    return out[:_MAX_CONTEXT_FILES], cut
 
 
-def context_paths(changed: Mapping[str, str], tree: list[str]) -> list[str]:
+def context_plan(changed: Mapping[str, str], tree: list[str]) -> tuple[list[str], bool]:
     """Unchanged files to fetch with real content for the facts the ``changed`` files (path →
-    content) depend on: build files in a changed Java / Kotlin file's folder or an ancestor, and the
-    modules a changed Python file with an ``@x.tool`` imports from. At most
-    :data:`_MAX_CONTEXT_FILES` of each kind (a warning is logged when a cap cuts), in a stable
-    order."""
+    content) depend on, and whether that list is complete. Build files in a changed Java /
+    Kotlin file's folder or an ancestor — the repository root's first, then each changed file's
+    nearest, then the folders between — and the modules a changed Python file with an
+    ``@x.tool`` imports from. At most :data:`_MAX_CONTEXT_FILES` of each kind, in a stable
+    order; ``False`` (and a logged warning) when a cap cut."""
     index = _TreeIndex(tree)
     unchanged = index.files - set(changed)
-    build: dict[str, None] = {}
+    root: dict[str, None] = {}
+    nearest: dict[str, None] = {}
+    between: dict[str, None] = {}
     modules: dict[str, None] = {}
     for path in sorted(changed):
         if path.endswith((".java", ".kt")):
             parts = path.split("/")[:-1]
+            found = False
             for n in range(len(parts), -1, -1):
                 folder = "/".join(parts[:n])
-                for name in _BUILD_FILES:
-                    candidate = f"{folder}/{name}" if folder else name
-                    if candidate in unchanged:
-                        build[candidate] = None
+                here = [
+                    c
+                    for name in _BUILD_FILES
+                    if (c := f"{folder}/{name}" if folder else name) in unchanged
+                ]
+                bucket = root if not folder else between if found else nearest
+                for candidate in here:
+                    bucket[candidate] = None
+                found = found or bool(here)
         elif path.endswith(".py") and _PY_TOOL.search(changed[path]):
             for m in _PY_FROM_IMPORT.finditer(changed[path]):
                 for candidate in _python_module_files(path, m.group(1), m.group(2), index):
                     if candidate in unchanged:
                         modules[candidate] = None
-    return _capped(build, "build files") + _capped(modules, "Python modules")
+    build = {**root, **nearest, **between}
+    build_paths, build_cut = _capped(build, "build files")
+    module_paths, module_cut = _capped(modules, "Python modules")
+    return build_paths + module_paths, not (build_cut or module_cut)
+
+
+def context_paths(changed: Mapping[str, str], tree: list[str]) -> list[str]:
+    """The files of :func:`context_plan`, without its completeness flag."""
+    return context_plan(changed, tree)[0]
 
 
 def resolve_git_diff(
@@ -231,7 +261,8 @@ def resolve_git_diff(
     Returns ``(temp_dir, filter_set, deleted)``. The temp dir holds **every** blob path
     at ``incoming`` as an empty file (so the scanner and import resolution see the whole
     repo shape) with real content for the changed files and the few unchanged files their
-    cross-file facts read (:func:`context_paths`).
+    cross-file facts read (:func:`context_plan`). Raises :class:`IncompleteDiffContext` (temp
+    dir removed) when those cannot all be fetched.
     """
     diff = client.compare(ref, current, incoming)
 
@@ -268,16 +299,6 @@ def resolve_git_diff(
         filter_set.add(path)
         contents[path] = content
 
-    # Real content for the unchanged files cross-file facts read; parsed, never streamed (they
-    # are not in `filter_set`). A file that cannot be read stays empty, as before.
-    for path in context_paths(contents, tree):
-        try:
-            content = client.file_content(ref, path, incoming)
-        except SCMAPIError as exc:
-            logger.warning("Skipping unreadable context file %s: %s", path, exc)
-            continue
-        (Path(temp_dir) / path).write_text(content, encoding="utf-8")
-
     if diff.changed and not filter_set:
         # The compare found changed files but none could be read. Failing keeps the
         # sync retryable; an empty result would let the backend advance the stored
@@ -288,6 +309,25 @@ def resolve_git_diff(
             502,
         )
 
+    # Real content for the unchanged files cross-file facts read; parsed, never streamed (they
+    # are not in `filter_set`). One that is cut or cannot be read would stay an empty skeleton
+    # and silently drop the facts proven there, so the diff is abandoned instead.
+    paths, complete = context_plan(contents, tree)
+    try:
+        if not complete:
+            raise IncompleteDiffContext("context files over the fetch cap", diff.deleted)
+        for path in paths:
+            try:
+                content = client.file_content(ref, path, incoming)
+            except SCMAPIError as exc:
+                raise IncompleteDiffContext(
+                    f"context file {path} could not be read: {exc}", diff.deleted
+                ) from None
+            (Path(temp_dir) / path).write_text(content, encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
     return temp_dir, filter_set, diff.deleted
 
 
@@ -297,7 +337,9 @@ def acquire_diff(
     """Entry point behind ``ServerDeps.acquire_diff``.
 
     Incremental when a usable ``currentCommitId`` is present **and** the provider client
-    supports it; otherwise a full clone (``filter_set=None`` → process every file).
+    supports it; otherwise a full clone (``filter_set=None`` → process every file). An
+    incremental diff whose context files cannot all be fetched also falls back to a full clone,
+    keeping the compare's deleted paths.
     """
     ref = _parse_repo_ref(body["repoUrl"], settings.scm_instances)
     if ref is None:
@@ -315,9 +357,17 @@ def acquire_diff(
 
     with client:
         try:
+            deleted: list[str] = []
             if has_current and client.supports_incremental:
-                return resolve_git_diff(client, ref, str(current), incoming)
+                try:
+                    return resolve_git_diff(client, ref, str(current), incoming)
+                except IncompleteDiffContext as exc:
+                    # Analyze the whole commit: every file is parsed with its real neighbours.
+                    # The compare's deletions still ride along, since a full run streams only
+                    # the files that exist.
+                    logger.warning("Incremental analysis abandoned for a full clone: %s", exc)
+                    deleted = exc.deleted
             temp_dir = clone_repo_full(client, ref, incoming, branch, settings.git_clone_timeout)
-            return temp_dir, None, []
+            return temp_dir, None, deleted
         except SCMError as exc:
             raise ApiError(str(exc), exc.status_code) from None

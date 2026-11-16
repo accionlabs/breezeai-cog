@@ -202,7 +202,17 @@ def test_context_paths_are_bounded_and_skip_plain_python() -> None:
 def test_context_paths_fetch_gradle_kts_for_a_kotlin_file() -> None:
     tree = ["build.gradle.kts", "svc/build.gradle.kts", "svc/src/main/kotlin/T.kt", "other/pom.xml"]
     changed = {"svc/src/main/kotlin/T.kt": "class T\n"}
-    assert git_mod.context_paths(changed, tree) == ["svc/build.gradle.kts", "build.gradle.kts"]
+    assert git_mod.context_paths(changed, tree) == ["build.gradle.kts", "svc/build.gradle.kts"]
+
+
+def test_context_paths_put_the_root_and_nearest_build_files_first() -> None:
+    """The root build file, then each changed file's nearest, then the folders between."""
+    tree = ["pom.xml", "a/pom.xml", "a/b/pom.xml", "a/b/c/X.java", "d/pom.xml", "d/Y.java"]
+    changed = {"a/b/c/X.java": "", "d/Y.java": ""}
+    assert git_mod.context_plan(changed, tree) == (
+        ["pom.xml", "a/b/pom.xml", "d/pom.xml", "a/pom.xml"],
+        True,
+    )
 
 
 def test_context_paths_build_files_have_their_own_budget_and_caps_warn(
@@ -219,11 +229,67 @@ def test_context_paths_build_files_have_their_own_budget_and_caps_warn(
     assert "app/server.py" in paths
     assert len([p for p in paths if p.endswith("pom.xml")]) == git_mod._MAX_CONTEXT_FILES
     assert paths[0] == "m00/pom.xml"  # stable order
+    assert git_mod.context_plan(changed, tree)[1] is False  # the cut is reported
     assert any("80 build files" in r.getMessage() for r in caplog.records)
     caplog.clear()
     with caplog.at_level("WARNING", logger=git_mod.__name__):
         git_mod.context_paths({"app/tools.py": changed["app/tools.py"]}, tree)
     assert not caplog.records  # under both caps: no warning
+
+
+def test_context_over_the_cap_abandons_the_diff(recorded_git) -> None:
+    """More build files than the cap: parsing would leave some empty and drop the facts proven
+    there, so the diff is abandoned (temp dir removed) with the compare's deletions."""
+    tree = [f"m{i:02}/pom.xml" for i in range(60)] + [f"m{i:02}/A.java" for i in range(60)]
+    content = {f"m{i:02}/A.java": "class A {}\n" for i in range(60)}
+    content.update({f"m{i:02}/pom.xml": "<project/>" for i in range(60)})
+    client = FakeClient(tree=tree, changed=list(content)[:60], deleted=["old.py"], content=content)
+    made: list[str] = []
+    real_mkdtemp = git_mod.tempfile.mkdtemp
+
+    def mkdtemp(**kw):
+        made.append(real_mkdtemp(**kw))
+        return made[-1]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(git_mod.tempfile, "mkdtemp", mkdtemp)
+        with pytest.raises(git_mod.IncompleteDiffContext) as info:
+            git_mod.resolve_git_diff(client, REF, "base", _SHA)
+    assert info.value.deleted == ["old.py"]
+    assert not Path(made[0]).exists()
+    assert not any(c.startswith("content:m") and c.endswith("pom.xml") for c in client.calls)
+
+
+def test_unreadable_context_file_abandons_the_diff() -> None:
+    """A context file that cannot be fetched would stay an empty skeleton: the changed tools
+    file would lose its server proof, so the diff is abandoned rather than parsed."""
+    client = FakeClient(
+        tree=["app/server.py", "app/tools.py"],
+        changed=["app/tools.py"],
+        content={"app/tools.py": "from .server import mcp\n@mcp.tool\ndef f(): ...\n"},
+    )
+    with pytest.raises(git_mod.IncompleteDiffContext, match="app/server.py"):
+        git_mod.resolve_git_diff(client, REF, "base", _SHA)
+
+
+def test_acquire_diff_falls_back_to_a_full_clone_when_context_is_incomplete(
+    monkeypatch, recorded_git
+) -> None:
+    client = FakeClient(
+        tree=["app/server.py", "app/tools.py"],
+        changed=["app/tools.py"],
+        deleted=["app/old.py"],
+        content={"app/tools.py": "from .server import mcp\n@mcp.tool\ndef f(): ...\n"},
+    )
+    _use_client(monkeypatch, client)
+
+    _, filter_set, deleted = git_mod.acquire_diff(
+        Settings(_env_file=None), _body(currentCommitId="base")
+    )
+
+    assert filter_set is None  # every file is parsed and streamed
+    assert deleted == ["app/old.py"]
+    assert recorded_git[0][4:6] == ["--branch", _BRANCH]
 
 
 def test_context_paths_follow_the_python_import_rules() -> None:
