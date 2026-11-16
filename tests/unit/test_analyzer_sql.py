@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from breezeai_cog.analyzers.sql import _strip_sqlplus, detect_dialect, parse_ddl
+from breezeai_cog.analyzers.sql import _strip_leading_noise, _strip_sqlplus, detect_dialect, parse_ddl
 
 # A trimmed Oracle SQL*Plus script in the shape of a real schema install script:
 # rem/Prompt/SET directives between statements, a multi-line COMMENT string, and all
@@ -844,6 +844,88 @@ def test_tsql_go_separator_variants(separator: str) -> None:
     assert sorted(t["name"] for t in r["tables"]) == ["A", "B"]
 
 
+_T1 = "CREATE TABLE [dbo].[T1] ([Id] INT)\nGO\n"
+_V1 = "CREATE VIEW [dbo].[V1] AS SELECT [Id] FROM [dbo].[T1]\nGO\n"
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_tsql_go_inside_a_block_comment_is_not_a_separator(eol: str) -> None:
+    # Splitting there left `end note */ CREATE VIEW …` as a batch and dropped the view.
+    text = (_T1 + "/* note\nGO\nend note */\n" + _V1).replace("\n", eol)
+    r = parse_ddl(text, "schema_mssql.sql")
+    assert [t["name"] for t in r["tables"]] == ["T1"]
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_go_inside_a_string_keeps_the_procedure_body_whole() -> None:
+    body = "CREATE PROCEDURE [dbo].[P1] AS\nBEGIN\n  SELECT 'it''s the first line\nGO\nsecond line' AS x\nEND"
+    r = parse_ddl(_T1 + body + "\nGO\n" + _V1, "schema_mssql.sql")
+    assert [p["body"] for p in r["procedures"]] == [body]
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_go_inside_a_string_keeps_the_view_definition_verbatim() -> None:
+    view = "CREATE VIEW [dbo].[V2] AS SELECT 'a\nGO\nb' AS x"
+    r = parse_ddl(_T1 + view + "\nGO\n", "schema_mssql.sql")
+    assert [v["definition"] for v in r["views"]] == [view]
+
+
+def test_tsql_apostrophe_in_a_line_comment_does_not_hide_the_next_go() -> None:
+    r = parse_ddl(_T1 + "-- don't split here\n" + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_never_closed_quote_still_splits_on_every_go() -> None:
+    # A malformed batch must not swallow the rest of the file: a quote no later quote closes
+    # masks nothing. (`_V1` has no quote to close it.)
+    r = parse_ddl(_T1 + "SELECT 'oops\nGO\n" + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_stray_quote_closed_later_hides_the_go_between() -> None:
+    # As in SSMS and sqlcmd, the stray quote pairs with the quote before `x`: the GO between
+    # them is string text, so V9 shares the SELECT's batch and is not captured. Pinned so the
+    # behaviour is a documented choice, not an accident.
+    view = "CREATE VIEW [dbo].[V9] AS SELECT 'x' AS c\nGO\n"
+    r = parse_ddl(_T1 + "SELECT 'oops\nGO\n" + view + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+@pytest.mark.parametrize(
+    "comment",
+    ["/* a /* b */ c */\n", "/* a /* b */\nGO\n*/\n", "/* a\n/* b */\n*/\n"],
+    ids=["inline", "go-inside", "multiline"],
+)
+def test_tsql_nested_comment_before_an_object_keeps_it(comment: str) -> None:
+    # The leading-comment strip stopped at the first `*/`, leaving `c */ CREATE VIEW …`, and
+    # the view was dropped with failed: 0.
+    r = parse_ddl(_T1 + comment + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+    assert r["views"][0]["definition"] == "CREATE VIEW [dbo].[V1] AS SELECT [Id] FROM [dbo].[T1]"
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_tsql_semicolon_inside_a_nested_comment_does_not_split() -> None:
+    # The `;` after the inner `*/` is still inside the outer comment.
+    text = "/* a /* b; */ c; */\nCREATE TABLE [dbo].[T2] ([Id] INT);\nCREATE TABLE [dbo].[T3] ([Id] INT)\nGO\n"
+    r = parse_ddl(text, "schema_mssql.sql")
+    assert [t["name"] for t in r["tables"]] == ["T2", "T3"]
+
+
+def test_tsql_nested_comment_before_a_procedure_keeps_it_a_program() -> None:
+    body = "CREATE PROCEDURE [dbo].[P2] AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND"
+    r = parse_ddl(_T1 + "/* a /* b */ c */\n" + body + "\nGO\n", "schema_mssql.sql")
+    assert [p["body"] for p in r["procedures"]] == [body]
+
+
+def test_only_tsql_reads_block_comments_as_nested() -> None:
+    # Oracle and MySQL end a block comment at its first `*/`; the default must not change that.
+    text = "/* a /* b */ c */ CREATE VIEW v"
+    assert _strip_leading_noise(text) == "c */ CREATE VIEW v"
+    assert _strip_leading_noise(text, nested=True) == "CREATE VIEW v"
+    assert _strip_leading_noise("/* never closed CREATE VIEW v", nested=True) == "/* never closed CREATE VIEW v"
+
+
 @pytest.mark.parametrize(
     "text, filename, expected",
     [
@@ -864,3 +946,588 @@ def test_bom_is_only_stripped_at_the_start() -> None:
     # A U+FEFF inside a statement is data, not a byte-order mark: leave it alone.
     r = parse_ddl("CREATE TABLE app.t (a text);\n-- note \ufeff here\nCREATE TABLE app.u (b text);\n", "schema_pg.sql")
     assert sorted(t["name"] for t in r["tables"]) == ["t", "u"]
+
+
+# PostgreSQL stored programs (BREEZEAI-958 DEF-3): procedures and functions were not extracted.
+def test_postgres_procedure_is_extracted_with_its_whole_body() -> None:
+    proc = (
+        "CREATE OR REPLACE PROCEDURE app.do_it(IN n int, OUT total numeric(10, 2), INOUT \"Msg\" text DEFAULT 'a;b')\n"
+        "LANGUAGE plpgsql\nAS $$\nBEGIN\n  RAISE NOTICE 'hi %; ok', n;\n  INSERT INTO app.t VALUES (1);\nEND;\n$$"
+    )
+    r = parse_ddl("CREATE TABLE app.t (id int);\n" + proc + ";\n", "schema_pg.sql")
+    assert [t["name"] for t in r["tables"]] == ["t"]
+    [p] = r["procedures"]
+    assert p == {
+        "name": "do_it",
+        "schema": "app",
+        "fullName": "app.do_it",
+        "procedureType": "procedure",
+        "parameters": [
+            {"name": "n", "direction": "IN", "dataType": "INT"},
+            {"name": "total", "direction": "OUT", "dataType": "NUMERIC(10, 2)"},
+            {"name": "Msg", "direction": "IN OUT", "dataType": "TEXT"},
+        ],
+        "returnType": None,
+        "body": proc,
+    }
+
+
+def test_postgres_procedure_only_file_is_not_empty() -> None:
+    # A procedure-only file used to extract nothing, so the upload was rejected as empty.
+    r = parse_ddl("CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;\n", "procs.sql")
+    assert r["dialect"] == "postgresql"
+    assert [p["fullName"] for p in r["procedures"]] == ["p"]
+
+
+@pytest.mark.parametrize(
+    ("header", "return_type"),
+    [
+        pytest.param("RETURNS integer", "INTEGER", id="scalar"),
+        pytest.param("RETURNS SETOF app.t", "SETOF APP.T", id="setof"),
+        pytest.param("RETURNS TABLE(id int, name text)", "TABLE(id int, name text)", id="table"),
+        pytest.param("RETURNS trigger", "TRIGGER", id="trigger"),
+        pytest.param("RETURNS character varying(20)", "CHARACTER VARYING(20)", id="multiword"),
+    ],
+)
+def test_postgres_function_return_type(header: str, return_type: str) -> None:
+    r = parse_ddl(f"CREATE FUNCTION app.f() {header} LANGUAGE sql AS $f$ SELECT 1 $f$;\n", "schema_pg.sql")
+    [f] = r["procedures"]
+    assert (f["procedureType"], f["returnType"]) == ("function", return_type)
+
+
+def test_postgres_function_with_a_quoted_body() -> None:
+    fn = "CREATE FUNCTION add(a integer, b integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'select a + b; -- it''s ok'"
+    [f] = parse_ddl(fn + ";\n", "schema_pg.sql")["procedures"]
+    assert f["body"] == fn
+    assert [p["name"] for p in f["parameters"]] == ["a", "b"]
+
+
+def test_postgres_parameter_names_are_optional() -> None:
+    fn = (
+        "CREATE FUNCTION f(integer, double precision, x double precision, \"Odd\"\"N\" text[], "
+        "VARIADIC nums numeric[] = '{}') RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n"
+    )
+    [f] = parse_ddl(fn, "schema_pg.sql")["procedures"]
+    assert f["parameters"] == [
+        {"name": None, "direction": "IN", "dataType": "INTEGER"},
+        {"name": None, "direction": "IN", "dataType": "DOUBLE PRECISION"},
+        {"name": "x", "direction": "IN", "dataType": "DOUBLE PRECISION"},
+        {"name": 'Odd"N', "direction": "IN", "dataType": "TEXT[]"},
+        {"name": "nums", "direction": "IN", "dataType": "NUMERIC[]"},
+    ]
+
+
+def test_postgres_begin_atomic_body_is_not_stored_truncated() -> None:
+    # The statement splitter cuts a SQL-standard body at its first inner `;`, so the record
+    # would hold half a body: it is counted as failed instead.
+    r = parse_ddl("CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1; SELECT 2; END;\n", "schema_pg.sql")
+    assert r["procedures"] == []
+    assert r["parseStats"]["failed"] == 1
+
+
+def test_mysql_single_statement_function_needs_no_delimiter() -> None:
+    fn = "CREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1"
+    r = parse_ddl(fn + ";\n", "schema_mysql.sql")
+    assert r["dialect"] == "mysql"
+    assert [(p["procedureType"], p["returnType"], p["body"]) for p in r["procedures"]] == [("function", "INT", fn)]
+
+
+def test_postgres_lines_that_look_like_sqlplus_directives_are_kept() -> None:
+    # SQL*Plus stripping ran on every non-T-SQL file: it deleted `SET …` inside a `$$` body,
+    # and `EXECUTE FUNCTION …;` ending a trigger, which merged the trigger into the next view.
+    proc = (
+        "CREATE PROCEDURE app.touch(p_id bigint) LANGUAGE plpgsql AS $$\nBEGIN\n"
+        "    UPDATE app.t AS o\n       SET n = n + 1\n     WHERE o.id = p_id;\nEND;\n$$"
+    )
+    view = "CREATE VIEW app.v AS SELECT id FROM app.t"
+    text = (
+        "CREATE TABLE app.t (id bigint, n int);\n" + proc + ";\n"
+        "CREATE TRIGGER trg BEFORE UPDATE ON app.t\nFOR EACH ROW\nEXECUTE FUNCTION app.f();\n" + view + ";\n"
+    )
+    r = parse_ddl(text, "schema_pg.sql")
+    assert [p["body"] for p in r["procedures"]] == [proc]
+    assert [v["definition"] for v in r["views"]] == [view]
+
+
+# MySQL / MariaDB stored programs: a compound body is written between DELIMITER commands.
+_MYSQL_PROC = (
+    "CREATE DEFINER=`root`@`localhost` PROCEDURE `shop`.`add_order`"
+    "(IN p_total DECIMAL(10,2), OUT p_id INT, INOUT `p note` VARCHAR(20))\n"
+    "BEGIN\n  INSERT INTO orders(total) VALUES (p_total); -- inline ; comment\n"
+    "  SET p_id = LAST_INSERT_ID();\n  SELECT 'a $$ in a string';\nEND"
+)
+_MYSQL_FUNC = (
+    "CREATE FUNCTION order_count(p_status ENUM('Open','Closed')) RETURNS INT UNSIGNED\nDETERMINISTIC\n"
+    "BEGIN\n  DECLARE n INT;\n  SELECT COUNT(*) INTO n FROM orders;\n  RETURN n;\nEND"
+)
+_MYSQL_SCRIPT = (
+    "CREATE TABLE `orders` (`id` INT NOT NULL AUTO_INCREMENT, `total` DECIMAL(10,2), PRIMARY KEY (`id`));\n"
+    "DROP PROCEDURE IF EXISTS `add_order`;\n"
+    "DELIMITER $$\n" + _MYSQL_PROC + "$$\n" + _MYSQL_FUNC + " $$\n"
+    "CREATE TRIGGER trg BEFORE INSERT ON orders FOR EACH ROW BEGIN SET NEW.total = 0; END$$\n"
+    "DELIMITER ;\n"
+    "CREATE VIEW v_orders AS SELECT id, total FROM orders;\n"
+    "CREATE INDEX ix_total ON orders (total);\n"
+)
+
+
+def test_mysql_programs_between_delimiters_are_extracted_whole() -> None:
+    r = parse_ddl(_MYSQL_SCRIPT, "schema_mysql.sql")
+    proc, func = r["procedures"]
+    assert proc == {
+        "name": "add_order",
+        "schema": "shop",
+        "fullName": "shop.add_order",
+        "procedureType": "procedure",
+        "parameters": [
+            {"name": "p_total", "direction": "IN", "dataType": "DECIMAL(10,2)"},
+            {"name": "p_id", "direction": "OUT", "dataType": "INT"},
+            {"name": "p note", "direction": "IN OUT", "dataType": "VARCHAR(20)"},
+        ],
+        "returnType": None,
+        "body": _MYSQL_PROC,
+    }
+    assert (func["name"], func["returnType"], func["body"]) == ("order_count", "INT UNSIGNED", _MYSQL_FUNC)
+    assert func["parameters"] == [{"name": "p_status", "direction": "IN", "dataType": "ENUM('Open','Closed')"}]
+
+
+def test_mysql_delimiter_blocks_leave_the_rest_of_the_script_intact() -> None:
+    r = parse_ddl(_MYSQL_SCRIPT, "schema_mysql.sql")
+    assert [t["name"] for t in r["tables"]] == ["orders"]
+    assert [v["definition"] for v in r["views"]] == ["CREATE VIEW v_orders AS SELECT id, total FROM orders"]
+    assert [i["name"] for i in r["allIndexes"]] == ["ix_total"]
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_mysqldump_double_semicolon_delimiter() -> None:
+    proc = "CREATE DEFINER=`app`@`%` PROCEDURE `p`()\nBEGIN\n  SELECT 1;\nEND"
+    r = parse_ddl("DELIMITER ;;\n" + proc + " ;;\nDELIMITER ;\nCREATE TABLE t (a int);\n", "dump_mysql.sql")
+    assert [p["body"] for p in r["procedures"]] == [proc]
+    assert [t["name"] for t in r["tables"]] == ["t"]
+
+
+def test_mysql_compound_body_without_delimiter_is_not_stored_truncated() -> None:
+    # Under `;` the body ends at its first inner `;`: reported as failed, never half-stored.
+    r = parse_ddl("CREATE PROCEDURE p() BEGIN SELECT 1; END;\n", "schema_mysql.sql")
+    assert r["procedures"] == []
+    assert r["parseStats"]["failed"] == 1
+
+
+# CREATE SEQUENCE on PostgreSQL and MariaDB, in the Oracle sequence record shape.
+@pytest.mark.parametrize(
+    ("text", "filename", "expected"),
+    [
+        pytest.param(
+            "CREATE SEQUENCE IF NOT EXISTS app.order_seq AS bigint INCREMENT BY 5 MINVALUE 1 NO MAXVALUE "
+            "START WITH 1000 CACHE 10 NO CYCLE OWNED BY app.orders.id;\n",
+            "schema_pg.sql",
+            {"schema": "app", "name": "order_seq", "startWith": 1000, "incrementBy": 5, "minValue": 1,
+             "maxValue": None, "cache": 10, "cycle": False},
+            id="postgres",
+        ),
+        pytest.param(
+            "CREATE OR REPLACE SEQUENCE s1 START WITH 100 INCREMENT BY 10 MINVALUE=1 NOMAXVALUE CACHE 20 CYCLE;\n",
+            "schema_mariadb.sql",
+            {"schema": None, "name": "s1", "startWith": 100, "incrementBy": 10, "minValue": 1,
+             "maxValue": None, "cache": 20, "cycle": True},
+            id="mariadb",
+        ),
+        pytest.param(
+            "CREATE SEQUENCE `db`.`s2` NOCACHE NOCYCLE;\n",
+            "schema_mariadb.sql",
+            {"schema": "db", "name": "s2", "startWith": None, "incrementBy": None, "minValue": None,
+             "maxValue": None, "cache": 0, "cycle": False},
+            id="mariadb-quoted",
+        ),
+    ],
+)
+def test_sequences_on_the_sqlglot_path(text: str, filename: str, expected: dict) -> None:
+    [seq] = parse_ddl(text, filename)["sequences"]
+    assert {k: seq[k] for k in expected} == expected
+    assert seq["order"] is None  # an Oracle-only option
+
+
+def test_sequence_options_left_unwritten_stay_null() -> None:
+    [seq] = parse_ddl("CREATE SEQUENCE plain_seq;\n", "schema_pg.sql")["sequences"]
+    assert (seq["startWith"], seq["incrementBy"], seq["cache"]) == (None, None, None)
+
+
+# SQL*Plus recognises its directives only between statements. Inside a statement or a PL/SQL
+# block, a line starting with SET / EXECUTE / HOST … is SQL and must survive the strip.
+def test_sqlplus_keywords_inside_a_plsql_body_are_kept() -> None:
+    body = (
+        "CREATE OR REPLACE PROCEDURE HR.RAISE_SALARY (p_emp_id IN NUMBER, p_pct IN NUMBER) AS\n"
+        "BEGIN\n    UPDATE HR.EMPLOYEES\n       SET SALARY = SALARY * (1 + p_pct / 100)\n"
+        "     WHERE EMP_ID = p_emp_id;\n    EXECUTE IMMEDIATE 'ANALYZE TABLE HR.EMPLOYEES COMPUTE STATISTICS';\nEND;"
+    )
+    text = "SET DEFINE OFF\nPROMPT procs\n" + body + "\n/\nPROMPT done\n"
+    cleaned = _strip_sqlplus(text)
+    assert body in cleaned
+    assert "PROMPT" not in cleaned and "SET DEFINE" not in cleaned
+    [p] = parse_ddl(text, "procs_ora.sql")["procedures"]
+    assert "SET SALARY = SALARY" in p["body"] and "EXECUTE IMMEDIATE" in p["body"]
+
+
+def test_column_named_like_a_directive_is_kept() -> None:
+    text = "CREATE TABLE audit_log (\n  id NUMBER(10),\n  host VARCHAR2(128),\n  desc_text VARCHAR2(10)\n);\n"
+    [t] = parse_ddl(text, "audit_ora.sql")["tables"]
+    assert [c["name"] for c in t["columns"]] == ["ID", "HOST", "DESC_TEXT"]
+
+
+def test_plsql_unit_without_slash_ends_at_the_next_create() -> None:
+    # A unit missing its `/` must not swallow the directives that follow the next statement.
+    text = (
+        "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n"
+        "CREATE TABLE t (id NUMBER(10));\nPROMPT after\nCREATE TABLE u (id NUMBER(10));\n"
+    )
+    cleaned = _strip_sqlplus(text)
+    assert "PROMPT after" not in cleaned
+    assert sorted(t["name"] for t in parse_ddl(text, "mixed_ora.sql")["tables"]) == ["T", "U"]
+
+
+@pytest.mark.parametrize(
+    ("text", "table"),
+    [
+        (
+            "CREATE OR REPLACE TYPE t_list AS TABLE OF VARCHAR2(30);\nSET DEFINE OFF\nCREATE TABLE a (id NUMBER(10));\n",
+            "A",
+        ),
+        (
+            "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\nSPOOL off\nCREATE TABLE b (id NUMBER(10));\n",
+            "B",
+        ),
+    ],
+)
+def test_directive_after_plsql_unit_without_slash_keeps_the_next_table(text: str, table: str) -> None:
+    # A directive in the gap was glued to the next CREATE, which was then lost.
+    r = parse_ddl(text, "mixed_ora.sql")
+    assert [t["name"] for t in r["tables"]] == [table]
+    assert not any("SET DEFINE" in e or "SPOOL" in e for e in r["parseStats"]["sampleErrors"])
+
+
+def test_set_column_after_semicolon_in_plsql_unit_stays_in_the_body() -> None:
+    # `SET define = …` assigns a column; it is not the SQL*Plus option and must not end the unit.
+    body = (
+        "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nUPDATE t\nSET define = 1;\n"
+        "  NULL;\nEND;"
+    )
+    cleaned = _strip_sqlplus(body + "\n/\n")
+    assert "SET define = 1;" in cleaned
+    [p] = parse_ddl(body + "\n/\n", "procs_ora.sql")["procedures"]
+    assert "SET define = 1;" in p["body"]
+
+
+def test_postgres_unreadable_parameter_fails_the_program() -> None:
+    # Dropping the unread parameter made `b` look like the first and only argument.
+    r = parse_ddl(
+        "CREATE FUNCTION f(a national character(10) collate x, b int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+        "f_pg.sql",
+    )
+    assert r["procedures"] == []
+    assert r["parseStats"]["failed"] == 1
+    assert r["parseStats"]["sampleErrors"][0].startswith("parameter not understood in CREATE FUNCTION f")
+
+
+def test_postgres_national_character_parameter() -> None:
+    r = parse_ddl(
+        "CREATE FUNCTION f(a national character(10), b int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;", "f_pg.sql"
+    )
+    [p] = r["procedures"]
+    assert p["parameters"] == [
+        {"name": "a", "direction": "IN", "dataType": "NATIONAL CHARACTER(10)"},
+        {"name": "b", "direction": "IN", "dataType": "INT"},
+    ]
+    # sqlglot rejects the header, but the program was read: no error is reported for it.
+    assert (r["parseStats"]["ok"], r["parseStats"]["failed"], r["parseStats"]["sampleErrors"]) == (1, 0, [])
+
+
+def test_mysql_returns_enum_keeps_value_case() -> None:
+    text = "DELIMITER $$\nCREATE FUNCTION g() RETURNS ENUM('a','B') DETERMINISTIC BEGIN RETURN 'a'; END$$\nDELIMITER ;\n"
+    [p] = parse_ddl(text, "g_mysql.sql")["procedures"]
+    assert p["returnType"] == "ENUM('a','B')"
+
+
+def test_tsql_sequence_with_bracketed_name() -> None:
+    # `\b` after `]` never matched, so a bracketed sequence was skipped without a trace.
+    [seq] = parse_ddl("CREATE SEQUENCE [dbo].[InvoiceSeq] START WITH 1000 INCREMENT BY 1\nGO\n", "seq_mssql.sql")[
+        "sequences"
+    ]
+    assert (seq["schema"], seq["name"], seq["startValue"], seq["increment"]) == ("dbo", "InvoiceSeq", 1000, 1)
+
+
+@pytest.mark.parametrize(
+    ("column", "expected"),
+    [
+        pytest.param(
+            "a_id bigint NOT NULL CONSTRAINT fk_a REFERENCES s.a (id) ON DELETE CASCADE",
+            {"name": "fk_a", "columns": ["a_id"], "refTableName": "a", "refColumns": ["id"], "refTableSchema": "s"},
+            id="named-qualified",
+        ),
+        pytest.param(
+            "a_id bigint REFERENCES a",  # no column list: the referenced PK, not known here
+            {"name": None, "columns": ["a_id"], "refTableName": "a", "refColumns": []},
+            id="no-columns",
+        ),
+    ],
+)
+def test_column_level_references_is_a_foreign_key(column: str, expected: dict) -> None:
+    [t] = parse_ddl(f"CREATE TABLE b (id int, {column});\n", "schema_pg.sql")["tables"]
+    [fk] = [c for c in t["constraints"] if c["constraintType"] == "FOREIGN_KEY"]
+    assert {k: fk.get(k) for k in expected} == expected
+    assert [c["name"] for c in t["columns"] if c["isForeignKey"]] == ["a_id"]
+
+
+def test_mysql_column_level_references_is_not_a_foreign_key() -> None:
+    # Whether MySQL creates a constraint from a column-level REFERENCES depends on the server
+    # version (9.0 enforces it), so it is left out: missing, never wrong.
+    [t] = parse_ddl("CREATE TABLE b (`a_id` INT REFERENCES a (id));\n", "schema_mysql.sql")["tables"]
+    assert t["constraints"] == []
+
+
+@pytest.mark.parametrize("options", ["WITHOUT ROWID", "STRICT", "WITHOUT ROWID, STRICT"])
+def test_sqlite_table_options_keep_the_table(options: str) -> None:
+    text = f"CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT NOT NULL) {options};\nCREATE TABLE t (a INTEGER);\n"
+    r = parse_ddl(text, "schema_sqlite.sql")
+    assert [t["name"] for t in r["tables"]] == ["books", "t"]
+    assert [c["name"] for c in r["tables"][0]["columns"]] == ["id", "title"]
+
+
+def test_create_the_parser_does_not_understand_is_counted_as_failed() -> None:
+    # sqlglot degrades this CREATE TABLE to a bare Command; it used to count as success.
+    r = parse_ddl("CREATE TABLE t (a int) INHERITS (p) TABLESPACE x;\nCREATE TABLE u (a int);\n", "schema_pg.sql")
+    assert [t["name"] for t in r["tables"]] == ["u"]
+    assert (r["parseStats"]["ok"], r["parseStats"]["failed"]) == (1, 1)
+    assert r["parseStats"]["sampleErrors"][0].startswith("CREATE TABLE not understood")
+
+
+# DEF-958-01: two tables share a name in different schemas. A CREATE INDEX or ALTER TABLE ADD
+# CONSTRAINT naming one schema must land on that table, not on whichever came last.
+_SAME_NAME_SCRIPTS = [
+    pytest.param(
+        "CREATE TABLE [dbo].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [sales].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [dbo].[Orders] ([Code])\nGO\n"
+        "ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [PK_Orders] PRIMARY KEY ([Id])\nGO\n",
+        "schema.sql",
+        "dbo",
+        id="tsql",
+    ),
+    pytest.param(
+        "CREATE TABLE public.orders (id int, code text);\n"
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON public.orders (code);\n"
+        "ALTER TABLE public.orders ADD CONSTRAINT pk_orders PRIMARY KEY (id);\n",
+        "schema_pg.sql",
+        "public",
+        id="postgres",
+    ),
+    pytest.param(
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE INDEX HR.IX_CODE ON HR.ORDERS (CODE);\n"
+        "ALTER TABLE HR.ORDERS ADD CONSTRAINT PK_ORDERS PRIMARY KEY (ID);\n",
+        "schema_ora.sql",
+        "HR",
+        id="oracle",
+    ),
+]
+
+
+def _by_schema(r: dict) -> dict:
+    return {t["schema"]: t for t in r["tables"]}
+
+
+@pytest.mark.parametrize(("text", "filename", "schema"), _SAME_NAME_SCRIPTS)
+def test_index_and_constraint_attach_to_the_named_schema(text: str, filename: str, schema: str) -> None:
+    tables = _by_schema(parse_ddl(text, filename))
+    other = next(s for s in tables if s != schema)
+
+    assert len(tables[schema]["indexes"]) == 1
+    assert [c["constraintType"] for c in tables[schema]["constraints"]] == ["PRIMARY_KEY"]
+    assert tables[other]["indexes"] == []
+    assert tables[other]["constraints"] == []
+    # The column flags follow the attachment.
+    assert any(c.get("isIndexed") for c in tables[schema]["columns"])
+    assert not any(c.get("isIndexed") for c in tables[other]["columns"])
+    assert not any(c.get("isPrimaryKey") for c in tables[other]["columns"])
+
+
+def test_reversed_declaration_order_still_attaches_by_schema() -> None:
+    # The old name-keyed map was last-wins, so the bug showed only when the target came first.
+    text = (
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE TABLE public.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON sales.orders (code);\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_pg.sql"))
+    assert [i["name"] for i in tables["sales"]["indexes"]] == ["ix_code"]
+    assert tables["public"]["indexes"] == []
+
+
+def test_tsql_unqualified_reference_means_dbo() -> None:
+    text = (
+        "CREATE TABLE [sales].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [dbo].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [Orders] ([Code])\nGO\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema.sql"))
+    assert len(tables["dbo"]["indexes"]) == 1
+    assert tables["sales"]["indexes"] == []
+
+
+def test_schema_match_ignores_case() -> None:
+    text = (
+        "CREATE TABLE [dbo].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [sales].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [DBO].[Orders] ([Code])\nGO\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema.sql"))
+    assert len(tables["dbo"]["indexes"]) == 1
+    assert tables["sales"]["indexes"] == []
+
+
+def test_qualified_reference_reaches_a_table_declared_without_schema() -> None:
+    # `CREATE TABLE Orders` lives in the default schema, so `ON dbo.Orders` still finds it.
+    text = (
+        "CREATE TABLE [Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [dbo].[Orders] ([Code])\nGO\n"
+    )
+    r = parse_ddl(text, "schema.sql")
+    assert [i["name"] for i in r["tables"][0]["indexes"]] == ["IX_Code"]
+
+
+def test_index_on_a_schema_with_no_such_table_is_not_misattached() -> None:
+    text = (
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON hr.orders (code);\n"
+    )
+    r = parse_ddl(text, "schema_pg.sql")
+    assert r["tables"][0]["indexes"] == []
+
+
+def test_oracle_alter_column_ops_follow_the_schema() -> None:
+    # Every Oracle ALTER (not only ADD CONSTRAINT) shared the bare-name lookup.
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "ALTER TABLE HR.ORDERS DROP COLUMN CODE;\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
+    assert [c["name"] for c in tables["HR"]["columns"]] == ["ID"]
+    assert [c["name"] for c in tables["SALES"]["columns"]] == ["ID", "CODE"]
+
+
+def test_oracle_comments_follow_the_schema() -> None:
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "COMMENT ON TABLE HR.ORDERS IS 'hr orders';\n"
+        "COMMENT ON COLUMN HR.ORDERS.CODE IS 'hr code';\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
+    assert tables["HR"]["comment"] == "hr orders"
+    assert [c.get("comment") for c in tables["HR"]["columns"]] == [None, "hr code"]
+    assert tables["SALES"].get("comment") is None
+    assert not any(c.get("comment") for c in tables["SALES"]["columns"])
+
+
+def test_oracle_column_comment_follows_a_rename_in_its_own_schema() -> None:
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "COMMENT ON COLUMN HR.ORDERS.CODE IS 'hr code';\n"
+        "COMMENT ON COLUMN SALES.ORDERS.CODE IS 'sales code';\n"
+        "ALTER TABLE HR.ORDERS RENAME COLUMN CODE TO REF;\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
+    assert {c["name"]: c.get("comment") for c in tables["HR"]["columns"]} == {"ID": None, "REF": "hr code"}
+    assert {c["name"]: c.get("comment") for c in tables["SALES"]["columns"]} == {"ID": None, "CODE": "sales code"}
+
+
+# One table declared twice (drop-and-recreate, concatenated migrations) is the same table, not
+# an ambiguity: an unqualified index, ALTER or comment lands on the last declaration.
+_REDECLARED_SCRIPTS = [
+    pytest.param(
+        "CREATE TABLE orders (id int, code text);\n"
+        "DROP TABLE orders;\n"
+        "CREATE TABLE orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON orders (code);\n"
+        "ALTER TABLE orders ADD CONSTRAINT pk_orders PRIMARY KEY (id);\n",
+        "schema_pg.sql",
+        id="postgres",
+    ),
+    pytest.param(
+        "CREATE TABLE [dbo].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [dbo].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [Orders] ([Code])\nGO\n"
+        "ALTER TABLE [Orders] ADD CONSTRAINT [PK_Orders] PRIMARY KEY ([Id])\nGO\n",
+        "schema.sql",
+        id="tsql",
+    ),
+    pytest.param(
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE INDEX IX_CODE ON ORDERS (CODE);\n"
+        "ALTER TABLE ORDERS ADD CONSTRAINT PK_ORDERS PRIMARY KEY (ID);\n",
+        "schema_ora.sql",
+        id="oracle",
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "filename"), _REDECLARED_SCRIPTS)
+def test_redeclared_table_keeps_its_index_and_constraint(text: str, filename: str) -> None:
+    first, last = parse_ddl(text, filename)["tables"]
+    assert len(last["indexes"]) == 1
+    assert [c["constraintType"] for c in last["constraints"]] == ["PRIMARY_KEY"]
+    assert first["indexes"] == []
+    assert first["constraints"] == []
+
+
+def test_oracle_comment_reaches_a_redeclared_table() -> None:
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "COMMENT ON TABLE ORDERS IS 'orders';\n"
+    )
+    first, last = parse_ddl(text, "schema_ora.sql")["tables"]
+    assert last["comment"] == "orders"
+    assert first.get("comment") is None
+
+
+def test_qualified_reference_to_a_non_default_schema_skips_the_unqualified_table() -> None:
+    # `CREATE TABLE orders` is public.orders, so `ON hr.orders` names neither declared table.
+    text = (
+        "CREATE TABLE orders (id int, code text);\n"
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON hr.orders (code);\n"
+    )
+    r = parse_ddl(text, "schema_pg.sql")
+    assert all(t["indexes"] == [] for t in r["tables"])
+
+
+@pytest.mark.parametrize(
+    ("text", "filename"),
+    [
+        pytest.param(
+            "SET search_path TO app;\n"
+            "CREATE TABLE orders (id int, code text);\n"
+            "CREATE INDEX ix_code ON app.orders (code);\n"
+            "ALTER TABLE app.orders ADD CONSTRAINT pk_orders PRIMARY KEY (id);\n",
+            "schema_pg.sql",
+            id="postgres-search-path",
+        ),
+        pytest.param(
+            "CREATE TABLE [Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+            "CREATE INDEX [IX_Code] ON [sales].[Orders] ([Code])\nGO\n"
+            "ALTER TABLE [sales].[Orders] ADD CONSTRAINT [PK_Orders] PRIMARY KEY ([Id])\nGO\n",
+            "schema.sql",
+            id="tsql",
+        ),
+    ],
+)
+def test_qualified_reference_reaches_the_only_table_declared_without_schema(text: str, filename: str) -> None:
+    # No same-named table in another schema competes, so `app.orders` / `sales.Orders` is it.
+    (table,) = parse_ddl(text, filename)["tables"]
+    assert len(table["indexes"]) == 1
+    assert [c["constraintType"] for c in table["constraints"]] == ["PRIMARY_KEY"]

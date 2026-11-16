@@ -22,6 +22,7 @@ from ...schemas import FileRecord
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from ..treesitter import node_text
+from ..handler_sites import handler_info, method_lines
 from ..vertx_common import (
     vertx_emit,
     HANDLER_CALLS,
@@ -35,9 +36,8 @@ from ..vertx_common import (
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
-    handler_info,
+    failure_handler_only,
     join_path,
-    method_lines,
     render_address,
     router_vars,
     service_builder_vars,
@@ -216,6 +216,20 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
             found = pargs.named_children[0] if pargs is not None and pargs.named_children else None
         node = parent
     return found
+
+
+def _chained(call: Node, source: bytes) -> list[str]:
+    """The names of the calls chained on ``call``: ``router.get("/x").handler(h)`` → ``[handler]``."""
+    names: list[str] = []
+    node = call
+    while (access := node.parent) is not None and access.type == "field_access" \
+            and access.child_by_field_name("object") == node \
+            and (parent := access.parent) is not None and parent.type == "method_invocation":
+        field = access.child_by_field_name("field")
+        if field is not None:
+            names.append(node_text(field, source))
+        node = parent
+    return names
 
 
 _NOT_MOUNTED = object()
@@ -409,6 +423,8 @@ def detect_vertx_groovy(
         if info is None:
             continue
         semantic, verb, endpoint, route_kind = info
+        if semantic == "route" and failure_handler_only(_chained(call, source)):
+            continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
         unknown_base = False
         recv = router_name(obj)
         base: str | None | object = _NOT_MOUNTED

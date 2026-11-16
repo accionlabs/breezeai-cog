@@ -16,6 +16,10 @@ Emits ``semanticType="route"`` statements with ``routeKind="page"`` — element 
 Angular ``loadComponent``). Routes are parented to the file (React routes are config/markup, not
 handler methods), mirroring the Angular detector.
 
+**Additive** (``react-routes``): a router file is not always owned by the React parser — one that
+also imports a ``@nestjs/…`` DTO in a monorepo is the NestJS parser's — so this runs for every
+TypeScript file that the React parser would claim (:data:`REACT_GUARDS`), whatever parser owns it.
+
 Wiring has no record (contract §4): a path-only parent (nested routes, no element), a layout (an
 element whose children include an index or empty-path child, which always fills its outlet), a
 pathless layout route, and v7 ``layout()`` / ``prefix()``. A layout whose element is a guard
@@ -30,6 +34,7 @@ import re
 from tree_sitter import Node
 
 from ...emit import file_id
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
 from ..typescript.imports import resolve_const_value
@@ -264,7 +269,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
             routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
             guards=list(inherited) or None,
-        ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
+        ), parent=file_id(path), text=entry_text(elem, source)))
         if children is not None and nested:
             _process_config(children, full, source, path, routes, inherited)
 
@@ -436,3 +441,26 @@ def detect_react_routes(root: Node, source: bytes, path: str, *,
     # v7 framework-mode config DSL (gated on the @react-router/dev import).
     _detect_v7(root, source, path, routes, const_values)
     return routes
+
+
+# Byte guards for a React file: a router import (routes) OR a bare ``react`` import — the
+# latter is what a plain component file (``Button.tsx``) has. ``'react'`` / ``"react"`` match
+# ``from 'react'`` exactly and do NOT match ``react-dom`` / ``react-router-dom`` (more chars
+# precede the closing quote). Shared with the React parser's ``claims``.
+REACT_GUARDS = (b"react-router", b"'react'", b'"react"')
+
+
+def _detect(dc: DetectContext) -> Detection | None:
+    if not any(g in dc.source for g in REACT_GUARDS):
+        return None  # a Vue / Angular `{ path, component }` array is not a React route
+    routes = detect_react_routes(
+        dc.root, dc.source, dc.path,
+        const_values=getattr(dc.ctx.resolution_index, "const_values", None),
+    )
+    return Detection(routes, label="react") if routes else None
+
+
+register_detector(Detector(
+    name="react-routes", gate=Gate("typescript", order=52, skip_fixtures=True),
+    detect=_detect, frameworks=("react",),
+))

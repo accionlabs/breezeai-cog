@@ -7,6 +7,13 @@ method call, a runtime variable) has no compile-time value, so it stays **unreso
 (honest-null) rather than being guessed. Client-agnostic: this matches syntax only, never any
 project's naming.
 
+One exception, read from syntax alone: Java ``T.class.getSimpleName()`` on a class literal
+folds to ``T``'s simple name (``Outer.Inner.class`` → ``Inner``). The compiler does not fold
+it, but its value is the class's name as written in the source, fixed by the declaration
+itself. A class reached any other way (``obj.getClass()``, Groovy's ``x.class``), an array
+class (``int[].class``) and the other name methods (``getName()``, ``getCanonicalName()``)
+stay unresolved.
+
 An initializer is captured as a flat **token list** — picklable, so a repo-wide
 ``build_index`` can carry it across worker processes. Each token is either a literal string or
 a reference to another constant by name. :func:`resolve_tokens` folds one list against a
@@ -25,6 +32,7 @@ from .treesitter import node_text
 #: One initializer fragment: ``("lit", text)`` (a string literal) or ``("ref", name)`` (a
 #: reference to another constant, by simple name or ``Class.field``).
 Token = tuple[str, str]
+
 
 def init_tokens(node: Node, source: bytes) -> list[Token] | None:
     """A constant-initializer / argument expression → fold tokens, or ``None`` if it is not a
@@ -54,7 +62,34 @@ def init_tokens(node: Node, source: bytes) -> list[Token] | None:
         return init_tokens(inner, source) if inner is not None else None
     if t in ("identifier", "field_access"):  # reference to another constant (NAME / Class.FIELD)
         return [("ref", node_text(node, source))]
+    if t == "method_invocation":
+        simple = _class_simple_name(node, source)
+        return [("lit", simple)] if simple is not None else None
     return None
+
+
+def _class_simple_name(call: Node, source: bytes) -> str | None:
+    """Java ``T.class.getSimpleName()`` → ``T``'s simple name, else ``None``.
+
+    Only a Java ``class_literal`` over a plain or dotted type name qualifies — never an array
+    type. Groovy is left out on purpose: there ``x.class`` on a *variable* means
+    ``x.getClass()``, and syntax alone cannot tell a type name from a variable."""
+    name = call.child_by_field_name("name")
+    receiver = call.child_by_field_name("object")
+    args = call.child_by_field_name("arguments")
+    if (
+        name is None
+        or receiver is None
+        or args is None
+        or args.named_child_count
+        or node_text(name, source) != "getSimpleName"
+        or receiver.type != "class_literal"
+    ):
+        return None
+    type_node = receiver.named_children[0] if receiver.named_children else None
+    if type_node is None or type_node.type not in ("type_identifier", "scoped_type_identifier"):
+        return None
+    return node_text(type_node, source).rsplit(".", 1)[-1]
 
 
 def resolve_tokens(tokens: list[Token], values: dict[str, str]) -> str | None:

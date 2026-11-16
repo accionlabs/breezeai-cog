@@ -162,7 +162,7 @@ It is still an entry point. Record it with:
 |---|---|
 | `handler` | **empty** — never an invented name (`anonymous`, `<lambda>`, `handler`) and never the route's variable or file name |
 | `handlerLine` | the line where the function starts (`12`) |
-| `handlerPath` | empty — an inline handler is always in the record's own file |
+| `handlerPath` | empty — an inline handler is in the record's own file, except on a property of an imported object (`Query: queries`, [GraphQL in TypeScript](../entry-point-roles/graphql-typescript.md)), where it is that object's file |
 
 A function is **named** when the source gives it a name: a declaration (`function getUser`), a
 method, or a function assigned to a variable or property (`const getUser = async () => …`). Only
@@ -343,7 +343,7 @@ there.
 | `AddQueryType<T>()` / `AddMutationType<T>()` / `AddSubscriptionType<T>()` | Wiring | Registers `T` as a root container, usually from another file |
 | Public method or property of a root container | Binding | One operation: `QUERY` / `MUTATION` / `SUBSCRIPTION`, field name as `endpoint` |
 | `descriptor.Field(...)` in `Configure` of a root `ObjectType<T>` / `ObjectTypeExtension` | Binding | One operation, declared fluently |
-| Fields of a data type (`[ExtendObjectType(typeof(Book))]`, `[Parent]` resolvers, `ObjectType<Book>` fields) | None | No address of their own; recorded as `routeKind: field_resolver`, not counted (§5) |
+| Fields of a data type (`[ExtendObjectType(typeof(Book))]`, `[Parent]` resolvers, `ObjectType<Book>` fields whose resolver reads its object: `ctx.Parent<Book>()`, or a `[Parent]` `ResolveWith` method) | None | No address of their own; recorded as `routeKind: field_resolver`, not counted (§5). Other `ObjectType<Book>` fields stay plain statements |
 | `[ReferenceResolver]` on a type (Apollo Federation) | Binding | Called by the gateway through the generated `_entities` field: `method: RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` |
 | `[NodeResolver]` on a type marked `[Node]` (Relay, `AddGlobalObjectIdentification`) | Binding | Called through the generated `node` field: `method: RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` |
 | `[Authorize]` / `.Authorize(...)` | Guard | |

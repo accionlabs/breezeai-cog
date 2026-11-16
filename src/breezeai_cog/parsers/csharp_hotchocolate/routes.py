@@ -22,7 +22,7 @@ from tree_sitter import Node
 
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function
-from ..dotnet_common import innermost_type, response_dto, simple_attr_name
+from ..dotnet_common import innermost_type, named_arg, response_dto, simple_attr_name
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import first_line, node_text
@@ -36,9 +36,11 @@ from .mappings import (
     IGNORE_ATTR,
     INFRA_PARAM_ATTRS,
     INFRA_PARAM_TYPES,
+    OBJECT_TYPE_ATTR,
     PARENT_ATTR,
     ROOT_ATTRS,
     SUBSCRIBE_ATTR,
+    SUBSCRIBE_WITH,
     ROOT_SCHEMA_NAMES,
     TOPIC_ATTR,
 )
@@ -49,6 +51,7 @@ from .descriptor import (
     field_authorizations,
     field_handler,
     field_declarations,
+    generic_arg,
     named_target,
     resolve_reads_parent,
     resolve_with_method,
@@ -137,8 +140,16 @@ def _guard_labels(authorizations: list[list[str]]) -> list[str]:
 
 def guards_of(cls: Class, fn: Function) -> list[str]:
     """``[Authorize]`` guards inherited from the class plus the method's own, deduped."""
-    return _guard_labels([dec.args for decorators in (cls.decorators, fn.decorators)
+    return _guard_labels([[_guard_arg(a) for a in dec.args]
+                          for decorators in (cls.decorators, fn.decorators)
                           for dec in decorators if simple_attr_name(dec.name) == AUTHORIZE_ATTR])
+
+
+def _guard_arg(arg: str) -> str:
+    """A string argument by its value, as the fluent ``.Authorize("P")`` gives it:
+    ``Policy = "P"`` → ``P``."""
+    key, value = named_arg(arg)
+    return value.strip('"') if key is not None and value.startswith('"') else arg
 
 
 
@@ -337,24 +348,62 @@ def _operation_records(
     return [route, topic_consumer_statement(fn, topic, root, anchor)]
 
 
+#: The generic attributes that name an extended type, with and without the ``Attribute`` suffix.
+_GENERIC_OBJECT_TYPE = (OBJECT_TYPE_ATTR, OBJECT_TYPE_ATTR + "Attribute")
+_GENERIC_EXTENDERS = (EXTEND_ATTR, EXTEND_ATTR + "Attribute", *_GENERIC_OBJECT_TYPE)
+
+
 def extend_target(cls: Class) -> str | None:
     """The type an ``[ExtendObjectType(...)]`` class extends, or None if it carries no such
     attribute.
 
     Handles the argument forms real code uses: ``typeof(Book)``, ``"Query"``,
     ``OperationTypeNames.Query``, and any of those written as a **named** argument
-    (``extendsType: typeof(IMarker)``), which the framework's own test suite does.
+    (``extendsType: typeof(IMarker)``), which the framework's own test suite does. The generic
+    forms name the type as a type argument: ``[ExtendObjectType<Book>]``, and the source
+    generator's ``[ObjectType<Book>]`` (:func:`is_object_type`).
     """
     for dec in cls.decorators:
+        target = generic_arg(dec.name, _GENERIC_EXTENDERS)
+        if target is not None:
+            return target
         if simple_attr_name(dec.name) != EXTEND_ATTR or not dec.args:
             continue
-        arg = dec.args[0].strip()
+        key, arg = named_arg(dec.args[0])
+        if key not in (None, "Name"):
+            continue
         if ":" in arg and not arg.startswith(('"', "typeof(")):
             arg = arg.split(":", 1)[1].strip()  # named argument → keep the value
         if arg.startswith("typeof(") and arg.endswith(")"):
             arg = arg[len("typeof("): -1]
         return arg.strip().strip('"').rsplit(".", 1)[-1] or None
     return None
+
+
+def is_object_type(cls: Class) -> bool:
+    """Whether ``cls`` is a source-generated ``[ObjectType<T>]`` class: its methods extend ``T``
+    and its ``Configure`` (a partial method) describes ``T`` fluently, so both are read."""
+    return any(generic_arg(dec.name, _GENERIC_OBJECT_TYPE) is not None for dec in cls.decorators)
+
+
+def stream_methods(methods: list[Function]) -> set[str]:
+    """Methods named by ``[Subscribe(With = nameof(M))]`` / ``[Subscribe(With = "M")]``: each
+    supplies a subscription's event stream and is not a field itself."""
+    out: set[str] = set()
+    for fn in methods:
+        for dec in fn.decorators:
+            if simple_attr_name(dec.name) != SUBSCRIBE_ATTR:
+                continue
+            for arg in dec.args:
+                key, value = named_arg(arg)
+                if key != SUBSCRIBE_WITH:
+                    continue
+                if value.startswith("nameof(") and value.endswith(")"):
+                    out.add(value[len("nameof("): -1].strip().rsplit(".", 1)[-1])
+                elif len(value) > 1 and value.startswith('"') and value.endswith('"'):
+                    out.add(value[1:-1].strip())
+    out.discard("")
+    return out
 
 
 def _root_kind_of_name(
@@ -403,7 +452,7 @@ def _extension_routes(
     heritage: dict[str, object], path: str, root: Node,
     anchors: dict[tuple[str, int], Anchor],
     generated_loaders: dict[str, str | None] | None = None,
-    hc_root_types: dict[str, str] | None = None,
+    hc_root_types: dict[str, str] | None = None, attr: str = EXTEND_ATTR,
 ) -> list[Emit]:
     """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
     resolved root, field resolvers when it is a data type whose parent binding is visible, and
@@ -412,7 +461,7 @@ def _extension_routes(
     if kind is not None:
         return [s for fn in methods
                 for s in _operation_records(
-                    cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", root, anchors,
+                    cls, fn, kind, f"[{attr}] {fn.name}", root, anchors,
                     generated_loaders)]
     resolvers = [fn for fn in methods if resolves_parent(fn, target)]
     if not resolvers:
@@ -422,7 +471,7 @@ def _extension_routes(
         )
         return []
     return [field_resolver_statement(
-                cls, fn, target, f"[{EXTEND_ATTR}({target})] {fn.name}", root, generated_loaders)
+                cls, fn, target, f"[{attr}({target})] {fn.name}", root, generated_loaders)
             for fn in resolvers]
 
 
@@ -618,6 +667,8 @@ def detect_hotchocolate_routes(
     routes: list[Emit] = []
     for cls in record.classes:
         own = methods.get(cls.id, [])
+        streams = stream_methods(own)
+        own = [fn for fn in own if fn.name not in streams]
         kind = root_kind(cls)
         if kind is None and hc_root_types is not None:
             kind = hc_root_types.get(cls.name)
@@ -651,6 +702,12 @@ def _class_routes(
                 for s in _operation_records(
                     cls, fn, kind, f"[{attr}] {fn.name}", root, anchors, generated_loaders)]
     target = extend_target(cls)
+    if target is not None and is_object_type(cls):
+        extension = _extension_routes(
+            cls, target, own, record, heritage, record.path, root, anchors,
+            generated_loaders, hc_root_types=hc_root_types, attr=OBJECT_TYPE_ATTR) if own else []
+        return extension + _descriptor_routes(
+            cls, record, nodes, source, heritage, root, hc_root_types, generated_loaders, index)
     if target is not None:
         if not own:
             return []

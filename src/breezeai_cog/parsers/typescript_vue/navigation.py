@@ -19,7 +19,7 @@ from tree_sitter import Node
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.navigation import absolute, first_arg, literal, navigation, walk
+from ..navigation_common import absolute, first_arg, literal, navigation, walk
 
 _METHODS = frozenset({"push", "replace"})
 _VUE_ROUTER = "vue-router"

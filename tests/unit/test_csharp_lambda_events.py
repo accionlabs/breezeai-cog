@@ -138,7 +138,7 @@ public class OrdersController : ControllerBase {
 
 
 def test_no_registry_parser_for_lambda() -> None:
-    # Lambda detection is additive (csharp/lambda_events.py) — NOT a claiming parser, so it
+    # Lambda detection is additive (csharp_aws/lambda_events.py) — NOT a claiming parser, so it
     # must not be registered (no selection surface).
     from breezeai_cog.core import registry
     registry.discover_builtin()

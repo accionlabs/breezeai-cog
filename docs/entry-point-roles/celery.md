@@ -1,6 +1,6 @@
 # Celery — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/python/celery.py` (additive detector), `python/celery_tasks.py` (task names, a registered fact) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_celery.py`
+Parser: `src/breezeai_cog/parsers/python_celery/tasks.py` (additive detector), `python_celery/task_names.py` (task names, a registered fact) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_celery.py`
 
 A task is addressed by its name. `name=` gives it; otherwise Celery's default `<module>.<function>` is used **only when the code confirms it**: the name is written as a literal somewhere (a beat entry, `send_task("…")`, `signature("…")`), or the module is in Celery's task-module configuration (`autodiscover_tasks(["proj"])` → `proj.tasks`, `Celery(include=[…])`, `include` / `imports`). Otherwise the name is empty — it depends on how the worker imports the file, which the code does not show.
 

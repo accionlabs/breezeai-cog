@@ -14,8 +14,9 @@ from tree_sitter import Node
 from ...schemas import Decorator, FileRecord, Function
 from ..emits import Emit
 from ..java.functions import method_nodes, payload_type
-from ..java.guards import security_guards
-from ..java.web_guards import ModuleGuards, spring_global_guards
+from ..java_security_guards import security_guards
+from .security import Rule, route_rule
+from ..java_web_guards import ModuleGuards, spring_global_guards
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -97,6 +98,22 @@ def apply_global_guards(routes: list[Emit], module_guards: ModuleGuards) -> None
         outer = spring_global_guards(module_guards, r.fields.get("endpoint"))
         if outer:
             r.fields["guards"] = outer + (r.fields.get("guards") or [])
+
+
+def apply_security_rules(routes: list[Emit], rules: list[Rule]) -> None:
+    """Prepend the Spring Security URL rule that certainly applies to each HTTP route (the first
+    matching ``antMatchers`` / ``requestMatchers`` … rule; none for ``permitAll``). It runs in the
+    security filter chain, before other filters and interceptors. A rule that certainly rejects
+    anonymous callers sets ``authRequired``."""
+    for r in routes:
+        if r.fields.get("semanticType") != "route":
+            continue
+        rule = route_rule(rules, r.fields.get("method"), r.fields.get("endpoint"))
+        if rule is None or rule.guard is None:
+            continue
+        r.fields["guards"] = [rule.guard] + (r.fields.get("guards") or [])
+        if rule.requires_auth:
+            r.fields["authRequired"] = True
 
 
 def apply_context_path(routes: list[Emit], context_path: str | None) -> None:

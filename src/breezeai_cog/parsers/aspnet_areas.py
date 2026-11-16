@@ -40,13 +40,30 @@ _CLASSES = ("class_declaration", "struct_declaration", "record_declaration")
 _NAMESPACES = ("namespace_declaration", "file_scoped_namespace_declaration")
 
 
-def _string(node: Node | None, source: bytes) -> str | None:
-    """A plain C# string literal's value (no interpolation), else None."""
-    if node is None or node.type not in ("string_literal", "verbatim_string_literal"):
+def _string(node: Node | None, source: bytes, depth: int = 0) -> str | None:
+    """A C# string built only from literals — regular, verbatim or raw, joined with ``+`` — else
+    None (interpolation, any name)."""
+    if node is None or depth > 32:
+        return None
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _string(node.named_children[0], source, depth + 1)
+    if node.type == "binary_expression":
+        op = node.child_by_field_name("operator")
+        if op is None or node_text(op, source) != "+":
+            return None
+        left = _string(node.child_by_field_name("left"), source, depth + 1)
+        right = _string(node.child_by_field_name("right"), source, depth + 1) \
+            if left is not None else None
+        return left + right if left is not None and right is not None else None
+    if node.type == "verbatim_string_literal":
+        return node_text(node, source)[2:-1].replace('""', '"')
+    if node.type == "raw_string_literal":
+        text = node_text(node, source)
+        quotes = len(text) - len(text.lstrip('"'))
+        return text[quotes:-quotes]
+    if node.type != "string_literal":
         return None
     content = next((c for c in node.named_children if c.type == "string_literal_content"), None)
-    if node.type == "verbatim_string_literal":
-        return node_text(node, source)[2:-1]
     return node_text(content, source) if content is not None else ""
 
 
@@ -82,8 +99,8 @@ def _collect_constants(root: Node, source: bytes, rel: str,
                     if v.type != "variable_declarator":
                         continue
                     ident = next((x for x in v.named_children if x.type == "identifier"), None)
-                    value = _string(next((x for x in v.named_children if x.type.endswith(
-                        "string_literal")), None), source)
+                    value = _string(v.named_children[1], source) if len(v.named_children) > 1 \
+                        else None
                     if ident is not None and value is not None:
                         found.append((".".join((*chain, node_text(ident, source))), value))
             elif c.type in _NAMESPACES or c.type == "declaration_list" or c.type.startswith("preproc_"):
@@ -128,6 +145,68 @@ def string_value(node: Node | None, source: bytes, index: Any | None,
             return consts[key]  # None when that key is ambiguous
     hits = {v for k, v in consts.items() if k.endswith("." + ref)}
     return next(iter(hits)) if len(hits) == 1 else None
+
+
+#: Members whose locals and parameters can shadow a field of the class.
+_MEMBERS = ("method_declaration", "constructor_declaration", "local_function_statement",
+            "lambda_expression", "anonymous_method_expression", "accessor_declaration",
+            "operator_declaration", "conversion_operator_declaration")
+
+
+def constant_string(node: Node | None, source: bytes, index: Any | None) -> str | None:
+    """A string expression's value: a literal, or a ``const`` / ``static readonly`` string the
+    way C# binds the name at ``node``. A bare name is a field of the enclosing class or an outer
+    one — unless a local or parameter of the enclosing member is named the same, which is then
+    what it means; a qualified one (``Queues.Orders``) is looked up as :func:`string_value` does.
+    Unknown or ambiguous → None."""
+    if node is None:
+        return None
+    literal = _string(node, source)
+    if literal is not None:
+        return literal
+    classes: list[str] = []
+    member: Node | None = None
+    parent = node.parent
+    while parent is not None:
+        if member is None and parent.type in _MEMBERS:
+            member = parent
+        if parent.type in _CLASSES and (nm := _name(parent, source)):
+            classes.insert(0, nm)
+        parent = parent.parent
+    ns = namespace_of(node, source)
+    scope = [*([ns] if ns else []), *classes]
+    if node.type != "identifier":
+        return string_value(node, source, index, ".".join(scope)) if node.type in (
+            "member_access_expression", "qualified_name") else None
+    name = node_text(node, source)
+    if member is not None and any(_declared_name(d, source) == name for d in _descendants(member)):
+        return None  # a local or parameter
+    consts: dict[str, str | None] = index_fact(index, CONSTANTS) or {}
+    for i in range(len(classes), 0, -1):  # the class, then each outer one
+        key = ".".join([*([ns] if ns else []), *classes[:i], name])
+        if key in consts:
+            return consts[key]
+    return None
+
+
+def _declared_name(node: Node, source: bytes) -> str | None:
+    """The name a local (``variable_declarator``) or parameter declares, else None."""
+    if node.type == "parameter":
+        nm = node.child_by_field_name("name")
+        return node_text(nm, source) if nm is not None else None
+    if node.type == "variable_declarator" and node.named_children:
+        return node_text(node.named_children[0], source)
+    return None
+
+
+def _descendants(node: Node) -> list[Node]:
+    out: list[Node] = []
+    stack = list(node.named_children)
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack.extend(n.named_children)
+    return out
 
 
 # ---- aspnet.area-registrations -----------------------------------------------------------

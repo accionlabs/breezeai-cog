@@ -25,6 +25,7 @@ from typing import Any, Iterator
 
 from ..logging import get_logger
 from ..schemas import FileRecord
+from .nx import NxProjectIndex
 from .scanner import ScanEntry
 
 # Force spawn: cross-platform (matches macOS/Windows) and avoids the
@@ -133,10 +134,19 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         )
         return None
     _prune_template_edges(record, options.get("template_extensions") or frozenset())
+    _assign_nx_project(record, options.get("nx_projects"))
     summary = summarize_skipped_concats(path)  # one clean, human-readable line if any
     if summary:
         get_logger("breezeai_cog.worker").warning(summary)
     return record
+
+
+def _assign_nx_project(record: FileRecord, index: NxProjectIndex | None) -> None:
+    """``project`` / ``projectRoot`` of the Nx project the file is in (see ``core.nx``)."""
+    project = index.project_for(record.path) if index is not None else None
+    if project is not None:
+        record.project = project.name
+        record.projectRoot = project.root
 
 
 def _init_worker(log_queue: object, repo_root: str, options: dict) -> None:
@@ -220,16 +230,18 @@ def _stop_listener(state: tuple) -> None:
 
 def parse_entries(
     entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None,
-    owners: dict[str, str] | None = None,
+    owners: dict[str, str] | None = None, nx_projects: NxProjectIndex | None = None,
 ) -> Iterator[tuple[str, FileRecord]]:
     """Yield ``(language, FileRecord)`` — parallel across processes, sequential when
     ``jobs == 1`` or there's nothing to parallelize. ``indexes`` maps parser-name →
     repo-level ``build_index`` result (threaded into each ParseContext); ``owners`` maps each
-    shared file to the language the ownership step decided for it."""
+    shared file to the language the ownership step decided for it; ``nx_projects`` gives each
+    file its Nx project."""
     repo_root = str(Path(repo_root))
     options = _options(settings)
     options["indexes"] = indexes or {}
     options["owners"] = owners or {}
+    options["nx_projects"] = nx_projects
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
 
     if jobs <= 1 or len(entries) <= 1:

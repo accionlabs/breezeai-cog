@@ -67,6 +67,34 @@ def test_lazy_component_is_binding(analyze_files) -> None:
     assert not r.handler
 
 
+VITE_ALIAS = (
+    "import { fileURLToPath, URL } from 'node:url';\n"
+    "import { defineConfig } from 'vite';\n"
+    "export default defineConfig({\n"
+    "  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },\n"
+    "});\n"
+)
+HOME_VUE = "<template><p/></template>\n<script>\nexport default { name: 'RwvHome' };\n</script>\n"
+
+
+def test_lazy_component_through_a_vite_alias_is_binding(analyze_files) -> None:
+    # `@/views/Home` is a Vite `resolve.alias` entry: it leads to the component like the relative form.
+    st = _routes(
+        analyze_files, "  { path: '/', component: () => import('@/views/Home') },\n",
+        **{"vite.config.js": VITE_ALIAS, "src/views/Home.vue": HOME_VUE},
+    )
+    [r] = _at(st, "/")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("RwvHome", "src/views/Home.vue", 3)
+    # An alias that can't be read statically leaves the import external: no name, no file.
+    st = _routes(
+        analyze_files, "  { path: '/', component: () => import('@/views/Home') },\n",
+        **{"vite.config.js": VITE_ALIAS.replace("fileURLToPath(new URL('./src', import.meta.url))", "srcDir"),
+           "src/views/Home.vue": HOME_VUE},
+    )
+    [r] = _at(st, "/")
+    assert (r.handler, r.handlerPath, r.handlerLine) == (None, None, None)
+
+
 def test_named_views_default_component_is_handler(analyze_files) -> None:
     st = _routes(
         analyze_files, "  { path: '/home', components: { default: Home, sidebar: Side } },\n"
@@ -114,12 +142,24 @@ def test_children_only_parent_prefixes_children(analyze_files) -> None:
     assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
 
 
-def test_redirect_is_none(analyze_files) -> None:
+def test_redirect_is_not_an_entry_point(analyze_files) -> None:
     st = _routes(
         analyze_files,
         "  { path: '/', redirect: '/users' },\n  { path: '/users', component: UserList },\n",
     )
     assert [r.endpoint for r in _eps(st)] == ["/users"]
+
+
+def test_redirect_is_outbound_navigation(analyze_files) -> None:
+    # BREEZEAI-1369: a redirect is recorded as a link to its target, but is not an entry point.
+    st = _routes(
+        analyze_files,
+        "  { path: '/', redirect: '/users?x=1' },\n  { path: '/users', component: UserList },\n",
+    )
+    [nav] = [s for s in st if s.path == ROUTER and s.routeKind == "navigation"]
+    assert (nav.semanticType, nav.framework, nav.endpoint) == ("route", "vue", "/users")
+    assert (nav.handler, nav.handlerPath) == (None, None)
+    assert not is_entry_point(nav)
 
 
 def test_before_enter_is_guard(analyze_files) -> None:

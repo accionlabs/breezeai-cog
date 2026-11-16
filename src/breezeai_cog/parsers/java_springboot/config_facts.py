@@ -9,7 +9,7 @@
   ``@KafkaListener`` topic.
 
 A module is the directory above a Java file's ``src/main/java``; its configuration is read once
-per module from ``src/main/resources`` (see :mod:`..java.config`)::
+per module from ``src/main/resources`` (see :mod:`..java_spring_config`)::
 
     orders/src/main/java/com/x/OrderController.java    → module "orders"
     orders/src/main/resources/application.yml          → server.servlet.context-path: /orders
@@ -23,7 +23,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
-from ..java.config import module_of, spring_context_paths, spring_properties
+from ..java_spring_config import module_of, spring_context_paths, spring_properties
 
 CONTEXT_PATHS = "spring.context-paths"
 PROPERTIES = "spring.properties"

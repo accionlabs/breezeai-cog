@@ -7,7 +7,7 @@ from pathlib import Path
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..constfold import Token
+from .constants import importable_constants
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
 
@@ -17,11 +17,16 @@ FqcnIndex = dict[str, str | None]
 
 @dataclass(frozen=True)
 class KotlinIndex:
+    """Repo-level pre-pass result: ``package.Type`` → path (import resolution) and the string
+    constants other files can reference, by fully-qualified name (``com.acme.Paths.USERS`` →
+    ``/users``; see :func:`~.constants.importable_constants`). A name declared in two files
+    with different values is absent from ``consts``: which one is meant is unknown."""
+
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, list[Token]]] | None:
+def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, str]] | None:
     file_s, rel = args
     try:
         source = Path(file_s).read_bytes()
@@ -43,7 +48,7 @@ def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, li
                 if nm is not None:
                     name = node_text(nm, source)
                     fqcn_frag[f"{package}.{name}" if package else name] = rel
-        return fqcn_frag, {}
+        return fqcn_frag, importable_constants(root, source, package)
     except Exception:
         return None
 
@@ -51,13 +56,16 @@ def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, li
 def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> KotlinIndex:
     args = [(str(f), repo_relative(f, repo_root)) for f in files]
     fqcn: FqcnIndex = {}
+    consts: dict[str, str | None] = {}
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, _ = frag
+        fqcn_frag, const_frag = frag
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
-    return KotlinIndex(fqcn=fqcn)
+        for name, value in const_frag.items():
+            record_distinct(consts, name, value)
+    return KotlinIndex(fqcn=fqcn, consts={k: v for k, v in consts.items() if v is not None})
 
 
 def _package_of(root: Node, source: bytes) -> str:

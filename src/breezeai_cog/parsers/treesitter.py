@@ -28,10 +28,9 @@ def _load_dekobon_groovy() -> Language:
     """Load the Groovy grammar from ``dekobon_tree_sitter_groovy``.
 
     ``pyproject.toml`` pins this distribution to the Accionlabs fork
-    (github.com/accionlabs/tree-sitter-groovy), which adds nested-type,
-    modifier-enum, enum-members-without-``;``, and enhanced-for support that stock
-    dekobon lacks. The upstream PR is pending; the pin moves back to a released
-    dekobon version once it merges. See ``.todo/groovy-grammar-evaluation.md``.
+    (github.com/accionlabs/tree-sitter-groovy): upstream v0.5.0 plus fixes still under
+    upstream review. The pin moves back to a released dekobon version once they release.
+    See ``.todo/groovy-grammar-evaluation.md``.
     """
     import dekobon_tree_sitter_groovy
 
@@ -76,9 +75,24 @@ def node_text(node: Node, source: bytes) -> str:
     return source[node.start_byte:node.end_byte].decode("utf-8", "replace")
 
 
+def end_line(node: Node) -> int:
+    """1-based line of the node's last non-whitespace character.
+
+    Some grammars (VB, the C preprocessor, Go case clauses, Scala indented bodies) end a node
+    *after* its trailing newline(s), so ``end_point`` sits at column 0 of a later line that
+    holds none of the node's code; step back over those trailing line breaks.
+    """
+    row, col = node.end_point
+    if col != 0 or row == node.start_point[0]:
+        return row + 1
+    text = node.text or b""
+    trailing = text[len(text.rstrip()):].count(b"\n")
+    return max(node.start_point[0] + 1, row + 1 - trailing)
+
+
 def line_span(node: Node) -> tuple[int, int]:
     """1-based (start_line, end_line)."""
-    return node.start_point[0] + 1, node.end_point[0] + 1
+    return node.start_point[0] + 1, end_line(node)
 
 
 def first_line(text: str) -> str:

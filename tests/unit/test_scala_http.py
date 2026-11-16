@@ -86,7 +86,7 @@ class Calls(
 def test_resttemplate_and_java_net_http_resolve_without_guessing() -> None:
     record = _parse(REST_TEMPLATE_SRC)
     calls = [(s.method, s.endpoint) for s in record.statements if s.semanticType == "api_call"]
-    assert calls == [("GET", None), ("POST", "/orders"), ("REQUEST", None)]
+    assert calls == [("GET", None), ("POST", "/orders"), (None, None)]
 
 
 RT = "import org.springframework.web.client.RestTemplate"
@@ -100,7 +100,7 @@ RT = "import org.springframework.web.client.RestTemplate"
         # the verb argument is read when written as HttpMethod.X, else left unresolved
         ('rt.exchange("/a", HttpMethod.POST, e, classOf[String])', [("POST", "/a")]),
         ('rt.execute("/a", org.springframework.http.HttpMethod.DELETE, cb, ex)', [("DELETE", "/a")]),
-        ('rt.exchange("/a", verb, e, classOf[String])', [("REQUEST", "/a")]),
+        ('rt.exchange("/a", verb, e, classOf[String])', [(None, "/a")]),
     ],
 )
 def test_resttemplate_verbs(body: str, expected: list[tuple[str, str | None]]) -> None:
@@ -221,15 +221,15 @@ class Calls(client: Client[IO]) {{
 def test_a_java_net_http_client_is_resolved_through_its_import() -> None:
     assert _api_calls(
         "import java.net.http.{HttpClient, HttpRequest}", "c: HttpClient", "c.send(req, h)"
-    ) == [("REQUEST", None)]
+    ) == [(None, None)]
 
 
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
         # a Request argument carries its own verb — never assume GET
-        ("client.expect[String](req)", [("REQUEST", None)]),
-        ("client.run(postReq)", [("REQUEST", None)]),
+        ("client.expect[String](req)", [(None, None)]),
+        ("client.run(postReq)", [(None, None)]),
         # a Uri argument is a GET
         ('client.expect[String](uri"https://a.b/c")', [("GET", "https://a.b/c")]),
     ],
@@ -250,7 +250,7 @@ def test_http4s_verb_is_resolved_never_guessed(
         ("Http(u).postMulti(part).asString", [("POST", None)]),
         ('Http(u).put("data").asString', [("PUT", None)]),
         ('Http(u).method("PUT").asString', [("PUT", None)]),
-        ("Http(u).method(verb).asString", [("REQUEST", None)]),
+        ("Http(u).method(verb).asString", [(None, None)]),
         # the last verb builder applied wins
         ('Http(u).postData(b).method("PATCH").asString', [("PATCH", None)]),
         # the URL is Http's argument, never another builder's
@@ -284,7 +284,7 @@ def test_as_string_on_a_value_named_http_is_not_a_call() -> None:
             HTTP4S,
             "c: Client[IO]",
             "c.run(org.http4s.Request[F](org.http4s.Method.GET, uri))",
-            [("REQUEST", None)],
+            [(None, None)],
         ),
         # a paren-less verb call is still a call
         ("", "ws: WSClient", 'ws.url("/x").get', [("GET", "/x")]),

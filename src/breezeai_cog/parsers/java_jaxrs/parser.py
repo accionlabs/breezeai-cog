@@ -8,10 +8,10 @@ from __future__ import annotations
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..emits import apply
-from ..java.config import module_of
+from ..java_spring_config import module_of
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
-from ..java.web_guards import module_guards
+from ..java_web_guards import module_guards
 from ..treesitter import parse_source
 from .prefixes import declared_paths, jaxrs_prefixes
 from .routes import detect_jaxrs_routes

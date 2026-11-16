@@ -421,6 +421,11 @@ C++.
 > called from another file. In Java or C# the same field marks a class-level member; a C
 > function has no class, so on it the field can only mean file-local. **Cost:** a query on
 > `isStatic` across languages mixes the two meanings.
+>
+> A C++ (or CUDA) static member function has `isStatic: true` where `static` is written: on its
+> declaration or inline definition in the class. Its out-of-class definition (`Pool&
+> Pool::instance() { … }`) can't repeat the keyword, so there it stays empty: the class is
+> usually in another file.
 
 > **Decision —** `typedef struct [tag] { … } name;` (also `union`, `enum`) is a class named
 > `name`, with its fields or members; a tag that differs is the class's `alias`. A typedef
@@ -436,6 +441,17 @@ C++.
 > class's embedding text. The same applies to C-style typedefs in C++. An alias declared on
 > its own (`using A = B;`, `typedef B A;`) stays a statement, as in every other language.
 
+> **Decision —** a named struct, class, union or enum defined in the same declaration as a
+> variable (`static struct config { int level; } cfg;`) is a class like any other definition,
+> and the variable keeps its `declaration` statement; the index reads the class too. In a
+> class, a member declared with its nested type (`struct node { … } root;`, `union { … } u;`)
+> is a field statement beside the nested class. An anonymous type at file scope (`struct {
+> … } cfg;`) has no name to give a class, and stays the variable's statement only.
+> **Why:** C writes one-off globals this way (redis's `config`, `sentinelState`), and the class,
+> its fields and its methods were lost; the members declared with their type were the only
+> fields of a class that weren't captured. **Cost:** none known; naming an anonymous type after
+> its variable would be a guess.
+
 > **Decision —** a file-scope function prototype (`int list_len(const node_t *head);`) is a
 > plain `declaration` statement named after the function, not a `Function`.
 > **Why:** a C header's prototypes are its module's API, and nothing else captured them. A
@@ -444,6 +460,314 @@ C++.
 > reads as a function returning a function — is skipped rather than named wrongly. **Cost:**
 > statements aren't embedded, so a header isn't found by meaning from its prototypes; and
 > macro-prefixed prototypes the grammar misreads are not captured.
+
+> **Decision —** every macro definition is a statement (`preproc_def` / `preproc_function_def`)
+> named after the macro, wherever it is written: at file scope, inside a function body or
+> inside a class; never a `Function`, and a call to a macro stays unresolved.
+> **Why:** cog doesn't run the preprocessor, so a macro has no body cog can read as code; the
+> functions a macro wraps are captured where they are defined. Where a macro confuses the
+> grammar, nothing is named from the confusion: `unsigned long ZEXPORT f()` has the return type
+> `unsigned long` (a type name can't follow `unsigned` / `long` in C, so `ZEXPORT` is a macro);
+> a declaration or definition with an error on the way to its name is skipped (`int f
+> OF((int a, int b));` would be named `b`, `voidpf ZLIB_INTERNAL zcalloc(…)` would be a
+> function named `ZLIB_INTERNAL`); a declaration whose parameter list has a parameter with no
+> type is a macro call around the real one and is skipped (`local int gz_init OF((gz_statep));`
+> reads as a function named `OF`; a typedef written that way keeps its statement, without a
+> name); a keyword reserved in both C and C++ is never a declared name (`LOCALS` with no `;`
+> before `if (a) {…}` reads as a variable `if`), so such a statement keeps its text without a
+> name; and a row of macro calls the grammar reads as one function
+> named after the macro (`GEN(a) GEN(b)` followed by a function) is not emitted. An error in an
+> initializer, in a parameter list or after an initialized variable's name leaves the name
+> intact. **Cost:** calls into macros have no `CALLS` edge; a function whose name the grammar
+> lost is not captured.
+
+> **Decision —** a declaration or definition with a macro in front is read past the macro in
+> two shapes, and in no others: a macro in front of the type (`LUA_API int lua_gettop(…)`, read
+> as the type `LUA_API` with `int` in an error) when the error is bare words between the type
+> and a clean declarator; and a macro or type in front of the name (`LUALIB_API lua_Integer
+> luaL_len(…)`, read as a function named `lua_Integer`) when the error is the one word right
+> before the parameter list — in C, the word before a function's `(` is its name. The parser
+> and the index read both the same way, so calls to these functions resolve. A C++ class member
+> is read past a macro in front of its type by the same rule (`ESIMD_INLINE int row(int g)
+> const`, `API static Model *load(…)`); any other broken member is still skipped. A macro the
+> grammar folds into `unsigned` / `signed` / `long` / `short` (`LUALIB_API unsigned int f(…)`
+> reads as the type `LUALIB_API unsigned` with `int` in an error) is read past the same way,
+> when the error holds only type keywords.
+> **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
+> lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
+> them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`
+> is empty unless the words after the macro are C type keywords (`LUA_API int`, `LUA_API const
+> char *`): `LUA_API lua_Integer` and `uLong ZEXPORT` parse the same way, so which word is the
+> type can't be told.
+
+> **Decision —** a name parenthesized after a macro and a type keyword (`LUA_API int
+> (lua_gettop) (lua_State *L);`, Lua's guard against a macro of the same name) is recovered.
+> The grammar reads it as a function named `int` that returns a function, which C and C++ never
+> allow, so the tree is always a misreading. A type keyword can't be a name or a macro, so when
+> the misread name is one and the inner parentheses hold one bare word, the word in front is
+> the macro (a decorator), the keywords are the return type and the bare word is the name. The
+> same holds for a class member, and the parser and the index read both the same way. Any
+> other function-returning-function shape is skipped, at file scope and in a class alike. A
+> parenthesized name read cleanly (`int (f)(int a) {…}`, `LUALIB_API lua_State *(luaL_newstate)
+> (void) {…}`) is named without its parentheses, in the parser and the index alike.
+> **Why:** Lua writes its whole API this way (lua.h, lauxlib.h, lualib.h, and every project that
+> embeds it); the prototypes were lost and a definition was named `int (luaL_loadstring)`.
+> **Cost:** a type name in front (`LUALIB_API lua_Integer (luaL_len)`) stays skipped: it is
+> also how a type and a name-building macro look (`int MANGLE(f)(…)`), so the name would be a
+> guess.
+
+> **Decision —** an attribute between a declarator and its initializer or `;` (`static const
+> __fp16 lut[64] __attribute__((aligned(VLEN))) = {…};`, `float buf[8] __attribute__((aligned(16)));`)
+> is blanked in the shared second parse; on a file-scope variable it is the decorator (`aligned`
+> with `VLEN`). The grammar reads `__attribute__` in front of a declarator but not there: the
+> declaration breaks and its error runs on over what follows, often the whole file. A candidate
+> is `__attribute__((…))` (also on the next line), or before `=` an attribute macro in capitals,
+> right after a name or `]`, where the grammar failed on it; before `;` only `__attribute__` itself counts, since a
+> macro there can be a parameter list (`int f OF((int a));`). The blank is kept only where a
+> declaration then reads whole through that `=` or `;`.
+> **Why:** aligned buffers are written this way in SIMD and DSP code: llama.cpp's Hexagon
+> kernels lost about 70 functions to ten such declarations. **Cost:** such a file is parsed
+> twice (sharing the class-head parse).
+
+> **Decision —** a macro in front of a `struct` / `union` / `enum` return type (`UNITTEST struct
+> stsentry *hsts_check(…)`, `GGML_API struct ggml_tensor * ggml_add(…);`) is the decorator, and
+> the tagged type the `returnType` (`struct stsentry`). A tag type can't follow a type, so the
+> word in front is the macro. C splits such a line into a broken `UNITTEST struct` (its `;`
+> missing) and `stsentry *hsts_check(…)`; exactly that split is blanked in the shared second
+> parse and kept only where the declaration then reads whole with the tagged type, and the
+> macro is read back as the one word before the type that no node covers. C++ reads the macro as
+> the type with `struct stsentry` in an error, and is read past as for a keyword type. The
+> statement's `text` starts at the keyword.
+> **Why:** the `returnType` was `stsentry`, a name C doesn't define (only `struct stsentry`), and
+> the export macro on most of llama.cpp's and curl's struct-returning API was lost. **Cost:** in
+> C such a file is parsed twice (sharing the class-head parse).
+
+> **Decision —** macros in front of a return type are read past in two more shapes where the
+> macro is still certain. Several words before a keyword type are all macros (`static __device__
+> __forceinline__ unsigned int f`: both are decorators, `unsigned int` the `returnType`); a word
+> before a qualified or template type is a macro, since no macro can be named `sycl::half`
+> (`static __dpct_inline__ sycl::half f`). C++ also joins `MACRO type name(` into `type::name`
+> with a `::` it inserts (`GGML_API ggml_backend_t ggml_backend_cuda_init(int device)`): that is
+> a free function named `name` — the parser, the index and same-file resolution read it so — with
+> the type as `returnType` (and the word in front as the decorator) only when the type is
+> qualified or a template; before a plain type name, which word is the type can't be told.
+> **Why:** these were captured as methods of a class named after the return type, with the macro
+> as their `returnType` (`float2 warp_reduce_sum`, typed `method`, returning `__dpct_inline__`),
+> and calls to them didn't resolve; HIP and SYCL helpers with stacked qualifiers were lost.
+> **Cost:** none — the tree is already there.
+
+> **Decision —** a calling-convention or export macro between a keyword return type and the
+> name (`int ZEXPORT unzOpen(…)`, `void WINAPI f(…)`, also in a K&R definition or a class
+> member) is read past: the keyword type is the `returnType` and the macro the decorator. After
+> a type made of keywords only the declarator can follow, so a bare word the grammar leaves in
+> an error there, before a clean declarator, is a macro. A word between a `*` and the name
+> (`const char * ZEXPORT zlibVersion(void)`, already captured) is that function's decorator for
+> the same reason. With a type name in front (`uLong ZEXPORT adler32`) which word is the type
+> still can't be told, as before.
+> **Why:** the shape is how zlib, minizip and Windows-facing C export their API; those functions
+> and prototypes were lost while the less certain `uLong ZEXPORT f` was kept. **Cost:** none —
+> the tree is already there.
+
+> **Decision —** a qualifier macro between a parameter's `*` and its name (`float *
+> GGML_RESTRICT s`, `float ** FAR s`) is read past: the parameter is named `s`. The grammar
+> takes the macro for the name and leaves the real name in an error right after the parameter;
+> no `T * A B` is valid C or C++, so when that error holds one bare word before the next `,` or
+> `)`, the word is the name. The parameter list then counts as clean for reading past a macro in
+> front of the return type, and the parser, the variables a body can't call and the receiver
+> types all use the same name. The macro itself is not captured (a parameter has no decorators).
+> **Why:** restrict and pointer macros are standard in performance and portable C: llama.cpp
+> had 1,330 parameters named `GGML_RESTRICT` or `RESTRICT`, and every `GGML_API` prototype with
+> one was lost. **Cost:** none — the tree is already there. In C++ a definition whose
+> parameters are all `Name * MACRO p` (a type name, no `const`) reads as a variable initialised
+> with `Name * MACRO`; the next decision reads it.
+
+> **Decision —** a C++ definition that a qualifier macro made read as a variable (`void
+> unpack(tile_t * RESTRICT tile, const void * RESTRICT p) { … }`, read as `unpack` initialised
+> with `tile_t * RESTRICT`, its body a stray block) is read from the shared second parse with
+> the macros blanked. It happens when no parameter has an unambiguous type. A macro counts only
+> in exactly that shape — a declaration initialised with an argument list and followed at once
+> by `{ … }`, an `A * MACRO` argument followed by an error starting with the parameter's name —
+> and the blank is kept only where a function definition with a clean header then starts there.
+> **Why:** the whole function was lost. **Cost:** such a file is parsed twice (sharing the
+> class-head parse); one case in the six repos sampled.
+
+> **Decision —** a macro between `class` / `struct` / `union` and the class name (`class
+> OPENVINO_API GatherMatmul : public Op { … }`) is blanked and the file is parsed a second
+> time, so the class is read as if the macro weren't written. The word is blanked only where
+> the grammar misread the class because of it: the head has no body and sits in a function
+> definition or a broken declaration. The blank keeps the same length, so lines and byte offsets
+> don't move, and names and text are still read from the original source. A class that still
+> doesn't parse whole without the macro — another macro in its body breaks it — keeps the macro
+> and stays uncaptured: read again, its head would sit in an error and its methods would read
+> as free functions. The index parses the file the same way.
+> **Why:** export macros (`OPENVINO_API`, Qt's `Q_CORE_EXPORT`, Chromium's `BASE_EXPORT`)
+> sit there in most public headers of a C++ library. In C++ only an attribute can stand between
+> `class` and the name, and attributes parse, so a bare word there is always such a macro. The
+> grammar takes it for the class name and reads the class body as a function body
+> (constructors as calls, `public:` as a label), which nothing can be recovered from safely;
+> without the macro it is an ordinary class. **Cost:** such a file is parsed twice.
+
+> **Decision —** a macro wrapped around a whole declaration (`DEPRECATED(LLAMA_API int
+> llama_n_vocab(const struct llama_vocab * vocab), "use llama_vocab_n_tokens instead");`) is
+> blanked in the same second parse as a class-head macro: `DEPRECATED(` and `, "…")` become
+> spaces, and the declaration reads as written. A wrapper counts only outside a function body,
+> with a first argument that ends in a parameter list, string literals (and comments) as its
+> other arguments, and `;` right after it; the blank is kept only where it leaves one
+> declaration, outside any error, running through that `;`. The wrapper is the declaration's
+> decorator, with its strings as arguments (`DEPRECATED("use llama_vocab_n_tokens instead")`).
+> The statement's `text` is the declaration's span, from its first word through the `;`.
+> **Why:** the grammar can't read a declaration as a macro argument, and its error runs on over
+> the clean declarations after the wrapper: llama.cpp's `llama.h` and `ggml.h` lost about 500
+> of their 600 public prototypes. The notice is what an agent needs to know about a deprecated
+> function. **Cost:** such a file is parsed twice (sharing the class-head parse).
+
+> **Decision —** attribute macros after a declaration's parameter list (`void errorf(const
+> char *fmt, ...) CURL_PRINTF(1, 2);`, `int f(void) WARN_UNUSED_RESULT CURL_PRINTF(1, 2);`) are
+> blanked in the same second parse, and become the declaration's decorators with their
+> arguments. Such a macro expands to `__attribute__((…))`, which the grammar reads there, but as
+> a macro it breaks the prototype (or, in a class, becomes a field named after the macro). A
+> candidate is a run of macros — `NAME(…)` in capitals or `__`-prefixed (`__printflike(1, 2)`),
+> or a bare word in capitals — between the `)` of a real parameter list and `;`, outside a
+> function body, where the grammar failed on it or cut the declaration before it short; the
+> blank is kept only where the declaration then parses whole through that `;`. A lower-case word
+> there is a K&R parameter or a function's name (`int MACRO(1) g(int b);`), never an attribute.
+> The macros are read from the original source, between the declarator and the `;`.
+> **Why:** printf-format and unused-result macros are common on C library prototypes: curl lost
+> about 60 of its internal and public prototypes this way. **Cost:** such a file is parsed twice
+> (sharing the class-head parse).
+
+> **Decision —** a macro with arguments between a return type and the function's name
+> (`CURL_EXTERN void CURL_DEPRECATED(7.56.0, "Use curl_mime_free()") curl_formfree(…);`) is
+> blanked in the same second parse and becomes the function's decorator with its arguments —
+> how a library marks a function deprecated, and with which replacement. A candidate is a macro
+> in capitals with arguments, after a word and right before a name and `(`, outside a function
+> body, where the grammar failed on it; the blank is kept only where that name then names a
+> function outside any error. After a pointer return type's `*` the same holds, and
+> `__attribute__((…))` there counts too (`const char * JEMALLOC_FORMAT_ARG(3) emitter_gen_fmt(…)`,
+> `void * __attribute__((always_inline)) f(…)`): its attributes become the decorators.
+> **Why:** curl's deprecated form and socket APIs were lost. After a `*` it was worse than a
+> loss: the grammar read the macro as the function's name (`JEMALLOC_FORMAT_ARG`), a wrong value.
+> **Cost:** such a file is parsed twice (sharing the class-head parse).
+
+> **Decision —** a `#define` that a block comment ended early is read whole. The grammar ends a
+> macro definition at a `/* … */` right before a line's `\` (or turns it into an error), and the
+> rest of its body reads as file-scope code: locals captured as globals, and the function after
+> it lost. A definition counts when such a comment sits in its continued lines and the grammar's
+> node there doesn't run to its last line; its block comments are blanked in the shared second
+> parse, and the blank is kept only where the definition then runs to its last line without an
+> error. Its statement's `text` still holds the comments.
+> **Why:** commenting a macro's lines this way is common (redis, curl, lua, llama.cpp: nine
+> definitions in the six repos sampled, two redis functions lost, fourteen locals captured as
+> globals). **Cost:** such a file is parsed twice (sharing the class-head parse).
+
+> **Decision —** a macro with arguments after an enum member's name (`CURLSSLBACKEND_NSS
+> CURL_DEPRECATED(8.3.0, "") = 3,`) is blanked in the shared second parse and becomes the
+> member's decorator with its arguments. The grammar put the macro and the `= value` in errors,
+> so the member lost its value. A candidate is a macro in capitals right after an enumerator the
+> grammar followed with an error, closing before `=`, `,` or `}`; the blank is kept only where
+> the member then parses whole.
+> **Why:** this is how curl marks its deprecated options and backends, and the value is part of
+> the API. **Cost:** such a file is parsed twice (sharing the class-head parse).
+
+> **Decision —** a macro written as a whole member of a class or struct body
+> (`OPENVINO_MATCHER_PASS_RTTI("…")`, jemalloc's `LOCKEDINT_MTX_DECLARE(mtx)`) is blanked in the
+> same second parse. A line that is only `NAME(…)` has no `;` and no body, so it can't be a
+> member: it is a macro that expands to members (or to nothing). It counts only where the
+> grammar failed on it inside a class body (a field with an error, or an error holding the
+> class keyword before it), outside a function body, after the end of a member, the body's `{`
+> or an access label, and followed by the start of another member. A following `:`, `{`, `=`,
+> `,`, `)`, a qualifier (`const`, `noexcept`, `override`, …), `->` or an attribute makes it a
+> member written over two lines (`Foo(int a)` / `: a_(a) {}`), which is left alone. The blank
+> is kept only where the line then sits in a class body outside any error and the member after
+> it parses whole. The macro itself is not captured.
+> **Why:** the grammar runs the line into the next member: the class is lost (llama.cpp's
+> OpenVINO pass headers) or the macro and the next member become one field with a wrong name
+> and type. **Cost:** such a file is parsed twice (sharing the class-head parse); a class that
+> also has an export macro in its head is read only if the head alone is enough.
+
+> **Decision —** an `extern "C"` guard the file's parse collapsed around is resolved as the
+> compiler for the file's language would, in the same second parse. In `#ifdef __cplusplus` /
+> `extern "C" {` / `#endif` … `#ifdef __cplusplus` / `}` / `#endif` the grammar reads both
+> blocks, so `{` and `}` sit in separate conditionals; when more conditional code follows, its
+> recovery fails and the whole file reads as one error, with only its comments captured.
+> `__cplusplus` is defined exactly when a C++ compiler reads the file: for C++ and CUDA only the
+> directive lines are blanked, so `extern "C" { … }` stays a block and its functions keep their C
+> linkage; for C both guard blocks are blanked. Only a file with an error at file scope and one
+> guard pair is touched, and the blank is kept only where no file-scope error is left over it.
+> **Why:** curl's `curl.h` and llama.cpp's `mtmd.h`, `mtmd-helper.h` and `ggml-impl.h` captured
+> nothing, and a guard around two vendor prototypes in `aclnn_ops.cpp` hid the 20 functions
+> after it. **Cost:** other `__cplusplus`-only code is still read as both branches, as before.
+
+> **Decision —** a function whose braces a preprocessor conditional splits is read from a second
+> parse where the normal one gets its end wrong. When one `#ifdef` block opens a brace (`} else {`)
+> and a later one closes it, the compiler sees both or neither, but the grammar reads both and
+> can't match them: the body runs on into the functions after it (lost, their calls credited to
+> it) or stops short. A file where a function body with a parse error holds a conditional is
+> parsed again with each conditional resolved to its first branch — directive lines, later
+> branches and `#if 0` blocks blanked, lines and offsets kept. Where both parses agree on where a
+> function starts but not where it ends, the function is read from the second parse, and so is
+> everything in the span the first one covered wrongly (functions, classes, declarations);
+> everything else comes from the normal parse. The index and same-file call resolution read the file the same way.
+> **Why:** the second parse is the compiler's view under one consistent configuration, so its
+> braces match; it can't replace the normal parse, which captures both branches of a conditional
+> (the second drops every `#else`-only definition), so it only settles where a function ends.
+> **Cost:** the corrected function's calls in later branches are not captured, nor are
+> `#else`-only definitions inside the span it had swallowed (before, none of them were).
+
+> **Decision —** the same second parse also supplies what an error at file scope swallowed,
+> when that error holds a conditional. An `else if` written inside an `#ifndef` (curl's
+> `http.c`), or a split brace in a function, can turn everything after it — up to the end of a
+> file-wide `#ifndef` — into one error the parser can't read, so no function is left to repair.
+> The definitions and declarations the second parse finds inside that error's span are read from
+> it; anything else it finds there, and anything it misread too (a `}` it had to insert, a brace
+> lost in an error outside a function body), is not.
+> **Why:** a file-wide error loses every function after the break: curl's `http.c` lost 102
+> functions, llama.cpp's `ggml-hexagon.cpp` 190. The second parse reads that region as one build
+> configuration would. **Cost:** as for split braces — the recovered region is read under the
+> first branch of each conditional, and its `#else`-only definitions stay lost; a call in a
+> recovered function is the one that configuration makes.
+
+> **Decision —** a file whose whole parse is one error is read from the same second parse when
+> that parse reads it without one. A conditional can make the grammar give up on the entire file
+> (zlib's `inflate.c` splits an `if (` across `#ifdef GUNZIP` / `#else`); the functions after the
+> break are lost, and the statements and locals of the broken ones read as file-scope
+> declarations — 173 locals were captured as globals across nine such files. Each file- or
+> namespace-scope node the second parse finds that the normal parse doesn't have as such
+> (functions, classes, declarations, `#define`s, and only ones it read whole) is read from it, and
+> the normal parse's nodes inside it are skipped; the normal parse's nodes outside every such
+> node, an `#else`-only definition among them, stay. What the second parse supplies sits in its
+> classes, so the spilled-member rule below doesn't apply to it.
+> **Why:** the normal parse of such a file is wrong in places it can't tell, while the second
+> parse reads it whole under one build configuration. **Cost:** as for split braces — one more parse
+> for such a file (ten in the six repos sampled), and the first branch of each conditional.
+
+> **Decision —** when a C++ or CUDA file can't be parsed as a whole and members of a class
+> spilled out to file scope, only definitions that name their owner (`int Judge::decide()`)
+> are captured from the file's flat scope; unqualified functions and declarations are not. The
+> grammar then makes the file's root an `ERROR` holding every declaration flat, and the members
+> of a class whose head was lost in it read as free functions. A definition that can only be a
+> member proves the spill: a `field_identifier` name (the grammar's name for a member), an
+> unqualified destructor, `operator=` / `->` / `()` / `[]`, or a definition with no return type
+> (a constructor). Classes that parsed whole are kept, and the index and same-file call
+> resolution skip the same definitions.
+> **Why:** a member emitted as a free function of the file is a wrong owner and a wrong call
+> target, and in the flat scope a member can't be told from a real free function by its name.
+> **Cost:** real free functions in such a file are lost (in a large single-header library,
+> a few free operators beside hundreds of members). Files that parse, and broken files without
+> such proof — all broken C files among them — are read as before.
+
+> **Decision —** C/C++ attributes and the macros cog reads past are `decorators` on the
+> function, prototype, member or class, as annotations are in other languages: `[[nodiscard]]`,
+> `[[deprecated("use g")]]`, `__attribute__((format(printf, 2, 3)))` and `__declspec(dllexport)`
+> each give one decorator with its arguments, and an export or inline macro gives one with its
+> name (`LUA_API`, `ZEXPORT`, `OPENVINO_API`). A macro is recorded only where it is certainly
+> the macro: in front of a C type keyword (`LUA_API int f`), after `unsigned` / `long`
+> (`unsigned long ZEXPORT crc32`), or between `class` and the class name.
+> **Why:** the macro says how the code is built and exported (`GGML_API`, `CURL_EXTERN`), which
+> is lost otherwise; `decorators` already carries markers written in front of a declaration in
+> every other language and is stored by the backend. **Cost:** a macro beside a type name
+> (`uLong ZEXPORT f`, `CURL_EXTERN CURLcode f`) is not recorded, so the list is not complete; a
+> macro's meaning isn't seen (zlib's `local` is `static`, and `isStatic` stays empty).
 
 > **Decision —** a call links to a function defined in a header only when the calling file can
 > see that header: the file includes it, directly or through other includes, or — for a call
@@ -458,6 +782,19 @@ C++.
 > it. **Cost:** a real call is left unresolved when cog can't follow the include: a `<…>`
 > include of a repo header, or a name found through the build's include path that several
 > folders share. A function defined in a source file is still linked by name.
+
+> **Decision —** a C++ method defined inside its class (`int hits() const { … }`) is a call
+> target under `Class::method`, like one defined outside it, and a method's call links into a
+> header by the same visibility rule as a free function's. An `obj.m()` / `obj->m()` receiver
+> that is a local, a parameter or a member field is only typed, never read as a class of the
+> same name; a local declared `struct Foo foo` or `auto p = static_cast<Foo *>(…)` (any of the
+> four casts) is typed `Foo`, and one of no readable type (`auto p = make()`) is unknown.
+> **Why:** most C++ methods are written in their class, so calls to them never resolved and a
+> bare call inside a class fell through to an unrelated free function of the same name. Once
+> they are targets, a variable named like a class (`const arena & parser` beside a `class
+> parser`) would link to that class. **Cost:** an overload defined both in the class and outside
+> it (`get_lr()` and `get_lr(float)`) is ambiguous and left unresolved, as is a call on a local
+> of unknown type that used to borrow the type of a member field it shadows.
 
 > **Decision —** include guards and `extern "C" { … }` blocks are walked even when they contain
 > a parse error, and each declaration in them is checked on its own.

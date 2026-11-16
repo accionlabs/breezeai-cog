@@ -1,0 +1,7 @@
+@model OrderModel
+<script src="~/lib/jquery/jquery.min.js"></script>
+<h1>@Model.Title</h1>
+<script>
+    $.get("/api/orders", function (rows) { render(rows); });
+    $.ajax({ url: "/api/orders/save", type: "POST", data: payload });
+</script>

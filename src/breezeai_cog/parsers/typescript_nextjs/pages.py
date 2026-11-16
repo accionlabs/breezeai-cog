@@ -3,20 +3,26 @@
 * **App Router** — ``app/**/page.(tsx|jsx|ts|js)``: the page's URL is its directory path.
 * **Pages Router** — ``pages/**`` outside ``pages/api``: the URL is the file path from ``pages``
   (``index`` collapses to its directory). ``_app`` / ``_document`` / ``_error`` wrap every page
-  and ``404`` / ``500`` are error screens, not URLs the app defines — none is a page.
+  and ``404`` / ``500`` are error screens, not URLs the app defines — none is a page. With
+  ``pageExtensions`` in ``next.config`` (the ``next.page-extensions`` fact) only files ending in
+  one of them are pages, the extension dropped from the URL (``index.page.tsx`` → ``/``); set
+  but not a literal list → which files are pages is unknown, so the app's Pages Router gives
+  no page records. The App Router follows it too: a page is ``page.`` + one of them
+  (``page.page.tsx`` with ``['page.tsx']``).
 
 Each page is one ``route`` record with ``routeKind: page``; ``handler`` is the default-exported
 component (wrappers such as ``memo(Page)`` unwrapped), ``handlerLine`` its declaration in this
-file. Route groups ``(x)`` and slots ``@x`` are dropped from the URL; dynamic segments stay
-literal (``[id]``), as on the API-route records. ``layout`` / ``template`` / ``loading`` /
-``error`` files are wiring, not pages; a private folder ``_x`` and an intercepting route
-``(.)x`` are not addressable on their own, so they get no record.
+file. Route groups ``(x)`` are dropped from the URL; dynamic segments stay literal (``[id]``),
+as on the API-route records. ``layout`` / ``template`` / ``loading`` / ``error`` files are
+wiring, not pages; a private folder ``_x``, an intercepting route ``(.)x`` and a parallel-route
+slot ``@x`` are not addressable on their own, so they get no record — a slot's page is drawn
+inside its parent's layout, at the parent's URL, which the parent's own ``page`` records.
 
 **Additive** (like Express): a page file is usually owned by the React parser (it imports
 ``react``), so this runs for every TS file and records the page whatever parser owns it. Only
 files inside a Next.js app (the ``next.apps`` fact) count — Gatsby also routes
-``src/pages/*.tsx``. The app's ``basePath`` and ``middleware.ts`` guards apply, as for API
-routes."""
+``src/pages/*.tsx``. The app's ``basePath`` and ``middleware.ts`` / ``proxy.ts`` guards apply,
+as for API routes."""
 
 from __future__ import annotations
 
@@ -27,48 +33,54 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import first_line, node_text
-from .facts import next_apps, router_root
+from .facts import next_apps, page_extensions, page_stem, router_root
 from .routes import _middleware_guards, _served, _url_segments
 
 _PAGE_EXTS = (".tsx", ".jsx", ".ts", ".js")
 _SPECIAL_PAGES = {"_app", "_document", "_error", "404", "500"}
 
 
-def _app_router_endpoint(path: str) -> str | None:
+def _app_router_endpoint(path: str, extensions: tuple[str, ...] | None = ()) -> str | None:
     """``app/settings/profile/page.tsx`` → ``/settings/profile``; None when the file is not an
-    App Router page or sits in a private (``_x``) or intercepting (``(.)x``) folder."""
+    App Router page — ``page`` plus one of the app's ``extensions`` (``()``: none set, any; None:
+    unknown) — or sits in a private (``_x``), intercepting (``(.)x``) or parallel-route slot
+    (``@x``) folder."""
     segs = path.replace("\\", "/").split("/")
-    if segs[-1].rsplit(".", 1)[0] != "page" or "app" not in segs[:-1]:
+    stem = page_stem(segs[-1], extensions) if extensions is not None else None
+    if stem != "page" or "app" not in segs[:-1]:
         return None
     dirs = segs[segs.index("app") + 1 : -1]
-    if any(d.startswith("_") or d.startswith("(.") for d in dirs):
+    if any(d.startswith(("_", "(.", "@")) for d in dirs):
         return None
     return _url_segments(dirs)
 
 
-def _pages_router_endpoint(path: str) -> str | None:
+def _pages_router_endpoint(path: str, extensions: tuple[str, ...] | None) -> str | None:
     """``pages/orders/[id].tsx`` → ``/orders/[id]``; None for ``pages/api/**``, the special
-    files (``_app``, ``_document``, ``_error``, ``404``, ``500``) and non-pages."""
+    files (``_app``, ``_document``, ``_error``, ``404``, ``500``), a file without one of the
+    app's ``extensions`` (``()``: any) and when they are unknown (None)."""
     segs = path.replace("\\", "/").split("/")
     if "pages" not in segs[:-1]:
         return None
     rest = segs[segs.index("pages") + 1 :]
     if rest[:1] == ["api"] and len(rest) > 1:
         return None
-    stem = rest[-1].rsplit(".", 1)[0]
-    if stem in _SPECIAL_PAGES or stem.endswith((".d", ".test", ".spec", ".stories")):
+    stem = page_stem(rest[-1], extensions) if extensions is not None else None
+    if stem is None or stem in _SPECIAL_PAGES \
+            or stem.endswith((".d", ".test", ".spec", ".stories")):
         return None
     tail = [] if stem == "index" else [stem]
     return _url_segments(rest[:-1] + tail)
 
 
-def _page_endpoint(path: str) -> tuple[str, str] | None:
+def _page_endpoint(path: str, index: object | None) -> tuple[str, str] | None:
     """(router directory, URL) of a page file, or None."""
     if not path.endswith(_PAGE_EXTS):
         return None
-    if (url := _app_router_endpoint(path)) is not None:
+    exts = page_extensions(index, path)
+    if (url := _app_router_endpoint(path, exts)) is not None:
         return "app", url
-    if (url := _pages_router_endpoint(path)) is not None:
+    if (url := _pages_router_endpoint(path, exts)) is not None:
         return "pages", url
     return None
 
@@ -122,7 +134,7 @@ def _handler(
 
 def detect_nextjs_page(dc: DetectContext) -> Emit | None:
     """The page record for a Next.js page file, or None."""
-    found = _page_endpoint(dc.path)
+    found = _page_endpoint(dc.path, dc.ctx.resolution_index)
     if found is None:
         return None
     router_dir, local = found
@@ -153,7 +165,8 @@ def detect_nextjs_page(dc: DetectContext) -> Emit | None:
             "routeKind": "page",
             "isRegex": False,
         },
-        parent=parent, node_type="synthetic", line=line,
+        enrich="same",  # an existing statement on the default export becomes the page
+        parent=parent, line=line,
         text=first_line(node_text(stmt_node, dc.source))[:200],
     )
 

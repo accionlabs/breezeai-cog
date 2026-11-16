@@ -1,4 +1,5 @@
-"""PHP outbound HTTP calls are recorded only for a proven client (php/http_calls.py)."""
+"""PHP outbound HTTP calls are recorded only for a proven client (php_http_common.py and a detector per
+client library)."""
 
 from __future__ import annotations
 

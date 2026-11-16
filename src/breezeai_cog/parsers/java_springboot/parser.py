@@ -5,7 +5,7 @@ annotations. Covers Spring Boot v2 and v3 (identical web annotations). The modul
 ``server.servlet.context-path`` (the ``spring.context-paths`` fact) prefixes every HTTP route except
 WebFlux.fn routes, which take ``spring.webflux.base-path`` instead. Broker
 listeners and template sends (Kafka, RabbitMQ, JMS, SQS) are detected in ``messaging.py``,
-``@Scheduled`` jobs in ``scheduling.py``."""
+``@Scheduled`` jobs and ``TaskScheduler`` / ``ScheduledTaskRegistrar`` calls in ``scheduling.py``."""
 
 from __future__ import annotations
 
@@ -13,18 +13,21 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..constfold import resolve_all
 from ..emits import apply
-from ..java.config import module_of, resolve_placeholders
+from ..java_spring_config import module_of, resolve_placeholders
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
-from ..java.web_guards import module_guards
+from .security import security_rules
+from ..java_web_guards import module_guards
 from ..treesitter import parse_source
 from .config_facts import context_paths, module_properties
 from .functional_routes import detect_spring_functional_routes
 from .messaging import detect_spring_listeners, detect_spring_sends, has_messaging
-from .scheduling import detect_spring_scheduled, has_scheduled
+from .scheduling import (detect_spring_scheduled, detect_spring_scheduler_calls,
+                         has_scheduled, has_scheduler_calls)
 from .queries import detect_spring_queries
-from .routes import apply_context_path, apply_global_guards, detect_spring_routes
+from .routes import (apply_context_path, apply_global_guards, apply_security_rules,
+                     detect_spring_routes)
 
 
 #: A WebFlux.fn router (``org.springframework.web.reactive.function.server``), as opposed to
@@ -62,6 +65,10 @@ class SpringBootParser(JavaParser):
                 guards = module_guards(idx)
                 if module is not None and module in guards:
                     apply_global_guards(routes, guards[module])
+                # Spring Security URL rules run first, in the security filter chain.
+                rules = security_rules(idx).get(module) if module is not None else None
+                if rules:
+                    apply_security_rules(routes, rules)
                 # server.servlet.context-path of this file's module prefixes every HTTP route.
                 # A module without one, in a repo where another module sets one, may be served
                 # by that module's application: its address is unknown.
@@ -81,7 +88,9 @@ class SpringBootParser(JavaParser):
                 apply(record, routes + reactive, ctx.source, ctx.path)
                 record.framework = "spring"
             messaging, scheduled = has_messaging(ctx.source), has_scheduled(ctx.source)
-            if messaging or scheduled:  # @KafkaListener … consumers, template sends; @Scheduled
+            scheduler_calls = has_scheduler_calls(ctx.source)
+            # @KafkaListener … consumers, template sends; @Scheduled; TaskScheduler calls
+            if messaging or scheduled or scheduler_calls:
                 consts = resolve_all(collect_constants(root, ctx.source),
                                      base=idx.consts if isinstance(idx, JavaIndex) else {})
                 props = module_properties(idx).get(module, {}) if module is not None else {}
@@ -98,6 +107,10 @@ class SpringBootParser(JavaParser):
                         root, ctx.source, ctx.path, record, consts, props)
                     apply(record, timers, ctx.source, ctx.path)
                     found = found or bool(timers)
+                if scheduler_calls:
+                    calls = detect_spring_scheduler_calls(root, ctx.source, record, consts, props)
+                    apply(record, calls, ctx.source, ctx.path)
+                    found = found or bool(calls)
                 if found and record.framework is None:
                     record.framework = "spring"
             # @Query → query_statement

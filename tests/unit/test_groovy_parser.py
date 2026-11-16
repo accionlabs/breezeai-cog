@@ -394,3 +394,168 @@ def test_field_annotations_captured_on_statements(tmp_path) -> None:
     rec = _parse_src(tmp_path, src, capture=True)
     field = next(s for s in rec.statements if s.name == "userService")
     assert [(d.name, d.args) for d in field.decorators] == [("Autowired", [])]
+
+
+def test_synchronized_block_is_control_flow(tmp_path) -> None:
+    # A `synchronized (lock) { … }` block is control flow, as in Java: one statement for the
+    # header with no semanticType. Its body's statements are captured beside it under the
+    # method, as an `if` body's are.
+    src = (
+        b"class Queue {\n"
+        b"  void drain() {\n"
+        b"    synchronized (lock) {\n"
+        b"      pending.clear()\n"
+        b"    }\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    sync = [s for s in rec.statements if s.nodeType == "synchronized_statement"]
+    assert [(s.text, s.semanticType, s.startLine, s.endLine) for s in sync] == [
+        ("synchronized (lock) {", None, 3, 5)
+    ]
+    body = [s for s in rec.statements if s.text == "pending.clear()"]
+    assert [(s.parentId, s.startLine) for s in body] == [(sync[0].parentId, 4)]
+
+
+def test_string_named_method_is_named_without_quotes(tmp_path) -> None:
+    # Spock feature methods are named by a string; the method's name is the text inside the
+    # quotes, whichever quote style declares it.
+    src = (
+        b"class OrderSpec {\n"
+        b'  def "order is created"() { expect: true }\n'
+        b"  def 'order is cancelled'() { expect: true }\n"
+        b'  def plain(String f) { this."order is created"(); this."findBy$f"() }\n'
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src)
+    assert [f.name for f in rec.functions] == [
+        "order is created", "order is cancelled", "plain"
+    ]
+    # A call by the string name resolves to the method in this file; a call whose name is
+    # interpolated is only known at run time, so it is not recorded.
+    plain = next(f for f in rec.functions if f.name == "plain")
+    assert [(c.name, c.path) for c in plain.calls] == [("order is created", "T.groovy")]
+
+
+def test_named_argument_url_is_the_endpoint(tmp_path) -> None:
+    # Groovy collects named arguments into one map, so a `url:` / `uri:` / `path:` entry is the
+    # call's URL wherever it sits. A call with no such key still reads its first positional
+    # argument, and a call with neither has no endpoint.
+    src = (
+        b"class C {\n"
+        b"  def httpClient\n"
+        b'  void a() { httpClient.get(url: "https://x.dev/named", timeout: 30) }\n'
+        b'  void b(String id) { httpClient.post(timeout: 3, uri: "/orders/" + id) }\n'
+        b'  void c() { httpClient.get(timeout: 3, "/positional") }\n'
+        b"  void d() { httpClient.get(timeout: 3) }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    calls = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"]
+    assert calls == [
+        ("GET", "https://x.dev/named"),
+        ("POST", "/orders/{id}"),
+        ("GET", "/positional"),
+        ("GET", None),
+    ]
+
+
+def test_collection_methods_with_a_closure_are_not_data_access(tmp_path) -> None:
+    # `find { … }` / `findAll { … }` are Groovy collection methods: whatever the receiver is
+    # called, a call whose only argument is a closure filters a collection in memory. A name
+    # inside a closure along the chain (`it.repo`) is not the receiver either.
+    src = (
+        b"class S {\n"
+        b"  def userRepository\n"
+        b"  void a(def collection, Map model, List rows) {\n"
+        b"    def x = collection.find { it.id == 1 }\n"
+        b"    def y = model.findAll { k, v -> v }\n"
+        b"    def z = rows.collect { it.repo }.save()\n"
+        b"    def r = userRepository.findAll()\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    db = [(s.name, s.method, s.dataAccessHint) for s in rec.statements
+          if s.semanticType == "db_method_call"]
+    assert db == [("r", "findAll", "orm")]
+
+
+def test_safe_navigation_and_spread_calls_are_named_by_their_method(tmp_path) -> None:
+    # `a?.m()` and `list*.m()` call `m`; the operator is not part of the name. A spread call
+    # runs on each element, so the list's own type cannot resolve it.
+    src = (
+        b"class C {\n"
+        b"  void run(List items) {\n"
+        b"    helper?.save(1)\n"
+        b"    items*.helper()\n"
+        b"  }\n"
+        b"  void save(int x) { }\n"
+        b"  void helper() { }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src)
+    run = next(f for f in rec.functions if f.name == "run")
+    assert [c.name for c in run.calls] == ["save", "helper"]
+    assert next(c for c in run.calls if c.name == "helper").path is None
+
+
+def test_a_call_without_parentheses_is_a_call_and_a_statement(tmp_path) -> None:
+    # `println "done"` / `helper 3` are calls without parentheses (a `command_chain`). Each is a
+    # call of its function and a statement with that nodeType.
+    src = (
+        b"class C {\n"
+        b"  void run() {\n"
+        b'    println "done"\n'
+        b"    helper 3\n"
+        b"  }\n"
+        b"  void helper(int n) { }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    run = next(f for f in rec.functions if f.name == "run")
+    assert [(c.name, c.path) for c in run.calls] == [("println", None), ("helper", "T.groovy")]
+    chains = [(s.text, s.semanticType, s.parentId) for s in rec.statements
+              if s.nodeType == "command_chain"]
+    assert chains == [('println "done"', None, run.id), ("helper 3", None, run.id)]
+
+
+
+def test_a_call_without_parentheses_passing_a_block_is_not_a_statement(tmp_path) -> None:
+    # `node { … }` wraps a whole pipeline: it stays a call, but as a statement it would swallow
+    # the block and its comments, which keep their own records.
+    src = (
+        b"node {\n"
+        b"    // Make the output directory.\n"
+        b'    sh "mkdir -p output"\n'
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    assert [s.nodeType for s in rec.statements if s.nodeType == "command_chain"] == []
+    assert [s.text for s in rec.statements if s.semanticType == "comment"] == [
+        "// Make the output directory."
+    ]
+
+
+def test_a_typed_local_is_named_and_typed(tmp_path) -> None:
+    # A typed local holds its names directly on the declaration (no `variable_declarator`): the
+    # statement is named, and the variable's type is known for resolving calls made on it.
+    from breezeai_cog.parsers.groovy.functions import type_map
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = (
+        b"class C {\n"
+        b"  void run() {\n"
+        b"    Mailer m = new Mailer()\n"
+        b"    int a = 1, b = 2\n"
+        b"    def c = 3\n"
+        b"  }\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, capture=True)
+    decls = [s.name for s in rec.statements if s.nodeType == "local_variable_declaration"]
+    assert decls == ["m", "a", "c"]
+    types = type_map(parse_source("groovy", src).root_node, src)
+    assert {k: types[k] for k in ("m", "a", "b")} == {"m": "Mailer", "a": "int", "b": "int"}
+    assert "c" not in types

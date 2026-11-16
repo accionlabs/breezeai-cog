@@ -17,10 +17,12 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 from ..schemas import SCHEMA_VERSION, FileRecord
 
 
-#: A language's handler lookup: the handler name as written → ``(handler, (file, line))`` — the
-#: name to keep (a path-shaped name becomes the declared one, or None when unknown) and where it
-#: is declared (None: not found) — or None to leave the record as it is.
-HandlerLocator = Callable[[str], tuple[str | None, tuple[str, int] | None] | None]
+#: A language's handler lookup: the handler name as written, and the line of the record that
+#: names it (a lookup may use it to see a local name shadowing a top-level one) →
+#: ``(handler, (file, line))`` — the name to keep (a path-shaped name becomes the declared one, or
+#: None when unknown) and where it is declared (None: not found) — or None to leave the record as
+#: it is.
+HandlerLocator = Callable[[str, int | None], tuple[str | None, tuple[str, int] | None] | None]
 
 
 def _read_sibling_lines(obj: object, filename: str) -> list[str]:
@@ -168,16 +170,16 @@ class BaseParser:
         the lookup, :meth:`handler_locator`, which is asked for only when a record needs it."""
         if not ctx.capture_statements:
             return
-        from .handler_sites import handler_location, unlocated  # handler_sites imports this module
+        from .handler_sites import handler_location, pending as unlocated_records  # imports this module
 
-        pending = [s for s in record.statements if unlocated(s)]
+        pending = unlocated_records(record)
         if not pending:
             return
         locate = self.handler_locator(ctx)
         if locate is None:
             return
         for s in pending:
-            found = locate(s.handler or "")
+            found = locate(s.handler or "", s.startLine)
             if found is None:
                 continue
             s.handler, site = found

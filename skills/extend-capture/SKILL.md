@@ -110,7 +110,7 @@ causes the failures in §1.
 | You are adding… | Category | Mechanism | Owns the file? |
 |---|---|---|---|
 | A new programming language (its own grammar and extensions) | **Language parser** | The full `LanguageParser` for the language | Yes — the fallback owner for its extensions |
-| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers — **and** has a file-level signature no other framework shares (NestJS, Spring, Vert.x) | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
+| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers — **and** has a file-level signature no other framework shares (NestJS, Spring) | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
 | A library used *across* files that already belong to other frameworks — ORM, validation, serialization, messaging SDK, HTTP client — **or** a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Internal-framework detector** | An *additive* detector — **not** a registered parser | **No** — it composes on top of whatever parser owns the file |
 
 The distinction that trips people up: a **server framework owns the file** (a file "is a
@@ -120,6 +120,10 @@ one-per-file parser would displace the server framework and lose its routes.
 The test: **can this framework's entry points appear in a file another framework owns?** If
 so, it is additive even though it defines routes — an Express `app.get(...)` inside a NestJS
 `main.ts` is captured by the `express` detector while NestJS keeps the file.
+A framework that is *also* a library other frameworks' files call (Vert.x: a Spring
+`@Component` calls `vertx.setPeriodic`) takes both: a low-priority parser that only claims
+the files no other framework owns, and an additive detector that does all its detection
+(`parsers/java_vertx/parser.py` and `detector.py`).
 
 ### 3A. Language parser
 Implement the full language parser. The step-by-step (package layout, the parse/extract
@@ -158,8 +162,9 @@ a role, record one entry point per binding, and keep wiring (mounts, prefixes, r
 as plain statements. Lead each entry point to its handler with `parsers/handler_sites.py`: a
 detector that knows the class calls `locate_method` (or `locate_export` for a TS module) and
 writes the result with `handler_location`; one that knows only a name written in the file names
-the handler and lets the parser's `handler_locator` (TypeScript) find it — never guess a file
-(see
+the handler and lets the parser's `handler_locator` (TypeScript) find it; one whose handler
+names are not symbols (a registered key, an object's member) looks them up itself and sets
+`locates_handlers=True` on its `Detector` — never guess a file (see
 [leading an entry point to its handler](../../docs/architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler)).
 Write the role table (in
 [`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its
@@ -187,6 +192,13 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   (e.g. `parsers/typescript_express/routes.py`; the registry is `parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
   with `run_additive(<language>, …)`, which runs every registered detector for that language,
   so it fires for every file of the language and layers underneath whichever framework won.
+  **Where the module goes:** with what it detects. A framework that has its own parser package
+  → that package (`csharp_webforms/handlers.py`). A separate library or SDK → its own
+  detector-only package `parsers/<lang>_<library>/` whose `__init__.py` is a docstring and
+  an empty `PARSERS` list (`csharp_hangfire/jobs.py`, `go_kafka/events.py`) — never the base
+  `<lang>/` package, which every framework parser of the language inherits. Rules shared by
+  several languages go in a top-level module (`quartz_common.py`); `parsers/detection/` is only
+  for the shared text-level classifiers. Discovery finds the module wherever it is.
   Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
   may enrich the statement already there); the registry writes it (`parsers/emits.py` `apply`:
   enrich in place or append, ids, parents). `detect(dc)` gets a `DetectContext`: `dc.root`,
@@ -390,10 +402,12 @@ src/breezeai_cog/parsers/
 ├─ additive.py             # detector + fact registry (register_detector, register_fact, run_additive)
 ├─ emits.py                # Emit + apply: the one place detector output is written
 ├─ contract.py             # entry-point contract check (validate)
-├─ detection/              # shared cross-language classifiers (api/db/query) — reuse, don't fork
-├─ <lang>/                 # one base language parser package per language
-└─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file) and
-                           # detector-only packages (register detectors / facts)
+├─ detection/              # shared cross-language text-level classifiers (api/db/query) only
+├─ <lang>/                 # one base language parser package per language (the language only)
+├─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file), or
+│                          # detector-only packages for a framework without a parser
+└─ <lang>_<library>/       # detector-only packages for a separate library or SDK
+                           # (PARSERS = []; register detectors / facts), e.g. csharp_hangfire/
 ```
 
 ## 9. Reliability checklist

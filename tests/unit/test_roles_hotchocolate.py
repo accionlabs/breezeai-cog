@@ -354,3 +354,52 @@ def test_add_graphql_server_is_none(analyze_files) -> None:
     stmts = analyze_files({"Program.cs": PROGRAM})
     line = _line(PROGRAM, "AddGraphQLServer")
     assert [s for s in _eps(stmts) if s.startLine == line] == []
+
+
+# --- a REST + HotChocolate project ------------------------------------------------------------
+
+MIXED_PROGRAM = """using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddControllers();
+builder.Services.AddGraphQLServer().AddTypes();
+var app = builder.Build();
+app.MapControllers();
+app.MapGet("/health", () => "ok");
+app.MapGraphQL("/graphql");
+app.Run();
+"""
+
+MIXED_CONTROLLER = """using Microsoft.AspNetCore.Mvc;
+
+namespace Books;
+
+[ApiController]
+[Route("api/books")]
+public class BooksController : ControllerBase
+{
+    [HttpGet("{id}")]
+    public IActionResult Get(int id) => Ok();
+
+    [HttpPost]
+    public IActionResult Create(Book book) => Ok();
+}
+"""
+
+
+def test_rest_routes_survive_beside_hotchocolate(analyze_files) -> None:
+    stmts = analyze_files({
+        "Books.csproj": '<Project Sdk="Microsoft.NET.Sdk.Web"></Project>',
+        "Program.cs": MIXED_PROGRAM,
+        "Controllers/BooksController.cs": MIXED_CONTROLLER,
+        "BookQueries.cs": QUERIES,
+    })
+    assert sorted((s.path, s.method, s.endpoint, s.framework) for s in _eps(stmts)) == [
+        ("BookQueries.cs", "QUERY", "bookById", "graphql"),
+        ("BookQueries.cs", "QUERY", "secret", "graphql"),
+        ("Controllers/BooksController.cs", "GET", "/api/books/{id}", "aspnet"),
+        ("Controllers/BooksController.cs", "POST", "/api/books", "aspnet"),
+        ("Program.cs", "GET", "/health", "aspnet"),
+        ("Program.cs", "POST", "/graphql", "graphql"),
+    ]

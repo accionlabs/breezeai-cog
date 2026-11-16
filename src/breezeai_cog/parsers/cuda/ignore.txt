@@ -1,0 +1,10 @@
+# CUDA per-language ignore defaults (layer 2) — vendored/third-party sources that must never be
+# parsed as first-party code. Language-scoped, applied post-scan; the same folders as C and C++.
+thirdparty/
+third_party/
+vendor/
+vendored/
+external/
+extern/
+deps/
+.deps/

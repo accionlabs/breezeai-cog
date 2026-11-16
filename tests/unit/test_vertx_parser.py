@@ -198,6 +198,40 @@ def test_cross_file_constant_address_folds(tmp_path) -> None:
     assert "APP0957/x" in eps      # cross-file constant chain
 
 
+def test_class_simple_name_address_folds(tmp_path) -> None:
+    # `T.class.getSimpleName()` is the class's simple name as written: it folds in a constant
+    # (same file and across files), nested (`Outer.Inner` -> `Inner`) and inline. A class reached
+    # through a value (`obj.getClass()`), an array class and `getName()` stay empty.
+    (tmp_path / "Filter.java").write_text(
+        "package a;\npublic class Filter {\n"
+        "  public static final String ADDRESS = Filter.class.getSimpleName();\n"
+        "}\n"
+    )
+    v = tmp_path / "V.java"
+    v.write_text(
+        "package a;\nimport io.vertx.core.AbstractVerticle;\n"
+        "public class V extends AbstractVerticle {\n"
+        '  static final String OWN = V.class.getSimpleName() + "/x";\n'
+        "  static final String FQ = V.class.getName();\n"
+        "  void start() {\n"
+        "    vertx.eventBus().consumer(Filter.ADDRESS, h);\n"
+        "    vertx.eventBus().consumer(Filter.Inner.class.getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(OWN, h);\n"
+        "    vertx.eventBus().consumer(Direct.class.getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(FQ, h);\n"
+        "    vertx.eventBus().consumer(this.getClass().getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(int[].class.getSimpleName(), h);\n"
+        "  }\n}\n"
+    )
+    parser = VertxParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    ctx = ParseContext(path="V.java", abs_path=v, source=v.read_bytes(), repo_root=tmp_path,
+                       resolution_index=idx, capture_statements=True)
+    rec = parser.parse_file(ctx)
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert eps == ["Filter", "Inner", "V/x", "Direct", None, None, None]
+
+
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"
@@ -244,41 +278,30 @@ public class AppVerticle extends Verticle {
 '''
 
 
-def test_delegation_wrapper_promotes_call_sites(tmp_path) -> None:
-    # A private wrapper that forwards its first String param to registerHandler makes its
-    # call sites the real consumers; the wrapper's own registerHandler (address = parameter)
-    # is suppressed rather than emitted with endpoint="address" (honest-null).
-    p = tmp_path / "AppVerticle.java"
-    p.write_text(_WRAPPER_SRC.decode())
-    ctx = ParseContext(path="AppVerticle.java", abs_path=p, source=_WRAPPER_SRC,
-                       repo_root=tmp_path, capture_statements=True)
-    rec = VertxParser().parse_file(ctx)
-    consumers = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
-    # three real call-site addresses (`app` is a local var → rendered as placeholder)
-    assert consumers == {None, "view/APP"}  # {app} parts are runtime values → empty
-    # the wrapper's own forwarded call is NOT emitted as a junk consumer
-    assert "address" not in consumers
-    assert rec.framework == "vertx"
+def test_delegation_wrapper_promotes_call_sites(analyze_files) -> None:
+    # A private wrapper that forwards its address parameter to registerHandler is an address
+    # forwarder: each call site is a consumer with its own address folded, and the wrapper's own
+    # registerHandler keeps its record with no address (never the parameter name).
+    st = analyze_files({"src/com/acme/AppVerticle.java": _WRAPPER_SRC.decode()})
+    consumers = sorted((s.startLine, s.endpoint or "") for s in st
+                       if s.semanticType == "eventbus_consumer")
+    # `app` is a local variable: a call site built from it has no address.
+    assert consumers == [(11, ""), (12, ""), (13, "view/APP"), (17, "")]
 
 
-def test_send_wrapper_promotes_call_sites(tmp_path) -> None:
-    # The alias mechanism is not consumer-specific: a wrapper delegating to send() makes its
-    # call sites eventbus_send.
+def test_send_wrapper_promotes_call_sites(analyze_files) -> None:
+    # Not consumer-specific: a wrapper delegating to send() makes its call sites eventbus_send.
     src = (
-        b"package x;\nimport io.vertx.core.AbstractVerticle;\n"
-        b"public class V extends AbstractVerticle {\n"
-        b'  void start() { emit("orders.audit", payload); }\n'
-        b"  private void emit(String address, Object body) {\n"
-        b"    vertx.eventBus().send(address, body);\n"
-        b"  }\n}"
+        "package x;\nimport io.vertx.core.AbstractVerticle;\n"
+        "public class V extends AbstractVerticle {\n"
+        '  void start() { emit("orders.audit", payload); }\n'
+        "  private void emit(String address, Object body) {\n"
+        "    vertx.eventBus().send(address, body);\n"
+        "  }\n}"
     )
-    p = tmp_path / "V.java"
-    p.write_text(src.decode())
-    ctx = ParseContext(path="V.java", abs_path=p, source=src, repo_root=tmp_path,
-                       capture_statements=True)
-    rec = VertxParser().parse_file(ctx)
-    sends = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"}
-    assert sends == {"orders.audit"}  # only the call site; wrapper's own send suppressed
+    st = analyze_files({"src/x/V.java": src})
+    sends = sorted((s.startLine, s.endpoint or "") for s in st if s.semanticType == "eventbus_send")
+    assert sends == [(4, "orders.audit"), (6, "")]  # the call site; the wrapper's own send
 
 
 def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:

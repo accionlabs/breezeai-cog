@@ -16,7 +16,7 @@ from tree_sitter import Node
 from ...schemas import Decorator, FileRecord
 from ..emits import Emit
 from ..java.functions import method_nodes, payload_type
-from ..java.guards import security_guards
+from ..java_security_guards import security_guards
 
 # Standard @HttpMethod-meta-annotated markers (javax/jakarta.ws.rs).
 _HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"}

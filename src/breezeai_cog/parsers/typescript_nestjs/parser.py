@@ -8,23 +8,14 @@ per-file by ``claims``."""
 
 from __future__ import annotations
 
-import re
-
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
-from .outbound import detect_client_proxy_calls
+from .outbound import nest_framework
+from .patterns import claims_nest
 from .routes import detect_nest_routes
-
-# Framework-agnostic controller-route signature: a ``@Controller``/``@JsonController``
-# class decorator plus at least one HTTP-verb *method* decorator. Matches NestJS,
-# routing-controllers, Ts.ED, and hand-rolled/re-exported decorator modules (e.g. a repo's
-# local ``./core`` wrapper) — the old Node parser detected all of these as "nestjs-like".
-_CONTROLLER_SIG = re.compile(rb"@(?:Json)?Controller\b")
-_VERB_SIG = re.compile(rb"@(?:Get|Post|Put|Patch|Delete|Options|Head|All)\b")
-
 
 class NestJSParser(TypeScriptParser):
     name = "typescript-nestjs"
@@ -35,19 +26,11 @@ class NestJSParser(TypeScriptParser):
     frameworks = ["nestjs", "routing-controllers", "nestjs-like"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        if b"@nestjs/" in source or b"routing-controllers" in source:
-            return True
-        # Custom / re-exported decorator modules: detect the pattern itself (a @Controller
-        # class with HTTP-verb method decorators), not the import source.
-        return bool(_CONTROLLER_SIG.search(source) and _VERB_SIG.search(source))
+        return claims_nest(source)
 
     @staticmethod
     def _framework(source: bytes) -> str:
-        if b"@nestjs/" in source:
-            return "nestjs"
-        if b"routing-controllers" in source:
-            return "routing-controllers"
-        return "nestjs-like"  # custom / re-exported decorators (matches the legacy label)
+        return nest_framework(source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
@@ -61,13 +44,6 @@ class NestJSParser(TypeScriptParser):
             if routes:
                 apply(record, routes, ctx.source, ctx.path)
                 record.framework = framework
-            # Outbound microservice messages (ClientProxy.send / emit) — services carry them too.
-            # After the routes: a call on a route's line is then a record of its own.
-            sends = detect_client_proxy_calls(
-                root, ctx.source, framework=framework, index=ctx.resolution_index,
-            )
-            if sends:
-                apply(record, sends, ctx.source, ctx.path)
-                if record.framework is None:
-                    record.framework = framework
+            # Outbound microservice messages (ClientProxy.send / emit) are the additive
+            # ``nestjs-clients`` detector (outbound.py): they run in every owner's extract().
         return record

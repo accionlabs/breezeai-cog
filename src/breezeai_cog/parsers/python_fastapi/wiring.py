@@ -29,7 +29,8 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import parse_source
-from .file_facts import FileFacts, PrefixSpec, file_facts, module_constants
+from ..python_common import module_constants
+from .file_facts import FileFacts, PrefixSpec, file_facts
 
 FACT = "fastapi.wiring"
 

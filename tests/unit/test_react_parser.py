@@ -74,6 +74,9 @@ def test_config_routes_detected_with_lazy_page(tmp_path) -> None:
     assert routes["/reports"].routeKind == "page"  # lazy code-split: still a page (Q10)
     assert routes["/team"].routeKind == "page"
     assert rec.framework == "react"
+    # a route-config entry is a real object node, its own source as text (never synthetic)
+    assert {r.nodeType for r in routes.values()} == {"object"}
+    assert routes["/team"].text.startswith("{")
 
 
 INDEX_JSX_SRC = b'''import { Routes, Route } from 'react-router-dom';
@@ -455,3 +458,26 @@ def test_redirect_route_has_no_record(analyze_files) -> None:
         ),
     })
     assert sorted(s.endpoint for s in st if s.semanticType == "route") == ["/about", "/home"]
+
+
+def test_routes_are_found_whatever_parser_owns_the_file(analyze_files) -> None:
+    # Additive: a monorepo router file importing a @nestjs DTO is the NestJS parser's.
+    st = analyze_files({
+        "src/routes.tsx": (
+            "import { createBrowserRouter } from 'react-router-dom';\n"
+            "import type { Dto } from '@nestjs/swagger';\n"
+            "export const router = createBrowserRouter([{ path: '/x', element: <X /> }]);\n"
+        ),
+    })
+    got = [(s.endpoint, s.handler, s.framework, s.nodeType) for s in st if s.semanticType == "route"]
+    assert got == [("/x", "X", "react", "object")]
+
+
+def test_vue_style_route_array_without_react_is_not_a_react_route(analyze_files) -> None:
+    st = analyze_files({
+        "src/router.ts": (
+            "import { createRouter } from 'vue-router';\n"
+            "export default createRouter({ routes: [{ path: '/x', component: X }] });\n"
+        ),
+    })
+    assert all(s.framework != "react" for s in st if s.semanticType == "route")

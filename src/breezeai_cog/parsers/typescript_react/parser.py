@@ -1,24 +1,18 @@
 """ReactParser — a TypeScript framework parser. Selected over the base TypeScriptParser
-(single parser per file) when ``claims`` finds a ``react-router`` import; reuses
-``TypeScriptParser.extract`` on the shared tree, then adds React Router routes. It
-coexists with the other TS framework parsers (NestJS, Angular, LoopBack) because
-selection is per-file by ``claims``."""
+(single parser per file) when ``claims`` finds a ``react`` / ``react-router`` import; reuses
+``TypeScriptParser.extract`` on the shared tree, then marks components and hooks. React Router
+routes are the additive ``react-routes`` detector (``routes.py``), so a router file another
+parser owns keeps them."""
 
 from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
-from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
+from ..typescript_nextjs.routes import is_route_file
 from .components import mark_react_components, mark_react_hooks
-from .routes import detect_react_routes
-
-# Byte guards for a React file: a router import (routes) OR a bare ``react`` import — the
-# latter is what a plain component file (``Button.tsx``) has, and is needed so components
-# reach this parser at all. ``'react'`` / ``"react"`` match ``from 'react'`` exactly and do
-# NOT match ``react-dom`` / ``react-router-dom`` (more chars precede the closing quote).
-_REACT_GUARDS = (b"react-router", b"'react'", b'"react"')
+from .routes import REACT_GUARDS as _REACT_GUARDS
 
 
 class ReactParser(TypeScriptParser):
@@ -41,12 +35,9 @@ class ReactParser(TypeScriptParser):
         # framework axis: every file this parser claims IS a React file — stamp it
         # unconditionally so "list React files" is answerable, not only on route files. The
         # JS/TS distinction lives on the orthogonal `language` axis (.tsx -> typescript,
-        # .jsx -> javascript), set by the base extractor.
-        record.framework = "react"
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by statement capture; skip fixtures (R4)
-            routes = detect_react_routes(
-                root, ctx.source, ctx.path,
-                const_values=getattr(ctx.resolution_index, "const_values", None),
-            )
-            apply(record, routes, ctx.source, ctx.path)  # framework already stamped above
+        # .jsx -> javascript), set by the base extractor. A Next.js route handler file that
+        # imports React (an OG-image `route.tsx`) stays a Next.js file.
+        if not (record.framework == "nextjs" and is_route_file(ctx.path, ctx.source)):
+            record.framework = "react"
+        # Routes: the additive ``react-routes`` detector, already run inside extract().
         return record

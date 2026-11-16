@@ -5,9 +5,10 @@ Returns an inferred ``dataAccessHint`` (the DB/ORM) for a normalized call, else
 distinctive method names map directly; ambiguous ORM verbs (``findOne``/``save``…)
 are refined by receiver hints.
 
-Mostly language-agnostic, with one language-aware gate: an optional ``language`` tag
-suppresses Entity-Framework verbs in known non-.NET files (see ``_DOTNET``) so that,
-e.g., ``.include()`` in TypeScript is not mislabeled as EF. High-collision generic
+An optional ``language`` tag keeps a product out of files where it cannot exist:
+Entity-Framework verbs only in .NET files (``.include()`` in TypeScript is not EF), and
+the Node and Python ORMs only in their own language (``_RECEIVER_HINTS``,
+``_PRODUCT_LANGUAGES``) — a Java repository call is ``orm``, not TypeORM. High-collision generic
 verbs (``find``/``create``/…) require a positive DB receiver rather than defaulting to
 ``orm`` — this is what keeps ``Array.find`` / ``dict.update`` / ``Cookies.remove`` out.
 
@@ -20,6 +21,9 @@ classified as ``query_statement`` before this runs.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+
+from .api_calls import _ends_with_word, _receiver_text
 
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
@@ -46,6 +50,10 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
     "dynamodb": (
         "putitem", "deleteitem", "updateitem",
         "batchgetitem", "batchwriteitem", "transactgetitems", "transactwriteitems",
+        # AWS SDK for .NET names its operations with an ``Async`` suffix.
+        "putitemasync", "deleteitemasync", "updateitemasync",
+        "batchgetitemasync", "batchwriteitemasync", "transactgetitemsasync",
+        "transactwriteitemsasync",
     ),
     "elasticsearch": ("msearch",),
     "firebase": ("getdocs", "getdoc", "setdoc", "updatedoc", "deletedoc", "adddoc", "onsnapshot"),
@@ -58,8 +66,9 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
         "countasync", "longcountasync", "anyasync", "allasync",
         "minasync", "maxasync", "sumasync", "averageasync",
         "findasync", "addasync", "addrangeasync", "savechangesasync", "savechanges",
-        # EF-distinctive operators (no LINQ-to-Objects collision).
-        "include", "theninclude", "asnotracking", "astracking",
+        # EF-distinctive operators (no LINQ-to-Objects collision). `Include` / `ThenInclude`
+        # are not here: script bundles have them too (see `_EF_INCLUDE_VERBS`).
+        "asnotracking", "astracking",
         "fromsqlraw", "fromsqlinterpolated", "executesqlraw", "executesqlinterpolated",
     ),
     # NOTE: the synchronous LINQ terminals `tolist`/`toarray`/`firstordefault`/
@@ -85,6 +94,50 @@ _DISTINCTIVE: dict[str, str] = {}
 for _db, _methods in _DB_METHODS.items():
     for _m in _methods:
         _DISTINCTIVE.setdefault(_m, _db)
+
+# The ORM a file's own imports name: an import (``FileRecord.externalImports`` entry, matched
+# case-insensitively as the name itself or a dotted child) -> hint. It names the product only
+# where the call already proves data access and the language left it the generic ``orm``, and
+# only on a receiver that is itself a data-access handle (``_VENDOR_RECEIVERS``): the import
+# says the file uses Hibernate, not that every call in it does. The first entry that matches
+# wins, so Spring Data JPA (whose default provider is Hibernate) is ``jpa``. A service that
+# imports only its own repository interface names no product and stays ``orm``.
+#
+# On the JVM only the API a call goes through counts, not its package: Ebean and other ORMs use
+# the ``jakarta.persistence`` annotations and exceptions too, so an imported
+# ``PersistenceException`` or ``@Entity`` says nothing about the calls. A C# ``using`` always
+# names a namespace, so the .NET entries are namespaces.
+_VENDOR_BY_IMPORT: tuple[tuple[str, str], ...] = (
+    ("org.springframework.data.jpa", "jpa"),
+    ("org.hibernate.session", "hibernate"),
+    ("org.hibernate.sessionfactory", "hibernate"),
+    ("org.hibernate.statelesssession", "hibernate"),
+    ("jakarta.persistence.entitymanager", "jpa"),
+    ("jakarta.persistence.entitymanagerfactory", "jpa"),
+    ("javax.persistence.entitymanager", "jpa"),
+    ("javax.persistence.entitymanagerfactory", "jpa"),
+    ("nhibernate", "hibernate"),
+    ("microsoft.entityframeworkcore", "entity_framework"),
+    ("system.data.entity", "entity_framework"),
+)
+
+
+def vendor_from_imports(external_imports: "list[str] | None") -> str | None:
+    """The ORM named by a file's external imports (``_VENDOR_BY_IMPORT``), else ``None``."""
+    lows = [i.lower() for i in external_imports or ()]
+    for prefix, hint in _VENDOR_BY_IMPORT:
+        if any(i == prefix or i.startswith(prefix + ".") for i in lows):
+            return hint
+    return None
+
+
+# Collection-iteration methods that take a block (Groovy ``list.findAll { it.active }``). When
+# the block is the call's only argument, a call by one of these names iterates a collection in
+# memory, so it is not data access whatever the receiver is called (``collection.find { … }``,
+# ``model.findAll { … }``). A query that takes a closure (GORM ``Book.findAll { author == a }``)
+# is then left unrecorded rather than guessed. Only the iteration methods that share a name with
+# a database verb are listed.
+_CLOSURE_ITERATION_VERBS = frozenset({"find", "findall", "count"})
 
 # Ambiguous ORM verbs -> generic hint, refined by receiver below.
 _GENERIC = {
@@ -118,16 +171,81 @@ _ACTIVE_RECORD_METHODS = (
 )
 _RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
 
-# Receiver substring -> hint (refines _GENERIC).
+# Language families, used to keep a product's name out of files where that product cannot
+# exist. Every gate fires only on a language we know: an unknown language (``None``) stays
+# permissive.
+#
+# Languages whose files may legitimately use Entity Framework verbs. EF method names
+# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
+# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
+# the file is a non-.NET language we treat the EF match as a collision and fall through.
+_DOTNET = frozenset({"csharp", "vb"})
+
+# Django and SQLAlchemy are Python-only; suppress Django-queryset verbs in known non-Python
+# files so that TypeScript ``response.objects.filter()`` is not mislabelled as Django.
+_PYTHON = frozenset({"python"})
+
+# TypeORM, Sequelize, Prisma and Mongoose are Node libraries.
+_JSTS = frozenset({"typescript", "javascript"})
+
+# Receiver substring -> (hint, languages the product ships for) — refines _GENERIC.
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
 # ("session", "objects") require a dot-anchored match so they don't fire on *containing*
 # identifiers like ``sessionFactory`` / ``productObjects``; others are distinctive enough
 # (``prisma``, ``sequelize``, ``mongoose``, ``repository``) that substring is fine.
-_RECEIVER_HINTS = (
-    ("prisma", "prisma"), ("sequelize", "sequelize"), ("mongoose", "mongodb"),
-    ("repository", "typeorm"), ("repo", "typeorm"), ("entitymanager", "typeorm"),
-    ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
+#
+# The receiver shows data access, but ``…repository``, ``entityManager`` and ``session`` are
+# as idiomatic in Java, C# and Python as in Node, so it cannot name the product: a Java
+# ``orderRepository.findById`` is not TypeORM, a Hibernate ``session.save`` is not SQLAlchemy.
+# In a known language the product does not ship for, the hint is the generic ``orm``.
+_RECEIVER_HINTS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("prisma", "prisma", _JSTS), ("sequelize", "sequelize", _JSTS),
+    ("mongoose", "mongodb", _JSTS),
+    ("repository", "typeorm", _JSTS), ("repo", "typeorm", _JSTS),
+    ("entitymanager", "typeorm", _JSTS),
+    ("session", "sqlalchemy", _PYTHON), ("queryset", "django", _PYTHON),
+    ("objects", "django", _PYTHON),
 )
+
+# Product -> the languages it ships for, for the products the DISTINCTIVE verb table names.
+# Those verbs are ordinary words elsewhere: ``findFirst`` is ``java.util.stream`` and a .NET
+# ``ClaimsPrincipal`` method, ``findAll`` a Groovy collection method, a Spring Data repository
+# method and ``Array.FindAll``. In another language the verb is not evidence of the product,
+# nor of data access, so the receiver has to show it (see ``match_db``). Products absent here
+# are portable: Mongo/Redis/DynamoDB/ES/Neo4j driver verbs appear across languages, and the EF
+# verbs have their own ``_DOTNET`` gate. The Firebase verbs (``getDocs``, ``onSnapshot``) are the
+# JavaScript SDK's; a Java or Groovy ``getDocs()`` is a getter.
+_PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
+    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS, "firebase": _JSTS,
+    "django": _PYTHON, "sqlalchemy": _PYTHON,
+}
+# Needles read like the HTTP client names (:func:`.api_calls._ends_with_word`): a name in the
+# receiver chain must end with one of the needle's words, starting a word there, because the last
+# word of a name says what it is. ``userRepository``, ``this.userRepo``, ``order_repository``,
+# ``getRepository(User)`` and ``repositories.users`` are repositories; ``reportFile`` and
+# ``reportService`` only contain the letters, and ``repoUrl`` / ``repoDir`` are a URL and a folder.
+_WORD_HINTS: dict[str, tuple[str, ...]] = {
+    "repository": ("repository", "repositories"),
+    "repo": ("repo", "repos", "repository", "repositories"),
+}
+
+
+# Everything that cannot be part of a name separates two: a dot, a line break in a chain
+# (``this.getRepository()⏎ .createQueryBuilder()``) and type arguments, whose names count too
+# (``UoW.Repository<Booking>()``, ``Engine.Resolve<IContentItemRepository>()``).
+_NAME_SEPARATORS = re.compile(r"[^A-Za-z0-9_$]+")
+
+
+def _names_word(callee: str, words: tuple[str, ...]) -> bool:
+    """Whether a name in the call's receiver chain ends with one of ``words``, starting a word."""
+    if "." not in callee:
+        return False  # a bare call has no receiver
+    return any(
+        _ends_with_word(name, w)
+        for name in _NAME_SEPARATORS.split(_receiver_text(callee)) for w in words
+    )
+
+
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
 _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
@@ -140,7 +258,7 @@ _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
 # overrides this. (Write verbs like ``save``/``delete``/``create`` are opt-in via
 # ``_HIGH_COLLISION`` and never reach this fallback.)
 _NON_DB_RECEIVERS = (
-    "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
+    "cache", "cachemanager", "cacheservice", "logger", "emitter", "eventbus", "eventemitter", "state",
     "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
     # HTML Canvas / 2D rendering context — ctx.save()/restore() are draw-state calls, not DB.
     "ctx", "canvas", "context2d",
@@ -152,17 +270,6 @@ _DJANGO_VERBS = {"filter", "get", "all", "exclude", "annotate", "values"}
 # Neo4j runs Cypher via ``session.run(...)`` / ``tx.run(...)``. ``run`` is too generic to
 # list as a distinctive method, so require a driver/session/transaction-ish receiver.
 _NEO4J_RUN_RECEIVERS = ("session", "tx", "transaction", "driver", "neo4j")
-
-# Languages whose files may legitimately use Entity Framework verbs. EF method names
-# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
-# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
-# the file is a non-.NET language we treat the EF match as a collision and fall through;
-# an unknown language (``None``) stays permissive for backward compatibility.
-_DOTNET = frozenset({"csharp", "vb"})
-
-# Django is Python-only; suppress Django-queryset verbs in known non-Python files so that
-# TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
-_PYTHON = frozenset({"python"})
 
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
@@ -197,6 +304,18 @@ _DB_RECEIVER_SUFFIXES = (
     "datasource", "queryrunner", "database", "manager", "connection", "conn",
 )
 
+# Receiver terminal-segment suffixes that are a data-access handle of the ORM itself, so the
+# file's imported ORM (``vendor_from_imports``) can name the product of a call on one. Narrower
+# than ``_DB_RECEIVER_SUFFIXES``: a ``…collection``/``…model``/``…connection`` is data access
+# but not necessarily through the imported ORM.
+_VENDOR_RECEIVERS = ("repository", "repo", "dao", "entitymanager", "session")
+
+
+def _orm(receiver: str, vendor: str | None) -> str:
+    """``vendor`` on an ORM data-access handle, else the generic ``orm``."""
+    return vendor if vendor and receiver.endswith(_VENDOR_RECEIVERS) else "orm"
+
+
 # Synchronous LINQ terminal operators that are AMBIGUOUS: identical method names run over
 # both a DbSet/IQueryable (EF → a SQL round-trip) and an in-memory List/array/ZipArchive
 # (LINQ-to-Objects → no DB). Their async twins stay in _DISTINCTIVE (in-memory collections
@@ -206,6 +325,12 @@ _DB_RECEIVER_SUFFIXES = (
 _EF_LINQ_VERBS = frozenset({
     "tolist", "toarray", "firstordefault", "singleordefault", "lastordefault",
 })
+
+# EF's eager-loading operators. ASP.NET script and style bundles have the same name
+# (`ScriptBundle(...).Include("~/Scripts/jquery.js")`), so they count as EF only on proof: the
+# file imports EF (`Microsoft.EntityFrameworkCore` / `System.Data.Entity`, which declare them as
+# extension methods, so the call cannot compile without one) or the chain shows an EF source.
+_EF_INCLUDE_VERBS = frozenset({"include", "theninclude"})
 
 # Substrings in the FULL callee chain that positively mark an EF/queryable source, so a sync
 # LINQ terminal on it is a DB query, not LINQ-to-Objects. Scanned across the whole (lowercased)
@@ -270,13 +395,12 @@ _ES_VERBS = frozenset({"search", "bulk", "index", "scroll", "reindex", "count"})
 # not merely something ending in "client" — otherwise ``httpClient.count()`` reads as ES.
 _ES_COLLISION_VERBS = frozenset({"count", "index"})
 
-# Cache/Redis service verbs — too generic alone (Map.get, Set.set), so gated on a
-# cache-specific receiver, mirroring the ES verb/receiver pattern.
+# Redis service verbs — too generic alone (Map.get, Set.set), so gated on a receiver named
+# after Redis, mirroring the ES verb/receiver pattern. A cache's name (``cache``,
+# ``cacheManager``, ``HttpRuntime.Cache``) is not one: it says nothing about where the data
+# lives, and is most often in memory (a Map, an LRU, ASP.NET's cache).
 _CACHE_VERBS = frozenset({"get", "set", "del", "reset", "store"})
-_CACHE_RECEIVERS = frozenset({
-    "cache", "cachemanager", "cacheservice",
-    "redisservice", "redis", "redisclient",
-})
+_REDIS_RECEIVERS = frozenset({"redisservice", "redis", "redisclient"})
 # Terminal receiver segment that identifies an ES client (``this.client`` / ``esClient`` /
 # ``osClient``). Anything ending in ``client`` plus the explicit ES names — but NOT the DB
 # receivers above, so ``xxxCustomRepository.search`` / ``xService.search`` are excluded.
@@ -299,6 +423,20 @@ _PRISMA_VERBS = frozenset({
 })
 
 
+# Verbs that count on a receiver whose declared type names the product (``typed_receivers``:
+# name → product, collected by the language parser). These are too generic to trust by name
+# (``SaveAsync``, ``QueryAsync``, ``Load``) — the declared client type is the evidence.
+_DYNAMODB_TYPED = frozenset({
+    "getitem", "putitem", "updateitem", "deleteitem", "query", "scan",
+    "batchgetitem", "batchwriteitem", "transactgetitems", "transactwriteitems",
+    "executestatement", "batchexecutestatement", "executetransaction",
+    "save", "load", "delete", "fromquery", "fromscan", "executebatchget", "executebatchwrite",
+})
+_TYPED_VERBS: dict[str, frozenset[str]] = {
+    "dynamodb": _DYNAMODB_TYPED | frozenset(v + "async" for v in _DYNAMODB_TYPED),
+}
+
+
 def _is_prisma_chain(low: str) -> bool:
     """The receiver chain is a real Prisma-client access (`prisma.` root or a `.prisma.`
     segment, e.g. `this.prisma.user.findMany`)."""
@@ -306,22 +444,45 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
-    if language in {"php", "go"}:
+             typed_db_ids: "frozenset[str] | None" = None,
+             vendor: str | None = None,
+             typed_receivers: "Mapping[str, str] | None" = None,
+             closure_arg: bool = False) -> str | None:
+    """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
+    imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``.
+    ``typed_receivers`` maps a name declared as a datastore client type to its product.
+    ``closure_arg`` says the call's only argument is a closure (see
+    :data:`_CLOSURE_ITERATION_VERBS`)."""
+    if language in {"php", "go", "c", "cpp"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
-        # imports, types and model classes (php/data_access.py), Go from the receiver's declared
+        # imports, types and model classes (php_data_access_common.py), Go from the receiver's declared
         # type (go_database/access.py). A name match here would be a guess: it would tag a Go
-        # `repo.Update` as TypeORM or an in-memory `cache.Get` as Redis.
+        # `repo.Update` as TypeORM or an in-memory `cache.Get` as Redis. C and C++ have no ORM
+        # naming convention either (`session.run()`, `models.remove(name)`), and no detector
+        # for them yet, so their data access is left unrecorded.
         return None
     m = method.lower()
+    if closure_arg and m in _CLOSURE_ITERATION_VERBS:
+        return None
     low = callee.lower()
-    if m in _PRISMA_VERBS and _is_prisma_chain(low):
+    if typed_receivers and "." in callee:
+        product = typed_receivers.get(callee.rsplit(".", 1)[0].rsplit(".", 1)[-1])
+        if product is not None and m in _TYPED_VERBS.get(product, ()):
+            return product
+    if m in _PRISMA_VERBS and _is_prisma_chain(low) and (language is None or language in _JSTS):
         return "prisma"
+    # A distinctive verb whose product cannot exist in this language falls through to the
+    # receiver evidence below, as a high-collision verb: `logRepository.findAll()` is still data
+    # access (`orm`), while `names.stream().findFirst()` and `Array.FindAll(…)` drop out.
+    gated = False
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
+        langs = _PRODUCT_LANGUAGES.get(db)
+        if langs is not None and language is not None and language not in langs:
+            gated = True
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
-        if callee != method and not (
+        elif callee != method and not (
             db == "entity_framework" and language is not None and language not in _DOTNET
         ):
             return db
@@ -329,6 +490,11 @@ def match_db(callee: str, method: str, language: str | None = None,
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
+    if m in _EF_INCLUDE_VERBS and language in _DOTNET:
+        if "bundle" in low and not _has_ef_source(low):
+            return None  # ASP.NET bundling: ``new ScriptBundle("~/x").Include("~/Scripts/x.js")``
+        ef = vendor == "entity_framework" or _has_ef_source(low)
+        return "entity_framework" if ef else None
     if _is_active_record_call(callee, method, language, typed_db_ids):
         return "activerecord"
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
@@ -349,27 +515,39 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "elasticsearch"
         elif receiver.endswith("client") or receiver in _ES_RECEIVERS:
             return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
-    # Cache/Redis service calls — gated on the TERMINAL receiver only (like ES above), and on an
-    # explicit cache/redis receiver NAME. A bare ``endswith("cache")`` is deliberately NOT used:
-    # in-memory ``Map``/``LRUCache`` fields are routinely named ``…Cache`` (e.g. a DataLoader
-    # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
-    cache_receivers = _CACHE_RECEIVERS
-    if language == "scala":
-        cache_receivers = _CACHE_RECEIVERS - {"cache"}
-    if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
+    # Redis service calls — gated on the TERMINAL receiver only (like ES above), and on a name
+    # that says Redis (:data:`_REDIS_RECEIVERS`, a ``…redis`` suffix); never a cache's name.
+    if receiver and (receiver in _REDIS_RECEIVERS or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
-    if m in _GENERIC:
-        for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
+    if m in _GENERIC or gated:
+        for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
+                continue
+            if needle in _WORD_HINTS and not _names_word(callee, _WORD_HINTS[needle]):
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
             if needle in _ANCHORED_HINTS:
                 if not (f".{needle}." in low or low.startswith(f"{needle}.")):
                     continue
+            # In .NET a ``Session`` is ASP.NET session state or an NHibernate / RavenDB session.
+            # ``Remove`` is the one session-state method that reaches here, and the database
+            # sessions have none (they ``Delete``); any other call is data access, whose
+            # product is NHibernate only when the file imports it, never the file's EF.
+            if needle == "session" and language in _DOTNET:
+                if m == "remove" or "httpcontext.session" in low:
+                    return None
+                return "hibernate" if vendor == "hibernate" else "orm"
+            # ``objects`` is Django's model manager; in another language it is an ordinary
+            # name (``objects.findAll { … }`` filters a list), not evidence of data access.
+            if needle == "objects" and language is not None and language not in _PYTHON:
+                continue
+            # The receiver shows data access; the product named must ship for this language.
+            if language is not None and language not in langs:
+                return _orm(receiver, vendor)
             return hint
-        if m in _HIGH_COLLISION:
+        if m in _HIGH_COLLISION or gated:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
             # early before the suffix heuristic can misfire (e.g. ``ctx.save()``).
             if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
@@ -380,11 +558,11 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "orm" if receiver in typed_db_ids else None
             # Opt-in heuristic (Python, non-class TS, etc.): positive DB suffix wins.
             if receiver and any(receiver.endswith(s) for s in _DB_RECEIVER_SUFFIXES):
-                return "orm"
+                return _orm(receiver, vendor)
             return None
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
-        return "orm"
+        return _orm(receiver, vendor)
 
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low

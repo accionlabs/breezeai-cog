@@ -64,17 +64,28 @@ TRANSPARENT_SCOPES = frozenset({
     "linkage_specification", "declaration_list",
 })
 
-#: Macro definitions (``#define NAME value``, ``#define MIN(a, b) …``): at file scope each is a
-#: plain statement — constants and macro APIs (C's ``lua_pop``) live there, nowhere else.
+#: Macro definitions (``#define NAME value``, ``#define MIN(a, b) …``): each is a plain
+#: statement wherever it is written — constants and macro APIs (C's ``lua_pop``) live there,
+#: nowhere else.
 MACRO_TYPES = frozenset({"preproc_def", "preproc_function_def"})
 
 #: Extensions of files that are included rather than compiled on their own. A ``static``
 #: function in one of them is visible to every file that includes it; in any other file it is
 #: visible to that file only, so it never resolves a call from another file.
-HEADER_EXTENSIONS = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl"})
+HEADER_EXTENSIONS = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl", ".cuh"})
 
 #: Comment node types the shared comment pass captures (``semanticType="comment"``; each
 #: statement keeps its real tree-sitter ``nodeType``).
 COMMENT_TYPES = {"comment"}
 
 FRAMEWORKS: list[str] = []
+
+#: Keywords reserved in both C and C++: never a declared name. A macro the grammar can't place
+#: makes it read one as a name: `LOCALS` (no `;`) then `if (a) {…}` reads as a variable `if`.
+#: A word reserved in only one of them (`restrict`, `new`, `class`) is a valid name in the other.
+KEYWORDS = frozenset({
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+    "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+    "unsigned", "void", "volatile", "while",
+})

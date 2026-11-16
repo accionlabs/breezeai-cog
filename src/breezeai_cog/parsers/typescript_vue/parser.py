@@ -21,7 +21,7 @@ from dataclasses import replace
 
 from ...emit import file_id
 from ...schemas import FileRecord, Statement
-from ..base import ParseContext
+from ..base import HandlerLocator, ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_composables, mark_factory_ui_roles
@@ -51,6 +51,13 @@ class VueParser(TypeScriptParser):
         # A .vue SFC is always ours. A .ts/.js file is ours only when it imports vue /
         # vue-router (router configs, app bootstrap) — byte guard keeps it off unrelated TS.
         return path.lower().endswith(".vue") or any(g in source for g in _VUE_IMPORT_GUARDS)
+
+    def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
+        # Only script files: a .vue SFC's script is not the whole file (the TS extensions, not
+        # ``self.extensions``, which adds ``.vue``).
+        if not ctx.path.endswith(TypeScriptParser.extensions):
+            return None
+        return super().handler_locator(ctx)
 
     def _template_statements(
         self, ctx: ParseContext, fid: str, seen_ids: set[str]

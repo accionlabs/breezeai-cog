@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     )
     # Per-repo upload POST cap (seconds); the request fails/retries past this. Default 15 min —
     # large ontologies stream over a single request (services/upload.py). --upload-timeout.
-    upload_timeout: float = Field(default=900.0, gt=0)
+    upload_timeout: float = Field(default=900.0, ge=1.0)
     # Concurrent uploads in --batch mode. Default 1 (serial). --parallel-uploads.
     upload_parallelism: int = Field(default=1, ge=1)
     # Retries after a failed upload (total attempts = upload_max_retries + 1). Only transient

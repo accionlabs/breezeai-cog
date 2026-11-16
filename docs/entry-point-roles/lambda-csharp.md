@@ -1,6 +1,6 @@
 # AWS Lambda (C#) — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/csharp/lambda_events.py` (additive detector) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_lambda_csharp.py`
+Parser: `src/breezeai_cog/parsers/csharp_aws/lambda_events.py` (additive detector) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_lambda_csharp.py`
 
 | Construct | Role | Record | Why |
 |---|---|---|---|

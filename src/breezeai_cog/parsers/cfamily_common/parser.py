@@ -1,10 +1,11 @@
-"""CFamilyParser — the extraction C and C++ share: one translation unit into a FileRecord.
+"""CFamilyParser — the extraction C, C++ and CUDA share: one translation unit into a FileRecord.
 
 The tree-sitter C++ grammar is built on the C grammar, so the constructs both languages have
 (``function_definition``, ``struct_specifier``, ``declaration``, ``preproc_def``, …) are the same
 node types in both trees. One walker reads either; C files simply never contain the C++-only
-nodes. Each language parses with its own grammar (``grammar``) and keeps its own identity,
-index and evidence in its package (``parsers/c``, ``parsers/cpp``).
+nodes. The CUDA grammar is built on the C++ one in the same way. Each language parses with its
+own grammar (``grammar``) and keeps its own identity, index and evidence in its package
+(``parsers/c``, ``parsers/cpp``, ``parsers/cuda``).
 
 C and C++ are **best-effort** languages: real files routinely parse with ``has_error`` (macros
 such as ``Q_OBJECT``, unexpanded preprocessor tokens, template metaprogramming), so every
@@ -21,12 +22,14 @@ Structure captured:
 * ``namespace_definition`` is flattened — its members parent to the file (there is no
   namespace node type in the schema).
 
-The two languages share ``.h``: the ownership step decides each header's language. Each reads
-the other's index after its own (``related_languages``); what it may call there is
-:meth:`CFamilyParser.callable_in`.
+C and C++ share ``.h``: the ownership step decides each header's language. Each reads the
+other's index after its own (``related_languages``), and CUDA reads both; what a language may
+call there is :meth:`CFamilyParser.callable_in`.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 from tree_sitter import Node
 
@@ -34,7 +37,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..treesitter import node_text, parse_source
+from ..treesitter import node_text
 from .classes import (
     _CLASS_TYPES,
     TYPE_ALIAS_TYPES,
@@ -42,25 +45,40 @@ from .classes import (
     _unwrap_template,
     build_class,
     build_enum,
+    defined_type,
+    parse_cfamily,
     type_alias_statement,
     typedef_type,
 )
 from .functions import (
     build_function,
+    DeclarationRead,
+    decorators_of,
     defined_names,
     function_declarator_of,
+    function_name_node,
+    is_inserted_scope,
     has_declaration_error,
+    read_declaration,
     is_misread_declarator,
+    owner_is_explicit,
+    spilled_members,
 )
+from .branches import branch_fix, enclosing_scope
 from .imports import FamilyHeaders, extract_imports
 from .index import (
     CFamilyIndex, IncludeGraph, _join_ns, _ns_name, header_visibility, make_cfamily_resolver,
 )
 from ..comments_common import comment_statements_for
 from ..statements_common import member_statement
+from .statements import macro_statement
 from .mappings import (
     COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, MACRO_TYPES, STATEMENT_TYPES, TRANSPARENT_SCOPES,
 )
+
+
+#: File-scope nodes that ``read_declaration`` decides on.
+_DECLARATIONS = ("declaration", "function_definition")
 
 
 def _is_include_guard(node: Node, source: bytes) -> bool:
@@ -92,7 +110,7 @@ class CFamilyParser(BaseParser):
     build_index_accepts_timeout = True
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source(self.grammar, ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_cfamily(self.grammar, ctx.source, ctx.parse_timeout_micros)
         return self.extract(root, ctx)
 
     def callable_in(self, related: CFamilyIndex) -> dict[str, str | None]:
@@ -113,9 +131,16 @@ class CFamilyParser(BaseParser):
         related = [r for r in ctx.related_indexes.values() if isinstance(r, CFamilyIndex)]
         headers = FamilyHeaders(idx.headers if idx else {}, [r.headers for r in related])
         internal, external, _, _ = extract_imports(root, source, headers)
+        # Class members that spilled to file scope: unqualified definitions aren't emitted.
+        spilled = spilled_members(root, source, self.grammar != "c")
+        # Functions whose braces a conditional split: read from a second parse (`branches`).
+        fix = branch_fix(root, source, self.grammar, ctx.parse_timeout_micros)
         graph = IncludeGraph(headers, [i for i in (idx, *related) if i is not None])
         resolve = make_cfamily_resolver(
-            defined_names(root, source), path, idx, [self.callable_in(r) for r in related],
+            defined_names(
+                root, source, spilled, fix.extra if fix else (), fix is not None and fix.whole,
+            ), path, idx,
+            [self.callable_in(r) for r in related],
             header_visibility(path, internal, graph),
         )
 
@@ -124,43 +149,46 @@ class CFamilyParser(BaseParser):
         statements: list[Statement] = []
         class_map: dict[str, str] = {}  # simple class name → class id (out-of-class method attach)
 
-        def process(scope: Node, ns: str = "") -> None:
-            for child in scope.named_children:
+        def process(scope: Node, ns: str = "", second: Sequence[Node] = ()) -> None:
+            """Walk a scope's members — or, given ``second``, nodes from the second parse."""
+            for child in second or scope.named_children:
                 node = _unwrap_template(child)
+                from_second = bool(second) and fix is not None and fix.whole
+                if fix is not None and not second:
+                    if node.start_byte in fix.skip:
+                        continue  # inside a function the normal parse cut short
+                    from_second = fix.whole and node.start_byte in fix.replace
+                    node = fix.replace.get(node.start_byte, node)
+                read = DeclarationRead()
+                if node.type in _DECLARATIONS:
+                    if spilled and not owner_is_explicit(node) and not from_second:
+                        continue  # maybe a member of a class the grammar lost: absent beats wrong
+                    # A declaration or definition is read past a macro where that is safe
+                    # (`read_declaration`); one whose name can't be trusted is skipped.
+                    maybe_read = read_declaration(node, source)
+                    if maybe_read is None:
+                        continue
+                    read = maybe_read
+                    if (spec := defined_type(node)) is not None:
+                        # `struct point { int x, y; } origin;` defines the type as well as the
+                        # variable, whose statement follows below.
+                        _emit_type(spec)
                 if node.type in TRANSPARENT_SCOPES:
                     process(node, ns)  # include guard / preproc conditional / extern "C" — recurse
-                elif has_declaration_error(node):
+                elif node.type not in _DECLARATIONS and has_declaration_error(node):
                     continue  # corrupt header — skip rather than emit fabricated data
                 elif node.type == "namespace_definition":
                     body = node.child_by_field_name("body")
                     if body is not None:  # flatten members to the file, but track the ns path
                         process(body, _join_ns(ns, _ns_name(node, source)))
-                elif node.type in _CLASS_TYPES:
-                    cls_list, methods, cls_stmts = build_class(
-                        node, source, path,
-                        parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
-                    )
-                    classes.extend(cls_list)
-                    functions.extend(methods)
-                    statements.extend(cls_stmts)
-                    for c in cls_list:
-                        class_map.setdefault(c.name, c.id)
-                elif node.type == "enum_specifier":
-                    enum_cls, enum_stmts = build_enum(
-                        node, source, path, parent_id=fid, seen_ids=seen_ids,
-                        capture=capture, limit=limit,
-                    )
-                    if enum_cls is not None:
-                        classes.append(enum_cls)
-                        statements.extend(enum_stmts)
+                elif node.type in _CLASS_TYPES or node.type == "enum_specifier":
+                    _emit_type(node)
                 elif node.type == "function_definition":
-                    _emit_function(node, ns)
+                    _emit_function(node, ns, read)
                 elif node.type in MACRO_TYPES and capture and not _is_include_guard(node, source):
-                    name = node.child_by_field_name("name")
                     statements.append(
-                        member_statement(
+                        macro_statement(
                             node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
-                            name=node_text(name, source) if name is not None else None,
                         )
                     )
                 elif (typedef := typedef_type(node, source)) is not None:
@@ -168,26 +196,7 @@ class CFamilyParser(BaseParser):
                     # — C's usual way to declare a struct, enum or union. It is a class under
                     # the typedef's name, the one code writes; a different tag is its `alias`.
                     spec, type_name, tag = typedef
-                    alias = tag if tag is not None and tag != type_name else None
-                    if spec.type == "enum_specifier":
-                        enum_cls, enum_stmts = build_enum(
-                            spec, source, path, parent_id=fid, seen_ids=seen_ids,
-                            capture=capture, limit=limit, name=type_name, alias=alias,
-                        )
-                        if enum_cls is not None:
-                            classes.append(enum_cls)
-                            statements.extend(enum_stmts)
-                    else:
-                        cls_list, methods, cls_stmts = build_class(
-                            spec, source, path, parent_id=fid, seen_ids=seen_ids,
-                            capture=capture, limit=limit, resolve=resolve, name=type_name,
-                            alias=alias,
-                        )
-                        classes.extend(cls_list)
-                        functions.extend(methods)
-                        statements.extend(cls_stmts)
-                        for c in cls_list:
-                            class_map.setdefault(c.name, c.id)
+                    _emit_type(spec, type_name, tag if tag is not None and tag != type_name else None)
                 elif node.type in TYPE_ALIAS_TYPES and capture:
                     # `typedef X Y;` / `using Y = X;` at file or namespace scope. C++ carries
                     # much of its vocabulary in typedefs, and the aliased type stays on the
@@ -209,21 +218,50 @@ class CFamilyParser(BaseParser):
                     # `Function`: the definition is, wherever it is. Namespace members parent
                     # to the file, matching how `process` already flattens namespaces. A
                     # declarator the grammar misread (a macro taken for the type) is skipped.
+                    # So is one with an error on the way to its name: zlib's `int f OF((int a,
+                    # int b));` reads as a variable named after the last parameter. One read
+                    # past a macro (`read_declaration`) is kept only with a name to show; a
+                    # misread one only with the name `read_declaration` recovered.
                     declarator = node.child_by_field_name("declarator")
-                    if not is_misread_declarator(declarator):
+                    name = read.name or _declarator_name(declarator, source)
+                    if (read.name is not None or not is_misread_declarator(declarator)) and (
+                        name is not None or read.return_type_known
+                    ):
                         statements.append(
                             member_statement(
                                 node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
-                                name=_declarator_name(declarator, source),
+                                name=name, decorators=decorators_of(node, source, read),
                             )
                         )
 
-        def _emit_function(node: Node, ns: str) -> None:
+        def _emit_type(spec: Node, name: str | None = None, alias: str | None = None) -> None:
+            """A struct / class / union / enum definition → its class (and members). ``name``
+            names it instead of its tag (a typedef's name); ``alias`` is the tag when it differs."""
+            if spec.type == "enum_specifier":
+                enum_cls, enum_stmts = build_enum(
+                    spec, source, path, parent_id=fid, seen_ids=seen_ids,
+                    capture=capture, limit=limit, name=name, alias=alias,
+                )
+                if enum_cls is not None:
+                    classes.append(enum_cls)
+                    statements.extend(enum_stmts)
+                return
+            cls_list, methods, cls_stmts = build_class(
+                spec, source, path, parent_id=fid, seen_ids=seen_ids,
+                capture=capture, limit=limit, resolve=resolve, name=name, alias=alias,
+            )
+            classes.extend(cls_list)
+            functions.extend(methods)
+            statements.extend(cls_stmts)
+            for c in cls_list:
+                class_map.setdefault(c.name, c.id)
+
+        def _emit_function(node: Node, ns: str, read: DeclarationRead) -> None:
             fd = function_declarator_of(node.child_by_field_name("declarator"))
-            inner = fd.child_by_field_name("declarator") if fd is not None else None
+            inner = function_name_node(fd)
             if inner is None:
                 return  # not a recognizable function — do not fabricate
-            if inner.type == "qualified_identifier":
+            if inner.type == "qualified_identifier" and not is_inserted_scope(inner):
                 # `A::B::Cls::method` — the class is everything but the last component. The
                 # class's fully-qualified name is the enclosing namespace path plus that prefix,
                 # so a definition binds only to a class whose whole path matches.
@@ -234,12 +272,13 @@ class CFamilyParser(BaseParser):
                 fn, fn_stmts = build_function(
                     node, source, path,
                     parent_id=cid or fid, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, class_name=class_simple, kind="method",
+                    resolve=resolve, class_name=class_simple, kind="method", read=read,
                 )
             else:
                 fn, fn_stmts = build_function(
                     node, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    read=read,
                 )
             if not fn.name:
                 return  # nameless (unparseable declarator) — skip
@@ -261,6 +300,9 @@ class CFamilyParser(BaseParser):
             return idx.classdecl.get(class_fqn)  # exact node id, or None when ambiguous/unknown
 
         process(root)
+        for extra in fix.extra if fix is not None else ():
+            # What the normal parse swallowed into the function before it.
+            process(root, enclosing_scope(extra, source)[0], [extra])
 
         if capture:
             statements.extend(

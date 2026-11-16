@@ -1,6 +1,6 @@
 """LoopBack application base paths as a registered fact on the TypeScript index,
 ``loopback.base-paths``: the ``rest.basePath`` option or ``app.basePath(...)`` call of an
-application, by the directory of the file that sets it (:mod:`..typescript.base_paths`, shared
+application, by the directory of the file that sets it (:mod:`..base_paths_common`, shared
 with Next.js)."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
-from ..typescript.base_paths import BasePathRaw, collect_base_path, resolve_base_paths
+from ..base_paths_common import BasePathRaw, collect_base_path, resolve_base_paths
 
 BASE_PATHS = "loopback.base-paths"
 

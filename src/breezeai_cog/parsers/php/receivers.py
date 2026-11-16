@@ -1,6 +1,6 @@
 """What a PHP call chain is called on — from evidence in the file, never from a name.
 
-Evidence-based detectors (``data_access.py``, ``http_calls.py``) ask one question of every
+Evidence-based detectors (data access and HTTP calls, one per library) ask one question of every
 call chain: is its receiver a known kind of handle — a database connection, an Eloquent
 model, an HTTP client? :func:`outermost_calls` answers it from what the file proves:
 
