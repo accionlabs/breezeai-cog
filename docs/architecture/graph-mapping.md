@@ -171,6 +171,9 @@ What this means for cog:
 Further points:
 - **`semanticType` is stored as-is.** The backend does not check it against a list, so a new
   value works at once and can be filtered on.
+- **Entry points are Statements told by `semanticType`:** `route`, `eventbus_consumer`, `timer`
+  and `mcp_tool` (a tool an MCP server exposes; `method` `TOOL`, `endpoint` = the tool name, with
+  `description` and `params`). See the [entry-point contract](entry-points.md).
 - **Nested values become JSON strings** (`metadata`, `decorators`, `params`…). They can be read
   and are included in embeddings (for File, Class, Function), but cannot be filtered on field by
   field. Filters on nested names (`metadata.kind`) are rejected.
@@ -217,7 +220,7 @@ How agents reach the graph (Breeze MCP tools → backend):
 |---|---|---|
 | Semantic search (`Code_Graph_Search` → `POST /code-ontology/:projectUuid/semantic-search`) | File, Function, Class by meaning (vector search) | "Where is order checkout handled?" |
 | Context of a hit | The hit's direct children: a File's file-level statements and class/function stubs; a Class's statements and methods; a Function's statements | Seeing what's inside a result |
-| Label query (`Get_Code_Nodes_By_Label` → `GET /code-ontology/:uuid/:label`) | File, Function, Class, **Statement**, by field filters (`$eq`, `$in`, `$contains`, `$regex`, `$startsWith`…) | "All `route` statements", "every `api_call` to `/billing`" |
+| Label query (`Get_Code_Nodes_By_Label` → `GET /code-ontology/:uuid/:label`) | File, Function, Class, **Statement**, by field filters (`$eq`, `$in`, `$contains`, `$regex`, `$startsWith`…) | "All `route` statements", "every `mcp_tool`", "every `api_call` to `/billing`" |
 
 Where to put a captured value:
 

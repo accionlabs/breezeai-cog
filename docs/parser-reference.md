@@ -552,8 +552,10 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   characters by default) is split at emit time like any other statement into ordered parts
   with ids `…#part1ofN` … `…#partNofN`, every part `isPartial`; joined in order they give the
   whole text. Only part 1 keeps `semanticType`, `name` and `description`, so a filter on
-  `semanticType` lists each document once, and a listing of a file's statements shows one row
-  per part.
+  `semanticType` lists each document once.
+- **A long document is several statements.** Anything that lists a File's statements (a file
+  view, a "statements of this file" call, a `HAS_STATEMENT` traversal) shows one row per part,
+  and must read the parts in order to get the whole text.
 - **Kinds** (`classify.py`, first match wins; a kind that needs front matter is never given on
   a guess). `File.metadata.kind` is the kind; the statement's `semanticType` is the kind for
   the first four rows and `doc` for the rest:
