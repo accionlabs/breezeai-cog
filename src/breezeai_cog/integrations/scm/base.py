@@ -19,11 +19,15 @@ from typing import Any, Final
 #: Provider slugs. Also the keys of the factory registry, the suffix of the
 #: ``scm_token_<slug>`` settings, and the allowed values of ``scm_instances``.
 SUPPORTED_PROVIDERS: Final[frozenset[str]] = frozenset(
-    {"github", "bitbucket", "gitlab", "azure_devops"}
+    {"github", "bitbucket", "gitlab", "azure_devops", "bitbucket_server"}
 )
 
 #: Public-cloud host per provider. ``RepoRef.host`` holds one of these unless the URL
 #: named a self-hosted instance (or a legacy ``<owner>.visualstudio.com`` host).
+#:
+#: ``bitbucket_server`` has **no entry on purpose**: Bitbucket Data Center ships no public
+#: cloud, so every host is a customer instance. ``is_self_hosted`` is therefore always
+#: ``True`` for it, and callers must use ``RepoRef.host`` rather than indexing this map.
 DEFAULT_HOSTS: Final[dict[str, str]] = {
     "github": "github.com",
     "bitbucket": "bitbucket.org",
@@ -45,6 +49,21 @@ class RepoRef:
         host: The host the URL named (``github.com``, ``acme.visualstudio.com``,
             ``git.acme.internal`` …). Lets the clone URL and API base URL follow the
             instance the request came from instead of assuming the public cloud.
+        context_path: Leading path an instance is served under, with a leading and no
+            trailing slash (``/stash``), or ``""`` when it is served at the root. Only
+            Bitbucket Data Center sets it; its REST base, web URLs and ``/scm`` clone
+            path all sit under the same context path.
+        scheme: ``https`` or ``http``, as the URL gave it. A self-hosted instance behind
+            a terminating proxy is sometimes served over plain HTTP.
+        port: The URL's explicit port, or ``None`` for the scheme default. Bitbucket Data
+            Center's stock install listens on 7990 (and 8443 behind a proxy), so dropping
+            it sends every call to 443 and nothing connects.
+
+    Note:
+        For ``bitbucket_server`` the two name fields carry Data Center's vocabulary:
+        ``owner`` is the **project key** (``P3``, or ``~jdoe`` for a personal project)
+        and ``repo`` is the **repository slug**. They address
+        ``/projects/{owner}/repos/{repo}``, not Bitbucket Cloud's workspace pair.
     """
 
     provider: str
@@ -52,6 +71,20 @@ class RepoRef:
     repo: str
     project: str = ""
     host: str = ""
+    context_path: str = ""
+    scheme: str = "https"
+    port: int | None = None
+
+    @property
+    def origin(self) -> str:
+        """``<scheme>://<host>[:<port>]`` — the instance this reference came from.
+
+        Every URL built for a reference (REST base, clone URL, web URL) must start here
+        rather than hard-coding ``https://{host}``, or a non-default port and a plain-HTTP
+        instance are silently dropped and the request goes to the wrong place.
+        """
+        port = f":{self.port}" if self.port else ""
+        return f"{self.scheme}://{self.host}{port}"
 
     @property
     def is_self_hosted(self) -> bool:
@@ -203,7 +236,7 @@ PR_STATES: Final[dict[str, str]] = {
     "open": "open", "closed": "closed",
     # GitLab
     "opened": "open", "merged": "merged", "locked": "closed",
-    # Bitbucket
+    # Bitbucket Cloud and Data Center (Data Center uses the same three, no SUPERSEDED)
     "OPEN": "open", "MERGED": "merged", "DECLINED": "closed", "SUPERSEDED": "closed",
     # Azure DevOps
     "active": "open", "completed": "merged", "abandoned": "closed",
@@ -221,10 +254,14 @@ class AbstractSCMClient(ABC):
         supports_incremental: Whether ``tree`` / ``compare`` / ``file_content`` are
             implemented well enough for the incremental REST path. When ``False`` the
             orchestration always falls back to ``clone_url`` and a full clone.
+        requires_credential: Whether the provider is unusable anonymously. The factory
+            refuses to build such a client without a resolved token, so the caller gets
+            one 400 naming the missing credential instead of a provider 401 per call.
     """
 
     provider: str = ""
     supports_incremental: bool = False
+    requires_credential: bool = False
 
     @abstractmethod
     def tree(self, ref: RepoRef, commit: str) -> list[str]:
@@ -284,6 +321,15 @@ class AbstractSCMClient(ABC):
             SCMAPIError: when the provider refuses or cannot serve the file. Callers
                 treat a failure as "skip this file" and log it.
         """
+
+    def git_auth_config(self) -> list[str]:
+        """``git -c <key>=<value>`` arguments the clone needs beyond ``clone_url``.
+
+        Empty for every provider whose credential embeds in the URL. Bitbucket Data
+        Center overrides it: a bare HTTP access token has no username half, so it
+        authenticates through an ``Authorization`` header instead.
+        """
+        return []
 
     @abstractmethod
     def clone_url(self, ref: RepoRef) -> str:

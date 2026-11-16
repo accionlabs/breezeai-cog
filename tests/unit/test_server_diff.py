@@ -15,6 +15,7 @@ from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
 from breezeai_cog.server.git import INVALID_REPO_URL_MESSAGE, parse_repo_url
+from breezeai_cog.server.git import resolve_repo_ref as _REAL_RESOLVE
 
 BODY = {
     "repoUrl": "https://github.com/acme/widgets.git",
@@ -473,10 +474,46 @@ def test_unhandled_exception_is_logged_and_returns_json(
     def boom(*args, **kwargs):
         raise KeyError("unexpected")
 
-    monkeypatch.setattr(routes_mod, "parse_repo_url", boom)
+    monkeypatch.setattr(routes_mod, "resolve_repo_ref", boom)
     client = _make_failing_client(captured)
     r = client.post("/api/analyze-diff", json=BODY)
     assert r.status_code == 500
     assert r.json() == {"error": "Internal Server Error"}
     text = _log_text(file_log)
     assert "status=500" in text and "KeyError" in text and "Traceback" in text
+
+
+def test_analyze_diff_resolves_a_bitbucket_server_url_via_git_provider() -> None:
+    """`/api/analyze-diff` parses `repoUrl` itself to derive `repo_name`, separately from
+    `acquire_diff`. Honouring `gitProvider` in only one of the two rejected the request
+    with a 400 before acquisition ever ran."""
+    body = {
+        "repoUrl": "https://stash.payroll.co.jp/stash/scm/p3/pippen-navigate-for-webkit.git",
+        "gitProvider": "bitbucket_server",
+    }
+    ref = _REAL_RESOLVE(body, {})
+    assert ref is not None
+    assert (ref.provider, ref.owner, ref.repo, ref.context_path) == (
+        "bitbucket_server", "p3", "pippen-navigate-for-webkit", "/stash",
+    )
+
+
+def test_analyze_diff_rejects_a_bitbucket_server_url_without_the_slug() -> None:
+    body = {"repoUrl": "https://stash.payroll.co.jp/stash/scm/p3/kit.git"}
+    assert _REAL_RESOLVE(body, {}) is None
+
+
+def test_analyze_diff_logs_the_s3_url_after_a_successful_upload(caplog, captured) -> None:
+    """The URL is logged only after `upload.close()` returns, which is the storage
+    contract's proof that the object is complete — printing it earlier could point the
+    reader at a partial upload."""
+    import logging as _logging
+
+    client = _make_client(captured, filter_set=None, deleted=[])
+    with caplog.at_level(_logging.INFO, logger="breezeai_cog.server.routes"):
+        r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 200
+    key = r.json()["storage_key"]
+    logged = [m for m in caplog.messages if "breezeai_capture_uploaded" in m]
+    assert logged, "no upload log line"
+    assert key in logged[0] and "s3://" in logged[0]

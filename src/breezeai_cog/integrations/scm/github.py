@@ -179,9 +179,9 @@ class GitHubSCMClient(AbstractSCMClient):
         )
 
     def clone_url(self, ref: RepoRef) -> str:
-        host = ref.host or DEFAULT_HOSTS["github"]
+        origin = ref.origin if ref.host else f'https://{DEFAULT_HOSTS["github"]}'
         auth = f"x-access-token:{self._token}@" if self._token else ""
-        return f"https://{auth}{host}/{ref.owner}/{ref.repo}.git"
+        return f"{origin.replace('//', f'//{auth}', 1)}/{ref.owner}/{ref.repo}.git"
 
 
 _RELATIONS = frozenset({"identical", "ahead", "behind", "diverged"})

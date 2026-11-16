@@ -20,9 +20,10 @@ from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
 from ..constfold import Token, resolve_all
-from ..index_common import parallel_map, record_distinct, seed_same_package
+from ..index_common import ClassHeritage, parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
 from .constants import collect_constants
+from .heritage import HeritageFrag, build_heritage, collect_heritage
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration", "trait_declaration",
@@ -41,6 +42,9 @@ class GroovyIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    #: Simple class name → its in-repo base and the methods a call on it reaches (→ the declaring
+    #: file), for call resolution (``heritage.py``); ``None`` when the name is declared twice.
+    class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
@@ -66,9 +70,10 @@ def _type_name(node: Node, source: bytes) -> str | None:
     return node_text(nm, source) if nm is not None else None
 
 
-#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}`` and what the
-#: registered facts collect from it.
-_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]]
+#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}``, what the
+#: registered facts collect from it, and its classes' heritage.
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any],
+                   list[tuple[str, HeritageFrag]]]
 
 
 def _fqcn_index_one(args: tuple[str, str, str]) -> _IndexFrag | None:
@@ -90,7 +95,8 @@ def _fqcn_index_one(args: tuple[str, str, str]) -> _IndexFrag | None:
                 if name is not None:
                     fqcn_frag[f"{package}.{name}" if package else name] = rel
         const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
-        return fqcn_frag, const_frag, collect_additive("groovy", root, source, rel, Path(repo_root))
+        return (fqcn_frag, const_frag, collect_additive("groovy", root, source, rel, Path(repo_root)),
+                [(rel, c) for c in collect_heritage(root, source, package)])
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -110,17 +116,20 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> G
     collected: dict[str, list[Any]] = collect_fact_sources("groovy", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     raw_consts: dict[str, list[Token] | None] = {}
+    heritage: list[tuple[str, HeritageFrag]] = []
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, const_frag, facts = frag
+        fqcn_frag, const_frag, facts, classes = frag
+        heritage.extend(classes)
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
-    index = GroovyIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
+    index = GroovyIndex(fqcn=fqcn, consts=resolve_all(raw_consts),
+                        class_heritage=build_heritage(heritage, fqcn))
     # Registered facts may need the whole index, so they resolve after it is built.
     index.facts.update(resolve_additive("groovy", collected, index))
     return index
@@ -135,6 +144,19 @@ def _resolve(fqcn: str, is_static: bool, index: FqcnIndex | None) -> str | None:
     if is_static and "." in fqcn:  # static import: strip the member to get the class
         return index.get(fqcn.rsplit(".", 1)[0])
     return None
+
+
+def import_aliases(root: Node, source: bytes) -> dict[str, str]:
+    """``import a.b.Foo as Bar`` → ``{"Bar": "Foo"}``: the simple name of the class an alias
+    stands for (static imports left out — their alias names a member, not a class)."""
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type != "import_declaration" or any(c.type == "static" for c in node.children):
+            continue
+        name, alias = node.child_by_field_name("name"), node.child_by_field_name("alias")
+        if name is not None and alias is not None:
+            out[node_text(alias, source)] = node_text(name, source).rsplit(".", 1)[-1]
+    return out
 
 
 def extract_imports(

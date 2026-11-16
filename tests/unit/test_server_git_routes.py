@@ -371,3 +371,69 @@ def test_parse_pr_url_invalid_is_400(url) -> None:
 def test_parse_pr_url_requires_pr_url() -> None:
     r = _app(FakeClient()).post("/api/git/parse-pr-url", json={})
     assert r.status_code == 400 and r.json() == {"error": "All fields required: prUrl"}
+
+
+# --- gitProvider override (Bitbucket Data Center only) ------------------------------
+
+DC_REPO = "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+
+
+def test_bitbucket_server_is_addressable_without_scm_instances() -> None:
+    """Data Center has no public-cloud URL pattern, so `gitProvider` is what makes an
+    unregistered customer host reachable without deployment-wide config."""
+    fake = FakeClient()
+    seen: list = []
+    r = _app(fake, seen=seen).post("/api/git/latest-commit", json={
+        "repoUrl": DC_REPO, "gitBranch": "develop", "gitToken": "tok",
+        "gitProvider": "bitbucket_server",
+    })
+    assert r.status_code == 200
+    ref = seen[0][0]
+    assert ref == RepoRef(
+        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
+        host="stash.payroll.co.jp", context_path="/stash",
+    )
+
+
+def test_bitbucket_server_without_the_override_is_a_400() -> None:
+    r = _app(FakeClient()).post("/api/git/latest-commit", json={
+        "repoUrl": DC_REPO, "gitBranch": "develop", "gitToken": "tok",
+    })
+    assert r.status_code == 400 and r.json() == {"error": INVALID_REPO_URL_MESSAGE}
+
+
+def test_any_slug_other_than_bitbucket_server_is_ignored() -> None:
+    """The four clouds are identified from the URL and always have been; honouring a
+    slug for them too would be a second source of truth that can disagree with the
+    host."""
+    seen: list = []
+    r = _app(FakeClient(), seen=seen).post("/api/git/latest-commit", json={
+        "repoUrl": REPO, "gitBranch": "main", "gitToken": "tok",
+        "gitProvider": "gitlab",
+    })
+    assert r.status_code == 200 and seen[0][0].provider == "github"
+
+
+def test_bitbucket_server_slug_on_a_cloud_url_is_a_400_not_a_silent_fallback() -> None:
+    """The slug is the caller stating the grammar. A github.com URL has no Data Center
+    anchor, so the contradiction is reported rather than resolved in their favour."""
+    r = _app(FakeClient()).post("/api/git/latest-commit", json={
+        "repoUrl": REPO, "gitBranch": "main", "gitToken": "tok",
+        "gitProvider": "bitbucket_server",
+    })
+    assert r.status_code == 400 and r.json() == {"error": INVALID_REPO_URL_MESSAGE}
+
+
+def test_parse_pr_url_honours_the_bitbucket_server_override() -> None:
+    r = _app(FakeClient()).post("/api/git/parse-pr-url", json={
+        "prUrl": ("https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+                  "/pull-requests/42/overview"),
+        "gitProvider": "bitbucket_server",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "bitbucket_server" and body["prId"] == "42"
+    assert body["prLinks"]["comment"] == (
+        "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
+        "/pull-requests/42/comments"
+    )

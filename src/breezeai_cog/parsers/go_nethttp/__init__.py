@@ -2,4 +2,6 @@
 so it runs on every Go file that imports the package, whatever else the file does; the router
 analysis it shares with the other Go routers is ``parsers/go/routing.py``."""
 
-PARSERS: list = []
+from ..base import BaseParser
+
+PARSERS: list[BaseParser] = []

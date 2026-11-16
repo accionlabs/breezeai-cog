@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 
-def parse_gosum(path: str | Path, text: str) -> dict:
+def parse_gosum(path: str | Path, text: str) -> dict[str, Any]:
     deps: list[str] = []
     for line in text.splitlines():
         if not line.strip() or line.strip().startswith("//"):

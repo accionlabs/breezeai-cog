@@ -265,11 +265,12 @@ class AzureDevOpsSCMClient(AbstractSCMClient):
 
     def clone_url(self, ref: RepoRef) -> str:
         auth = f"pat:{self._token}@" if self._token else ""
-        host = ref.host or DEFAULT_HOSTS["azure_devops"]
-        if host.endswith(".visualstudio.com"):
+        origin = ref.origin if ref.host else f'https://{DEFAULT_HOSTS["azure_devops"]}'
+        base = origin.replace("//", f"//{auth}", 1)
+        if ref.host.endswith(".visualstudio.com"):
             # Legacy per-organisation host: the org is the subdomain, not a path segment.
-            return f"https://{auth}{host}/{ref.project}/_git/{ref.repo}"
-        return f"https://{auth}{host}/{ref.owner}/{ref.project}/_git/{ref.repo}"
+            return f"{base}/{ref.project}/_git/{ref.repo}"
+        return f"{base}/{ref.owner}/{ref.project}/_git/{ref.repo}"
 
 
 __all__ = ["AzureDevOpsSCMClient"]
