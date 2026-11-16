@@ -21,12 +21,16 @@ from typing import Any
 from ..config import Settings
 from ..integrations.scm import (
     AbstractSCMClient,
+    ChangeSet,
     RepoRef,
     SCMAPIError,
     SCMClientFactory,
     SCMError,
 )
 from ..integrations.scm.repository import parse_repo_url as _parse_repo_ref
+from ..parsers.java_mcp.tools import _declares_server
+from ..parsers.python_mcp.servers import sdk_framework, server_assignments, server_class_names
+from ..parsers.treesitter import parse_source
 from .errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -109,6 +113,10 @@ _JVM_TOOL_MARKER = "Tool"
 _PY_TOOL = re.compile(r"@[ \t]*\w+[ \t]*\.[ \t]*tool\b")
 _PY_FROM_IMPORT = re.compile(r"^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import\b", re.MULTILINE)
 _PY_PROJECT_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
+#: Text without which a file proves no MCP server for other files (the gate of the fact that
+#: reads it): a build file's Spring AI MCP server starter, a Python module's FastMCP server.
+_BUILD_SERVER_GATE = "mcp-server"
+_PY_SERVER_GATE = "FastMCP"
 
 
 class _TreeIndex:
@@ -248,6 +256,83 @@ def context_plan(changed: Mapping[str, str], tree: list[str]) -> tuple[list[str]
     return build_paths + module_paths, not (build_cut or module_cut)
 
 
+def _server_gate(path: str) -> str | None:
+    """The gate text of the MCP server proof ``path`` may hold for other files, else None."""
+    if path.rsplit("/", 1)[-1] in _BUILD_FILES:
+        return _BUILD_SERVER_GATE
+    return _PY_SERVER_GATE if path.endswith(".py") else None
+
+
+def _server_proof(path: str, content: str | None) -> object:
+    """What ``content`` of ``path`` proves for the MCP tools of other files, by the facts'
+    own rules: a build file that declares a Spring AI MCP server starter → True; a Python
+    module → its module-level FastMCP server names and SDK. None when it proves nothing."""
+    if content is None:
+        return None
+    source = content.encode("utf-8")
+    name = path.rsplit("/", 1)[-1]
+    if name in _BUILD_FILES:
+        return _declares_server(name, source) or None
+    if _PY_SERVER_GATE.encode() not in source:
+        return None
+    root = parse_source("python", source).root_node
+    names = server_assignments(root, source, server_class_names(root, source), module_only=True)
+    return (frozenset(names), sdk_framework(source)) if names else None
+
+
+def server_proof_change(
+    client: AbstractSCMClient,
+    ref: RepoRef,
+    current: str,
+    diff: ChangeSet,
+    contents: Mapping[str, str],
+) -> str | None:
+    """Why the diff may change an MCP server proof that unchanged files' tools rely on, else
+    None. An incremental analysis re-parses only the changed files, so a build file that adds
+    or drops its Spring AI MCP server starter, or a Python module whose FastMCP server appears,
+    is renamed or goes, would leave the tools of the unchanged files next to it missing or
+    stale. A changed or deleted build file or Python module is compared with its version at
+    ``current``, fetched only when that version may hold the fact's gate text (not for an added
+    file, nor when the provider's patch shows the gate was never there); a 404 there is no old
+    version. More such fetches than :data:`_MAX_CONTEXT_FILES`, or one that fails otherwise,
+    is a possible change too."""
+    entries = {f.filename: f for f in diff.files}
+    old_needed: list[str] = []
+    for path in [*contents, *diff.deleted]:
+        gate = _server_gate(path)
+        if gate is None:
+            continue
+        new = contents.get(path)
+        entry = entries.get(path)
+        if entry is not None and entry.status == "added":
+            old_may = False
+        else:
+            # Every line holding the gate in the old version but not the new one is a
+            # removed line of the patch.
+            old_may = (
+                (new is not None and gate in new)
+                or entry is None
+                or entry.patch is None
+                or gate in entry.patch
+            )
+        if old_may:
+            old_needed.append(path)
+        elif _server_proof(path, new) is not None:
+            return f"{path} adds an MCP server proof"
+    if len(old_needed) > _MAX_CONTEXT_FILES:
+        return f"{len(old_needed)} files whose MCP server proof may change, over the fetch cap"
+    for path in old_needed:
+        try:
+            old: str | None = client.file_content(ref, path, current)
+        except SCMAPIError as exc:
+            if exc.http_status != 404:
+                return f"the previous version of {path} could not be read: {exc}"
+            old = None
+        if _server_proof(path, contents.get(path)) != _server_proof(path, old):
+            return f"{path} changes an MCP server proof"
+    return None
+
+
 def context_paths(changed: Mapping[str, str], tree: list[str]) -> list[str]:
     """The files of :func:`context_plan`, without its completeness flag."""
     return context_plan(changed, tree)[0]
@@ -265,7 +350,8 @@ def resolve_git_diff(
     at ``incoming`` as an empty file (so the scanner and import resolution see the whole
     repo shape) with real content for the changed files and the few unchanged files their
     cross-file facts read (:func:`context_plan`). Raises :class:`IncompleteDiffContext` (temp
-    dir removed) when those cannot all be fetched.
+    dir removed) when those cannot all be fetched, or when the diff may change an MCP server
+    proof the unchanged files' tools rely on (:func:`server_proof_change`).
     """
     diff = client.compare(ref, current, incoming)
 
@@ -317,6 +403,9 @@ def resolve_git_diff(
     # and silently drop the facts proven there, so the diff is abandoned instead.
     paths, complete = context_plan(contents, tree)
     try:
+        flipped = server_proof_change(client, ref, current, diff, contents)
+        if flipped:
+            raise IncompleteDiffContext(flipped, diff.deleted)
         if not complete:
             raise IncompleteDiffContext("context files over the fetch cap", diff.deleted)
         for path in paths:
@@ -341,8 +430,8 @@ def acquire_diff(
 
     Incremental when a usable ``currentCommitId`` is present **and** the provider client
     supports it; otherwise a full clone (``filter_set=None`` → process every file). An
-    incremental diff whose context files cannot all be fetched also falls back to a full clone,
-    keeping the compare's deleted paths.
+    incremental diff whose context files cannot all be fetched, or that may change an MCP
+    server proof, also falls back to a full clone, keeping the compare's deleted paths.
     """
     ref = _parse_repo_ref(body["repoUrl"], settings.scm_instances)
     if ref is None:

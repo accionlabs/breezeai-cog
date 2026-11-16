@@ -15,6 +15,7 @@ from breezeai_cog.integrations.scm import (
     AbstractSCMClient,
     ChangeSet,
     CommitInfo,
+    FileDiff,
     PrComment,
     PullRequestInfo,
     RepoRef,
@@ -29,15 +30,17 @@ REF = RepoRef("github", "acme", "repo", host="github.com")
 
 
 class FakeClient(AbstractSCMClient):
-    """Scriptable provider: fixed tree / compare results, content map, clone URL."""
+    """Scriptable provider: fixed tree / compare results, content map, clone URL. ``old`` is the
+    content at the ``base`` commit (default: ``content``); ``files`` the compare's entries."""
 
     provider = "github"
 
     def __init__(self, *, tree=(), changed=(), deleted=(), content=None, incremental=True,
-                 token="tok") -> None:
+                 token="tok", old=None, files=()) -> None:
         self._tree = list(tree)
-        self._changes = ChangeSet(list(changed), list(deleted))
+        self._changes = ChangeSet(list(changed), list(deleted), list(files))
         self._content = dict(content or {})
+        self._old = self._content if old is None else dict(old)
         self.supports_incremental = incremental
         self._token = token
         self.calls: list[str] = []
@@ -64,10 +67,11 @@ class FakeClient(AbstractSCMClient):
         return self._changes
 
     def file_content(self, ref, path, commit):
-        self.calls.append(f"content:{path}")
-        if path not in self._content:
+        self.calls.append(f"content:{path}" if commit != "base" else f"old:{path}")
+        content = self._old if commit == "base" else self._content
+        if path not in content:
             raise SCMAPIError(f"nope {path}", http_status=404)
-        return self._content[path]
+        return content[path]
 
     def clone_url(self, ref):
         auth = f"x-access-token:{self._token}@" if self._token else ""
@@ -300,6 +304,139 @@ def test_acquire_diff_falls_back_to_a_full_clone_when_context_is_incomplete(
     assert filter_set is None  # every file is parsed and streamed
     assert deleted == ["app/old.py"]
     assert recorded_git[0][4:6] == ["--branch", _BRANCH]
+
+
+_POM = "<project><dependencies>{}</dependencies></project>"
+_STARTER = "<dependency><artifactId>spring-ai-starter-mcp-server</artifactId></dependency>"
+_JAVA_TOOL = "class T { @Tool String f() { return \"\"; } }\n"
+
+
+def test_a_build_file_that_adds_the_mcp_server_starter_abandons_the_diff() -> None:
+    """Only pom.xml changes: the unchanged @Tool file becomes an MCP tool, which an incremental
+    run would never re-parse."""
+    client = FakeClient(
+        tree=["pom.xml", "src/T.java"],
+        changed=["pom.xml"],
+        content={"pom.xml": _POM.format(_STARTER), "src/T.java": _JAVA_TOOL},
+        old={"pom.xml": _POM.format(""), "src/T.java": _JAVA_TOOL},
+    )
+    with pytest.raises(git_mod.IncompleteDiffContext, match="pom.xml") as info:
+        git_mod.resolve_git_diff(client, REF, "base", _SHA)
+    assert info.value.deleted == []
+
+
+def test_a_build_file_that_drops_the_mcp_server_starter_abandons_the_diff() -> None:
+    client = FakeClient(
+        tree=["pom.xml", "src/T.java"],
+        changed=["pom.xml"],
+        content={"pom.xml": _POM.format("")},
+        old={"pom.xml": _POM.format(_STARTER)},
+    )
+    with pytest.raises(git_mod.IncompleteDiffContext, match="pom.xml"):
+        git_mod.resolve_git_diff(client, REF, "base", _SHA)
+
+
+def test_acquire_diff_clones_when_only_the_build_file_enables_mcp(monkeypatch, recorded_git) -> None:
+    client = FakeClient(
+        tree=["pom.xml", "src/T.java"],
+        changed=["pom.xml"],
+        deleted=["old/pom.xml"],
+        content={"pom.xml": _POM.format(_STARTER)},
+        old={"pom.xml": _POM.format("")},
+    )
+    _use_client(monkeypatch, client)
+
+    _, filter_set, deleted = git_mod.acquire_diff(
+        Settings(_env_file=None), _body(currentCommitId="base")
+    )
+
+    assert filter_set is None and deleted == ["old/pom.xml"]
+    assert recorded_git[0][4:6] == ["--branch", _BRANCH]
+
+
+def test_a_build_file_change_without_an_mcp_server_starter_stays_incremental() -> None:
+    """A dependency bump in a plain Spring module: no version mentions the starter, and the
+    compare's patch shows it, so the previous version is not even fetched."""
+    dep = "<dependency><artifactId>spring-boot-starter-web</artifactId><version>{}</version></dependency>"
+    client = FakeClient(
+        tree=["pom.xml", "src/T.java"],
+        changed=["pom.xml"],
+        content={"pom.xml": _POM.format(dep.format("3.3.1"))},
+        old={"pom.xml": _POM.format(dep.format("3.3.0"))},
+        files=[FileDiff("pom.xml", "modified", 1, 1, "@@ -1 +1 @@\n-3.3.0\n+3.3.1\n")],
+    )
+    _, filter_set, _ = git_mod.resolve_git_diff(client, REF, "base", _SHA)
+    assert filter_set == {"pom.xml"}
+    assert "old:pom.xml" not in client.calls
+
+
+def test_a_build_file_edit_that_keeps_the_mcp_server_starter_stays_incremental() -> None:
+    client = FakeClient(
+        tree=["pom.xml", "src/T.java"],
+        changed=["pom.xml"],
+        content={"pom.xml": _POM.format(_STARTER + "<dependency>b</dependency>")},
+        old={"pom.xml": _POM.format(_STARTER)},
+    )
+    _, filter_set, _ = git_mod.resolve_git_diff(client, REF, "base", _SHA)
+    assert filter_set == {"pom.xml"} and "old:pom.xml" in client.calls
+
+
+_SERVER_PY = "from fastmcp import FastMCP\n\nmcp = FastMCP('x')\n"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("x = 1\n", _SERVER_PY),  # the server appears
+        (_SERVER_PY, "x = 1\n"),  # the server goes, with every FastMCP mention
+        (_SERVER_PY, _SERVER_PY.replace("mcp =", "app =")),  # the server is renamed
+    ],
+)
+def test_a_python_module_whose_fastmcp_server_changes_abandons_the_diff(old, new) -> None:
+    client = FakeClient(
+        tree=["app/server.py", "app/tools.py"],
+        changed=["app/server.py"],
+        content={"app/server.py": new},
+        old={"app/server.py": old},
+    )
+    with pytest.raises(git_mod.IncompleteDiffContext, match="app/server.py"):
+        git_mod.resolve_git_diff(client, REF, "base", _SHA)
+
+
+def test_a_deleted_fastmcp_server_module_abandons_the_diff() -> None:
+    client = FakeClient(
+        tree=["app/tools.py", "app/x.py"],
+        changed=["app/x.py"],
+        deleted=["app/server.py"],
+        content={"app/x.py": "x = 1\n"},
+        old={"app/server.py": _SERVER_PY, "app/x.py": "x = 2\n"},
+    )
+    with pytest.raises(git_mod.IncompleteDiffContext, match="app/server.py") as info:
+        git_mod.resolve_git_diff(client, REF, "base", _SHA)
+    assert info.value.deleted == ["app/server.py"]
+
+
+def test_an_edit_that_keeps_the_fastmcp_server_stays_incremental() -> None:
+    client = FakeClient(
+        tree=["app/server.py"],
+        changed=["app/server.py"],
+        content={"app/server.py": _SERVER_PY + "\n@mcp.tool\ndef f(): ...\n"},
+        old={"app/server.py": _SERVER_PY},
+    )
+    _, filter_set, _ = git_mod.resolve_git_diff(client, REF, "base", _SHA)
+    assert filter_set == {"app/server.py"}
+
+
+def test_an_unreadable_previous_version_abandons_the_diff() -> None:
+    class Flaky(FakeClient):
+        def file_content(self, ref, path, commit):
+            if commit == "base":
+                raise SCMAPIError("rate limited", http_status=429)
+            return super().file_content(ref, path, commit)
+
+    client = Flaky(tree=["pom.xml"], changed=["pom.xml"], content={"pom.xml": _POM.format("")})
+    with pytest.raises(git_mod.IncompleteDiffContext, match="could not be read"):
+        git_mod.resolve_git_diff(client, REF, "base", _SHA)
 
 
 def test_context_paths_follow_the_python_import_rules() -> None:
