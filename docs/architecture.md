@@ -898,11 +898,12 @@ flowchart LR
 | `extends` | `EXTENDS` edges to classes with that name in the repository |
 | `id` of Class / Function / Statement | The `captureId` property (the statement's unique key) |
 
-> **Decision —** `File` and `Class` are **open** nodes; `Function` and `Statement` are **allow-listed**.
-> **Why:** files and classes need room for parser-specific attributes (config metadata, UI
-> roles). Functions and statements are the most numerous nodes, so their shape is kept fixed.
-> **Cost:** a new field on `Function` or `Statement` is **silently dropped** at ingest unless the
-> backend's allow-list is updated in the same change.
+> **Decision —** `File` is an **open** node; `Class`, `Function` and `Statement` are
+> **allow-listed** by the backend.
+> **Why:** files need room for parser-specific attributes (config metadata, UI roles). Functions
+> and statements are the most numerous nodes, so their shape is kept fixed.
+> **Cost:** a new field on `Class`, `Function` or `Statement` is **silently dropped** at ingest
+> unless the backend's allow-list is updated in the same change.
 
 > **Decision —** fields a parser did not fill are left out of the output (`exclude_none`).
 > **Why:** a missing field means "not known", which is different from an empty or false value,
