@@ -423,6 +423,9 @@ Most-used settings:
 | SCM pagination ceiling (pages per listing; server) | `BREEZEAI_COG_SCM_MAX_PAGES` | `100` |
 | SCM fallback token per provider (server; used when the request has no `gitToken`) | `BREEZEAI_COG_SCM_TOKEN_GITHUB` · `…_GITLAB` · `…_BITBUCKET` · `…_AZURE_DEVOPS` | — |
 | Self-hosted SCM instances (server; JSON host→provider, host→API base) | `BREEZEAI_COG_SCM_INSTANCES` · `BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING` | `{}` |
+| Hosts the server may call (comma-separated; empty = any but loopback/link-local/reserved) | `BREEZEAI_COG_SCM_ALLOWED_API_HOSTS` | — |
+| Also refuse private ranges (off by default — self-hosted instances live on them) | `BREEZEAI_COG_SCM_BLOCK_PRIVATE_NETWORKS` | `false` |
+| SCM connect-phase timeout (seconds) | `BREEZEAI_COG_SCM_API_CONNECT_TIMEOUT` | `10` |
 
 ### Choosing which files are analyzed
 
@@ -504,9 +507,11 @@ BREEZEAI_COG_SCM_INSTANCES='{"stash.payroll.co.jp": "bitbucket_server"}'
 BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING='{"stash.payroll.co.jp": "https://stash.payroll.co.jp/stash/rest/api/1.0"}'
 ```
 
-The credential travels as `gitToken` on each request and is the **base64-encoded
-`username:password` value of an HTTP Basic header**, passed through verbatim — not Cloud's plain
-`username:api_key`. The API base is otherwise derived from the
+The credential travels as `gitToken` on each request, in any of three forms: a **bare HTTP access
+token** (`BBDC-…`, what Data Center's own UI issues — sent as `Bearer`), a raw
+`username:password`, or a pre-encoded base64 `username:password` (both sent as `Basic`). A
+credential with an empty username is rejected. The URL's scheme and port are honoured, so a stock
+install on `http://host:7990` or a proxied one on `:8443` works. The API base is otherwise derived from the
 repository URL: `https://stash.payroll.co.jp/stash/scm/p3/kit.git` yields the context path `/stash`
 and therefore the base `https://stash.payroll.co.jp/stash/rest/api/1.0`, the project key `p3` and
 the slug `kit`. Browse URLs (`/projects/P3/repos/kit/browse`) and personal repositories

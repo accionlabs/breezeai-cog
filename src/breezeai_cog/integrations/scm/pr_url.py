@@ -75,7 +75,7 @@ def repo_web_url(ref: RepoRef) -> str:
     """The repository's canonical browser URL — the form ``codeOntology.repoUrl`` stores."""
     if ref.provider == "bitbucket_server":
         key, slug = quote(ref.owner, safe="~"), quote(ref.repo, safe="")
-        return f"https://{ref.host}{ref.context_path}/projects/{key}/repos/{slug}"
+        return f"{ref.origin}{ref.context_path}/projects/{key}/repos/{slug}"
     host = ref.host or DEFAULT_HOSTS[ref.provider]
     if ref.provider != "azure_devops":
         return f"https://{host}/{ref.owner}/{ref.repo}"

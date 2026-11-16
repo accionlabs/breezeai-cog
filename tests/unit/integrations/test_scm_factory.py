@@ -151,3 +151,40 @@ def test_bitbucket_server_api_base_mapping_wins_over_the_derived_one() -> None:
     assert resolve_api_base_url(_DC_REF, settings) == (
         "https://stash.payroll.co.jp/proxied/rest/api/1.0"
     )
+
+
+# ── which hosts this service will connect to ───────────────────────────────
+
+def test_a_loopback_host_is_refused() -> None:
+    """The caller names the host, so without this the service probes its own pod."""
+    from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError
+
+    settings = Settings(_env_file=None)
+    ref = RepoRef("bitbucket_server", "P3", "kit", host="localhost", context_path="")
+    with pytest.raises(SCMHostNotAllowedError) as info:
+        SCMClientFactory.for_repo(ref, settings, request_token="dXNlcjpwYXNz")
+    assert info.value.status_code == 400
+
+
+def test_a_private_host_is_allowed_by_default() -> None:
+    """Self-hosted Bitbucket and GitHub Enterprise normally live on a private address;
+    blocking those by default would block the self-hosted providers entirely."""
+    from breezeai_cog.integrations.scm.netguard import ensure_host_allowed
+
+    ensure_host_allowed("10.0.0.5", Settings(_env_file=None))
+
+
+def test_private_hosts_can_be_blocked_explicitly() -> None:
+    from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError, ensure_host_allowed
+
+    with pytest.raises(SCMHostNotAllowedError):
+        ensure_host_allowed("10.0.0.5", Settings(_env_file=None, scm_block_private_networks=True))
+
+
+def test_an_allow_list_bounds_the_reachable_hosts() -> None:
+    from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError, ensure_host_allowed
+
+    settings = Settings(_env_file=None, scm_allowed_api_hosts=["stash.payroll.co.jp"])
+    ensure_host_allowed("stash.payroll.co.jp", settings)
+    with pytest.raises(SCMHostNotAllowedError):
+        ensure_host_allowed("evil.example.com", settings)

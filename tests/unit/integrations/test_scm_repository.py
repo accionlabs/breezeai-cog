@@ -93,8 +93,10 @@ _INSTANCES = {
             RepoRef("github", "acme", "widgets", host="ghe.acme.com"),
         ),
         (
+            # Userinfo is dropped; the explicit port is kept, or every call would go
+            # to 443 and a self-hosted instance on another port could never connect.
             "https://user@bb.acme.com:8443/acme/widgets",
-            RepoRef("bitbucket", "acme", "widgets", host="bb.acme.com"),
+            RepoRef("bitbucket", "acme", "widgets", host="bb.acme.com", port=8443),
         ),
         (
             "https://ado.acme.com/DefaultCollection/my-project/_git/my-repo",
@@ -225,3 +227,33 @@ def test_parse_bitbucket_server_url_needs_no_instances_entry() -> None:
 )
 def test_parse_bitbucket_server_url_rejects_what_it_cannot_address(url) -> None:
     assert parse_bitbucket_server_url(url) is None
+
+
+# ── scheme and port survive parsing (self-hosted instances) ────────────────
+
+@pytest.mark.parametrize(
+    ("url", "origin", "context"),
+    [
+        # Data Center's stock HTTP port, served at the root.
+        ("http://bb.corp:7990/scm/P3/kit.git", "http://bb.corp:7990", ""),
+        # Behind a TLS proxy on 8443, under a /stash context path.
+        ("https://bb.corp:8443/stash/scm/P3/kit.git", "https://bb.corp:8443", "/stash"),
+        # A port equal to the scheme default normalises away.
+        ("https://bb.corp:443/stash/scm/P3/kit.git", "https://bb.corp", "/stash"),
+        ("http://bb.corp:80/scm/P3/kit.git", "http://bb.corp", ""),
+    ],
+)
+def test_bitbucket_server_keeps_scheme_and_port(url, origin, context) -> None:
+    ref = parse_bitbucket_server_url(url)
+    assert ref is not None
+    assert (ref.origin, ref.context_path) == (origin, context)
+
+
+def test_a_browsed_file_path_containing_scm_is_not_read_as_the_project() -> None:
+    """`projects`/`repos` is matched before `scm`, so a directory called `scm` inside a
+    browsed path cannot be mistaken for the project key."""
+    ref = parse_bitbucket_server_url(
+        "https://bb.corp/stash/projects/P3/repos/app/browse/scm/dir/f.py"
+    )
+    assert ref is not None
+    assert (ref.owner, ref.repo, ref.context_path) == ("P3", "app", "/stash")

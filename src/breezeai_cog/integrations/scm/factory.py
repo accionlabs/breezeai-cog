@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from .base import SUPPORTED_PROVIDERS, AbstractSCMClient, RepoRef
 from .errors import SCMCredentialError, UnsupportedSCMProviderError
+from .netguard import ensure_host_allowed
 
 if TYPE_CHECKING:
     from ...config import Settings
@@ -67,7 +68,7 @@ def resolve_api_base_url(ref: RepoRef, settings: Settings) -> str | None:
         # Data Center has no public cloud to fall back to, but it always serves REST
         # under the same context path as the /scm clone prefix the URL was parsed from,
         # so the base is derivable rather than guessed.
-        return f"https://{ref.host}{ref.context_path}/rest/api/1.0"
+        return f"{ref.origin}{ref.context_path}/rest/api/1.0"
     if ref.provider == "azure_devops" and ref.host.endswith(".visualstudio.com"):
         # Legacy per-organisation host; the public dev.azure.com/{org} API serves it.
         return None
@@ -135,12 +136,25 @@ class SCMClientFactory:
         request_token: str | None = None,
         **client_kwargs: Any,
     ) -> AbstractSCMClient:
-        """Resolve credential and API base for ``ref`` and build its client."""
+        """Resolve credential and API base for ``ref`` and build its client.
+
+        The host is checked first: the REST calls and the ``git`` clone both address it,
+        so one check before the client exists covers both.
+        """
+        ensure_host_allowed(ref.host, settings)
+        api_base_url = resolve_api_base_url(ref, settings)
+        if api_base_url:
+            from urllib.parse import urlsplit
+
+            mapped_host = (urlsplit(api_base_url).hostname or "").lower()
+            if mapped_host and mapped_host != ref.host:
+                # A per-instance base URL can point somewhere else entirely.
+                ensure_host_allowed(mapped_host, settings)
         return SCMClientFactory.create(
             ref.provider,
             resolve_scm_token(ref.provider, request_token, settings),
             settings,
-            resolve_api_base_url(ref, settings),
+            api_base_url,
             **client_kwargs,
         )
 

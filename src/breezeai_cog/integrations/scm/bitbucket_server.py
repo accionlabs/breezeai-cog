@@ -47,9 +47,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CREDENTIAL_FORMAT = (
-    "Bitbucket Data Center credential must be the base64-encoded "
-    '"username:password" value of an HTTP Basic header.'
+_EMPTY_USERNAME = (
+    "Bitbucket Data Center credential has an empty username; supply either a bare HTTP "
+    'access token, or "username:password" (raw or base64-encoded).'
 )
 
 #: Entries per page. Data Center caps this per endpoint and simply returns fewer with
@@ -122,7 +122,7 @@ class BitbucketServerSCMClient(AbstractSCMClient):
                 "the request.",
                 provider=self.provider,
             )
-        self._username, self._password = self._split_basic(self._token)
+        self._auth_header, self._username, self._password = self._credential(self._token)
         if not api_base_url:
             raise SCMCredentialError(
                 "Bitbucket Data Center requires an API base URL ending in /rest/api/1.0; "
@@ -132,28 +132,63 @@ class BitbucketServerSCMClient(AbstractSCMClient):
         self._http = SCMHttpClient(
             provider="Bitbucket Data Center",
             base_url=api_base_url,
-            headers={"Accept": "application/json", "Authorization": f"Basic {self._token}"},
+            headers={"Accept": "application/json", "Authorization": self._auth_header},
             settings=settings,
             transport=transport,
             sleep=sleep,
         )
 
     @staticmethod
-    def _split_basic(token: str) -> tuple[str, str]:
-        """Decode the Basic value into ``(username, password)``.
+    def _credential(token: str) -> tuple[str, str, str]:
+        """``(header_value, username, password)`` for a Data Center credential.
 
-        Validated up front so a raw (un-encoded) token is one 400 naming the format
-        rather than a 401 from the customer's instance. The halves are needed for the
-        clone URL; the header itself still sends ``token`` verbatim.
+        Three forms are accepted, because three are in circulation and rejecting any of
+        them strands a real user:
+
+        * a **bare HTTP access token** (``BBDC-…``) — what Data Center's own UI issues
+          and what the Breeze web UI asks for. Sent as ``Bearer``; there is no username,
+          so cloning uses a header rather than a URL credential.
+        * a **raw ``username:password``** — base64-encoded here and sent as ``Basic``.
+        * a **pre-encoded base64 ``username:password``** — sent as ``Basic`` verbatim,
+          never re-encoded (double-encoding 401s on every call with no obvious cause).
+
+        The forms cannot be confused: a raw ``user:token`` contains ``:``, which is not
+        in the base64 alphabet, and a ``BBDC-…`` token contains ``-``, which is not
+        either — so only one branch can ever match.
+
+        Raises:
+            SCMCredentialError: the decoded credential has an empty username. It would
+                authenticate as nobody, and the clone-URL scrubber cannot mask a
+                ``//:secret@`` pattern, so the password would reach the logs.
         """
         try:
             decoded = base64.b64decode(token, validate=True).decode("utf-8")
         except (binascii.Error, ValueError, UnicodeDecodeError):
-            raise SCMCredentialError(_CREDENTIAL_FORMAT, provider="bitbucket_server") from None
-        if ":" not in decoded:
-            raise SCMCredentialError(_CREDENTIAL_FORMAT, provider="bitbucket_server")
-        username, _, password = decoded.partition(":")
-        return username, password
+            decoded = ""
+        if decoded and ":" in decoded:
+            username, _, password = decoded.partition(":")
+            if not username:
+                raise SCMCredentialError(_EMPTY_USERNAME, provider="bitbucket_server")
+            return f"Basic {token}", username, password
+        if ":" in token:
+            username, _, password = token.partition(":")
+            if not username:
+                raise SCMCredentialError(_EMPTY_USERNAME, provider="bitbucket_server")
+            encoded = base64.b64encode(token.encode("utf-8")).decode("ascii")
+            return f"Basic {encoded}", username, password
+        return f"Bearer {token}", "", token
+
+    def git_auth_config(self) -> list[str]:
+        """``git -c`` arguments carrying this client's credential, or ``[]``.
+
+        A ``Basic`` credential is embedded in ``clone_url`` as userinfo, so nothing is
+        needed here. A bare token has no username to put in a URL, so it travels as an
+        ``Authorization`` header instead. The value lands in the git process's argv, so
+        ``server/git.py`` scrubs it out of any error text.
+        """
+        if self._auth_header.startswith("Bearer "):
+            return ["-c", f"http.extraHeader=Authorization: {self._auth_header}"]
+        return []
 
     def close(self) -> None:
         self._http.close()
@@ -174,9 +209,27 @@ class BitbucketServerSCMClient(AbstractSCMClient):
         """
         url = self._http.url_for(path)
 
+        def body_of(resp: httpx.Response) -> dict[str, Any] | None:
+            """The page body, or ``None`` when it is not a readable paged object.
+
+            A Data Center behind SSO can answer a login page with HTTP 200; decoding
+            that as JSON raises, which would surface as a 500 (our fault) instead of a
+            502 naming the provider.
+            """
+            try:
+                body = resp.json()
+            except ValueError:
+                raise SCMAPIError(
+                    f"Bitbucket Data Center GET {path} returned a non-JSON body "
+                    "(an SSO login page is the usual cause)",
+                    http_status=resp.status_code, provider=self.provider,
+                    operation=f"GET {path}",
+                ) from None
+            return body if isinstance(body, dict) else None
+
         def next_of(resp: httpx.Response) -> str | None:
-            body = resp.json()
-            if not isinstance(body, dict) or body.get("isLastPage", True):
+            body = body_of(resp)
+            if body is None or body.get("isLastPage", True):
                 return None
             start = body.get("nextPageStart")
             if start is None:
@@ -184,11 +237,10 @@ class BitbucketServerSCMClient(AbstractSCMClient):
             return f"{url}?{urlencode({**params, 'start': str(start)})}"
 
         for resp in self._http.paginate(path, next_of, params):
-            body = resp.json()
-            if not isinstance(body, dict):
+            body = body_of(resp)
+            if body is None:
                 raise SCMAPIError(
-                    f"Bitbucket Data Center GET {path} returned {type(body).__name__}, "
-                    "expected a paged object",
+                    f"Bitbucket Data Center GET {path} did not return a paged object",
                     provider=self.provider, operation=f"GET {path}",
                 )
             yield body
@@ -338,9 +390,14 @@ class BitbucketServerSCMClient(AbstractSCMClient):
         Data Center passwords and HTTP access tokens routinely contain ``@``, ``/`` and
         ``:``, which would otherwise split the URL in the wrong place.
         """
-        auth = f"{quote(self._username, safe='')}:{quote(self._password, safe='')}@"
+        # A bare token authenticates through git_auth_config's header instead: there is
+        # no username, and "//:token@" is a shape the clone-URL scrubber cannot mask.
+        auth = (
+            f"{quote(self._username, safe='')}:{quote(self._password, safe='')}@"
+            if self._username else ""
+        )
         return (
-            f"https://{auth}{ref.host}{ref.context_path}"
+            f"{ref.origin.replace('//', f'//{auth}', 1)}{ref.context_path}"
             f"/scm/{quote(ref.owner, safe='~')}/{quote(ref.repo, safe='')}.git"
         )
 

@@ -53,6 +53,11 @@ class RepoRef:
             trailing slash (``/stash``), or ``""`` when it is served at the root. Only
             Bitbucket Data Center sets it; its REST base, web URLs and ``/scm`` clone
             path all sit under the same context path.
+        scheme: ``https`` or ``http``, as the URL gave it. A self-hosted instance behind
+            a terminating proxy is sometimes served over plain HTTP.
+        port: The URL's explicit port, or ``None`` for the scheme default. Bitbucket Data
+            Center's stock install listens on 7990 (and 8443 behind a proxy), so dropping
+            it sends every call to 443 and nothing connects.
 
     Note:
         For ``bitbucket_server`` the two name fields carry Data Center's vocabulary:
@@ -67,6 +72,19 @@ class RepoRef:
     project: str = ""
     host: str = ""
     context_path: str = ""
+    scheme: str = "https"
+    port: int | None = None
+
+    @property
+    def origin(self) -> str:
+        """``<scheme>://<host>[:<port>]`` — the instance this reference came from.
+
+        Every URL built for a reference (REST base, clone URL, web URL) must start here
+        rather than hard-coding ``https://{host}``, or a non-default port and a plain-HTTP
+        instance are silently dropped and the request goes to the wrong place.
+        """
+        port = f":{self.port}" if self.port else ""
+        return f"{self.scheme}://{self.host}{port}"
 
     @property
     def is_self_hosted(self) -> bool:
@@ -285,6 +303,15 @@ class AbstractSCMClient(ABC):
             SCMAPIError: when the provider refuses or cannot serve the file. Callers
                 treat a failure as "skip this file" and log it.
         """
+
+    def git_auth_config(self) -> list[str]:
+        """``git -c <key>=<value>`` arguments the clone needs beyond ``clone_url``.
+
+        Empty for every provider whose credential embeds in the URL. Bitbucket Data
+        Center overrides it: a bare HTTP access token has no username half, so it
+        authenticates through an ``Authorization`` header instead.
+        """
+        return []
 
     @abstractmethod
     def clone_url(self, ref: RepoRef) -> str:

@@ -122,6 +122,17 @@ class Settings(BaseSettings):
     # whichever host the request named — one customer's credential to another's server.
     # The credential must arrive as `gitToken` on the request; without it the factory
     # answers 400 (AbstractSCMClient.requires_credential).
+    # Hosts this deployment may send an authenticated request to. Empty (the default)
+    # allows any host except loopback, link-local and other reserved addresses — see
+    # integrations/scm/netguard.py. Set it to bound the reachable set properly.
+    scm_allowed_api_hosts: list[str] = Field(default_factory=list)
+    # Also refuse private ranges (10/8, 172.16/12, 192.168/16). Off by default: a
+    # self-hosted Bitbucket or GitHub Enterprise normally lives on one, so turning this
+    # on without an allow-list blocks the self-hosted providers entirely.
+    scm_block_private_networks: bool = False
+    # Connect-phase cap (seconds), separate from scm_api_timeout. A blackholed host
+    # otherwise holds a threadpool worker for timeout x attempts (60s x 4 by default).
+    scm_api_connect_timeout: float = Field(default=10.0, gt=0)
     # Self-hosted instances: host → provider slug, e.g. {"git.acme.com": "gitlab"}. A repo
     # URL on a listed host is parsed with that provider's grammar. (JSON in env.)
     scm_instances: dict[str, str] = Field(default_factory=dict)
@@ -176,6 +187,14 @@ class Settings(BaseSettings):
     @field_validator("languages", mode="before")
     @classmethod
     def _split_languages(cls, v: object) -> object:
+        """Accept a comma-separated string (CLI / env) as a list."""
+        if isinstance(v, str):
+            return [part.strip() for part in v.split(",") if part.strip()]
+        return v
+
+    @field_validator("scm_allowed_api_hosts", mode="before")
+    @classmethod
+    def _split_allowed_hosts(cls, v: object) -> object:
         """Accept a comma-separated string (CLI / env) as a list."""
         if isinstance(v, str):
             return [part.strip() for part in v.split(",") if part.strip()]

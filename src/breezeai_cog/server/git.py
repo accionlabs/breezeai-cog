@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import Settings
@@ -78,7 +78,15 @@ def resolve_repo_ref(body: Mapping[str, Any], instances: Mapping[str, str]) -> R
 
 
 def _scrub(s: str) -> str:
-    return re.sub(r"//[^/@\s]+:[^/@\s]+@", "//***:***@", str(s or ""))
+    """Mask credentials in text that may reach a log or an error message.
+
+    Two shapes: userinfo in a clone URL, and an ``Authorization`` header, which Bitbucket
+    Data Center puts in the git process's argv for a bare-token clone. The userinfo
+    halves use ``*`` rather than ``+`` so an empty username (``//:secret@``) still
+    matches — it used not to, leaving the password in the clear.
+    """
+    out = re.sub(r"//[^/@\s]*:[^/@\s]*@", "//***:***@", str(s or ""))
+    return re.sub(r"(?i)(authorization:\s*)(\S+\s+)?\S+", r"\1***", out)
 
 
 def clone_repo_full(
@@ -100,13 +108,22 @@ def clone_repo_full(
         subprocess.run(["git", *argv], check=True, capture_output=True, timeout=timeout)
 
     try:
-        git("clone", "--depth", "1", "--branch", branch, "--single-branch", auth_url, temp_dir)
+        git(
+            *client.git_auth_config(),
+            "clone", "--depth", "1", "--branch", branch, "--single-branch",
+            auth_url, temp_dir,
+        )
         if incoming:
             try:
                 git("-C", temp_dir, "checkout", "--quiet", incoming)
             except subprocess.CalledProcessError:
-                # Shallow clone only has the branch tip; fetch the exact commit.
-                git("-C", temp_dir, "fetch", "--depth", "1", "origin", incoming)
+                # Shallow clone only has the branch tip; fetch the exact commit. The
+                # auth config is repeated because a bare-token credential lives in a
+                # header, not in the remote URL the clone stored.
+                git(
+                    "-C", temp_dir, *client.git_auth_config(),
+                    "fetch", "--depth", "1", "origin", incoming,
+                )
                 git("-C", temp_dir, "checkout", "--quiet", incoming)
     except subprocess.TimeoutExpired as exc:
         # `from None`: CalledProcessError/TimeoutExpired render argv, which carries the
@@ -123,6 +140,28 @@ def clone_repo_full(
 
     shutil.rmtree(Path(temp_dir) / ".git", ignore_errors=True)
     return temp_dir
+
+
+def _safe_join(root: Path, repo_path: str) -> Path:
+    """``root / repo_path``, proven to stay inside ``root``.
+
+    Every path here is a string a git host chose, and a caller can point this service at
+    any host. A path like ``../../app/.venv/…/x.pth`` would otherwise be written outside
+    the temp directory, where a ``.pth`` file is executed at the next interpreter start.
+    Nothing legitimate needs to escape, so a path that does is a hard failure rather than
+    a skip: a host sending one is not a host whose other answers should be trusted.
+
+    Raises:
+        SCMAPIError: ``repo_path`` is absolute, escapes ``root``, or is otherwise
+            unusable as a relative path.
+    """
+    candidate = PurePosixPath(repo_path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise SCMAPIError(f"Unsafe path from the git provider: {repo_path!r}")
+    full = (root / repo_path).resolve()
+    if full != root and root not in full.parents:
+        raise SCMAPIError(f"Unsafe path from the git provider: {repo_path!r}")
+    return full
 
 
 def resolve_git_diff(
@@ -149,8 +188,9 @@ def resolve_git_diff(
         return tempfile.mkdtemp(prefix="ontology-"), set(), []
 
     temp_dir = tempfile.mkdtemp(prefix="ontology-")
+    root = Path(temp_dir).resolve()
     for sp in client.tree(ref, incoming):
-        full = Path(temp_dir) / sp
+        full = _safe_join(root, sp)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text("")
 
@@ -164,7 +204,7 @@ def resolve_git_diff(
             # than silently reported as "no changes".
             logger.warning("Skipping unreadable changed file %s: %s", path, exc)
             continue
-        full = Path(temp_dir) / path
+        full = _safe_join(root, path)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8")
         filter_set.add(path)

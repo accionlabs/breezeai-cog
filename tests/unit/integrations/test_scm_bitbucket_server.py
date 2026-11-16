@@ -42,15 +42,58 @@ def test_missing_credential_is_a_400(settings) -> None:
     assert info.value.status_code == 400 and "gitToken" in str(info.value)
 
 
-def test_raw_unencoded_token_is_a_400(settings) -> None:
+@pytest.mark.parametrize(
+    ("token", "scheme"),
+    [
+        # A bare HTTP access token — what Data Center's UI issues and what the Breeze
+        # web UI collects. Rejecting it stranded every connection made from the UI.
+        ("BBDC-MDI2Mzg3NTk5MDcw", "Bearer"),
+        ("jdoe:s3cr3t", "Basic"),                              # raw username:password
+        (base64.b64encode(b"jdoe:s3cr3t").decode(), "Basic"),  # pre-encoded
+    ],
+)
+def test_all_three_credential_forms_are_accepted(router, settings, token, scheme) -> None:
+    router.add(r"/files", httpx.Response(200, json={"values": [], "isLastPage": True}))
+    _client(router, settings, token=token).tree(REF, SHA)
+    assert router.requests[0].headers["Authorization"].startswith(scheme + " ")
+
+
+def test_a_raw_pair_is_encoded_and_a_base64_pair_is_not_re_encoded(
+    router, settings
+) -> None:
+    """Both reach the wire as the same header; re-encoding the pre-encoded form would
+    401 on every call with no obvious cause."""
+    expected = "Basic " + base64.b64encode(b"jdoe:s3cr3t").decode()
+    for token in ("jdoe:s3cr3t", base64.b64encode(b"jdoe:s3cr3t").decode()):
+        r = type(router)()
+        r.add(r"/files", httpx.Response(200, json={"values": [], "isLastPage": True}))
+        _client(r, settings, token=token).tree(REF, SHA)
+        assert r.requests[0].headers["Authorization"] == expected
+
+
+@pytest.mark.parametrize("token", [":secret", "OnNlY3JldA=="])
+def test_an_empty_username_is_a_400(settings, token) -> None:
+    """It authenticates as nobody, and `//:secret@` is a shape the clone-URL scrubber
+    could not mask, so the password would reach the logs."""
     with pytest.raises(SCMCredentialError) as info:
-        BitbucketServerSCMClient("jdoe:s3cr3t", settings, API)
-    assert "base64" in str(info.value)
+        BitbucketServerSCMClient(token, settings, API)
+    assert info.value.status_code == 400 and "empty username" in str(info.value)
 
 
-def test_base64_without_a_colon_is_a_400(settings) -> None:
-    with pytest.raises(SCMCredentialError):
-        BitbucketServerSCMClient(base64.b64encode(b"nocolon").decode(), settings, API)
+def test_a_bare_token_clones_through_a_header_not_a_url_credential(
+    router, settings
+) -> None:
+    c = _client(router, settings, token="BBDC-MDI2Mzg3NTk5MDcw")
+    assert c.clone_url(REF) == (
+        "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+    )
+    assert c.git_auth_config() == [
+        "-c", "http.extraHeader=Authorization: Bearer BBDC-MDI2Mzg3NTk5MDcw",
+    ]
+
+
+def test_a_basic_credential_needs_no_git_config(router, settings) -> None:
+    assert _client(router, settings).git_auth_config() == []
 
 
 def test_missing_api_base_url_is_a_400(settings) -> None:
@@ -214,3 +257,12 @@ def test_personal_project_key_keeps_its_tilde(router, settings) -> None:
     router.add(r"/files", httpx.Response(200, json={"values": [], "isLastPage": True}))
     _client(router, settings).tree(ref, SHA)
     assert "/projects/~jdoe/repos/kit/files" in router.urls[0]
+
+
+def test_an_html_body_with_a_200_is_a_502_not_a_500(router, settings) -> None:
+    """A Data Center behind SSO answers a login page with HTTP 200; decoding it as JSON
+    raised, which surfaced as our fault rather than the provider's."""
+    router.add(r"/files", httpx.Response(200, text="<html>SSO login</html>"))
+    with pytest.raises(SCMAPIError) as info:
+        _client(router, settings).tree(REF, SHA)
+    assert info.value.status_code == 502 and "non-JSON" in str(info.value)
