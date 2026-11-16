@@ -54,6 +54,11 @@ class FakeClient(AbstractSCMClient):
         self._maybe_fail()
         return self._changes
 
+    def compare_relation(self, ref, base, head):
+        self.calls.append(("compare_relation", base, head))
+        self._maybe_fail()
+        return ChangeSet(relation="ahead", merge_base_sha=base)
+
     def tree(self, ref, commit):
         self.calls.append(("tree", commit))
         self._maybe_fail()
@@ -225,6 +230,17 @@ def test_compare_returns_git_diff_result() -> None:
         ],
     }
     assert fake.calls == [("compare", OLD, SHA)]
+
+
+def test_compare_relation_only_skips_the_file_list() -> None:
+    fake = FakeClient(changed=["a.py"], files=[FileDiff("a.py", "modified", 1, 0)])
+    r = _app(fake).post(
+        "/api/git/compare",
+        json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA, "relationOnly": True},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"baseSha": OLD, "headSha": SHA, "relation": "ahead", "mergeBaseSha": OLD}
+    assert fake.calls == [("compare_relation", OLD, SHA)]
 
 
 def test_compare_empty_diff() -> None:

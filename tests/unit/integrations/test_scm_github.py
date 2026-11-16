@@ -93,6 +93,19 @@ def test_compare_ignores_unknown_relation(router, settings) -> None:
     assert (cs.relation, cs.merge_base_sha) == (None, None)
 
 
+def test_compare_relation_is_one_small_request(router, settings) -> None:
+    router.add(r"/compare/", httpx.Response(200, json={
+        "status": "ahead", "merge_base_commit": {"sha": "c" * 40},
+        "files": [{"filename": "a.py", "status": "modified"}],
+        "headers_next": "ignored",
+    }, headers={"Link": '<https://api.github.com/next>; rel="next"'}))
+    cs = _client(router, settings).compare_relation(REF, BASE, SHA)
+    assert (cs.relation, cs.merge_base_sha) == ("ahead", "c" * 40)
+    assert cs.files == []  # the file list is not read
+    assert len(router.requests) == 1  # and no further pages are followed
+    assert router.requests[0].url.params["per_page"] == "1"
+
+
 def test_compare_empty_is_empty_changeset(router, settings) -> None:
     router.add(r"/compare/", httpx.Response(200, json={"files": []}))
     assert _client(router, settings).compare(REF, BASE, SHA).is_empty

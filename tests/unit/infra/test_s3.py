@@ -309,3 +309,30 @@ def test_reader_idle_timeout():
     reader = _QueueReader(queue.Queue(), idle_timeout=0.5)
     with pytest.raises(TimeoutError):
         reader.read(10)
+
+
+def test_idle_clock_restarts_on_caller_activity():
+    """gzip emits nothing for a long time; the caller's writes must keep the reader alive."""
+    import queue
+    import threading
+    import time
+    from breezeai_cog.infra.aws.s3 import _QueueReader
+
+    q: queue.Queue = queue.Queue()
+    reader = _QueueReader(q, idle_timeout=1.5)
+    result: list = []
+
+    def run():
+        try:
+            result.append(reader.read(10))
+        except BaseException as exc:  # noqa: BLE001
+            result.append(exc)
+
+    t = threading.Thread(target=run)
+    t.start()
+    for _ in range(4):  # 2s of activity without any compressed output, > idle_timeout
+        time.sleep(0.5)
+        reader.touch()
+    q.put(b"0123456789")
+    t.join(timeout=5)
+    assert result == [b"0123456789"]

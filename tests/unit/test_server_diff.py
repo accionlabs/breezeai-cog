@@ -29,6 +29,7 @@ class _Captured:
     def __init__(self) -> None:
         self.records: list[dict] = []
         self.notifications: list[tuple[str, dict]] = []
+        self.aborted = 0
 
 
 class _FakeInfra:
@@ -41,6 +42,9 @@ class _FakeInfra:
     def close(self) -> str:
         self._c.records.extend(json.loads(x) for x in self._lines)
         return "ok"
+
+    def abort(self) -> None:
+        self._c.aborted += 1
 
 
 def _make_client(captured: _Captured, filter_set, deleted, repo_files: dict | None = None) -> TestClient:
@@ -81,6 +85,22 @@ def test_full_clone(captured: _Captured) -> None:
     assert meta["repoUrl"] == BODY["repoUrl"] and meta["commitId"] == "abc123"
     assert meta["gitBranch"] == "main" and meta["totalFiles"] == 2
     assert payload["codeOntologyId"] == "C1" and payload["storage_key"] == out["storage_key"]
+
+
+def test_successful_export_is_not_aborted(captured: _Captured) -> None:
+    client = _make_client(captured, filter_set=None, deleted=[])
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 200
+    assert captured.aborted == 0
+
+
+def test_parse_failure_aborts_the_upload(captured: _Captured, monkeypatch) -> None:
+    def boom(*_a, **_k):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr("breezeai_cog.server.routes.run_diff_stream", boom)
+    client = _make_client(captured, filter_set=None, deleted=[])
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 500
+    assert captured.aborted == 1  # the upload thread is released, not left to the idle timeout
 
 
 def test_incremental_diff_filters_to_changed(captured: _Captured) -> None:

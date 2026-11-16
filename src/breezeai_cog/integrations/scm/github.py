@@ -138,10 +138,7 @@ class GitHubSCMClient(AbstractSCMClient):
         for resp in self._http.paginate(first, _next_link, {"per_page": "100"}):
             body = resp.json()
             if out.relation is None:  # every page repeats it; the first one is enough
-                status = body.get("status")
-                out.relation = status if status in _RELATIONS else None
-                merge_base = (body.get("merge_base_commit") or {}).get("sha")
-                out.merge_base_sha = merge_base if isinstance(merge_base, str) and merge_base else None
+                _read_relation(out, body)
             for f in body.get("files") or []:
                 name = f.get("filename")
                 if not name:
@@ -163,6 +160,17 @@ class GitHubSCMClient(AbstractSCMClient):
                     out.deleted.append(prev)
         return out
 
+    def compare_relation(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
+        """One compare request for ``status`` / ``merge_base_commit``. ``per_page=1`` keeps
+        the response small: the file list is not read, so an old commit with thousands of
+        changed files costs one call instead of one per 100 files."""
+        body = self._http.get_json(
+            f"/repos/{ref.owner}/{ref.repo}/compare/{base}...{head}", {"per_page": "1"}
+        )
+        out = ChangeSet()
+        _read_relation(out, body if isinstance(body, dict) else {})
+        return out
+
     def file_content(self, ref: RepoRef, path: str, commit: str) -> str:
         return self._http.get_text(
             f"/repos/{ref.owner}/{ref.repo}/contents/{quote(path)}",
@@ -177,6 +185,14 @@ class GitHubSCMClient(AbstractSCMClient):
 
 
 _RELATIONS = frozenset({"identical", "ahead", "behind", "diverged"})
+
+
+def _read_relation(out: ChangeSet, body: dict) -> None:
+    """Copy a compare response's ``status`` and ``merge_base_commit`` onto ``out``."""
+    status = body.get("status")
+    out.relation = status if status in _RELATIONS else None
+    merge_base = (body.get("merge_base_commit") or {}).get("sha")
+    out.merge_base_sha = merge_base if isinstance(merge_base, str) and merge_base else None
 
 
 def _next_link(resp: httpx.Response) -> str | None:

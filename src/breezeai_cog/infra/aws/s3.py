@@ -14,6 +14,7 @@ import gzip
 import io
 import queue
 import threading
+import time
 from threading import Lock
 from typing import Any
 
@@ -62,9 +63,11 @@ def _default_client(settings: Settings) -> Any:
 
 _EOF = object()
 _QUEUE_CHUNKS = 64  # bounded: backpressure on the writer, never unbounded memory
-# The reader gives up when the writer sends nothing for this long (a caller that never
-# closes the stream, e.g. after an exception mid-export), so the upload thread cannot
-# hang for the life of the process.
+# The reader gives up when the caller has neither written a line nor closed the stream for
+# this long (e.g. after an exception mid-export), so the upload thread cannot hang for the
+# life of the process. Activity is the caller's ``write_line`` calls, not compressed output:
+# gzip buffers about 128 KB before emitting anything, so a slow but healthy export can
+# produce no bytes for a long time.
 _READER_IDLE_TIMEOUT_S = 600.0
 _POLL_S = 0.5
 
@@ -78,20 +81,25 @@ class _QueueReader(io.RawIOBase):
         self._buf = b""
         self._eof = False
         self._idle_timeout = idle_timeout
+        self._last_activity = time.monotonic()
         self.abandoned = threading.Event()  # set by the owner to stop a waiting reader
 
+    def touch(self) -> None:
+        """Record caller activity (a line written), which restarts the idle clock."""
+        self._last_activity = time.monotonic()
+
     def _next_chunk(self) -> Any:
-        waited = 0.0
         while True:
             if self.abandoned.is_set():
                 raise BrokenPipeError("upload stream abandoned")
             try:
-                return self._chunks.get(timeout=_POLL_S)
+                chunk = self._chunks.get(timeout=_POLL_S)
+                self.touch()
+                return chunk
             except queue.Empty:
-                waited += _POLL_S
-                if waited >= self._idle_timeout:
+                if time.monotonic() - self._last_activity >= self._idle_timeout:
                     raise TimeoutError(
-                        f"no data from the writer for {self._idle_timeout:.0f}s; stream was never closed"
+                        f"no writes to the upload for {self._idle_timeout:.0f}s; stream was never closed"
                     ) from None
 
     def readable(self) -> bool:
@@ -250,6 +258,7 @@ class AWSStreamUpload(InfraStream):
         if error is not None:
             raise error
 
+        self._reader.touch()
         try:
             self._gz.write(line.encode("utf-8"))
         except (BrokenPipeError, OSError) as exc:
