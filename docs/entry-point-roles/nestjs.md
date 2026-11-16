@@ -10,7 +10,7 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 | `@Controller(path)` / `@JsonController(path)` on a class | Wiring | — (prefix for the class's bindings) | Container, no handler |
 | `app.setGlobalPrefix(prefix)` in the bootstrap | Wiring | — (prefix for every HTTP binding) | Applies to all handlers |
 | `RouterModule.register([{ path, module }])` | Wiring | — (prefix for the module's controllers) | Points at a module |
-| `@Version(v)` on a method or controller | Wiring | — (`version` on the bindings; part of the path under URI versioning) | Adds to other bindings |
+| `@Version(v)` on a method or controller, `@Controller({ version })`, `app.enableVersioning({ defaultVersion })` | Wiring | — (under URI versioning the version is in `endpoint` — `/api/v2/orders`, one binding per version; under header / media-type / custom versioning, or when the app's setting can't be read, `endpoint` stays unversioned and `version` holds it; `VERSION_NEUTRAL` adds no version) | Adds to other bindings |
 | `@UseGuards(...)` / `@Authorized()` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@UseInterceptors(...)` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@WebSocketGateway([port,] { namespace })` on a class | Wiring | — (namespace for the class's message handlers; the port and the engine `path` are connection settings) | Container, no handler |

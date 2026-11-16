@@ -29,7 +29,7 @@ from ..emits import Emit
 from ..index_common import record_distinct
 from .cron_expressions import CRON_EXPRESSIONS
 from .patterns import message_pattern
-from .prefixes import nest_prefixes
+from .prefixes import Versioning, Versions, nest_prefixes, version_values
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
@@ -90,6 +90,7 @@ _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$
 # `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
 # object form (the string form `@Controller('orders')` is handled directly).
 _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
+_VERSION_PROP_RE = re.compile(r"""\bversion\s*:\s*(\[[^\]]*\]|'[^']*'|"[^"]*"|`[^`]*`|[\w.]+)""")
 
 
 def _unquote(text: str) -> str:
@@ -366,13 +367,63 @@ def _controller_base(decorators: list[Node], source: bytes) -> str | None:
     return None
 
 
-def _version(decorators: list[Node], source: bytes) -> str | None:
-    """``@Version('2')`` (URI versioning) on a method or the controller → version tag."""
+def _versions(decorators: list[Node], source: bytes) -> Versions | None:
+    """The versions declared on a method or a controller: ``@Version('2')``, ``@Version(['1',
+    '2'])``, ``@Version(VERSION_NEUTRAL)``, or ``@Controller({ path, version })``. None when
+    nothing is declared; ``()`` when a version is declared but not written literally."""
     for dec in decorators:
         d = decorator(dec, source)
+        arg: str | None = None
         if d.name == "Version" and d.args:
-            return _unquote(d.args[0])
+            arg = d.args[0]
+        elif d.name in _CONTROLLER_DECORATORS and d.args and d.args[0].strip().startswith("{"):
+            m = _VERSION_PROP_RE.search(d.args[0])
+            arg = m.group(1) if m else None
+        if arg is not None:
+            return version_values(arg) or ()
     return None
+
+
+def _versioning_for(path: str, index: object | None) -> Versioning | None:
+    """The ``enableVersioning`` setting of the app this controller belongs to (the deepest
+    bootstrap directory above it), or None when cog saw no such call for it."""
+    prefixes = nest_prefixes(index)
+    if prefixes is None or not prefixes.versioning:
+        return None
+    anchors = [d for d in prefixes.versioning if d == "" or path.startswith(d + "/")]
+    return prefixes.versioning[max(anchors, key=len)] if anchors else None
+
+
+#: A route variant: (``version`` field, URI segment to insert, whether the address is known).
+_Variant = tuple[str | None, str | None, bool]
+
+
+def _version_variants(declared: Versions | None, cfg: Versioning | None) -> list[_Variant]:
+    """One entry per address a route answers on. URI versioning puts the version in the address
+    (``/v2/orders``) and leaves ``version`` empty; header / media-type / custom versioning keep
+    the address and set ``version``. When the app's setting was not found or cannot be read,
+    the address stays unversioned and ``version`` carries each declared version. A route with
+    no version of its own takes the app's ``defaultVersion``; ``VERSION_NEUTRAL`` answers
+    without one. A version that is not written literally leaves a URI address unknown."""
+    known = cfg is not None and cfg.kind is not None
+    if declared is None and known and cfg is not None:
+        declared = cfg.default
+    if declared is None:
+        return [(None, None, True)]
+    uri = known and cfg is not None and cfg.kind == "URI"
+    if not declared:  # declared, but not literal
+        return [(None, None, not uri)]
+    out: list[_Variant] = []
+    for v in declared:
+        if v is None:
+            variant: _Variant = (None, None, True)
+        elif uri and cfg is not None:
+            variant = (None, cfg.prefix + v, True)
+        else:
+            variant = (v, None, True)
+        if variant not in out:
+            out.append(variant)
+    return out
 
 
 def _class_with_decorators(root: Node):
@@ -411,36 +462,42 @@ def _excluded(local: str, verb: str, exclude: tuple[tuple[str, str | None], ...]
     return False
 
 
-def _served(local: str, verb: str, class_name: str, path: str, index: object | None) -> str | None:
+def _served(
+    local: str, verb: str, class_name: str, path: str, index: object | None,
+    version_segment: str | None = None,
+) -> str | None:
     """A NestJS HTTP route's full address: the app's ``setGlobalPrefix`` (unless excluded), then
-    its ``RouterModule`` path, then the controller and method paths (``local``). A prefix that is
+    the URI version segment (``v2``), then its ``RouterModule`` path, then the controller and
+    method paths (``local``). A prefix that is
     set but cannot be resolved — or a controller that cannot be tied to its app when one of the
     repo's apps sets a prefix — makes the address unknown → None (contract §8: never a partial
     address)."""
     prefixes = nest_prefixes(index)
     if prefixes is None:
-        return local
+        return _join(version_segment, local) if version_segment else local
     ctrl_prefixes = prefixes.controller_prefixes
     if class_name in ctrl_prefixes:
         mp = ctrl_prefixes[class_name]
         if mp is None:
             return None
         local = _join(mp, local)
+    # The version segment follows the global prefix; the exclude list matches the path without it.
+    versioned = _join(version_segment, local) if version_segment else local
     boots = prefixes.global_prefixes
     if not boots:
-        return local
+        return versioned
     anchors = [d for d in boots if d == "" or path.startswith(d + "/")]
     if not anchors:  # not under any app's bootstrap
-        return local if all(b == ("", ()) for b in boots.values()) else None
+        return versioned if all(b == ("", ()) for b in boots.values()) else None
     prefix, exclude = boots[max(anchors, key=len)]  # the deepest app above this controller
     if prefix == "":
-        return local
+        return versioned
     if prefix is None or exclude is None:
         return None
     hit = _excluded(local, verb, exclude)
     if hit is None:
         return None
-    return local if hit else _join(prefix, local)
+    return versioned if hit else _join(prefix, versioned)
 
 
 def detect_nest_routes(
@@ -469,7 +526,8 @@ def detect_nest_routes(
         ctrl_guards = (_guards(decs, source, interceptors=True)
                        if is_controller or is_gateway else [])
         ctrl_auth = bool(_guards(decs, source)) if is_controller or is_gateway else False
-        ctrl_version = _version(decs, source) if is_controller else None
+        ctrl_versions = _versions(decs, source) if is_controller else None
+        versioning = _versioning_for(path, index) if framework == "nestjs" else None
         # Stub parent: @Resolver(() => T) where a root @Mutation/@Query (in this class or any
         # other resolver of the repo) returns T as an empty object — T's @ResolveField methods
         # are that kind's operations, addressed <T>.<field>.
@@ -516,25 +574,31 @@ def detect_nest_routes(
                     )
                     fields: dict[str, Any]
                     if verb is not None:  # HTTP route: one per controller path × method path
+                        declared = _versions(pending, source)  # × version (see _version_variants)
+                        variants = _version_variants(
+                            ctrl_versions if declared is None else declared, versioning)
                         for b in _paths(base or ""):
                             for sub in (_paths(d.args[0]) if d.args else [""]):
                                 local = _join(b, sub) if b is not None and sub is not None \
                                     else None
-                                routes.append(Emit(dec, dict(
-                                    semanticType="route",
-                                    method=verb,
-                                    endpoint=(
-                                        _served(local, verb, class_name, path, index)
-                                        if framework == "nestjs" and local is not None
-                                        else local
-                                    ),
-                                    routeKind="route",
-                                    version=_version(pending, source) or ctrl_version,
-                                    requestDTO=_request_dto(member, source),
-                                    responseDTO=(_response_dto(pending, source)
-                                                 or return_dto(member, source)),
-                                    **common,
-                                ), parent=parent, node_type="synthetic"))
+                                for version, segment, known in variants:
+                                    routes.append(Emit(dec, dict(
+                                        semanticType="route",
+                                        method=verb,
+                                        endpoint=(
+                                            None if not known or local is None
+                                            else _served(local, verb, class_name, path, index,
+                                                         segment)
+                                            if framework == "nestjs"
+                                            else local
+                                        ),
+                                        routeKind="route",
+                                        version=version,
+                                        requestDTO=_request_dto(member, source),
+                                        responseDTO=(_response_dto(pending, source)
+                                                     or return_dto(member, source)),
+                                        **common,
+                                    ), parent=parent, node_type="synthetic"))
                         continue
                     elif ref:  # @ResolveReference: the gateway's _entities fetch of this type
                         fields = dict(
