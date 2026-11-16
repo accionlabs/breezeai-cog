@@ -1,4 +1,7 @@
-"""Semantic type of a Markdown document, from its name, location and front matter.
+"""Kind of a Markdown document, from its name, location and front matter.
+
+The kind is ``File.metadata.kind``. The Statement's ``semanticType`` is the kind for the four
+agent types and ``doc`` for every other kind (:func:`statement_type`).
 
 Precedence: ``skill`` > ``agent`` > ``command`` > ``agent_instructions`` > ``readme`` >
 ``changelog`` > ``adr`` > ``doc``. A type that needs front matter (``skill``, ``agent``, and a
@@ -22,6 +25,10 @@ AGENT_DOCUMENT_KINDS: frozenset[str] = frozenset(
     {"skill", "agent", "command", "agent_instructions", "adr"}
 )
 
+#: Kinds that are a ``semanticType`` of their own; a README, a changelog and a decision record
+#: are ``doc`` statements, told apart by ``File.metadata.kind``.
+_STATEMENT_TYPES: frozenset[str] = frozenset({"skill", "agent", "command", "agent_instructions"})
+
 #: Matched in exact case: the tools read these names as written, and a lower-case
 #: `docs/agents.md` or `docs/providers/claude.md` is prose about an agent, not its instructions.
 _AGENT_INSTRUCTION_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md"})
@@ -41,7 +48,7 @@ def classify(
     headings: list[dict[str, Any]],
     plugin_root: Callable[[str], bool],
 ) -> str:
-    """Return the semantic type of the Markdown file at repo-relative ``path``.
+    """Return the kind of the Markdown file at repo-relative ``path``.
 
     ``plugin_root(dir)`` tells whether a repo-relative directory is a Claude Code or Cursor
     plugin root (it holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json``);
@@ -111,6 +118,11 @@ def classify(
         return "adr"
 
     return "doc"
+
+
+def statement_type(kind: str) -> str:
+    """``semanticType`` of the document statement for a :func:`classify` kind."""
+    return kind if kind in _STATEMENT_TYPES else "doc"
 
 
 def _is_adr(name: str, dirs: tuple[str, ...], headings: list[dict[str, Any]]) -> bool:

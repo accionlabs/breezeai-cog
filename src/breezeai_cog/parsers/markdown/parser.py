@@ -5,14 +5,18 @@ Every ``.md`` / ``.mdx`` / ``.mdc`` file (plus ``README.rst`` and ``.cursorrules
 holds ``{kind, category: "documentation", frontmatter, title, headings}``, and, under statement
 capture, one Statement:
 
-* ``nodeType="document"``, ``semanticType`` = the kind (see :mod:`.classify`)
-* ``text`` = the whole file, secrets masked, cut at 64 KB on a line boundary with the loss
-  marked inline (``metadata.truncated`` / ``originalSize`` on the File)
+* ``nodeType="synthetic"`` (no grammar parses the file), ``semanticType`` = ``skill`` /
+  ``agent`` / ``command`` / ``agent_instructions`` / ``doc`` (see :mod:`.classify`; a README,
+  a changelog and a decision record are ``doc``, told apart by ``metadata.kind`` on the File)
+* ``text`` = the whole file, secrets masked
 * ``name`` / ``description`` from the front matter (name falls back to the title, the command
   file name, then the file name)
 
-Files over 512 KB keep the File record only. Like ``structured_data``, the statement is not
-embedded: it is found by exact filters (``semanticType``, ``name``, ``text`` contains).
+No size limit is specific to Markdown: a long document is split at emit time like any other
+statement (:mod:`breezeai_cog.emit.split`) into ordered ``#part{i}of{n}`` records, of which
+only part 1 keeps ``semanticType`` / ``name`` / ``description``. Like ``structured_data``, the
+statement is not embedded: it is found by exact filters (``semanticType``, ``name``, ``text``
+contains).
 """
 
 from __future__ import annotations
@@ -23,11 +27,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ...emit import file_id, statement_id
+from ...logging import get_logger
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..structured_json.redaction import redact_text
-from .classify import classify
+from .classify import classify, statement_type
 from .frontmatter import (
     load_front_matter,
     secret_name,
@@ -36,10 +41,8 @@ from .frontmatter import (
     token_count,
 )
 
-#: Statement text cap, in UTF-8 bytes (the largest SKILL.md measured is 60.5 KB).
-MAX_TEXT_BYTES = 64 * 1024
-#: Above this size a document keeps its File record (metadata + outline) and no Statement.
-MAX_STATEMENT_FILE_BYTES = 512 * 1024
+log = get_logger("breezeai_cog.parsers.markdown")
+
 _MAX_HEADINGS = 200
 _MAX_HEADING_LEVEL = 3
 _MAX_HEADING_CHARS = 200
@@ -53,7 +56,7 @@ _ANY_FENCE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)(.*)$")
 #: An indented code block line (four spaces or a tab), where snippets also live.
 _INDENTED_CODE = re.compile(r"^(?: {4}|[ \t]{0,3}\t)")
 _RST_UNDERLINE = re.compile(r"^([=\-~^\"'`#*+])\1{2,}\s*$")
-#: Inline base64 payloads (pasted images) carry no meaning for a reader and would eat the cap.
+#: Inline base64 payloads (pasted images) carry no meaning for a reader.
 _DATA_URI = re.compile(r"data:([a-zA-Z0-9.+/\-]+);base64,[A-Za-z0-9+/=]{200,}")
 #: Env-style assignment of a variable (``export DB_PASSWORD=…``); masked when the name is
 #: secret-like (:func:`~.frontmatter.secret_name`). Upper-case names only, so prose ("the
@@ -107,8 +110,6 @@ _FLOW_PAIR = re.compile(
     r"(?<![\w.\-\"'])([\"']?)([A-Za-z_][\w.\-]*+)\1([ \t]*:[ \t]*)"
     r"(\"[^\"\n]*\"|'[^'\n]*'|[^,{}\[\]\n]*)"
 )
-#: Bytes kept free under :data:`MAX_TEXT_BYTES` for the inline cut marker.
-_MARKER_RESERVE = len("\n…[+9999999999 bytes dropped: markdown 64 KB cap]".encode())
 #: Values after a secret-named key that are a type or a placeholder, not a secret
 #: (``password: string;`` in a TypeScript interface).
 _TYPE_VALUES = frozenset(
@@ -156,7 +157,6 @@ class MarkdownParser(BaseParser):
         return super().matches(path) or PurePosixPath(path).suffix.lower() in _SUFFIXES_ANY_CASE
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        size = len(ctx.source)
         text = _decode(ctx.source)
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         lines = text.split("\n")
@@ -182,7 +182,7 @@ class MarkdownParser(BaseParser):
             "headings": headings,
         }
         if not fm_ok:
-            metadata["frontmatterError"] = True
+            log.warning("markdown.front_matter_unreadable", path=ctx.path)
 
         record = FileRecord(
             id=file_id(ctx.path),
@@ -193,30 +193,23 @@ class MarkdownParser(BaseParser):
             metadata=metadata,
         )
 
-        # FileRecord copies ``metadata`` on validation: later flags go on the record's own dict.
-        assert record.metadata is not None
-        if size > MAX_STATEMENT_FILE_BYTES:
-            record.metadata.update(truncated=True, originalSize=size)
-            return record
         if not ctx.capture_statements:
             return record
 
         # Secret-named front-matter values are masked in the text too, not only in metadata.
         if body_start:
             text = "\n".join(_mask_front_matter(lines, body_start))
-        body, end_line, dropped = _cap(_clean(text), lines)
-        if dropped:
-            record.metadata.update(truncated=True, originalSize=size)
         stem = PurePosixPath(ctx.path).name.split(".")[0]
         record.statements.append(
             Statement(
                 id=statement_id(ctx.path, 1, 0),
                 parentId=record.id,
-                nodeType="document",
-                semanticType=kind,  # type: ignore[arg-type]
-                text=body,
+                nodeType="synthetic",
+                semanticType=statement_type(kind),  # type: ignore[arg-type]
+                text=_clean(text),
                 startLine=1,
-                endLine=end_line,
+                # A final newline ends the last line; it does not start another.
+                endLine=max(len(lines) - (1 if lines[-1] == "" else 0), 1),
                 path=ctx.path,
                 name=string_field(front_matter, "name")
                 or (stem if kind == "command" else None)
@@ -557,33 +550,6 @@ def _collection_end(line: str, start: int) -> int:
     return len(line)
 
 
-def _cap(text: str, lines: list[str]) -> tuple[str, int, int]:
-    """Cut ``text`` to :data:`MAX_TEXT_BYTES` on a line boundary → ``(text, endLine, dropped)``.
-    ``dropped`` is the number of bytes left out (0 when nothing was cut); the cut is marked
-    inline. A first line longer than the cap is hard-cut."""
-    total = len(text.encode("utf-8"))
-    last_line = max(len(lines) - (1 if lines and lines[-1] == "" else 0), 1)
-    if total <= MAX_TEXT_BYTES:
-        return text, last_line, 0
-    budget = MAX_TEXT_BYTES - _MARKER_RESERVE  # the marker fits under the cap too
-    kept: list[str] = []
-    used = 0
-    for line in text.split("\n"):
-        size = len(line.encode("utf-8")) + 1
-        if used + size > budget:
-            break
-        kept.append(line)
-        used += size
-    if kept:
-        body = "\n".join(kept)
-        end_line = len(kept)
-    else:  # one unbroken line over the cap
-        body = text.encode("utf-8")[:budget].decode("utf-8", "ignore")
-        end_line = 1
-    dropped = total - len(body.encode("utf-8"))
-    return f"{body}\n…[+{dropped} bytes dropped: markdown 64 KB cap]", end_line, dropped
-
-
 def _atx_headings(lines: list[str], start: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     fence: str | None = None
@@ -662,4 +628,3 @@ def _plugin_check(repo_root: Path | str | None) -> Callable[[str], bool]:
         return any((folder / d / "plugin.json").is_file() for d in _PLUGIN_MANIFEST_DIRS)
 
     return plugin_root
-

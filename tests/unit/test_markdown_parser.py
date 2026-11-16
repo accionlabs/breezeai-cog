@@ -1,6 +1,6 @@
-"""MarkdownParser: one File + one whole-file ``document`` statement per
-Markdown file, classified by name / location / front matter; defensive front matter; secrets
-masked; the 64 KB cut and the 512 KB File-only limit; pipeline totals and the doc-count cap."""
+"""MarkdownParser: one File + one whole-file ``synthetic`` statement per
+Markdown file, typed by name / location / front matter; defensive front matter; secrets
+masked; a long document split into parts at emit time; pipeline totals."""
 
 from __future__ import annotations
 
@@ -10,11 +10,9 @@ import pytest
 
 from breezeai_cog.core import pipeline, registry
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.markdown.parser import (
-    MAX_STATEMENT_FILE_BYTES,
-    MAX_TEXT_BYTES,
-    MarkdownParser,
-)
+from breezeai_cog.parsers.markdown import parser as markdown_parser
+from breezeai_cog.parsers.markdown.classify import statement_type
+from breezeai_cog.parsers.markdown.parser import MarkdownParser
 from breezeai_cog.schemas import ProjectMetaData
 
 
@@ -27,9 +25,29 @@ def _parse(path: str, text: str | bytes, *, repo_root: Path | str = ".", capture
 
 
 def _kind(path: str, text: str = "# Title\n", **kw) -> str:
+    """``File.metadata.kind``; the statement's ``semanticType`` is checked against it."""
     rec = _parse(path, text, **kw)
-    assert rec.metadata["kind"] == rec.statements[0].semanticType
+    assert rec.statements[0].semanticType == statement_type(rec.metadata["kind"])
     return rec.metadata["kind"]
+
+
+class _Warnings:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def warning(self, event: str, **kw) -> None:
+        self.events.append((event, kw))
+
+
+@pytest.fixture
+def warnings(monkeypatch: pytest.MonkeyPatch) -> _Warnings:
+    """The warnings the Markdown parser logs."""
+    log = _Warnings()
+    monkeypatch.setattr(markdown_parser, "log", log)
+    return log
+
+
+_FM_WARNING = "markdown.front_matter_unreadable"
 
 
 SKILL = """---
@@ -56,7 +74,7 @@ def test_skill_record_and_statement_shape() -> None:
     assert md["title"] == "Search skill"
     assert md["headings"] == [{"level": 1, "text": "Search skill", "line": 7}]
     [st] = rec.statements
-    assert st.nodeType == "document" and st.semanticType == "skill"
+    assert st.nodeType == "synthetic" and st.semanticType == "skill"
     assert st.id == "skills/search/SKILL.md:1:0" and st.parentId == rec.id
     assert (st.startLine, st.endLine) == (1, 9)
     assert st.text == SKILL
@@ -151,8 +169,15 @@ def test_markdown_owns_md_mdx_mdc_and_readme_rst() -> None:
         ("page.mdx", "# Page\n<Comp />\n", "doc"),
     ],
 )
-def test_semantic_type(path: str, text: str, kind: str) -> None:
+def test_kind(path: str, text: str, kind: str) -> None:
     assert _kind(path, text) == kind
+
+
+@pytest.mark.parametrize(
+    "path", ["README.md", "CHANGELOG.md", "docs/adr/0001-use-neo4j.md", "docs/setup.md"]
+)
+def test_readme_changelog_and_decision_record_are_doc_statements(path: str) -> None:
+    assert _parse(path, "# T\n").statements[0].semanticType == "doc"
 
 
 def test_plugin_commands_folder_is_a_command(tmp_path: Path) -> None:
@@ -175,16 +200,17 @@ def test_name_falls_back_to_title_then_file_name() -> None:
 # ── front matter ─────────────────────────────────────────────────────────────
 
 
-def test_invalid_front_matter_falls_back_to_doc_and_is_flagged() -> None:
+def test_invalid_front_matter_falls_back_to_doc_and_is_logged(warnings: _Warnings) -> None:
     rec = _parse("skills/x/SKILL.md", "---\nname: [unclosed\ndescription: d\n---\n# X\n")
-    assert rec.metadata["kind"] == "doc" and rec.metadata["frontmatterError"] is True
+    assert rec.metadata["kind"] == "doc" and "frontmatterError" not in rec.metadata
+    assert warnings.events == [(_FM_WARNING, {"path": "skills/x/SKILL.md"})]
     assert rec.metadata["frontmatter"] == {}
     assert rec.statements[0].semanticType == "doc"
 
 
-def test_unclosed_front_matter_is_body_text() -> None:
+def test_unclosed_front_matter_is_body_text(warnings: _Warnings) -> None:
     rec = _parse("docs/x.md", "---\nname: x\n# Title\n")
-    assert rec.metadata["frontmatter"] == {} and "frontmatterError" not in rec.metadata
+    assert rec.metadata["frontmatter"] == {} and warnings.events == []
 
 
 @pytest.mark.parametrize(
@@ -196,9 +222,11 @@ def test_unclosed_front_matter_is_body_text() -> None:
         "- just\n- a list",  # not a mapping
     ],
 )
-def test_unsafe_or_unusable_front_matter_is_rejected(front_matter: str) -> None:
+def test_unsafe_or_unusable_front_matter_is_rejected(
+    front_matter: str, warnings: _Warnings
+) -> None:
     rec = _parse("skills/x/SKILL.md", f"---\n{front_matter}\n---\n# X\n")
-    assert rec.metadata["frontmatterError"] is True and rec.metadata["kind"] == "doc"
+    assert [e for e, _ in warnings.events] == [_FM_WARNING] and rec.metadata["kind"] == "doc"
     rec.model_dump_json()  # serializable: the sink can always write it
 
 
@@ -265,42 +293,35 @@ def test_data_uri_payload_is_dropped() -> None:
 # ── limits ───────────────────────────────────────────────────────────────────
 
 
-def test_text_over_64_kb_is_cut_on_a_line_boundary_and_marked() -> None:
-    line = "x" * 99
-    text = "\n".join([line] * 1000) + "\n"  # 100,000 bytes, 1000 lines
-    rec = _parse("docs/big.md", text)
-    st = rec.statements[0]
-    body, _, marker = st.text.rpartition("\n")
-    assert len(body.encode()) <= MAX_TEXT_BYTES
-    assert body.split("\n")[-1] == line  # whole lines only
-    assert st.endLine == len(body.split("\n")) < 1000
-    assert marker.startswith("…[+") and "bytes dropped: markdown 64 KB cap]" in marker
-    assert rec.metadata["truncated"] is True and rec.metadata["originalSize"] == len(text)
-
-
-def test_a_single_line_over_64_kb_is_hard_cut() -> None:
-    st = _parse("docs/one.md", "y" * (MAX_TEXT_BYTES + 10)).statements[0]
-    assert st.endLine == 1 and st.text.startswith("y" * 100) and "bytes dropped" in st.text
-
-
-def test_text_within_the_cap_is_whole() -> None:
+def test_text_is_whole_and_ends_on_the_last_line() -> None:
     rec = _parse("docs/a.md", "a\nb\n")
-    assert rec.statements[0].endLine == 2 and "truncated" not in rec.metadata
+    assert rec.statements[0].text == "a\nb\n" and rec.statements[0].endLine == 2
+    assert _parse("docs/a.md", "a\nb").statements[0].endLine == 2
 
 
-def test_file_over_512_kb_keeps_the_file_record_only() -> None:
-    text = "# Big\n" + ("z" * 100 + "\n") * (MAX_STATEMENT_FILE_BYTES // 100)
+def test_no_markdown_only_size_limit() -> None:
+    text = "# Big\n" + ("z" * 99 + "\n") * 6000  # 600,006 bytes
     rec = _parse("docs/huge.md", text)
-    assert rec.statements == []
-    assert rec.metadata["truncated"] is True and rec.metadata["originalSize"] == len(text)
-    assert rec.metadata["title"] == "Big"
+    [st] = rec.statements
+    assert st.text == text and st.endLine == 6001
+    assert set(rec.metadata) == {"kind", "category", "frontmatter", "title", "headings"}
 
 
-def test_document_statements_are_not_split() -> None:
+def test_long_document_is_split_into_parts_like_any_statement() -> None:
     from breezeai_cog.emit import split_oversized_statements
 
-    st = _parse("docs/a.md", ("w" * 79 + "\n") * 500).statements  # 40,000 chars
-    assert split_oversized_statements(st, 8000) == st
+    text = SKILL + ("w" * 79 + "\n") * 250  # 20,000 characters after the front matter
+    [whole] = _parse("skills/search/SKILL.md", text).statements
+    parts = split_oversized_statements([whole], 8000)
+    assert [p.id for p in parts] == [f"{whole.id}#part{i}of3" for i in (1, 2, 3)]
+    assert all(p.isPartial and len(p.text) <= 8000 for p in parts)
+    assert "".join(p.text for p in parts) == text  # nothing lost
+    first, *rest = parts
+    assert (first.semanticType, first.name) == ("skill", "search")
+    assert first.description == whole.description is not None
+    for p in rest:
+        assert (p.semanticType, p.name, p.description) == (None, None, None)
+        assert (p.nodeType, p.parentId, p.path) == ("synthetic", whole.parentId, whole.path)
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
@@ -430,9 +451,9 @@ def test_long_scheme_like_run_parses_fast() -> None:
     import time
 
     start = time.perf_counter()
-    rec = _parse("docs/a.md", "a" * 300_000)  # under 512 KB: goes through the cleaner
+    rec = _parse("docs/a.md", "a" * 300_000)
     assert time.perf_counter() - start < 2.0
-    assert rec.statements and rec.metadata["truncated"] is True
+    assert rec.statements[0].text == "a" * 300_000
 
 
 @pytest.mark.parametrize(
@@ -457,19 +478,21 @@ def test_cursor_plugin_layout(tmp_path: Path) -> None:
     assert _kind("commands/search.md", "Search it\n", repo_root=tmp_path) == "command"
 
 
-def test_cursor_front_matter_with_unquoted_glob_keeps_name_and_description() -> None:
+def test_cursor_front_matter_with_unquoted_glob_keeps_name_and_description(
+    warnings: _Warnings,
+) -> None:
     rec = _parse(
         "skills/x/SKILL.md",
         "---\nname: x\ndescription: Lint TS\nglobs: **/*.ts\nalwaysApply: false\n---\n# X\n",
     )
-    assert rec.metadata["frontmatterError"] is True
+    assert [e for e, _ in warnings.events] == [_FM_WARNING]
     assert rec.metadata["frontmatter"] == {"name": "x", "description": "Lint TS"}
     assert rec.metadata["kind"] == "skill" and rec.statements[0].description == "Lint TS"
 
 
-def test_non_yaml_leading_block_keeps_its_headings() -> None:
+def test_non_yaml_leading_block_keeps_its_headings(warnings: _Warnings) -> None:
     rec = _parse("docs/a.md", "---\n# Title\nSome prose here\n---\n## Next\n")
-    assert rec.metadata["frontmatterError"] is True
+    assert [e for e, _ in warnings.events] == [_FM_WARNING]
     assert [h["text"] for h in rec.metadata["headings"]] == ["Title", "Next"]
 
 
@@ -623,12 +646,6 @@ def test_commands_folder_deeper_in_a_plugin_is_a_doc(tmp_path: Path) -> None:
     assert _kind("docs/commands/cli.md", "CLI\n", repo_root=tmp_path) == "doc"
     assert _kind("skills/a/references/commands/deploy.md", "x\n", repo_root=tmp_path) == "doc"
     assert _kind("docs/agents/a.md", agent, repo_root=tmp_path) == "doc"
-
-
-def test_truncated_text_with_its_marker_fits_the_cap() -> None:
-    for text in ("\n".join(["x" * 99] * 1000) + "\n", "y" * (MAX_TEXT_BYTES + 10)):
-        st = _parse("docs/big.md", text).statements[0]
-        assert "bytes dropped" in st.text and len(st.text.encode()) <= MAX_TEXT_BYTES
 
 
 def test_code_lookups_are_not_masked_but_literals_are() -> None:
@@ -824,8 +841,8 @@ def test_upper_case_markdown_suffixes_are_claimed(analyze_files) -> None:
     assert all(p.name != "markdown" for p in registry.parsers_for("src/app.TS"))
     statements = analyze_files({"README.MD": "# Hi\n", "CHANGELOG.MD": "# 1.0\n"})
     assert {s.path: s.semanticType for s in statements} == {
-        "README.MD": "readme",
-        "CHANGELOG.MD": "changelog",
+        "README.MD": "doc",
+        "CHANGELOG.MD": "doc",
     }
 
 
@@ -940,9 +957,9 @@ def test_heading_of_only_hashes_is_empty() -> None:
     assert _parse("docs/a.md", "# ###\n").metadata["headings"] == []
 
 
-def test_front_matter_key_too_long_to_print_does_not_fail_the_file() -> None:
+def test_front_matter_key_too_long_to_print_does_not_fail_the_file(warnings: _Warnings) -> None:
     text = f"---\nname: x\n? 0x{'f' * 8000}\n: 1\n---\n# Body\n"
     rec = _parse("docs/a.md", text)
-    assert rec.metadata["frontmatterError"] is True
+    assert [e for e, _ in warnings.events] == [_FM_WARNING]
     assert rec.metadata["kind"] == "doc" and rec.metadata["frontmatter"] == {}
     assert rec.statements[0].text.endswith("# Body\n")

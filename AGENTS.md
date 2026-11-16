@@ -49,8 +49,6 @@ The capture contract's source of truth is
   backend needs) and emit it only after it is approved. An approved new field on `Function` or
   `Statement` also needs the backend allow-list change, or it is dropped.
 - **`nodeType` is the raw tree-sitter `node.type`**, or `synthetic` when there is no node.
-  One exception: the whole-file statement of a Markdown document uses `document` (see
-  `docs/architecture/statement-model.md`).
 - **Extend the existing mechanisms first** — `build_index`, registered facts, the additive
   detector registry, the shared classifiers in `parsers/detection/` — before proposing a new one.
 - **Parser code stays in its parser's package;** a change to a language parser, a shared module

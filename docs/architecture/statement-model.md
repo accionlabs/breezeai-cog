@@ -89,13 +89,6 @@ flowchart LR
 > **Why:** it stays truthful and checkable against the source. A statement with no node of its
 > own (a route derived from an annotation such as `@GetMapping`) uses `synthetic` rather than an
 > invented name like `route_annotation`. The meaning goes in `semanticType`.
->
-> **One exception — `document`**: the single whole-file
-> statement of a Markdown file (`parsers/markdown`) uses `nodeType: document`. Markdown is not
-> tree-sitter parsed and the statement covers the whole file. Its `semanticType` is the document
-> kind (`skill`, `agent`, `command`, `agent_instructions`, `readme`, `adr`, `changelog`, `doc`).
-> `document` is also the raw root node type of the HTML grammar (a JSP page's route statement
-> has it), so a consumer tells a Markdown document by its `semanticType`, not by `nodeType`.
 
 ---
 
@@ -481,8 +474,7 @@ routes, calls, events, comments or enum members. Files, classes, functions, impo
   `enrich` mode deliberately ([§4](#4-framework-detectors-enrich-or-append)).
 - Check `ctx.capture_statements` before emitting anything (an additive detector's `Gate` does
   it); route emitters skip fixture files (`Gate(skip_fixtures=True)` or `is_fixture_file`).
-- Use a real grammar `nodeType`, or `synthetic` (`document` is reserved for the Markdown parser).
-  Never invent a node type.
+- Use a real grammar `nodeType`, or `synthetic`. Never invent a node type.
 - Never put a `semanticType` on a control-flow statement.
 - Reuse an existing `semanticType` where it fits. A new value needs a decision first
   ([Extending Capture §5](../../skills/extend-capture/SKILL.md#5-choosing-how-to-store-what-you-capture)).

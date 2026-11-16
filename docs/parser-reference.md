@@ -538,20 +538,27 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 
 - **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
   document never counts as an analyzed language and adds no lines of code — in the full scan
-  and in `analyze-diff` alike. `metadata` holds `kind` (the semantic type below),
+  and in `analyze-diff` alike. `metadata` holds `kind` (the table below),
   `category: "documentation"`, `frontmatter` (YAML reduced to JSON values, secret-named keys
-  `***`), `title` and `headings` (levels 1–3, outside code fences). Invalid front matter sets
-  `frontmatterError`; a header YAML rejects only for an unquoted value (Cursor's
+  `***`), `title` and `headings` (levels 1–3, outside code fences). Invalid front matter is
+  logged as a warning (`markdown.front_matter_unreadable`); a header YAML rejects only for an unquoted value (Cursor's
   `globs: **/*.ts`) still gives `name` / `description`.
-- **Statement.** Under statement capture, one whole-file `Statement`: `nodeType="document"`,
-  `semanticType` = the kind, `text` = the file with secrets masked (cut at 64 KB on a line
-  boundary, marked inline; masking keeps every line, so `endLine` is the file's line),
-  `name` / `description` from the front matter. From 512 KB to 2 MB: the File record only;
-  over the scanner's `max_file_size` (2 MB by default) the file is skipped like any other. Document statements are not embedded or split.
-- **Semantic types** (`classify.py`, first match wins; a type that needs front matter is never
-  given on a guess):
+- **Statement.** Under statement capture, one whole-file `Statement`: `nodeType="synthetic"`,
+  `semanticType` = `skill`, `agent`, `command`, `agent_instructions` or `doc`, `text` = the
+  file with secrets masked (masking keeps every line, so `endLine` is the file's last line),
+  `name` / `description` from the front matter. Document statements are not embedded.
+- **Size.** No limit is specific to Markdown. A file over the scanner's `max_file_size` (2 MB
+  by default) is skipped like any other. A document longer than `statement_text_limit` (8,000
+  characters by default) is split at emit time like any other statement into ordered parts
+  with ids `…#part1ofN` … `…#partNofN`, every part `isPartial`; joined in order they give the
+  whole text. Only part 1 keeps `semanticType`, `name` and `description`, so a filter on
+  `semanticType` lists each document once, and a listing of a file's statements shows one row
+  per part.
+- **Kinds** (`classify.py`, first match wins; a kind that needs front matter is never given on
+  a guess). `File.metadata.kind` is the kind; the statement's `semanticType` is the kind for
+  the first four rows and `doc` for the rest:
 
-| `semanticType` | When |
+| `metadata.kind` | When |
 |---|---|
 | `skill` | `SKILL.md` with front-matter `name` and `description` |
 | `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin root's `agents/`, or with an agent key (`tools`, `model`, `color`) |
