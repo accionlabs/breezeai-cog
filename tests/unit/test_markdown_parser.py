@@ -935,3 +935,122 @@ def test_upper_case_markdown_suffixes_are_claimed(analyze_files) -> None:
         "README.MD": "readme",
         "CHANGELOG.MD": "changelog",
     }
+
+
+# ── review fixes, round 4 ────────────────────────────────────
+
+
+def test_metadata_secrets_are_masked_like_the_body() -> None:
+    """Title, headings, name, description and front-matter values (list items and nested
+    values included) take the body's prose masking, not only value-shaped redaction."""
+    text = (
+        "---\n"
+        "name: deploy with `DB_PASSWORD=hunter2`\n"
+        'description: "Run it with DB_PASSWORD=hunter2 set"\n'
+        'title: "Deploy with SIGNING_KEY=k3yk3yk3y"\n'
+        'env: ["DB_PASSWORD=hunter2", "PORT=8080"]\n'
+        'deploy:\n  notes: ["export API_TOKEN=abc123def"]\n'
+        "---\n"
+        "# Deploy with API_TOKEN=abc123def\n"
+        "## Step two with DB_PWD=hunter2\n"
+    )
+    rec = _parse("skills/deploy/SKILL.md", text)
+    st = rec.statements[0]
+    md = rec.metadata
+    assert st.description == "Run it with DB_PASSWORD=*** set"
+    assert st.name == "deploy with `DB_PASSWORD=***`"
+    assert md["title"] == "Deploy with SIGNING_KEY=***"
+    assert md["frontmatter"]["env"] == ["DB_PASSWORD=***", "PORT=8080"]
+    assert md["frontmatter"]["deploy"] == {"notes": ["export API_TOKEN=***"]}
+    assert [h["text"] for h in md["headings"]] == [
+        "Deploy with API_TOKEN=***",
+        "Step two with DB_PWD=***",
+    ]
+    assert "hunter2" not in repr(md) and "abc123def" not in repr(md) and "hunter2" not in st.text
+
+
+def test_metadata_without_a_secret_literal_is_kept() -> None:
+    text = (
+        "---\n"
+        "description: Raise MAX_TOKENS=4096, set PORT=8080, pass API_KEY=$API_KEY or "
+        "DB_PASSWORD=<your-password>\n"
+        "max_tokens: 4096\n"
+        "---\n"
+        "# Set PORT=8080 and TOKEN_LIMIT=512\n"
+    )
+    rec = _parse("docs/a.md", text)
+    assert rec.statements[0].description == (
+        "Raise MAX_TOKENS=4096, set PORT=8080, pass API_KEY=$API_KEY or DB_PASSWORD=<your-password>"
+    )
+    assert rec.metadata["frontmatter"]["max_tokens"] == 4096
+    assert rec.metadata["headings"][0]["text"] == "Set PORT=8080 and TOKEN_LIMIT=512"
+
+
+@pytest.mark.parametrize(
+    ("line", "secret"),
+    [
+        ("DB_PWD=hunter2", "hunter2"),
+        ("MYSQL_PWD=hunter2", "hunter2"),
+        ("ENCRYPTION_KEY=0123456789abcdef", "0123456789abcdef"),
+        ("signing_key: 0123456789abcdef", "0123456789abcdef"),
+        ("JWT_KEY=0123456789abcdef", "0123456789abcdef"),
+    ],
+)
+def test_pwd_and_key_names_are_secret_in_code_and_prose(line: str, secret: str) -> None:
+    fenced = _parse("docs/a.md", f"```\n{line}\n```\n").statements[0].text
+    prose = _parse("docs/a.md", f"Run with {line} set.\n").statements[0].text
+    assert secret not in fenced and "***" in fenced
+    if "=" in line:
+        assert secret not in prose and "***" in prose
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "primary_key = True",
+        "sort_key: created_at",
+        "PARTITION_KEY=tenant_id",
+        "cache_key = user_profile",
+        "idempotency_key: order_id",
+        "routing_key: orders.created",
+        "STORAGE_KEY=app-state",
+        "PWD=/home/app",
+        "monkey: banana",
+    ],
+)
+def test_schema_key_names_and_bare_pwd_are_not_secret(line: str) -> None:
+    for text in (f"```\n{line}\n```\n", f"Run with {line} set.\n"):
+        assert _parse("docs/a.md", text).statements[0].text == text
+
+
+def test_front_matter_key_names_follow_the_same_rule() -> None:
+    text = "---\nname: x\nmaster_key: abc\nDB_PWD: abc\nprimary_key: id\n---\nB\n"
+    fm = _parse("docs/a.md", text).metadata["frontmatter"]
+    assert fm == {"name": "x", "master_key": "***", "DB_PWD": "***", "primary_key": "id"}
+
+
+@pytest.mark.parametrize(
+    ("line", "heading"),
+    [
+        ("## Using C#", "Using C#"),
+        ("## Using F# ##", "Using F#"),
+        ("# Title #", "Title"),
+        ("# Title\t###   ", "Title"),
+        ("# Title#", "Title#"),
+        ("# #5 issue", "#5 issue"),
+    ],
+)
+def test_heading_closing_sequence_follows_commonmark(line: str, heading: str) -> None:
+    assert _parse("docs/a.md", f"{line}\n").metadata["headings"][0]["text"] == heading
+
+
+def test_heading_of_only_hashes_is_empty() -> None:
+    assert _parse("docs/a.md", "# ###\n").metadata["headings"] == []
+
+
+def test_front_matter_key_too_long_to_print_does_not_fail_the_file() -> None:
+    text = f"---\nname: x\n? 0x{'f' * 8000}\n: 1\n---\n# Body\n"
+    rec = _parse("docs/a.md", text)
+    assert rec.metadata["frontmatterError"] is True
+    assert rec.metadata["kind"] == "doc" and rec.metadata["frontmatter"] == {}
+    assert rec.statements[0].text.endswith("# Body\n")

@@ -164,11 +164,12 @@ class MarkdownParser(BaseParser):
 
         fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
         front_matter, fm_ok = load_front_matter(fm_text)
+        front_matter = _masked_values(front_matter)
         # A leading ``---`` block that is not YAML at all (a thematic break around prose) is
         # body: its headings are outline. A broken YAML header stays skipped.
         outline_start = body_start if fm_ok or _looks_like_yaml(lines, body_start) else 0
         headings = _rst_headings(lines) if rst else _atx_headings(lines, outline_start)
-        title = _redacted(string_field(front_matter, "title")) or next(
+        title = string_field(front_matter, "title") or next(
             (h["text"] for h in headings if h["level"] == 1), None
         )
         kind = classify(ctx.path, front_matter, headings, _plugin_check(ctx.repo_root))
@@ -217,11 +218,11 @@ class MarkdownParser(BaseParser):
                 startLine=1,
                 endLine=end_line,
                 path=ctx.path,
-                name=_redacted(string_field(front_matter, "name"))
+                name=string_field(front_matter, "name")
                 or (stem if kind == "command" else None)
                 or title
                 or PurePosixPath(ctx.path).name,
-                description=_redacted(string_field(front_matter, "description")),
+                description=string_field(front_matter, "description"),
             )
         )
         return record
@@ -453,8 +454,36 @@ def _mask_name_value(lines: list[str], start: int, end: int) -> None:
     flush()
 
 
-def _redacted(value: str | None) -> str | None:
-    return redact_text(value) if value else value
+def _mask_prose(text: str) -> str:
+    """``text`` — a heading, a title, a name, a description, a front-matter value — with
+    secrets masked by the rules for a prose line of the body: value-shaped secrets, an
+    authorization header, a secret-named ``NAME=value`` / ``NAME: value`` at a line start or
+    in the middle of the text, and the pairs inside inline code spans (``Deploy with
+    API_TOKEN=x`` → ``Deploy with API_TOKEN=***``). Their exemptions hold: token counts,
+    ``$VAR`` / ``<placeholder>`` values, expressions."""
+    text = redact_text(text)
+    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _ENV_ASSIGN.sub(_mask_env, text)
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if "=" in line:
+            line = _mask_prose_env(line)
+        if "`" in line:
+            line = _mask_inline_code(line)
+        lines[i] = line
+    return "\n".join(lines)
+
+
+def _masked_values(value: Any) -> Any:
+    """Loaded front matter with every string value (list items and nested values included)
+    masked by :func:`_mask_prose`; keys, and values that are not strings, unchanged."""
+    if isinstance(value, str):
+        return _mask_prose(value)
+    if isinstance(value, dict):
+        return {k: _masked_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_masked_values(v) for v in value]
+    return value
 
 
 def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
@@ -571,7 +600,7 @@ def _atx_headings(lines: list[str], start: int) -> list[dict[str, Any]]:
         if fence is not None:
             continue
         h = _ATX.match(line)
-        heading = h.group(2).rstrip(" \t#").strip() if h else ""
+        heading = _without_closing_sequence(h.group(2)) if h else ""
         if h and heading and len(h.group(1)) <= _MAX_HEADING_LEVEL:
             out.append(
                 {
@@ -585,9 +614,20 @@ def _atx_headings(lines: list[str], start: int) -> list[dict[str, Any]]:
     return out
 
 
+def _without_closing_sequence(text: str) -> str:
+    """ATX heading content without its optional closing ``#`` run, by the CommonMark rule: the
+    run counts only after a space or tab, or as the whole content (``Using C#`` keeps its
+    ``#``; ``Title ##`` → ``Title``)."""
+    text = text.strip(" \t")
+    bare = text.rstrip("#")
+    if bare == text or (bare and bare[-1] not in " \t"):
+        return text
+    return bare.rstrip(" \t")
+
+
 def _heading_text(text: str) -> str:
-    # Redact before the cut so a token is not split past its pattern; bound the input first.
-    return redact_text(text[: _MAX_HEADING_CHARS * 5])[:_MAX_HEADING_CHARS]
+    # Mask before the cut so a token is not split past its pattern; bound the input first.
+    return _mask_prose(text[: _MAX_HEADING_CHARS * 5])[:_MAX_HEADING_CHARS]
 
 
 def _rst_headings(lines: list[str]) -> list[dict[str, Any]]:

@@ -575,9 +575,12 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   `skill`, `agent`, `command`, `agent_instructions` and `adr` are the agent-document kinds
   counted in `configs.capturedAgentDocuments`.
 - **Secrets.** One secret-name rule (`password`, `secret`, `token`, `api_key`, `credential`,
-  `authorization`, …, and `pass` as a whole `_` / `-` / `.`-separated word, as in `DB_PASS`
-  or `mysql_pass` but not `passage` or `bypass`) applies to front-matter keys, env
-  assignments and code keys. PEM private-key bodies (to the matching footer; without one, only
+  `authorization`, …, `pass` as a whole `_` / `-` / `.`-separated word, as in `DB_PASS`
+  or `mysql_pass` but not `passage` or `bypass`, `pwd` likewise but joined to another word
+  (`DB_PWD`, not a bare `PWD`), and any other `*_key` name (`ENCRYPTION_KEY`, `signing_key`)
+  except a schema or lookup one such as `primary_key`, `sort_key`, `cache_key`,
+  `routing_key` or `public_key`) applies to front-matter keys, env assignments and code
+  keys. PEM private-key bodies (to the matching footer; without one, only
   the key-shaped lines after the header), provider tokens, JWTs and URL credentials are masked
   anywhere; so is an authorization-style header with a scheme word (`Authorization: Bearer x`,
   `curl -H "Authorization: Basic x"` — scheme and credential both). Secret-named upper-case env
@@ -593,6 +596,11 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   Compose `- name: DB_PASSWORD` / `value: x` shape) is masked too. PEM covers armored PGP
   private-key blocks; provider tokens include OpenAI keys (`sk-proj-…` and the legacy
   `sk-` + 32 or more letters and digits).
+  The title, headings, `name`, `description` and every front-matter string value (list
+  items and nested values included) are masked by the rules for a prose line of the text, so
+  `# Deploy with API_TOKEN=x` keeps no secret in `metadata.headings` either.
+- **Volume.** Every Markdown file the scan keeps becomes a File node, so a docs-heavy
+  repository can leave prose folders it does not need in the graph out with `.repoignore`.
 
 ### MCP tool detectors (`parsers/<lang>_mcp/`)
 A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,

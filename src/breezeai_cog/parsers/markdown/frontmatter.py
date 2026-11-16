@@ -29,11 +29,25 @@ _MAX_STRING = 4000
 #: Secret-like names, any case: the one rule for front-matter keys, env assignments and code
 #: assignments in a document. ``pass`` counts only as a whole word separated by ``_`` / ``-`` /
 #: ``.`` (``DB_PASS``, ``mysql_pass``, ``db.pass``), never inside ``passage``, ``compass`` or
-#: ``bypass``. Literal alternatives only, so a long name is searched in linear time.
+#: ``bypass``; ``pwd`` likewise, and only joined to another word (``DB_PWD``, ``MYSQL_PWD``), as
+#: a bare ``PWD`` is the shell's working directory. Literal alternatives only, so a long name
+#: is searched in linear time.
 _SECRET_NAME = re.compile(
     r"password|passwd|passphrase|secret|token|credential|authorization"
     r"|api[_\-]?key|private[_\-]?key|access[_\-]?key|client[_\-]?key"
-    r"|(?<![a-z0-9])pass(?![a-z0-9])",
+    r"|(?<![a-z0-9])pass(?![a-z0-9])"
+    r"|(?<=[_\-.])pwd(?![a-z0-9])|(?<![a-z0-9])pwd(?=[_\-.])",
+    re.IGNORECASE,
+)
+#: Any other ``*_key`` name (``ENCRYPTION_KEY``, ``SIGNING_KEY``, ``jwt.key``) is secret too,
+#: unless :data:`_SCHEMA_KEY` names it.
+_KEY_SUFFIX = re.compile(r"[_\-.]key$", re.IGNORECASE)
+#: ``*_key`` names that name a column, a lookup or a public half, not key material
+#: (``primary_key``, ``sort_key``, ``cache_key``, ``routing_key``, ``public_key``).
+_SCHEMA_KEY = re.compile(
+    r"(?<![a-z0-9])(?:primary|foreign|sort|partition|hash|range|cache|idempotency|routing"
+    r"|public|unique|composite|natural|surrogate|row|lookup|dedup|dedupe|message|group|shard"
+    r"|object|storage|query)[_\-.]key$",
     re.IGNORECASE,
 )
 
@@ -68,10 +82,10 @@ def split_front_matter(lines: list[str]) -> tuple[str | None, int]:
 
 def load_front_matter(text: str | None) -> tuple[dict[str, Any], bool]:
     """Parse front matter → ``(mapping, ok)``. ``ok`` is False when a block was present but
-    could not be used (too large, invalid YAML, anchors / aliases, or not a mapping); the
-    mapping is then empty, except that invalid YAML made only of plain ``key: value`` lines
-    still gives its ``name`` / ``description`` (:func:`_simple_fields`). No front matter at all
-    is ``({}, True)``."""
+    could not be used (too large, invalid YAML, anchors / aliases, not a mapping, or a key too
+    long to write as text); the mapping is then empty, except that invalid YAML made only of
+    plain ``key: value`` lines still gives its ``name`` / ``description``
+    (:func:`_simple_fields`). No front matter at all is ``({}, True)``."""
     if text is None:
         return {}, True
     if len(text.encode("utf-8")) > MAX_FRONT_MATTER_BYTES:
@@ -84,7 +98,10 @@ def load_front_matter(text: str | None) -> tuple[dict[str, Any], bool]:
         return {}, True
     if not isinstance(data, dict):
         return {}, False
-    return _mapping(data, 1), True
+    try:
+        return _mapping(data, 1), True
+    except ValueError:  # an integer key too long to print (``? 0xfff…``)
+        return {}, False
 
 
 #: A top-level ``key: value`` line of the plain-line fallback.
@@ -122,7 +139,9 @@ def _simple_fields(text: str) -> dict[str, Any]:
 
 def secret_name(name: str) -> bool:
     """True when ``name`` (a front-matter key, an env variable, a code key) looks secret."""
-    return _SECRET_NAME.search(name) is not None
+    if _SECRET_NAME.search(name) is not None:
+        return True
+    return _KEY_SUFFIX.search(name) is not None and _SCHEMA_KEY.search(name) is None
 
 
 def token_count(name: str, value: str) -> bool:
