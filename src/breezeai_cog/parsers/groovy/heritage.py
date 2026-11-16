@@ -25,8 +25,10 @@ a library base class, one added at runtime (GORM's ``save``) or by an AST transf
 
 A base or trait is kept only when exactly one of its candidate FQCNs is a repository class
 (its import, the same package, a wildcard import) or it is declared in the same file. Only
-``.groovy`` files are indexed, so a Java base class ends the chain. Two repository classes
-sharing a simple name make that name ambiguous: nothing resolves through it.
+``.groovy`` files are indexed here; a base that is no Groovy class keeps its candidates
+(:func:`foreign_bases`), and ``related.py`` continues the chain into the repository's Java
+classes. Two repository classes sharing a simple name make that name ambiguous: nothing
+resolves through it.
 """
 
 from __future__ import annotations
@@ -274,6 +276,21 @@ def _in_repo(ref: tuple[str, tuple[str, ...], bool],
     if local or len([c for c in candidates if fqcn_index.get(c) is not None]) == 1:
         return written.rsplit(".", 1)[-1]
     return None
+
+
+def foreign_bases(
+    frags: list[tuple[str, HeritageFrag]], fqcn_index: dict[str, str | None],
+) -> dict[str, tuple[str, ...] | None]:
+    """Class simple name → the FQCNs its base class may be, for each class whose base is no
+    Groovy class of the repository (a library class, or one of the repository's Java classes:
+    ``related.py`` looks the candidates up in the Java index). ``None`` when two classes of one
+    simple name name different bases."""
+    out: dict[str, tuple[str, ...] | None] = {}
+    for _, frag in frags:
+        if frag.base is None or frag.base[2] or any(c in fqcn_index for c in frag.base[1]):
+            continue
+        record_distinct(out, frag.fqcn.rsplit(".", 1)[-1], frag.base[1])
+    return out
 
 
 def build_heritage(

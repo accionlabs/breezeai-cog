@@ -15,7 +15,6 @@ still mis-parse (README's Groovy note lists them).
 
 from __future__ import annotations
 
-from collections import ChainMap
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -33,6 +32,7 @@ from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
 from .heritage import class_method_names
 from .imports import GroovyIndex, build_fqcn_index, extract_imports, import_aliases
+from .related import Overlay, file_heritage, groovy_view
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
@@ -45,6 +45,7 @@ _CLASS_TYPES = (
 class GroovyParser(BaseParser):
     name = "groovy"
     extensions = (".groovy",)
+    related_languages = ("java",)  # Groovy imports, calls and extends the repo's Java classes
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -74,29 +75,31 @@ class GroovyParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
-        fqcn = idx.fqcn if isinstance(idx, GroovyIndex) else idx  # bare FqcnIndex/None still ok
+        view = groovy_view(idx, ctx.related_indexes.get("java")) if isinstance(idx, GroovyIndex) else None
+        fqcn = view.fqcn if view is not None else idx  # bare FqcnIndex/None still ok
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn
         )
         set_datastore_vendor(external)
         heritage: Mapping[str, ClassHeritage | None] | None = None
         unknown: Mapping[tuple[str, str], frozenset[str] | None] | None = None
-        if isinstance(idx, GroovyIndex):  # `import a.Foo as Bar`: `Bar.m()` is looked up as `Foo`
-            known = idx.class_heritage
-            renamed = {a: real for a, real in import_aliases(root, source).items() if real in known}
-            aliases = {a: known[real] for a, real in renamed.items()}
-            heritage = ChainMap(aliases, known) if aliases else known
-            unknown = idx.unknown_methods
-            unknown_aliases = {(bindings[a], a): unknown[(bindings[a], real)]
+        if view is not None:  # `import a.Foo as Bar`: `Bar.m()` is looked up as `Foo`
+            renamed = {a: real for a, real in import_aliases(root, source).items()
+                       if real in view.heritage}
+            heritage = file_heritage(view, bindings, renamed)
+            unknown = view.unknown_methods
+            unknown_aliases = {(bindings[a], a): unknown.get((bindings[a], real))
                                for a, real in renamed.items()
                                if a in bindings and (bindings[a], real) in unknown}
             if unknown_aliases:
-                unknown = ChainMap(unknown_aliases, idx.unknown_methods)
+                unknown = Overlay(unknown_aliases, view.unknown_methods)
+        owner_defs = class_method_names(root, source)
+        local_defs = defined_names(root, source)
         shared = make_resolver(  # calls[].path: imports, same file, receiver type (declared only)
-            bindings, defined_names(root, source), path, type_map(root, source),
+            bindings, local_defs, path, type_map(root, source),
             heritage=heritage,
             declared_only=True,
-            owner_defs=class_method_names(root, source),
+            owner_defs=owner_defs,
             unknown_methods=unknown,
         )
 
@@ -104,7 +107,12 @@ class GroovyParser(BaseParser):
                     scope: Mapping[str, str | None] | None = None) -> str | None:
             """A bare or ``this`` call in a class: the class's own methods first — its index
             entry holds its generated accessors and its traits' methods, each with the file that
-            declares it — then the shared tiers, then (bare) the inherited methods."""
+            declares it — then the shared tiers, then (bare) the inherited methods. A bare call
+            whose name is both statically imported and declared by the class is left empty: Groovy
+            picks between them by the arguments."""
+            if receiver is None and name in bindings and name in (
+                    owner_defs[owner] if owner in owner_defs else local_defs):
+                return None  # (a class with a parse error is not in owner_defs: the whole file)
             if owner is not None and receiver in (None, "this") and heritage is not None:
                 own = heritage.get(owner)
                 if own is not None and name in own.methods:
