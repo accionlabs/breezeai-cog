@@ -145,10 +145,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         parser.link_handlers(record, ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
-            "parse.file.failed",
-            path=path,
-            parser=parser.name if parser is not None else (base.name if base is not None else None),
-            error=str(exc),
+            "parse.file.failed", path=path, parser=parser.name, error=str(exc)
         )
         return None
     _prune_template_edges(record, options.get("template_extensions") or frozenset())
