@@ -811,7 +811,9 @@ become statements (`EMIT_TYPES`: declarations, control flow, jumps). It also lis
 (`NESTED_SCOPES`: nested classes, methods, lambdas…) that are extracted as their own
 `Class`/`Function`. At file and class level the extractor stops at those scopes. Inside a function
 body it walks into inline lambdas and gives their statements to the function, as in the
-[worked example](#5-worked-example-one-file-start-to-finish).
+[worked example](#5-worked-example-one-file-start-to-finish). A function stored in a variable
+(`const save = (x) => …`) is one `Function` and its declaration is not emitted again as a
+statement ([statement model §2](architecture/statement-model.md#2-which-statements-are-emitted)).
 
 **Enrich or append.** A detector that matches a call first looks for an existing statement on
 the same span:

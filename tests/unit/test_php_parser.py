@@ -788,3 +788,37 @@ def test_php_class_names_resolve_by_php_rules() -> None:
     assert resolve_class("Local", aliases, "App\\Http") == "App\\Http\\Local"
     assert resolve_class("\\Abs\\X", aliases, "App\\Http") == "Abs\\X"
     assert resolve_class("static", aliases, "App\\Http") is None
+
+
+def _php_record(source: str):
+    return PhpParser().parse_file(ParseContext(
+        path="h.php", abs_path=Path("h.php"), source=source.encode(), repo_root=Path("."),
+        capture_statements=True,
+    ))
+
+
+def test_php_stored_closures_are_functions_and_inline_ones_are_not() -> None:
+    record = _php_record("""<?php
+$notify = function ($msg) { send($msg); };
+$double = fn($x) => calc($x * 2);
+function run($items) {
+    array_map(function ($x) { return save($x); }, $items);
+}
+Route::get('/health', function () {
+    return DB::table('jobs')->count();
+});
+""")
+    fns = {fn.name: fn for fn in record.functions}
+    assert {name: fn.type for name, fn in fns.items()} == {
+        "notify": "function_expression", "double": "arrow_function", "run": "function",
+    }
+    assert [c.name for c in fns["double"].calls] == ["calc"]
+    assert [c.name for c in fns["run"].calls] == ["array_map", "save"]
+    got = {(s.parentId, s.nodeType, s.text) for s in record.statements}
+    assert ("h.php#notify@2", "expression_statement", "send($msg);") in got
+    assert ("h.php#double@3", "function_call_expression", "calc($x * 2)") in got
+    # An inline closure's statements belong to the enclosing function, or to the file.
+    assert ("h.php#run@4", "return_statement", "return save($x);") in got
+    assert ("h.php", "return_statement", "return DB::table('jobs')->count();") in got
+    # The assignments that only store a closure are not repeated as statements.
+    assert not any(s.text.startswith(("$notify", "$double")) for s in record.statements)

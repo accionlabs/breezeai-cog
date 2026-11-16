@@ -1307,3 +1307,56 @@ def test_commonjs_require_imports_and_bindings(tmp_path) -> None:
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls["helper"] == "lib/util.js"
     assert calls["connect"] == "lib/db.js"
+
+
+def _record(tmp_path, body: str) -> FileRecord:
+    p = tmp_path / "f.ts"
+    p.write_text(body)
+    ctx = ParseContext(
+        path="f.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
+    return TypeScriptParser().parse_file(ctx)
+
+
+def test_a_function_stored_in_a_variable_is_recorded_once(tmp_path) -> None:
+    rec = _record(tmp_path, (
+        "const save = (x: string) => db.insert(x);\n"
+        "class Mailer {\n"
+        "  private logErr = (e: Error): void => {\n"
+        "    this.logger.error(e.message);\n"
+        "  };\n"
+        "}\n"
+        "export function outer() {\n"
+        "  const local = (n: number) => {\n"
+        "    keep(n);\n"
+        "  };\n"
+        "  local(1);\n"
+        "}\n"
+    ))
+    fns = {f.name: f for f in rec.functions}
+    assert (fns["save"].type, fns["logErr"].type, fns["local"].type) == ("arrow_function",) * 3
+    # No declaration or field statement repeats a stored function.
+    assert not any(
+        s.nodeType in ("lexical_declaration", "public_field_definition") for s in rec.statements
+    )
+    by_parent = {(s.parentId, s.nodeType, s.text) for s in rec.statements}
+    # The expression body is the function's one statement, with the call under the function.
+    assert ("f.ts#save@1", "call_expression", "db.insert(x)") in by_parent
+    assert [c.name for c in fns["save"].calls] == ["insert"]
+    assert ("f.ts#local@8", "expression_statement", "keep(n);") in by_parent
+    assert (fns["outer"].id, "expression_statement", "local(1);") in by_parent
+
+
+def test_a_declaration_that_stores_more_than_functions_is_kept(tmp_path) -> None:
+    rec = _record(tmp_path, (
+        "const a = 1, f = () => go();\n"
+        "const resolvers = { Query: { user: () => db.find() } };\n"
+    ))
+    assert {f.name for f in rec.functions} == {"f", "resolvers.Query.user"}
+    assert [s.text for s in rec.statements if s.parentId == "f.ts"] == [
+        "const a = 1, f = () => go();",
+        "const resolvers = { Query: { user: () => db.find() } };",
+    ]
+    # Only a function whose declaration is not emitted gets its expression body as a statement:
+    # anything else would record the same call twice.
+    assert not any(s.parentId != "f.ts" for s in rec.statements)

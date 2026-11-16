@@ -11,7 +11,7 @@ from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .decorators import extract_decorators
-from .statements import extract_statements
+from .statements import extract_expression_body, extract_statements, is_bound_function
 
 _DEF_TYPES = {
     "function_declaration", "generator_function_declaration", "method_definition",
@@ -251,6 +251,18 @@ def _calls(
     calls: list[Call] = []
     seen: set[str] = set()
 
+    def record(call: Node) -> None:
+        fn = call.child_by_field_name("function")
+        if fn is not None:
+            # Normalize optional chaining so `this.svc?.m()` resolves like `this.svc.m()`
+            # (otherwise the receiver becomes `this.svc?` and never matches a type).
+            callee = node_text(fn, source).replace("?.", ".")
+            name = callee.rsplit(".", 1)[-1]
+            receiver = callee.rsplit(".", 1)[0] if "." in callee else None
+            if name.isidentifier() and name not in seen:
+                seen.add(name)
+                calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+
     def visit(node: Node) -> None:
         # Descend into inline callbacks/lambdas — their calls belong to the nearest
         # named enclosing function — but stop at ``barriers``: the spans of nested
@@ -259,18 +271,11 @@ def _calls(
             if _span(child) in barriers:
                 continue
             if child.type == "call_expression":
-                fn = child.child_by_field_name("function")
-                if fn is not None:
-                    # Normalize optional chaining so `this.svc?.m()` resolves like `this.svc.m()`
-                    # (otherwise the receiver becomes `this.svc?` and never matches a type).
-                    callee = node_text(fn, source).replace("?.", ".")
-                    name = callee.rsplit(".", 1)[-1]
-                    receiver = callee.rsplit(".", 1)[0] if "." in callee else None
-                    if name.isidentifier() and name not in seen:
-                        seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+                record(child)
             visit(child)
 
+    if body.type == "call_expression":  # an arrow function's expression body: `() => save()`
+        record(body)
     visit(body)
     return calls
 
@@ -316,10 +321,20 @@ def build_function(
         endLine=end,
         calls=_calls(body, source, resolve, class_name, barriers),
     )
-    statements = extract_statements(
+    statements: list[Statement] = []
+    if (body is not None and node.type == "arrow_function" and body.type != "statement_block"
+            and is_bound_function(node)):
+        # `const save = (x) => db.insert(x)`: the declaration is not emitted (it would repeat
+        # this Function), so the expression body is this function's statement.
+        statements = extract_expression_body(
+            body, source, path, parent_id=fid, capture=capture, limit=limit,
+            seen_ids=seen_ids, typed_db_ids=typed_db_ids,
+        )
+    statements += extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline callbacks/lambdas — attribute their statements here
         barriers=barriers,  # …except separately-extracted nested named functions
+        built=barriers,  # …and a declaration that only binds them is not emitted at all
         typed_db_ids=typed_db_ids,
     )
     functions = [fn]
