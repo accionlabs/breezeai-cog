@@ -708,6 +708,7 @@ the file:
   │                  20   flask            python_flask/routes.py            ✔       │
   │                  30   drf-routers      python_django/routers.py          ✔       │
   │                  40   django-channels  python_django/channels.py         ✔       │
+  │                  50   aws-sdk-calls    python_aws/sdk_calls.py           ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala_akka/events.py                      │
   │                  20   spark            scala_spark/io.py                         │
