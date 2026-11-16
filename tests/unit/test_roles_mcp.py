@@ -1639,3 +1639,61 @@ def test_typescript_param_descriptions_stay_under_the_params_limit(analyze_files
     assert documented == sorted(documented, reverse=True)
     size = len(json.dumps([p.model_dump() for p in params], separators=(",", ":")).encode())
     assert size <= 15 * 1024
+
+
+# ── Cross-file proofs through analyze_repo: the index is built in the parent, read in workers ──
+
+
+def _captured_tools(tmp_path, files: dict[str, str], jobs: int) -> dict[str, dict]:
+    import gzip
+
+    from breezeai_cog import analyze_repo
+
+    repo = tmp_path / f"repo{jobs}"
+    for rel, src in files.items():
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src)
+    result = analyze_repo(repo, capture_statements=True, out=tmp_path / f"out{jobs}", jobs=jobs)
+    tools: dict[str, dict] = {}
+    for line in gzip.open(result.out_path, "rt", encoding="utf-8"):
+        for s in json.loads(line).get("statements", []):
+            if s.get("semanticType") == "mcp_tool":
+                tools[s["endpoint"]] = s
+    return tools
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_fastmcp_server_in_another_module_for_any_jobs(tmp_path, jobs) -> None:
+    files = {
+        "app/server.py": "from fastmcp import FastMCP\n\nmcp = FastMCP('x')\n",
+        "app/tools.py": "from app.server import mcp as server\n\n\n@server.tool\ndef hello(name: str) -> str:\n    return name\n",
+    }
+    tools = _captured_tools(tmp_path, files, jobs)
+    assert set(tools) == {"hello"}
+    assert tools["hello"]["framework"] == "fastmcp"
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize(
+    "build",
+    [{"pom.xml": POM_MCP}, {"build.gradle.kts": GRADLE_KTS_MCP}],
+    ids=["pom", "gradle-kts"],
+)
+def test_spring_ai_tools_with_a_build_file_starter_for_any_jobs(tmp_path, build, jobs) -> None:
+    files = {
+        **build,
+        "src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+        "src/main/kotlin/demo/ForecastTools.kt": KOTLIN_TOOLS.replace(
+            "WeatherTools", "ForecastTools"
+        ),
+    }
+    tools = _captured_tools(tmp_path, files, jobs)
+    assert set(tools) == {"current_weather", "now"}
+    assert {t["framework"] for t in tools.values()} == {"spring-ai-mcp"}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_spring_ai_tools_without_the_starter_for_any_jobs(tmp_path, jobs) -> None:
+    files = {"pom.xml": "<project/>", "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}
+    assert _captured_tools(tmp_path, files, jobs) == {}

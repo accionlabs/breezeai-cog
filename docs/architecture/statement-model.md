@@ -92,9 +92,10 @@ flowchart LR
 >
 > **One exception — `document`**: the single whole-file
 > statement of a Markdown file (`parsers/markdown`) uses `nodeType: document`. Markdown is not
-> tree-sitter parsed, the statement covers the whole file, and the value lets a reader tell a
-> document body from code at a glance. Its `semanticType` is the document kind (`skill`, `agent`,
-> `command`, `agent_instructions`, `readme`, `adr`, `changelog`, `doc`). No other parser uses it.
+> tree-sitter parsed and the statement covers the whole file. Its `semanticType` is the document
+> kind (`skill`, `agent`, `command`, `agent_instructions`, `readme`, `adr`, `changelog`, `doc`).
+> `document` is also the raw root node type of the HTML grammar (a JSP page's route statement
+> has it), so a consumer tells a Markdown document by its `semanticType`, not by `nodeType`.
 
 ---
 
