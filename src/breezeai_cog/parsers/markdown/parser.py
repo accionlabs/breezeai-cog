@@ -63,6 +63,11 @@ _ENV_ASSIGN = re.compile(
     r"(?m)^([ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*+)[ \t]*[=:][ \t]*)"
     r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"']+)"
 )
+#: A secret-named upper-case ``NAME=value`` in the middle of a prose line (``Run
+#: DB_PASSWORD=x and …``): no spaces around ``=``, the name behind a word boundary, so prose
+#: such as "my password is x" is untouched. Fenced, indented and inline code are masked by
+#: the code rules instead. Possessive name: linear time.
+_PROSE_ENV = re.compile(r"(?<![\w.\-$])([A-Z][A-Z0-9_]*+)=(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;)}\]]+)")
 #: An HTTP authentication scheme word before a credential (``Authorization: Bearer x``).
 _AUTH_SCHEME = (
     r"(?i:bearer|basic|token|digest|negotiate|ntlm|hawk|apikey|api-key|jwt|oauth|key"
@@ -108,6 +113,29 @@ _MARKER_RESERVE = len("\n…[+9999999999 bytes dropped: markdown 64 KB cap]".enc
 #: (``password: string;`` in a TypeScript interface).
 _TYPE_VALUES = frozenset(
     {"string", "str", "String", "number", "int", "bool", "boolean", "any", "None", "null"}
+)
+#: Words after a secret-named key that start an expression, not a literal
+#: (``const token = await getToken();``, ``password = None``).
+_CODE_KEYWORDS = frozenset(
+    {
+        "await",
+        "new",
+        "async",
+        "function",
+        "yield",
+        "lambda",
+        "typeof",
+        "require",
+        "import",
+        "null",
+        "None",
+        "nil",
+        "true",
+        "false",
+        "True",
+        "False",
+        "undefined",
+    }
 )
 #: A ``key:`` line in YAML front matter (optionally a list item).
 _FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
@@ -234,11 +262,23 @@ def _lookup(value: str) -> bool:
     return "(" in value or "[" in value or _DOTTED_NAME.fullmatch(value) is not None
 
 
+def _not_literal(value: str) -> bool:
+    """True when an unquoted value after a secret-named key is code, not a secret: a type
+    name, a lookup (:func:`_lookup`), a keyword that starts an expression (``await
+    getToken()``), a nested collection (``{"type": "string"}``) or a YAML tag (``!Ref x``)."""
+    return (
+        value in _TYPE_VALUES
+        or value in _CODE_KEYWORDS
+        or value[:1] in ("{", "!")
+        or _lookup(value)
+    )
+
+
 def _mask_code_assign(m: re.Match[str]) -> str:
     key, scheme, value = m.group(2), m.group(4), m.group(5)
     if (
         not secret_name(key)
-        or (not scheme and (value in _TYPE_VALUES or _lookup(value)))
+        or (not scheme and _not_literal(value))
         or value.strip("\"'") == "***"
         or token_count(key, value)
     ):
@@ -275,8 +315,11 @@ def _mask_code_blocks(text: str) -> str:
         if fence is not None or _INDENTED_CODE.match(line):
             if "=" in line or ":" in line:
                 line = lines[i] = _CODE_ASSIGN.sub(_mask_code_assign, line)
-        elif "`" in line:
-            line = lines[i] = _mask_inline_code(line)
+        else:
+            if "=" in line:
+                line = lines[i] = _mask_prose_env(line)
+            if "`" in line:
+                line = lines[i] = _mask_inline_code(line)
         if _TABLE_ROW.match(line) and not (i + 1 < len(lines) and _delimiter_row(lines[i + 1])):
             lines[i] = _mask_table_row(line)
     if fence is not None:
@@ -287,6 +330,34 @@ def _mask_code_blocks(text: str) -> str:
 def _delimiter_row(line: str) -> bool:
     """True for a pipe table's header delimiter row (``|---|:-:|``)."""
     return "-" in line and _TABLE_DELIMITER.fullmatch(line) is not None
+
+
+def _mask_prose_env(line: str) -> str:
+    """``line``, a prose line, with the values of secret-named upper-case ``NAME=value``
+    pairs outside its inline code spans masked (``Run DB_PASSWORD=x and …``). A placeholder
+    (``<password>``, ``$DB_PASSWORD``, ``${DB_PASSWORD}``) or an already masked value is kept."""
+    out: list[str] = []
+    pos = 0
+    for m in _INLINE_CODE.finditer(line):
+        out.append(_PROSE_ENV.sub(_mask_prose_pair, line[pos : m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_PROSE_ENV.sub(_mask_prose_pair, line[pos:]))
+    return "".join(out)
+
+
+def _mask_prose_pair(m: re.Match[str]) -> str:
+    name, value = m.group(1), m.group(2)
+    bare = value.strip("\"'")
+    if (
+        not secret_name(name)
+        or not bare
+        or bare == "***"
+        or bare[0] in "<$"
+        or token_count(name, value)
+    ):
+        return m.group(0)
+    return f"{name}={_masked_value(value)}"
 
 
 def _mask_inline_code(line: str) -> str:
@@ -319,9 +390,8 @@ def _mask_table_row(line: str) -> str:
             not bare
             or any(c.isspace() for c in bare)
             or "`" in bare
-            or bare in _TYPE_VALUES
             or bare.strip("\"'") in ("***", "-", "—", "")
-            or _lookup(bare)
+            or _not_literal(bare)
             or token_count(key.group(1), bare)
         ):
             continue

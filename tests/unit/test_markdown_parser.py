@@ -821,3 +821,60 @@ def test_front_matter_token_counts_are_kept() -> None:
     assert fm["max_tokens"] == 4096 and fm["token_limit"] == "512" and fm["api_token"] == "***"
     out = rec.statements[0].text
     assert "max_tokens: 4096" in out and "abc123" not in out and "api_token: ***" in out
+
+
+# ── code samples kept; secrets mid-way through a prose line masked ───────────
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '{"password": {"type": "string"}}',
+        "const token = await getToken();",
+        "secret: !Ref MySecret",
+        "const apiKey = new KeyProvider(config);",
+        "password = None",
+        "token: null",
+    ],
+)
+def test_code_values_that_are_expressions_are_not_masked(line: str) -> None:
+    text = f"```\n{line}\n```\n"
+    assert _parse("docs/a.md", text).statements[0].text == text
+
+
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        ('password = "hunter2"', 'password = "***"'),
+        ("token: abc123xyz", "token: ***"),
+    ],
+)
+def test_literal_code_secrets_are_still_masked(line: str, masked: str) -> None:
+    out = _parse("docs/a.md", f"```\n{line}\n```\n").statements[0].text
+    assert out == f"```\n{masked}\n```\n"
+
+
+def test_secret_env_pair_mid_prose_line_is_masked() -> None:
+    text = 'Run DB_PASSWORD=hunter2 and API_TOKEN="two words" before `make`.\n'
+    out = _parse("docs/a.md", text).statements[0].text
+    assert out == 'Run DB_PASSWORD=*** and API_TOKEN="***" before `make`.\n'
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Then set PORT=8080 and restart.",
+        "Tell them my password is x.",
+        "Pass API_KEY=$API_KEY or DB_TOKEN=${TOKEN} or DB_PASSWORD=<your-password>.",
+        "Raise MAX_TOKENS=4096 for long runs.",
+        "Write the db_password=x pair in lower case.",
+    ],
+)
+def test_prose_without_a_secret_literal_is_kept(line: str) -> None:
+    text = f"# Setup\n{line}\n"
+    assert _parse("docs/a.md", text).statements[0].text == text
+
+
+def test_prose_env_pair_inside_inline_code_is_masked_once() -> None:
+    out = _parse("docs/a.md", "Use `DB_PASSWORD=hunter2` here.\n").statements[0].text
+    assert out == "Use `DB_PASSWORD=***` here.\n"
