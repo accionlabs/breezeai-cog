@@ -120,15 +120,9 @@ def _matching_entries(path: str | Path, source: bytes | None = None) -> list[_Re
     return candidates
 
 
-<<<<<<< HEAD
 def parsers_for(path: str | Path) -> list[LanguageParser]:
     """All registered parsers that claim this file by extension/filename."""
     return [p for p in _REGISTRY if p.matches(path)]
-=======
-def parsers_for(path: str | Path, source: bytes | None = None) -> list[LanguageParser]:
-    """Return parsers matching the path, optionally using a bounded source prefix."""
-    return [entry.parser for entry in _matching_entries(path, source)]
->>>>>>> ce1dffc0 (Enhanced Ruby parser coverage and performance across Rails, Grape, and Sinatra)
 
 
 def language_candidates(path: str | Path) -> list[LanguageParser]:
@@ -180,7 +174,6 @@ def select(
     path: str | Path, source: bytes, parse_timeout_micros: int = 0, language: str | None = None
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
-<<<<<<< HEAD
     ``claims(path, source)`` is True (the base language parser is the priority-0 fallback).
 
     ``language`` is the ownership step's decision for a shared file: only that language's
@@ -199,16 +192,6 @@ def select(
             else p.claims(str(path), source)
         )
     ]
-=======
-    ``claims(path, source, parse_timeout_micros, parsed_root)`` is True (the base language
-    parser is the priority-0 fallback). Legacy two-argument claim methods are adapted once
-    at registration."""
-    candidates = _matching_entries(path, source)
-    claiming = []
-    for entry in candidates:
-        if entry.invoke_claims(str(path), source, parse_timeout_micros, parsed_root):
-            claiming.append(entry.parser)
->>>>>>> ce1dffc0 (Enhanced Ruby parser coverage and performance across Rails, Grape, and Sinatra)
     if not claiming:
         return None
     return max(claiming, key=lambda p: p.priority)
