@@ -64,7 +64,14 @@ def run_diff_stream(
 ) -> dict[str, Any]:
     """Parse ``temp_dir`` and stream the (filtered) records into ``upload``. The caller
     owns ``upload`` and must ``close()`` it — closing is what finalises the multipart
-    upload, and the route reports that step separately from parsing."""
+    upload, and the route reports that step separately from parsing.
+
+    An incremental run (``filter_set`` given) holds every unchanged file as an empty skeleton,
+    so the docs' byte budget (``max_markdown_bytes``, costed from file sizes on disk) cannot be
+    measured as a full run would: it is not applied, and a changed doc keeps its statement.
+    The count cap (``max_markdown_statements``) reads only paths and still applies."""
+    if filter_set is not None and settings.max_markdown_bytes:
+        settings = settings.model_copy(update={"max_markdown_bytes": 0})
     sink = _InfraStreamSink(upload, filter_set)
     pipeline.run_inprocess(temp_dir, settings, sink)
     return {

@@ -80,7 +80,8 @@ class Settings(BaseSettings):
     # files in path order, each costing its file size up to the 64 KB statement cap (a file over
     # 512 KB keeps no statement and costs nothing); past the budget a doc keeps its File record
     # only. Agent documents are always captured but use up the budget where they sit in path
-    # order. 0 = unbounded. (core/pipeline.py)
+    # order. 0 = unbounded. Not applied by an incremental analyze-diff, whose unchanged files
+    # are empty skeletons. (core/pipeline.py, services/diff.py)
     max_markdown_bytes: int = Field(default=32 * 1024 * 1024, ge=0)
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)
     parse_timeout: float = 10.0  # seconds; per-file tree-sitter native timeout (0 disables)
