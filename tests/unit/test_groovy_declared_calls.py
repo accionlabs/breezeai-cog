@@ -227,3 +227,53 @@ def test_a_subclass_of_a_class_whose_methods_are_not_known_keeps_the_type_file(t
         "Use.groovy": "package com.acme\nclass Use {\n    void run(MongoBuilder b) { b.build() }\n}\n",
     }
     assert _calls(tmp_path, files, "Use.groovy")["run"] == {"build": f"{_ROOT}/MongoBuilder.groovy"}
+
+
+_PARENT = "package com.acme\nclass Parent {\n    void audit() { }\n    void shared() { }\n}\n"
+
+
+def test_a_bare_this_or_super_call_resolves_to_the_ancestor_declaring_it(tmp_path: Path) -> None:
+    files = {
+        "Parent.groovy": _PARENT,
+        "Kid.groovy": "package com.acme\nclass Kid extends Parent {\n    void shared() { }\n"
+                      "    void bare() { audit() }\n    void self() { this.audit() }\n"
+                      "    void up() { super.shared() }\n    void own() { shared() }\n"
+                      "    void none() { missing() }\n}\n",
+    }
+    calls = _calls(tmp_path, files, "Kid.groovy")
+    parent, kid = f"{_ROOT}/Parent.groovy", f"{_ROOT}/Kid.groovy"
+    assert calls["bare"] == {"audit": parent}
+    assert calls["self"] == {"audit": parent}
+    assert calls["up"] == {"shared": parent}
+    assert calls["own"] == {"shared": kid}  # the class's own method wins over the parent's
+    assert calls["none"] == {"missing": None}
+
+
+def test_a_bare_call_to_a_trait_method_or_own_accessor_resolves_to_its_declaring_file(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "Parent.groovy": "package com.acme\nclass Parent {\n    void stamp() { }\n}\n",
+        "Stamps.groovy": "package com.acme\ntrait Stamps {\n    void stamp() { }\n}\n",
+        "Doc.groovy": "package com.acme\nclass Doc extends Parent implements Stamps {\n"
+                      "    String title\n    void run() {\n        stamp()\n        getTitle()\n    }\n}\n",
+    }
+    # a trait's method is the class's own: it wins over the parent's
+    assert _calls(tmp_path, files, "Doc.groovy")["run"] == {
+        "stamp": f"{_ROOT}/Stamps.groovy", "getTitle": f"{_ROOT}/Doc.groovy"}
+
+
+def test_a_method_of_a_library_parent_has_no_path(tmp_path: Path) -> None:
+    files = {"Job.groovy": "package com.acme\nimport com.lib.Script\nclass Job extends Script {\n"
+                           "    void run() { binding() }\n}\n"}
+    assert _calls(tmp_path, files, "Job.groovy")["run"] == {"binding": None}
+
+
+def test_a_call_in_an_anonymous_class_is_not_the_enclosing_class_s(tmp_path: Path) -> None:
+    files = {
+        "Parent.groovy": _PARENT,
+        "Kid.groovy": "package com.acme\nclass Kid extends Parent {\n    void run() {\n"
+                      "        def r = new Runnable() {\n            void run() { audit() }\n        }\n"
+                      "    }\n}\n",
+    }
+    assert _calls(tmp_path, files, "Kid.groovy")["run"]["audit"] is None

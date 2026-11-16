@@ -31,6 +31,7 @@ from ..treesitter import parse_source
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
+from .heritage import class_method_names
 from .imports import GroovyIndex, build_fqcn_index, extract_imports, import_aliases
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -84,11 +85,26 @@ class GroovyParser(BaseParser):
             aliases = {a: known[real] for a, real in import_aliases(root, source).items()
                        if real in known}
             heritage = ChainMap(aliases, known) if aliases else known
-        resolve = make_resolver(  # calls[].path: imports, same file, receiver type (declared only)
+        shared = make_resolver(  # calls[].path: imports, same file, receiver type (declared only)
             bindings, defined_names(root, source), path, type_map(root, source),
             heritage=heritage,
             declared_only=True,
+            owner_defs=class_method_names(root, source),
         )
+
+        def resolve(name: str, receiver: str | None, owner: str | None = None,
+                    scope: Mapping[str, str | None] | None = None) -> str | None:
+            """A bare or ``this`` call in a class: the class's own methods first — its index
+            entry holds its generated accessors and its traits' methods, each with the file that
+            declares it — then the shared tiers, then (bare) the inherited methods."""
+            if owner is not None and receiver in (None, "this") and heritage is not None:
+                own = heritage.get(owner)
+                if own is not None and name in own.methods:
+                    return own.methods[name]
+            found = shared(name, receiver, owner, scope)
+            if found is None and receiver is None and owner is not None:
+                found = shared(name, "this", owner, scope)  # `foo()` is `this.foo()`
+            return found
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []

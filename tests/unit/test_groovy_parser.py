@@ -573,3 +573,10 @@ def test_a_typed_local_is_named_and_typed(tmp_path) -> None:
     types = type_map(parse_source("groovy", src).root_node, src)
     assert {k: types[k] for k in ("m", "a", "b")} == {"m": "Mailer", "a": "int", "b": "int"}
     assert "c" not in types
+
+
+def test_a_declaration_whose_name_does_not_parse_is_not_emitted(tmp_path) -> None:
+    # `default Class<? extends T> kind()` leaves the name MISSING: no unnamed method.
+    rec = _parse_src(tmp_path, b"interface Shape {\n    default Class<? extends Number> kind() { Integer }\n"
+                               b"    void draw()\n}\n")
+    assert [f.name for f in rec.functions] == ["draw"]

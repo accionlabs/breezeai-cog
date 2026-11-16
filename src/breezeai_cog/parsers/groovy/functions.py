@@ -37,8 +37,13 @@ def has_declaration_error(node: Node) -> bool:
     becomes a method ``ID(...)``). Such a node must NOT be emitted — capturing nothing is a
     known gap, but capturing a method that does not exist is high-confidence wrong data
     (§ reliability: absent beats wrong). A messy method *body* (an error nested deeper) is
-    fine — the header is trustworthy — so we check only direct children."""
-    return any(c.type == "ERROR" or c.is_missing for c in node.children)
+    fine — the header is trustworthy — so we check only direct children, and the name: one the
+    grammar could not read (``default Class<? extends T> kind()`` leaves a ``MISSING`` inside
+    it) would be emitted empty."""
+    if any(c.type == "ERROR" or c.is_missing for c in node.children):
+        return True
+    name = node.child_by_field_name("name")
+    return name is not None and (name.has_error or not name.text)
 
 
 _INTERPOLATIONS = ("gstring_dollar_interpolation", "gstring_brace_interpolation")
@@ -138,27 +143,31 @@ def _callee(call: Node, source: bytes) -> tuple[str, str | None, bool]:
 
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
-    scope: Mapping[str, str | None] | None = None,
+    scope: Mapping[str, str | None] | None = None, owner: str | None = None,
 ) -> list[Call]:
-    """The calls in a method body; ``scope`` is the method's own variable types."""
+    """The calls in a method body; ``scope`` is the method's own variable types, ``owner`` the
+    simple name of the class it is declared in: a bare, ``this`` or ``super`` call may mean
+    one of that class's own or inherited methods."""
     if body is None:
         return []
     calls: list[Call] = []
     seen: set[str] = set()
 
-    def visit(node: Node) -> None:
+    def visit(node: Node, inner: bool) -> None:
         # Descend into every scope, including inline closures — their calls belong to
-        # the nearest named enclosing function (mirrors Java lambda handling).
+        # the nearest named enclosing function (mirrors Java lambda handling). Inside an
+        # anonymous class body (`inner`), `this` and a bare name mean that class's members.
         for child in node.named_children:
             if child.type in ("method_invocation", "command_chain"):
                 name, receiver, resolvable = _callee(child, source)
                 if name and name not in seen:
                     seen.add(name)
-                    path = resolve(name, receiver, None, scope) if resolvable else None
+                    path = (resolve(name, receiver, None if inner else owner, scope)
+                            if resolvable else None)
                     calls.append(Call(name=name, path=path))
-            visit(child)
+            visit(child, inner or child.type == "class_body")
 
-    visit(body)
+    visit(body, False)
     return calls
 
 
@@ -312,7 +321,7 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, method_scope(node, source, fields or {})),
+        calls=_calls(body, source, resolve, method_scope(node, source, fields or {}), class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

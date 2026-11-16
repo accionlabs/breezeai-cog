@@ -83,6 +83,44 @@ def _capitalize(name: str) -> str:
     return name[:1].upper() + name[1:]
 
 
+_CLASS_DECLS = ("class_declaration", "interface_declaration", "enum_declaration", "trait_declaration")
+
+
+def class_method_names(root: Node, source: bytes) -> dict[str, set[str]]:
+    """Class simple name → the methods a bare or ``this`` call in it can mean in this file: its
+    own (generated property accessors included) and its enclosing classes'. An anonymous
+    class's methods belong to no named class, so a call in a named method never lands on them.
+    A class whose body has a parse error is left out."""
+    out: dict[str, set[str]] = {}
+
+    def walk(node: Node, outer: set[str]) -> None:
+        for child in node.named_children:
+            if child.type in _CLASS_DECLS:
+                nm = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
+                if nm is None or body is None:
+                    continue
+                own: set[str] = set()
+                for m in body.named_children:
+                    if m.type in ("method_declaration", "constructor_declaration"):
+                        name = m.child_by_field_name("name")
+                        if name is not None:
+                            own.add(name_text(name, source))
+                    elif m.type == "field_declaration":
+                        own.update(a for a, _ in property_accessors(m, source))
+                names = own | outer
+                # A parse error in the body may have moved members out of it: leave the class
+                # out, so a call in it checks every method the file declares.
+                if not body.has_error:
+                    out.setdefault(node_text(nm, source), set()).update(names)
+                walk(body, names)
+            elif child.type != "class_body":  # an anonymous class is not a named scope
+                walk(child, outer)
+
+    walk(root, set())
+    return out
+
+
 def property_accessors(field: Node, source: bytes) -> list[tuple[str, str | None]]:
     """``(accessor, return type)`` for each property a ``field_declaration`` declares; empty for a
     field with an access modifier or ``@PackageScope``."""

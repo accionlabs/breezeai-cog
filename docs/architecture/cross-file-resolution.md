@@ -290,7 +290,7 @@ different types:
 | TypeScript / JavaScript | ✓ | ✓ (+ built-in guard) | — | ✓ |
 | C# | ✓ (+ `using static`) | ✓ | ✓ | ✓ |
 | Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
-| Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | — |
+| Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | ✓ (+ a bare call is `this`; the class's own and its traits' methods first) |
 | Kotlin, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
@@ -591,7 +591,7 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | Python resolves absolute imports from the repo root only | `src/`-layout projects (package under `src/`) resolve poorly |
 | Ruby `require_relative "x/y"` (no `./`) resolves from the repo root | It should resolve from the file's own folder |
 | TypeScript heritage: any class name used in two files → `None` | Even identical duplicates block inherited-call resolution |
-| Kotlin, Groovy, Scala: no inherited-call resolution (Groovy checks the declaring class only for calls on a typed receiver or an imported name; a Java parent class ends its chain); Java: class inheritance only (not an interface's `default` method) | `this.save()` from a base class has no `path` |
+| Kotlin, Scala: no inherited-call resolution; Groovy: a Java parent class ends its chain, and a call inside a closure is resolved as the enclosing class's even where a builder would send it to its delegate (only when an in-repo ancestor declares that method); Java: class inheritance only (not an interface's `default` method) | `this.save()` from a base class has no `path` |
 | VB: no import resolution and no inherited calls | Few `CALLS` edges in VB repos |
 | The Scala index has a constants field that is never filled; Kotlin's is not followed through star imports or into a constant built from another file's constant | No cross-file constant folding in Scala; those Kotlin paths stay empty |
 | Values from config files / environment | Routes and addresses built from them stay empty |
