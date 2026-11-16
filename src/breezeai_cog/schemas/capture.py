@@ -40,10 +40,18 @@ class Decorator(BaseModel):
 
 
 class Parameter(BaseModel):
+    """One parameter of a function (``Function.params``) or one input parameter of an
+    ``mcp_tool`` statement (``Statement.params``, read from the tool's input schema)."""
+
     name: str
-    type: str
+    type: str | None = None  # as written in the signature / schema; None when not declared
     decorators: list[Decorator] = Field(default_factory=list)
     default: str | None = None  # default-value expr, e.g. FastAPI `Depends(get_db)`
+    #: Whether a caller must pass it. None = not known (never read as optional).
+    required: bool | None = None
+    #: What the parameter is for, from the schema or annotation; for a Python tool it falls
+    #: back to the param's entry in the docstring's ``Args:`` / ``Parameters`` / ``:param``.
+    description: str | None = None
 
 
 class ConstructorParam(BaseModel):
@@ -57,18 +65,6 @@ class Call(BaseModel):
     name: str
     # callee's in-repo file path → builds CALLS; null / omitted for external.
     path: str | None = None
-
-
-class ToolParam(BaseModel):
-    """One input parameter of an ``mcp_tool`` statement, read from its input schema. For a
-    Python tool, ``description`` falls back to the param's entry in the docstring's ``Args:`` /
-    ``Parameters`` / ``:param`` section."""
-
-    name: str
-    type: str | None = None  # as written in the schema / signature (``str``, ``z.number()`` → ``number``)
-    required: bool = True
-    default: str | None = None  # source text of the default value, when declared
-    description: str | None = None
 
 
 class Statement(BaseModel):
@@ -125,7 +121,7 @@ class Statement(BaseModel):
     # command document, or the tool description / docstring of an ``mcp_tool``.
     description: str | None = None
     # mcp_tool-only: the tool's input parameters.
-    params: list[ToolParam] | None = None
+    params: list[Parameter] | None = None
 
 
 class Function(BaseModel):

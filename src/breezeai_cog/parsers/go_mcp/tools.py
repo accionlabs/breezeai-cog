@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import ToolParam
+from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..mcp_common import param, tool_emit
@@ -126,12 +126,12 @@ def _pkg_call(node: Node, source: bytes, pkgs: set[str]) -> tuple[str, list[Node
 
 def _params(
     options: list[Node], source: bytes, pkgs: set[str]
-) -> tuple[str | None, list[ToolParam] | None]:
+) -> tuple[str | None, list[Parameter] | None]:
     """``(description, params)`` from ``NewTool``'s options. An option that is not an ``mcp``
     call (a helper, ``opts...``), sets a raw schema or is not a known non-parameter option
     may add params: params unknown (None), never a partial list."""
     description: str | None = None
-    out: list[ToolParam] = []
+    out: list[Parameter] = []
     unknown = False
     for opt in options:
         call = _pkg_call(opt, source, pkgs)

@@ -61,7 +61,7 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...schemas import ToolParam
+from ...schemas import Parameter
 from ..additive import (
     DetectContext,
     Detection,
@@ -286,7 +286,7 @@ def _element(annotation: Node, key: str, source: bytes) -> Node | None:
 
 def _params(
     function: Node, source: bytes, param_annotation: str, aliases: dict[str, str]
-) -> list[ToolParam]:
+) -> list[Parameter]:
     params = next(
         (c for c in function.named_children if c.type == "function_value_parameters"), None
     )
@@ -302,7 +302,7 @@ def _params(
             mods = None
         elif c.type not in ("line_comment", "multiline_comment") and entries:
             entries[-1][2] = c
-    out: list[ToolParam] = []
+    out: list[Parameter] = []
     for p, p_mods, default in entries:
         assert p is not None
         name_node = next((c for c in p.named_children if c.type == "simple_identifier"), None)
@@ -455,7 +455,7 @@ def _local_variables(root: Node, source: bytes) -> dict[str, Node | None]:
 
 def _tool_fields(
     node: Node | None, source: bytes, variables: dict[str, Node | None], aliases: dict[str, str]
-) -> tuple[str, str | None, list[ToolParam] | None] | None:
+) -> tuple[str, str | None, list[Parameter] | None] | None:
     """``(name, description, params)`` of an MCP ``Tool`` expression: ``McpSchema.Tool(…)``,
     ``McpSchema.Tool.builder()…build()``, or a variable assigned one of them once."""
     if node is not None and node.type == "simple_identifier":
@@ -642,7 +642,7 @@ def _json_properties(node: Node | None, source: bytes) -> dict[str, dict[str, st
 
 def _kotlin_schema_params(
     node: Node | None, source: bytes, aliases: dict[str, str]
-) -> list[ToolParam] | None:
+) -> list[Parameter] | None:
     """Params of a ``Tool.Input(…)`` / ``ToolSchema(…)``; None when it cannot be read whole."""
     if node is None or node.type != "call_expression":
         return None

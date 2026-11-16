@@ -3,7 +3,7 @@
 Each detector emits one ``mcp_tool`` statement per tool an MCP **server** declares::
 
     semanticType="mcp_tool"  method="TOOL"  endpoint=<tool name clients call>
-    framework=<SDK>  handler / handlerLine  description  params=[ToolParam…]
+    framework=<SDK>  handler / handlerLine  description  params=[Parameter…]
 
 A tool is emitted only when the server it is registered on is proven (constructed, typed, or
 imported from where it is constructed) and its name is a literal: an agent framework's own
@@ -18,7 +18,7 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..schemas import ToolParam
+from ..schemas import Parameter
 from .emits import Emit
 from .treesitter import first_line, node_text
 
@@ -33,11 +33,11 @@ def param(
     name: str,
     type_: str | None = None,
     *,
-    required: bool = True,
+    required: bool | None,
     default: str | None = None,
     description: str | None = None,
-) -> ToolParam:
-    return ToolParam(
+) -> Parameter:
+    return Parameter(
         name=name,
         type=type_ or None,
         required=required,
@@ -54,18 +54,19 @@ def clean_doc(text: str | None) -> str | None:
     return cleaned or None
 
 
-def param_json_bytes(p: ToolParam) -> int:
-    """``p`` as the backend measures it: compact JSON, UTF-8, nulls included."""
+def param_json_bytes(p: Parameter) -> int:
+    """Size of ``p`` as compact UTF-8 JSON with its unset fields written as ``null``: never
+    less than what the backend measures (the capture leaves unset fields out)."""
     return len(json.dumps(p.model_dump(), ensure_ascii=False, separators=(",", ":")).encode())
 
 
-def params_json_bytes(params: list[ToolParam]) -> int:
+def params_json_bytes(params: list[Parameter]) -> int:
     """``[a,b]``: the items, their commas and the brackets, as the backend's JSON.stringify
     counts them."""
     return sum(param_json_bytes(p) for p in params) + max(len(params) - 1, 0) + 2
 
 
-def fit_params(params: list[ToolParam] | None) -> list[ToolParam] | None:
+def fit_params(params: list[Parameter] | None) -> list[Parameter] | None:
     """``params`` within :data:`MAX_TOOL_PARAMS_JSON`: when the list is over it, descriptions
     are kept in param order while they fit, and this one and the rest go without (one overflow
     would drop every param). Names, types and defaults are always kept."""
@@ -92,7 +93,7 @@ def tool_emit(
     handler: str | None,
     handler_line: int | None,
     description: str | None,
-    params: list[ToolParam] | None,
+    params: list[Parameter] | None,
     parent: str | None = None,
     node_type: str | None = "synthetic",
     extra: dict[str, Any] | None = None,

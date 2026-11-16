@@ -43,7 +43,7 @@ import re
 from tree_sitter import Node
 
 from ...logging import get_logger
-from ...schemas import ToolParam
+from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..mcp_common import (
@@ -454,13 +454,13 @@ def _short(node: Node, source: bytes) -> str:
     return text if len(text) <= _MAX_DEFAULT else text[: _MAX_DEFAULT - 1] + "…"
 
 
-def _params(fn: Node, source: bytes, doc_params: dict[str, str]) -> list[ToolParam]:
+def _params(fn: Node, source: bytes, doc_params: dict[str, str]) -> list[Parameter]:
     """The signature's params; a param's description is its ``Field`` / ``Annotated`` one, else
     its entry in ``doc_params`` (the docstring's), added in signature order while the whole list
     stays within ``MAX_TOOL_PARAMS_JSON`` (``mcp_common``): a docstring must never cost the
     ones the code declares."""
     params = fn.child_by_field_name("parameters")
-    out: list[ToolParam] = []
+    out: list[Parameter] = []
     from_doc: dict[int, str] = {}  # index in ``out`` → its docstring description
     for p in params.named_children if params is not None else []:
         name: Node | None
@@ -587,7 +587,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 break  # `enabled=False`: registered but never served
             # the docstring itself, not `description` (which `description=` replaces)
             doc_params = _docstring_param_docs(docstring)
-            params: list[ToolParam] | None = _params(fn, source, doc_params)
+            params: list[Parameter] | None = _params(fn, source, doc_params)
             excluded = _excluded_args(call, source) if call is not None else set()
             if excluded is None:
                 params = None  # `exclude_args=` not a literal: which params remain is unknown

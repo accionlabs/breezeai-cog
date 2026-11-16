@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import ToolParam
+from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..mcp_common import param, tool_emit
@@ -242,7 +242,7 @@ def _chain(node: Node, source: bytes, zod: set[str]) -> list[tuple[str, list[Nod
 _ZOD_WRAPPERS = frozenset({"optional", "nullish", "nullable"})
 
 
-def _zod_param(name: str, value: Node, source: bytes, zod: set[str]) -> ToolParam | None:
+def _zod_param(name: str, value: Node, source: bytes, zod: set[str]) -> Parameter | None:
     chain = _chain(value, source, zod)
     if not chain:
         return None
@@ -265,7 +265,7 @@ def _zod_param(name: str, value: Node, source: bytes, zod: set[str]) -> ToolPara
 
 def _zod_param_chain(
     name: str, base: str | None, chain: list[tuple[str, list[Node]]], source: bytes
-) -> ToolParam:
+) -> Parameter:
     """The param of a zod chain whose base type is ``base`` (None when unknown); ``chain[0]``
     is the base call, the rest are its methods."""
     base_args = chain[0][1]
@@ -288,7 +288,7 @@ def _zod_param_chain(
     return param(name, type_, required=required, default=default, description=description)
 
 
-def _zod_shape(obj: Node, source: bytes, zod: set[str]) -> list[ToolParam] | None:
+def _zod_shape(obj: Node, source: bytes, zod: set[str]) -> list[Parameter] | None:
     """An object literal whose every value is a zod chain → its params; else None."""
     if obj.type != "object":
         return None
@@ -304,7 +304,7 @@ def _zod_shape(obj: Node, source: bytes, zod: set[str]) -> list[ToolParam] | Non
     return out
 
 
-def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[ToolParam] | None:
+def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[Parameter] | None:
     """Params of an ``inputSchema`` value, or None when it cannot be read whole."""
     shape = _zod_shape(node, source, zod)
     if shape is not None:
@@ -347,7 +347,7 @@ _OBJECT_NEUTRAL = frozenset({"describe", "strict", "strip", "passthrough"})
 
 def _object_schema(
     chain: list[tuple[str, list[Node]]], source: bytes, zod: set[str]
-) -> list[ToolParam] | None:
+) -> list[Parameter] | None:
     """Params of ``z.object({…})`` and its methods. ``.partial()`` / ``.deepPartial()`` make
     every key optional; a method that adds, removes or picks keys (``.extend``, ``.merge``,
     ``.pick``, ``.omit``, ``.partial({a: true})``, …) leaves the params unknown."""
@@ -381,7 +381,7 @@ def _annotations(node: Node, source: bytes) -> bool:
     return bool(keys) and keys <= _ANNOTATION_KEYS
 
 
-def _tool_params(middle: list[Node], source: bytes, zod: set[str]) -> list[ToolParam] | None:
+def _tool_params(middle: list[Node], source: bytes, zod: set[str]) -> list[Parameter] | None:
     """Params of ``tool(name, [description], [shape], [annotations], cb)`` from the arguments
     between the description and the callback: ``[]`` with no shape, the shape's params when it
     reads whole, else None."""
@@ -454,7 +454,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         if not name:
             continue
         description: str | None = None
-        params: list[ToolParam] | None = []
+        params: list[Parameter] | None = []
         middle = args[1:-1]
         if method == "registerTool":
             if not middle or middle[0].type != "object":

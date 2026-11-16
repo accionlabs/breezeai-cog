@@ -28,7 +28,7 @@ import re
 
 from tree_sitter import Node
 
-from ...schemas import ToolParam
+from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..mcp_common import param, tool_emit
@@ -113,9 +113,9 @@ def _xml_summary(method: Node, source: bytes) -> str | None:
     return " ".join(m.group(1).split()) if m else None
 
 
-def _params(method: Node, source: bytes) -> list[ToolParam]:
+def _params(method: Node, source: bytes) -> list[Parameter]:
     plist = method.child_by_field_name("parameters")
-    out: list[ToolParam] = []
+    out: list[Parameter] = []
     for p in plist.named_children if plist is not None else []:
         if p.type != "parameter":
             continue

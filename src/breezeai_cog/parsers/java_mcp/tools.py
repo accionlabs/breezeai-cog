@@ -48,7 +48,7 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...schemas import ToolParam
+from ...schemas import Parameter
 from ..additive import (
     DetectContext,
     Detection,
@@ -197,9 +197,9 @@ def _element(annotation: Node, key: str, source: bytes) -> Node | None:
     return None
 
 
-def _params(method: Node, source: bytes, param_annotation: str) -> list[ToolParam]:
+def _params(method: Node, source: bytes, param_annotation: str) -> list[Parameter]:
     params = method.child_by_field_name("parameters")
-    out: list[ToolParam] = []
+    out: list[Parameter] = []
     for p in params.named_children if params is not None else []:
         if p.type != "formal_parameter":
             continue
@@ -351,13 +351,13 @@ def _builder_chain(node: Node, source: bytes) -> tuple[str, list[tuple[str, list
     return root, list(reversed(calls))
 
 
-def _schema_params(node: Node | None, source: bytes) -> list[ToolParam] | None:
+def _schema_params(node: Node | None, source: bytes) -> list[Parameter] | None:
     """Params of a JSON-schema string literal; None when it is not one (unknown)."""
     raw = _string(node, source)
     return _json_schema_params(_unescape(raw) if raw is not None else None)
 
 
-def _json_schema_params(text: str | None) -> list[ToolParam] | None:
+def _json_schema_params(text: str | None) -> list[Parameter] | None:
     """Params of a JSON schema's text (``properties`` / ``required``); None when it does not
     parse (unknown). Shared with the Kotlin detector (``kotlin_mcp``)."""
     if text is None:
@@ -390,7 +390,7 @@ def _json_schema_params(text: str | None) -> list[ToolParam] | None:
 
 def _tool_fields(
     node: Node | None, source: bytes, variables: dict[str, Node | None]
-) -> tuple[str, str | None, list[ToolParam] | None] | None:
+) -> tuple[str, str | None, list[Parameter] | None] | None:
     """``(name, description, params)`` of an MCP ``Tool`` expression: ``new McpSchema.Tool(…)``,
     ``McpSchema.Tool.builder()…build()``, or a local variable assigned one of them once."""
     if node is not None and node.type == "identifier":
