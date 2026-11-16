@@ -534,7 +534,7 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 ### Document parser: Markdown (`parsers/markdown/`)
 Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
 project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`, `.mdx`,
-`.mdc`, `README.rst` and `.cursorrules`; it reads text and never builds a tree.
+`.mdc` (in any case: `README.MD`), `README.rst` and `.cursorrules`; it reads text and never builds a tree.
 
 - **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
   document never counts as an analyzed language and adds no lines of code — in the full scan

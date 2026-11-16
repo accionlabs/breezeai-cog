@@ -922,3 +922,16 @@ def test_doc_cap_counts_only_non_agent_docs_with_a_statement(tmp_path: Path) -> 
     kept = {r.path for r in sink.records if r.statements}
     assert kept == {"a/SKILL.md", "b/CLAUDE.md", "d/one.md", "e/two.md"}
     assert meta.configs["markdownCapped"] == 1
+
+
+def test_upper_case_markdown_suffixes_are_claimed(analyze_files) -> None:
+    registry.discover_builtin()
+    for path in ("README.MD", "CHANGELOG.MD", "docs/Guide.Md", "docs/page.MDX", "rules/x.MDC"):
+        assert registry.select(path, b"# x\n").name == "markdown", path
+    assert _kind("README.MD") == "readme" and _kind("CHANGELOG.MD") == "changelog"
+    assert all(p.name != "markdown" for p in registry.parsers_for("src/app.TS"))
+    statements = analyze_files({"README.MD": "# Hi\n", "CHANGELOG.MD": "# 1.0\n"})
+    assert {s.path: s.semanticType for s in statements} == {
+        "README.MD": "readme",
+        "CHANGELOG.MD": "changelog",
+    }

@@ -139,6 +139,8 @@ _CODE_KEYWORDS = frozenset(
 )
 #: A ``key:`` line in YAML front matter (optionally a list item).
 _FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
+#: Suffixes the parser owns in any case (:meth:`MarkdownParser.matches`).
+_SUFFIXES_ANY_CASE = frozenset({".md", ".mdx", ".mdc"})
 #: Folders whose ``plugin.json`` marks a plugin root (Claude Code, Cursor).
 _PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
 
@@ -147,6 +149,11 @@ class MarkdownParser(BaseParser):
     name = "markdown"
     schema_version = SCHEMA_VERSION
     extensions = (".md", ".mdx", ".mdc", "README.rst", ".cursorrules")
+
+    def matches(self, path: str | Path) -> bool:
+        """The base suffix gate, and a Markdown suffix in any case (``README.MD``,
+        ``CHANGELOG.MD``): no other parser registers one."""
+        return super().matches(path) or PurePosixPath(path).suffix.lower() in _SUFFIXES_ANY_CASE
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         size = len(ctx.source)
