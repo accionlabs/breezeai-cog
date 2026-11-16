@@ -64,7 +64,6 @@ id_rsa*
 
 # Logs / temp
 *.log
-logs/
 tmp/
 temp/
 

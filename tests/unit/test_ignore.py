@@ -28,6 +28,13 @@ def test_builtin_keeps_normal_sources() -> None:
         assert not eng.is_ignored_global(path), path
 
 
+def test_logs_folder_source_kept_but_log_files_skipped() -> None:
+    eng = IgnoreEngine.build()
+    assert not eng.is_ignored_global("src/webapp/app/admin/logs/logs.ts")
+    assert eng.is_ignored_global("logs/app.log")
+    assert eng.is_ignored_global("server.log")
+
+
 def test_directory_form_matches() -> None:
     eng = IgnoreEngine.build()
     assert eng.is_ignored_global("node_modules/")
