@@ -26,6 +26,7 @@ from ..integrations.scm import (
     SCMClientFactory,
     SCMError,
 )
+from ..integrations.scm.repository import parse_bitbucket_server_url
 from ..integrations.scm.repository import parse_repo_url as _parse_repo_ref
 from .errors import ApiError
 
@@ -43,6 +44,37 @@ def parse_repo_url(
     """Legacy dict view of ``integrations.scm.repository.parse_repo_url`` for the route."""
     ref = _parse_repo_ref(repo_url, instances)
     return None if ref is None else ref.as_dict()
+
+
+def provider_override(body: Mapping[str, Any]) -> str:
+    """``body["gitProvider"]`` lower-cased, or ``""``.
+
+    Only ``bitbucket_server`` is acted on. Every other slug is ignored rather than
+    rejected: the four cloud providers are identified from the URL and always have been,
+    so honouring a slug for them would be a second source of truth that can disagree
+    with the host.
+    """
+    return str(body.get("gitProvider") or "").strip().lower()
+
+
+def resolve_repo_ref(body: Mapping[str, Any], instances: Mapping[str, str]) -> RepoRef | None:
+    """``body["repoUrl"]`` → ``RepoRef``, honouring an explicit ``gitProvider``.
+
+    Bitbucket Data Center ships no public cloud, so no URL pattern can identify it and
+    its host would otherwise have to be pre-registered in ``scm_instances``. The slug on
+    the request says so directly, which is what lets a per-customer instance be analysed
+    without deployment-wide config. Shared by ``/api/analyze-diff`` and ``/api/git/*`` so
+    the two cannot drift apart.
+
+    Returns:
+        ``None`` when no provider claims the URL, including when the caller named
+        ``bitbucket_server`` for a URL that has no Data Center anchor — a contradiction
+        the route reports rather than silently resolving in the URL's favour.
+    """
+    repo_url = str(body["repoUrl"])
+    if provider_override(body) == "bitbucket_server":
+        return parse_bitbucket_server_url(repo_url)
+    return _parse_repo_ref(repo_url, instances)
 
 
 def _scrub(s: str) -> str:
@@ -156,7 +188,7 @@ def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str
     Incremental when a usable ``currentCommitId`` is present **and** the provider client
     supports it; otherwise a full clone (``filter_set=None`` → process every file).
     """
-    ref = _parse_repo_ref(body["repoUrl"], settings.scm_instances)
+    ref = resolve_repo_ref(body, settings.scm_instances)
     if ref is None:
         raise ApiError(INVALID_REPO_URL_MESSAGE, 400)
 

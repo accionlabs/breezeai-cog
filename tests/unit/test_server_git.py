@@ -330,3 +330,38 @@ def test_clone_timeout_removes_its_temp_dir(monkeypatch: pytest.MonkeyPatch, tmp
         git_mod.clone_repo_full(FakeClient(), REF, _SHA, _BRANCH)
 
     assert not Path(created[0]).exists()
+
+
+# --- resolve_repo_ref: the gitProvider override, shared with /api/git/* -------------
+
+_DC_URL = "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+
+
+def test_resolve_repo_ref_honours_bitbucket_server_without_scm_instances() -> None:
+    """What `/api/analyze-diff` needs to reach a customer's Data Center instance without
+    deployment-wide config."""
+    ref = git_mod.resolve_repo_ref(
+        {"repoUrl": _DC_URL, "gitProvider": "bitbucket_server"}, {}
+    )
+    assert ref == RepoRef(
+        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
+        host="stash.payroll.co.jp", context_path="/stash",
+    )
+
+
+def test_resolve_repo_ref_without_the_slug_cannot_see_a_data_center_host() -> None:
+    assert git_mod.resolve_repo_ref({"repoUrl": _DC_URL}, {}) is None
+
+
+def test_resolve_repo_ref_still_uses_scm_instances_without_the_slug() -> None:
+    ref = git_mod.resolve_repo_ref(
+        {"repoUrl": _DC_URL}, {"stash.payroll.co.jp": "bitbucket_server"}
+    )
+    assert ref is not None and ref.provider == "bitbucket_server"
+
+
+def test_resolve_repo_ref_ignores_a_slug_for_a_cloud_provider() -> None:
+    ref = git_mod.resolve_repo_ref(
+        {"repoUrl": "https://github.com/acme/repo", "gitProvider": "gitlab"}, {}
+    )
+    assert ref is not None and ref.provider == "github"

@@ -138,7 +138,9 @@ def test_compare_maps_change_types_and_splits_a_move(router, settings) -> None:
     assert result.changed == ["src/new.py", "src/edit.py", "src/to.py"]
     assert result.deleted == ["src/gone.py", "src/from.py"]
     assert [f.status for f in result.files] == ["added", "modified", "removed", "renamed"]
-    assert router.urls[0] == f"{REPO}/compare/changes?from={BASE}&to={SHA}&limit=1000"
+    # Reversed on purpose: Data Center answers from=base&to=head with an empty page,
+    # so the wrong order reads as "nothing changed" rather than failing.
+    assert router.urls[0] == f"{REPO}/compare/changes?from={SHA}&to={BASE}&limit=1000"
 
 
 def test_compare_reports_no_line_counts_or_patch(router, settings) -> None:

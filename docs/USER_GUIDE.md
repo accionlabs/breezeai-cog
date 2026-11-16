@@ -490,8 +490,9 @@ credential or unknown host as `400`.
 **Bitbucket Data Center (`bitbucket_server`)** is a separate provider from Bitbucket Cloud, not a
 Cloud instance on another host: it speaks REST 1.0 and addresses repositories as
 `/projects/{projectKey}/repos/{repositorySlug}`. It ships no public cloud, so its host must be
-identified by `"gitProvider": "bitbucket_server"` on the request — the only slug `gitProvider`
-acts on, since every other provider is identified from the URL. Without it the host must be listed
+identified by `"gitProvider": "bitbucket_server"` on the request (on `/api/analyze-diff` and every
+`/api/git/*` route alike) — the only slug `gitProvider` acts on, since every other provider is
+identified from the URL. Without it the host must be listed
 in `BREEZEAI_COG_SCM_INSTANCES` instead. It has no anonymous mode either — a request without
 `gitToken` is a `400`. Unlike the other four providers it has **no**
 `BREEZEAI_COG_SCM_TOKEN_*` fallback: every Data Center host is a different customer's instance, so

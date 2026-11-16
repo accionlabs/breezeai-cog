@@ -277,7 +277,15 @@ class BitbucketServerSCMClient(AbstractSCMClient):
         )
 
     def compare(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
-        """``GET {repo}/compare/changes?from={base}&to={head}``.
+        """``GET {repo}/compare/changes?from={head}&to={base}``.
+
+        **The spec order is reversed** relative to GitHub's ``base...head``, the same way
+        Bitbucket Cloud's ``diffstat/{head}..{base}`` is. Sending ``from=base&to=head``
+        returns an empty page rather than an error, so the mistake does not surface as a
+        failure — it surfaces as a repository that never appears to change. Verified
+        against a live instance: for one merged pull request, ``from=base&to=head`` gave
+        0 entries while ``from=head&to=base`` gave the same 9 the provider's own
+        ``/pull-requests/{id}/changes`` reports.
 
         Data Center reports neither line counts nor diff text here, so ``additions`` /
         ``deletions`` stay ``0`` and ``patch`` stays ``None`` rather than carrying a
@@ -289,7 +297,7 @@ class BitbucketServerSCMClient(AbstractSCMClient):
         """
         path = f"{self._repo_path(ref)}/compare/changes"
         out = ChangeSet()
-        for body in self._pages(path, {"from": base, "to": head, "limit": _PAGE_LIMIT}):
+        for body in self._pages(path, {"from": head, "to": base, "limit": _PAGE_LIMIT}):
             for entry in body.get("values") or []:
                 new_path = ((entry.get("path") or {}).get("toString") or "").strip()
                 old_path = ((entry.get("srcPath") or {}).get("toString") or "").strip()

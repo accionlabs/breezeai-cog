@@ -6,6 +6,7 @@ blocking S3 upload run off the event loop; backend notifications are fire-and-fo
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import time
@@ -25,8 +26,10 @@ from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import INVALID_REPO_URL_MESSAGE, _scrub, parse_repo_url
+from .git import INVALID_REPO_URL_MESSAGE, _scrub, resolve_repo_ref
 from .git_routes import router as git_router
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -109,10 +112,13 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
         raise ApiError(
             "All fields required: repoUrl, incomingCommitId, gitBranch, projectUuid, codeOntologyId", 400
         )
-    parsed = parse_repo_url(repo_url, settings.scm_instances)
+    # The same resolver `acquire_diff` uses, so an explicit `gitProvider` is honoured
+    # here too; parsing in only one of the two places rejected the request before
+    # acquisition ever ran.
+    parsed = resolve_repo_ref(body, settings.scm_instances)
     if parsed is None:
         raise ApiError(INVALID_REPO_URL_MESSAGE, 400)
-    repo_name = parsed["repo"]
+    repo_name = parsed.repo
     ignore_patterns = _normalize_ignore_patterns(body.get("ignorePatterns"))
 
     # Every failure below leaves as an ApiError carrying the stage that broke, so the
@@ -179,6 +185,14 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
             await run_in_threadpool(upload.close)
         except Exception as exc:
             raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
+        # Logged only here: `close()` returning is the contract's proof that the object
+        # is complete and readable, so a URL printed any earlier could point at a
+        # partial upload the backend would then fail to ingest.
+        logger.info(
+            "breezeai_capture_uploaded: s3://%s/%s (https://%s.s3.%s.amazonaws.com/%s)",
+            settings.aws_s3_bucket, storage_key,
+            settings.aws_s3_bucket, settings.aws_region, storage_key,
+        )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

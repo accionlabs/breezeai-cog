@@ -38,10 +38,9 @@ from starlette.concurrency import run_in_threadpool
 from ..config import Settings
 from ..integrations.scm import AbstractSCMClient, RepoRef, SCMError
 from ..integrations.scm.pr_url import parse_pr_url
-from ..integrations.scm.repository import parse_bitbucket_server_url, parse_repo_url
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import INVALID_REPO_URL_MESSAGE
+from .git import INVALID_REPO_URL_MESSAGE, provider_override, resolve_repo_ref
 
 router = APIRouter(prefix="/api/git")
 
@@ -58,31 +57,10 @@ def _require(body: dict[str, Any], *fields: str) -> None:
         raise ApiError(f"All fields required: {', '.join(fields)}", 400)
 
 
-def _provider_override(body: dict[str, Any]) -> str:
-    """``body["gitProvider"]`` lower-cased, or ``""``.
-
-    Only ``bitbucket_server`` is honoured. Every other value is ignored rather than
-    rejected: the four cloud providers are identified from the URL and always have been,
-    so accepting a slug there would create a second source of truth that could disagree
-    with the host.
-    """
-    return str(body.get("gitProvider") or "").strip().lower()
-
-
 def _ref(settings: Settings, body: dict[str, Any]) -> RepoRef:
-    """``body["repoUrl"]`` → ``RepoRef``.
-
-    Bitbucket Data Center ships no public cloud, so no URL pattern can identify it and a
-    host would otherwise have to be pre-registered in ``BREEZEAI_COG_SCM_INSTANCES``.
-    ``gitProvider: "bitbucket_server"`` on the request says so directly, which is what
-    lets a per-customer instance be analysed without deployment-wide config. Every other
-    provider keeps host detection unchanged.
-    """
-    repo_url = str(body["repoUrl"])
-    if _provider_override(body) == "bitbucket_server":
-        ref = parse_bitbucket_server_url(repo_url)
-    else:
-        ref = parse_repo_url(repo_url, settings.scm_instances)
+    """``body["repoUrl"]`` → ``RepoRef`` via the resolver ``/api/analyze-diff`` also
+    uses, so an explicit ``gitProvider`` means the same thing on every endpoint."""
+    ref = resolve_repo_ref(body, settings.scm_instances)
     if ref is None:
         raise ApiError(INVALID_REPO_URL_MESSAGE, 400)
     return ref
@@ -120,7 +98,7 @@ async def parse_pr_url_route(request: Request) -> dict[str, Any]:
     body = await _body(request)
     _require(body, "prUrl")
     info = parse_pr_url(
-        str(body["prUrl"]), settings, provider=_provider_override(body)
+        str(body["prUrl"]), settings, provider=provider_override(body)
     )
     if info is None:
         raise ApiError(
