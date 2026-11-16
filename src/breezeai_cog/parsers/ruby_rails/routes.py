@@ -17,7 +17,7 @@ from ..inflect import plural as _plural
 from ..inflect import singular as _singular
 from ..ruby.ownership import owner_id
 from ..treesitter import node_text
-from .callbacks import callbacks_of, controller_class, guards_for
+from .callbacks import callbacks_of, controller_class, guards_for, is_auth_guard
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "match"}
 _DRAW_FACT = "rails.drawn-route-files"
@@ -189,6 +189,8 @@ _PATH_SCOPES = {"namespace", "scope"}
 #: Resource blocks: their routes are nested under the resource (``resources :photos do`` →
 #: ``/photos/:photo_id/…``; ``member do`` → ``/photos/:id/…``; ``collection do`` → ``/photos/…``).
 _RESOURCE_SCOPES = {"resources", "resource"}
+# Rails knows this -ses plural; the shared conservative inflector leaves that ending ambiguous.
+_RAILS_RESOURCE_SINGULARS = {"statuses": "status"}
 _MEMBER_SCOPES = {"member", "collection"}
 #: Blocks that add a path we do not compute (concerns mounted elsewhere, shallow nesting): a route
 #: inside one has a prefix we cannot resolve → its endpoint stays empty.
@@ -230,8 +232,10 @@ class _Resource:
         self.segment = (seg or "").strip("/")
         self.controller = ctrl
         self.param = param_name or "id"
-        singular = _singular(self.name) if self.plural else self.name
-        self.nested_param = f":{singular}_{self.param}" if singular is not None else None
+        nested_singular = singular if self.plural else self.name
+        self.nested_param = (
+            f":{nested_singular}_{self.param}" if nested_singular is not None else None
+        )
         self.shallow = _option(args, source, "shallow") is not None
         self.actions = self._actions(args, source)
 
@@ -400,18 +404,28 @@ def _route_module(call: Node, source: bytes) -> str | None:
     return "/".join(m.strip("/") for m in reversed(modules) if m.strip("/"))
 
 
-def _route_guards(handler: str | None, module: str | None, index: object) -> list[str]:
-    """The ``before_action`` guards of the controller action a route points at (``users#show`` →
-    ``UsersController#show``, inside ``namespace :admin`` → ``Admin::UsersController``). Unknown
-    controller, module or handler form → no guards."""
+def _route_callback_info(
+    handler: str | None, module: str | None, index: object
+) -> tuple[list[str], bool | None]:
+    """The guards and auth status of the controller action a route points at."""
     if handler is None or module is None:
-        return []
+        return [], None
     target = controller_class(f"{module}/{handler}" if module else handler)
     if target is None:
-        return []
+        return [], None
     controller, action = target
     callbacks = callbacks_of(index, controller)
-    return guards_for(callbacks, action) if callbacks is not None else []
+    if callbacks is None:
+        return [], None
+    guards = guards_for(callbacks, action)
+    auth_callbacks = [name for name, _, _ in callbacks if is_auth_guard(name)]
+    if any(is_auth_guard(guard) for guard in guards):
+        auth_required = True
+    elif auth_callbacks:
+        auth_required = False
+    else:
+        auth_required = None
+    return guards, auth_required
 
 
 def _join(prefix: str, local: str) -> str:
@@ -464,7 +478,7 @@ def detect_rails_routes(
         emit_index = emitted_by_call.get(key, 0)
         emitted_by_call[key] = emit_index + 1
         module = _route_module(call, source)
-        guards = _route_guards(handler, module, index)
+        guards, auth_required = _route_callback_info(handler, module, index)
         # `users#show` → the `show` action of `UsersController`, where it is declared (Q14).
         target = controller_class(f"{module}/{handler}" if module else handler) \
             if handler is not None and module is not None else None
@@ -524,6 +538,8 @@ def detect_rails_routes(
             prefix = _route_prefix(call, source)
             for name_node in [a for a in args if a.type != "pair"]:
                 resource = _Resource(call, name_node, source)
+                if not resource.name_is_literal:
+                    continue
                 if resource.actions is None:
                     continue  # only:/except: not a literal list — which actions exist is unknown
                 table = _PLURAL_ACTIONS if resource.plural else _SINGULAR_ACTIONS

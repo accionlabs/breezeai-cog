@@ -643,6 +643,17 @@ def model_receivers(
         _add_model_var(v_name, m_type)
 
     def visit(node: Node) -> None:
+        if node.type == "call":
+            receiver_node = node.child_by_field_name("receiver")
+            if receiver_node is not None and receiver_node.type in {
+                "constant", "scope_resolution",
+            }:
+                receiver_name = node_text(receiver_node, source)
+                if _resolve_model_constant(
+                    receiver_name, node, source, models, declared_names
+                ) is not None:
+                    add_receiver(receiver_name)
+
         if node.type == "assignment":
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")

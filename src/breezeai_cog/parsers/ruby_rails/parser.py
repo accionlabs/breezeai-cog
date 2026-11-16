@@ -82,6 +82,9 @@ class RailsParser(RubyParser):
             or rails_routes
             or rails_controller
         )
+        if _OTHER_FRAMEWORK.search(source) and not (rails_routes or rails_controller):
+            return False
+        return bool(_RAILS_REQUIRE.search(source) or rails_routes or rails_controller)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = ctx.parsed_root

@@ -44,6 +44,7 @@ class RubyParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+    build_index_accepts_timeout = True
 
     def fixture_markers(self) -> tuple[str, ...]:
         # RSpec / Minitest file naming (``cookies_spec.rb``, ``user_test.rb``): the file is a
@@ -132,7 +133,7 @@ class RubyParser(BaseParser):
         return True
 
     def build_index(
-        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = RUBY_INDEX_PARSE_TIMEOUT_MICROS,
     ) -> RubyIndex:
         """Repo-level pre-pass: the ActiveRecord model constants (see ``models.py``) and the
         registered facts of the Ruby files (Rails controller callbacks, …).
@@ -266,8 +267,16 @@ class RubyParser(BaseParser):
 
         statements.extend(
             extract_statements(
-                root, source, path, parent_id=fid, capture=capture, limit=limit,
-                seen_ids=seen_ids, typed_db_ids=typed_db_ids,
+                root,
+                source,
+                path,
+                parent_id=fid,
+                capture=capture,
+                limit=limit,
+                seen_ids=seen_ids,
+                typed_db_ids=typed_db_ids,
+                classifier_db_ids=classifier_db_ids,
+                extra_typed_db_ids=frozenset(root_extra_ids),
             )
         )
 

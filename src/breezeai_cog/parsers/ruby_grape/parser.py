@@ -9,8 +9,15 @@ from ..base import ParseContext
 from ..emits import apply
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
-from ..ruby.claims import has_require, has_superclass
 from .routes import detect_grape_routes
+
+_GRAPE_REQUIRE = re.compile(rb"""(?m)^\s*require(?:_relative)?\s*(?:\(\s*)?['"]grape['"]""")
+_GRAPE_API = re.compile(
+    rb"(?m)^\s*class\s+[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*\s*<\s*"
+    rb"(?:::)?Grape\s*::\s*(?:API|Endpoint)\b"
+    rb"|^\s*(?:[A-Za-z_]\w*\s*=\s*)?Class\s*\.\s*new\s*\(\s*"
+    rb"(?:::)?Grape\s*::\s*API\b"
+)
 
 
 class GrapeParser(RubyParser):

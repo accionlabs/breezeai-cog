@@ -361,7 +361,23 @@ def test_ruby_generic_verbs_require_an_identified_model() -> None:
         assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
             "db_method_call", method, "activerecord"
         )
-        assert classify_call(callee, method, language="ruby") is None
+
+
+def test_ruby_instance_writes_with_proven_receiver() -> None:
+    models = frozenset({"User", "user", "self", "session", "account", "user.account"})
+    for callee, method in [
+        ("self.save", "save"),
+        ("self.update", "update"),
+        ("session.save", "save"),
+        ("account.save", "save"),
+        ("user.account.save", "save"),
+    ]:
+        assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
+            "db_method_call", method, "activerecord"
+        )
+    assert classify_call("session.save", "save", language="ruby") == (
+        "db_method_call", "save", "sqlalchemy"
+    )
 
 
 def test_ruby_instance_writes_with_proven_receiver() -> None:

@@ -44,6 +44,14 @@ class RubyIndex:
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
+    #: All declared class constants, used for lexical model receiver resolution.
+    class_names: frozenset[str] = frozenset()
+
+    def __contains__(self, name: object) -> bool:
+        return name in self.models
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.models)
 
     def __contains__(self, name: object) -> bool:
         return name in self.models
