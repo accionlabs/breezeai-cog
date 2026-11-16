@@ -579,10 +579,13 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   anywhere; so is an authorization-style header with a scheme word (`Authorization: Bearer x`,
   `curl -H "Authorization: Basic x"` — scheme and credential both). Secret-named upper-case env
   assignments (`DB_PASSWORD=`) are masked anywhere; secret-named `key = value` / `key: value`
-  pairs of any case inside fenced code blocks (at any indent) and on indented code lines,
-  except values that are lookups (`os.environ['X']`, `get_token()`, `settings.PASSWORD`);
-  and secret-named front-matter values, including indented, block-scalar and flow-collection
-  (`env: {DB_PASSWORD: x}`) values. In fenced blocks and front matter (text and
+  pairs of any case inside fenced code blocks (at any indent), on indented code lines and in
+  inline code spans in prose (`` `DB_PASSWORD=x` ``), except values that are lookups
+  (`os.environ['X']`, `get_token()`, `settings.PASSWORD`); in a pipe-table row, a one-word
+  cell after a secret-named key cell (`| DB_PASSWORD | x |`; a header row is not a key); and
+  secret-named front-matter values, including indented, block-scalar and flow-collection
+  (`env: {DB_PASSWORD: x}`) values. A token count (`max_tokens: 4096`, `MAX_TOKENS=4096`) is a
+  number, not a secret, and is kept everywhere. In fenced blocks and front matter (text and
   `metadata.frontmatter`), a `value:` whose sibling `name:` is secret-named (the Kubernetes /
   Compose `- name: DB_PASSWORD` / `value: x` shape) is masked too. PEM covers armored PGP
   private-key blocks; provider tokens include OpenAI keys (`sk-proj-…` and the legacy

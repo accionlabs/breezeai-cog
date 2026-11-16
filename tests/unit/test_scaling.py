@@ -343,7 +343,8 @@ def _kotlin_ktor(n: int) -> str:
 def _markdown(n: int) -> str:
     body = "".join(
         f"## Step {i}\n"
-        f"Run it with `TOKEN_{i}` set.\n"
+        f"Run it with `TOKEN_{i}` set, or `DB_PASSWORD_{i}=p{i}`.\n"
+        f"| Key | Value |\n|---|---|\n| API_KEY_{i} | k{i} |\n"
         f"```yaml\n- name: DB_PASSWORD\n  value: s{i}\npassword: p{i}\n```\n"
         f"export API_KEY_{i}=k{i}\n"
         for i in range(n)

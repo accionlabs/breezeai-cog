@@ -28,7 +28,13 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..structured_json.redaction import redact_text
 from .classify import classify
-from .frontmatter import load_front_matter, secret_name, split_front_matter, string_field
+from .frontmatter import (
+    load_front_matter,
+    secret_name,
+    split_front_matter,
+    string_field,
+    token_count,
+)
 
 #: Statement text cap, in UTF-8 bytes (the largest SKILL.md measured is 60.5 KB).
 MAX_TEXT_BYTES = 64 * 1024
@@ -80,6 +86,14 @@ _CODE_ASSIGN = re.compile(
     r"(" + _AUTH_SCHEME + r"[ \t]++(?=[^\s,;)}\]]))?"
     r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;)}\]]+)"
 )
+#: A single-backtick inline code span in prose (```DB_PASSWORD=x```). The body is matched
+#: possessively up to the next backtick on the line: linear time.
+_INLINE_CODE = re.compile(r"`([^`\n]*+)`")
+#: A pipe-table row (``| DB_PASSWORD | x |``) and its header delimiter row (``|---|:-:|``).
+_TABLE_ROW = re.compile(r"^[ \t]*\|")
+_TABLE_DELIMITER = re.compile(r"[ \t:|\-]*+")
+#: A table cell that is a bare key: a name, optionally in backticks.
+_TABLE_KEY = re.compile(r"`?([A-Za-z_][\w.\-]*+)`?")
 #: A dotted name (``settings.DB_PASSWORD``, ``process.env.TOKEN``): a lookup, not a literal.
 _DOTTED_NAME = re.compile(r"[A-Za-z_]\w*+(?:\.[A-Za-z_]\w*+)+")
 #: A ``key: value`` pair inside a YAML flow collection (``env: {API_TOKEN: x, DB: y}``). The
@@ -95,8 +109,6 @@ _MARKER_RESERVE = len("\n…[+9999999999 bytes dropped: markdown 64 KB cap]".enc
 _TYPE_VALUES = frozenset(
     {"string", "str", "String", "number", "int", "bool", "boolean", "any", "None", "null"}
 )
-#: A token *count* (``MAX_TOKENS=4096``, ``max_tokens: 1024``) is a number, not a secret.
-_TOKEN_COUNT = re.compile(r"tokens|max_?token|token_?(?:limit|count|budget)", re.IGNORECASE)
 #: A ``key:`` line in YAML front matter (optionally a list item).
 _FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
 #: Folders whose ``plugin.json`` marks a plugin root (Claude Code, Cursor).
@@ -206,13 +218,9 @@ def _masked_value(value: str) -> str:
     return f"{quote}***{quote}"
 
 
-def _token_count(name: str, value: str) -> bool:
-    return value.isdigit() and bool(_TOKEN_COUNT.search(name))
-
-
 def _mask_env(m: re.Match[str]) -> str:
     name, value = m.group(2), m.group(3)
-    if not secret_name(name) or _token_count(name, value):
+    if not secret_name(name) or token_count(name, value):
         return m.group(0)
     return f"{m.group(1)}{_masked_value(value)}"
 
@@ -232,7 +240,7 @@ def _mask_code_assign(m: re.Match[str]) -> str:
         not secret_name(key)
         or (not scheme and (value in _TYPE_VALUES or _lookup(value)))
         or value.strip("\"'") == "***"
-        or _token_count(key, value)
+        or token_count(key, value)
     ):
         return m.group(0)
     masked = "***" if scheme else _masked_value(value)
@@ -242,7 +250,9 @@ def _mask_code_assign(m: re.Match[str]) -> str:
 def _mask_code_blocks(text: str) -> str:
     """Mask secret-named ``key = value`` pairs on code lines, where config and code snippets
     live: inside fenced blocks at any indent (a fence nested under a list item
-    included) and on indented code lines (four spaces or a tab). Other prose is untouched.
+    included) and on indented code lines (four spaces or a tab). In other prose, only the
+    code it quotes in inline code spans (:func:`_mask_inline_code`). Pipe-table rows, in prose
+    or in a block, have the cell after a secret-named key cell masked (:func:`_mask_table_row`).
 
     A fence closes only on a bare run of its own character at least as long as the opener, so
     a shorter or labelled fence quoted inside a block does not end it; an unclosed fence masks
@@ -262,11 +272,63 @@ def _mask_code_blocks(text: str) -> str:
                 fence = None
                 _mask_name_value(lines, fence_start, i)
                 continue
-        if (fence is not None or _INDENTED_CODE.match(line)) and ("=" in line or ":" in line):
-            lines[i] = _CODE_ASSIGN.sub(_mask_code_assign, line)
+        if fence is not None or _INDENTED_CODE.match(line):
+            if "=" in line or ":" in line:
+                line = lines[i] = _CODE_ASSIGN.sub(_mask_code_assign, line)
+        elif "`" in line:
+            line = lines[i] = _mask_inline_code(line)
+        if _TABLE_ROW.match(line) and not (i + 1 < len(lines) and _delimiter_row(lines[i + 1])):
+            lines[i] = _mask_table_row(line)
     if fence is not None:
         _mask_name_value(lines, fence_start, len(lines))
     return "\n".join(lines)
+
+
+def _delimiter_row(line: str) -> bool:
+    """True for a pipe table's header delimiter row (``|---|:-:|``)."""
+    return "-" in line and _TABLE_DELIMITER.fullmatch(line) is not None
+
+
+def _mask_inline_code(line: str) -> str:
+    """``line`` with secret-named ``KEY=value`` / ``key: value`` pairs inside its inline code
+    spans masked (``Set `DB_PASSWORD=x` first``), by the code-block rules."""
+
+    def span(m: re.Match[str]) -> str:
+        body = m.group(1)
+        if "=" not in body and ":" not in body:
+            return m.group(0)
+        return f"`{_CODE_ASSIGN.sub(_mask_code_assign, body)}`"
+
+    return _INLINE_CODE.sub(span, line)
+
+
+def _mask_table_row(line: str) -> str:
+    """``line``, a pipe-table body row, with the cell after a secret-named key cell masked
+    (``| DB_PASSWORD | x |``). Only a one-word value is a candidate (a sentence describing the
+    key is kept), and the code-block exemptions apply: type names, lookups, token counts."""
+    cells = line.split("|")
+    for k in range(1, len(cells) - 1):
+        key = _TABLE_KEY.fullmatch(cells[k].strip())
+        if key is None or not secret_name(key.group(1)):
+            continue
+        raw = cells[k + 1]
+        value = raw.strip()
+        tick = "`" if len(value) > 2 and value[0] == value[-1] == "`" else ""
+        bare = value[1:-1] if tick else value
+        if (
+            not bare
+            or any(c.isspace() for c in bare)
+            or "`" in bare
+            or bare in _TYPE_VALUES
+            or bare.strip("\"'") in ("***", "-", "—", "")
+            or _lookup(bare)
+            or token_count(key.group(1), bare)
+        ):
+            continue
+        lead = raw[: len(raw) - len(raw.lstrip())]
+        trail = raw[len(raw.rstrip()) :]
+        cells[k + 1] = f"{lead}{tick}{_masked_value(bare)}{tick}{trail}"
+    return "|".join(cells)
 
 
 def _mask_name_value(lines: list[str], start: int, end: int) -> None:
@@ -333,7 +395,8 @@ def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
                 continue
             block_indent = None
         m = _FM_KEY.match(line)
-        if m is None or not secret_name(m.group(2).strip("\"'")):
+        key = m.group(2).strip("\"'") if m is not None else ""
+        if m is None or not secret_name(key) or token_count(key, m.group(4).strip().strip("\"'")):
             # A flow collection (``env: {DB_PASSWORD: x}``, ``- {token: x}``) can hold
             # secret-named pairs of its own.
             if "{" in line:
@@ -361,7 +424,7 @@ def _mask_flow(line: str) -> str:
         head = line[m.start() : m.start(4)]
         pos = m.end()
         bare = value.strip()
-        if not secret_name(key) or bare.strip("\"'") == "***" or _token_count(key, bare):
+        if not secret_name(key) or bare.strip("\"'") == "***" or token_count(key, bare):
             out.append(m.group(0))
         elif bare:
             out.append(f"{head}{_masked_value(bare)}{value[len(value.rstrip()) :]}")

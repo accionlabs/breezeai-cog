@@ -769,3 +769,55 @@ def test_sibling_name_value_secret_is_masked_in_front_matter() -> None:
         {"name": "REGION", "value": "us-east-1"},
     ]
     assert rec.statements[0].name == "deploy"
+
+
+# ── secrets quoted in prose; token counts in front matter ────────────────────
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Set `DB_PASSWORD=hunter2` before starting.",
+        "Use `api_key: hunter2` in the config.",
+        "| DB_PASSWORD | hunter2 |",
+        "| `client_secret` | `hunter2` | the OAuth secret |",
+        "| DB_PASSWORD | hunter2",
+    ],
+)
+def test_secrets_in_inline_code_and_table_rows_are_masked(line: str) -> None:
+    st = _parse("docs/a.md", f"# Setup\n{line}\n").statements[0]
+    assert "hunter2" not in st.text and "***" in st.text
+
+
+def test_inline_code_and_table_non_secrets_are_kept() -> None:
+    text = (
+        "# Setup\nSet `REGION=us-east-1` and `password: string` and `MAX_TOKENS=4096`.\n\n"
+        "| Name | Value |\n|---|---|\n| REGION | us-east-1 |\n| DB_PASSWORD | string |\n"
+        "| api_token | Required for every call |\n| max_tokens | 4096 |\n"
+        "| token | `settings.API_TOKEN` |\n\n"
+        "| Token | Description |\n|:--|--:|\n| x | y |\n"
+    )
+    assert _parse("docs/a.md", text).statements[0].text == text
+
+
+def test_table_rows_inside_a_fence_are_masked_too() -> None:
+    out = _parse("docs/a.md", "```\n| DB_PASSWORD | hunter2 |\n| REGION | us |\n```\n")
+    assert out.statements[0].text == "```\n| DB_PASSWORD | *** |\n| REGION | us |\n```\n"
+
+
+def test_prose_masking_is_linear_on_adversarial_lines() -> None:
+    import time
+
+    start = time.perf_counter()
+    lines = ["`" * 200_000, "| TOKEN " * 50_000, "-" * 200_000 + "x", "`a=" * 60_000]
+    _parse("docs/a.md", "\n".join(lines) + "\n")
+    assert time.perf_counter() - start < 2.0
+
+
+def test_front_matter_token_counts_are_kept() -> None:
+    text = "---\nname: x\nmax_tokens: 4096\ntoken_limit: '512'\napi_token: abc123\n---\nBody\n"
+    rec = _parse("docs/a.md", text)
+    fm = rec.metadata["frontmatter"]
+    assert fm["max_tokens"] == 4096 and fm["token_limit"] == "512" and fm["api_token"] == "***"
+    out = rec.statements[0].text
+    assert "max_tokens: 4096" in out and "abc123" not in out and "api_token: ***" in out

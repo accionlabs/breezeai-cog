@@ -37,6 +37,9 @@ _SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 
+#: A token *count* (``MAX_TOKENS=4096``, ``max_tokens: 1024``) is a number, not a secret.
+_TOKEN_COUNT = re.compile(r"tokens|max_?token|token_?(?:limit|count|budget)", re.IGNORECASE)
+
 _DELIMITERS = ("---",)
 _CLOSERS = ("---", "...")
 
@@ -122,13 +125,28 @@ def secret_name(name: str) -> bool:
     return _SECRET_NAME.search(name) is not None
 
 
+def token_count(name: str, value: str) -> bool:
+    """True when ``value`` is a count of tokens (``max_tokens: 4096``), not a secret, though
+    ``name`` is secret-named."""
+    return value.isdigit() and _TOKEN_COUNT.search(name) is not None
+
+
+def _counts_tokens(name: str, value: Any) -> bool:
+    """:func:`token_count` for a loaded YAML value: a non-negative integer or a digit string."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):  # not ``str(value)``: a huge integer cannot be printed
+        return value >= 0 and _TOKEN_COUNT.search(name) is not None
+    return isinstance(value, str) and token_count(name, value)
+
+
 def _mapping(data: dict[Any, Any], depth: int) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in list(data.items())[:_MAX_ITEMS]:
         if not isinstance(key, (str, int, float, bool)):
             continue
         name = str(key)
-        if secret_name(name):
+        if secret_name(name) and not _counts_tokens(name, value):
             out[name] = "***"
             continue
         clean = _value(value, depth)
