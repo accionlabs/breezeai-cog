@@ -1624,3 +1624,18 @@ function inner() {
 """
     )
     assert set(_tools(analyze_files({"src/server.ts": src}))) == {"top", "typed", "innerLocal"}
+
+
+def test_typescript_param_descriptions_stay_under_the_params_limit(analyze_files) -> None:
+    """Every SDK keeps a tool's params JSON under the backend's limit, as Python does:
+    descriptions are kept in param order while they fit, names and types always."""
+    shape = ", ".join(f'p{i}: z.string().describe("{"x" * 1000}")' for i in range(20))
+    src = TS_HEADER + f'server.tool("big", {{ {shape} }}, async () => ({{ content: [] }}));\n'
+    params = _tools(analyze_files({"src/server.ts": src}))["big"].params or []
+    assert [p.name for p in params] == [f"p{i}" for i in range(20)]
+    assert all(p.type == "string" for p in params)
+    documented = [bool(p.description) for p in params]
+    assert 0 < sum(documented) < len(params)
+    assert documented == sorted(documented, reverse=True)
+    size = len(json.dumps([p.model_dump() for p in params], separators=(",", ":")).encode())
+    assert size <= 15 * 1024

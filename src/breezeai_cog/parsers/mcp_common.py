@@ -13,6 +13,7 @@ imported from where it is constructed) and its name is a literal: an agent frame
 from __future__ import annotations
 
 import inspect
+import json
 from typing import Any
 
 from tree_sitter import Node
@@ -23,6 +24,9 @@ from .treesitter import first_line, node_text
 
 SEMANTIC_TYPE = "mcp_tool"
 METHOD = "TOOL"
+#: A tool's whole ``params`` JSON (names, types, defaults, descriptions) is kept within this many
+#: UTF-8 bytes: the backend drops every param of a tool past 16 KB.
+MAX_TOOL_PARAMS_JSON = 15 * 1024
 
 
 def param(
@@ -50,6 +54,35 @@ def clean_doc(text: str | None) -> str | None:
     return cleaned or None
 
 
+def param_json_bytes(p: ToolParam) -> int:
+    """``p`` as the backend measures it: compact JSON, UTF-8, nulls included."""
+    return len(json.dumps(p.model_dump(), ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def params_json_bytes(params: list[ToolParam]) -> int:
+    """``[a,b]``: the items, their commas and the brackets, as the backend's JSON.stringify
+    counts them."""
+    return sum(param_json_bytes(p) for p in params) + max(len(params) - 1, 0) + 2
+
+
+def fit_params(params: list[ToolParam] | None) -> list[ToolParam] | None:
+    """``params`` within :data:`MAX_TOOL_PARAMS_JSON`: when the list is over it, descriptions
+    are kept in param order while they fit, and this one and the rest go without (one overflow
+    would drop every param). Names, types and defaults are always kept."""
+    if not params or params_json_bytes(params) <= MAX_TOOL_PARAMS_JSON:
+        return params
+    out = [p.model_copy(update={"description": None}) if p.description else p for p in params]
+    size = params_json_bytes(out)
+    for i, p in enumerate(params):
+        if not p.description:
+            continue
+        size += param_json_bytes(p) - param_json_bytes(out[i])
+        if size > MAX_TOOL_PARAMS_JSON:
+            break
+        out[i] = p
+    return out
+
+
 def tool_emit(
     node: Node,
     source: bytes,
@@ -72,7 +105,7 @@ def tool_emit(
         "handler": handler,
         "handlerLine": handler_line,
         "description": clean_doc(description),
-        "params": params,
+        "params": fit_params(params),
         "name": endpoint,
     }
     if extra:
