@@ -21,6 +21,7 @@ def classify_call(
     http_client_ids: "frozenset[str] | None" = None,
     vendor: str | None = None,
     typed_receivers: "Mapping[str, str] | None" = None,
+    closure_arg: bool = False,
 ) -> tuple[str, str | None, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
@@ -33,7 +34,9 @@ def classify_call(
     ``arg`` = the call's first string literal (for SQL sniffing). ``language`` = the source
     language tag, passed to :func:`match_db` for its language gates (``None`` = unknown, stays
     permissive); ``vendor`` = the ORM the file's imports name (``vendor_from_imports``);
-    ``typed_receivers`` = names declared as a datastore client type → that product.
+    ``typed_receivers`` = names declared as a datastore client type → that product;
+    ``closure_arg`` = the call's only argument is a closure (a collection iteration, see
+    :func:`match_db`).
     API is tried first (so ``objects.get`` is a Django query, not an HTTP GET);
     raw queries before ORM (so ``createNativeQuery("SELECT …")`` is a ``query_statement``).
     """
@@ -43,7 +46,7 @@ def classify_call(
     if is_query(method, arg, vendor):
         return "query_statement", method, None
     hint = match_db(callee, method, language, typed_db_ids=typed_db_ids, vendor=vendor,
-                    typed_receivers=typed_receivers)
+                    typed_receivers=typed_receivers, closure_arg=closure_arg)
     if hint is not None:
         return "db_method_call", method, hint
     return None

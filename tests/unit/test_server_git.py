@@ -330,3 +330,71 @@ def test_clone_timeout_removes_its_temp_dir(monkeypatch: pytest.MonkeyPatch, tmp
         git_mod.clone_repo_full(FakeClient(), REF, _SHA, _BRANCH)
 
     assert not Path(created[0]).exists()
+
+
+# --- resolve_repo_ref: the gitProvider override, shared with /api/git/* -------------
+
+_DC_URL = "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+
+
+def test_resolve_repo_ref_honours_bitbucket_server_without_scm_instances() -> None:
+    """What `/api/analyze-diff` needs to reach a customer's Data Center instance without
+    deployment-wide config."""
+    ref = git_mod.resolve_repo_ref(
+        {"repoUrl": _DC_URL, "gitProvider": "bitbucket_server"}, {}
+    )
+    assert ref == RepoRef(
+        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
+        host="stash.payroll.co.jp", context_path="/stash",
+    )
+
+
+def test_resolve_repo_ref_without_the_slug_cannot_see_a_data_center_host() -> None:
+    assert git_mod.resolve_repo_ref({"repoUrl": _DC_URL}, {}) is None
+
+
+def test_resolve_repo_ref_still_uses_scm_instances_without_the_slug() -> None:
+    ref = git_mod.resolve_repo_ref(
+        {"repoUrl": _DC_URL}, {"stash.payroll.co.jp": "bitbucket_server"}
+    )
+    assert ref is not None and ref.provider == "bitbucket_server"
+
+
+def test_resolve_repo_ref_ignores_a_slug_for_a_cloud_provider() -> None:
+    ref = git_mod.resolve_repo_ref(
+        {"repoUrl": "https://github.com/acme/repo", "gitProvider": "gitlab"}, {}
+    )
+    assert ref is not None and ref.provider == "github"
+
+
+# --- a hostile provider cannot write outside the temp directory --------------------
+
+@pytest.mark.parametrize(
+    "evil",
+    ["../../etc/x.pth", "/etc/passwd", "a/../../b.py", "..", "src/../../../x"],
+)
+def test_safe_join_refuses_a_path_that_escapes_the_temp_dir(tmp_path, evil) -> None:
+    """A caller can point this service at any host, so tree/compare paths are attacker
+    input. A `.pth` written outside the temp dir runs at the next interpreter start."""
+    with pytest.raises(SCMAPIError, match="Unsafe path"):
+        git_mod._safe_join(tmp_path.resolve(), evil)
+
+
+def test_safe_join_allows_ordinary_repository_paths(tmp_path) -> None:
+    root = tmp_path.resolve()
+    assert git_mod._safe_join(root, "src/main/java/A.java") == root / "src/main/java/A.java"
+
+
+def test_resolve_git_diff_fails_on_a_traversing_tree_entry(tmp_path) -> None:
+    client = FakeClient(tree=["ok.py", "../../escape.py"], changed=["ok.py"],
+                        content={"ok.py": "x = 1\n"})
+    with pytest.raises(SCMAPIError, match="Unsafe path"):
+        git_mod.resolve_git_diff(client, REF, "b" * 40, _SHA)
+    assert not (tmp_path.parent / "escape.py").exists()
+
+
+def test_scrub_masks_an_empty_username_and_an_auth_header() -> None:
+    """`//:secret@` used not to match, leaving the password in clone error text."""
+    assert git_mod._scrub("https://:secret@h/x") == "https://***:***@h/x"
+    assert git_mod._scrub("https://u:p@h/x") == "https://***:***@h/x"
+    assert "BBDC" not in git_mod._scrub("Authorization: Bearer BBDC-abc123")

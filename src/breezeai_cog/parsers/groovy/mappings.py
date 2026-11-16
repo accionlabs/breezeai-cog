@@ -35,6 +35,10 @@ DECLARATIONS = {
     "local_variable_declaration",
     "field_declaration",
     "expression_statement",
+    # A call without parentheses (``println "done"``, ``sh "ls"``). The grammar parses one only
+    # when a bare name takes literal or closure arguments; ``println name`` stays two statements.
+    # One that passes a block (``node { … }``) is not emitted (``statements._is_block_command``).
+    "command_chain",
 }
 
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS

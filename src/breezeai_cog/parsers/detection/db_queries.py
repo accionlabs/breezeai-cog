@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from .api_calls import _ends_with_word, _receiver_text
+
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -129,6 +131,14 @@ def vendor_from_imports(external_imports: "list[str] | None") -> str | None:
     return None
 
 
+# Collection-iteration methods that take a block (Groovy ``list.findAll { it.active }``). When
+# the block is the call's only argument, a call by one of these names iterates a collection in
+# memory, so it is not data access whatever the receiver is called (``collection.find { … }``,
+# ``model.findAll { … }``). A query that takes a closure (GORM ``Book.findAll { author == a }``)
+# is then left unrecorded rather than guessed. Only the iteration methods that share a name with
+# a database verb are listed.
+_CLOSURE_ITERATION_VERBS = frozenset({"find", "findall", "count"})
+
 # Ambiguous ORM verbs -> generic hint, refined by receiver below.
 _GENERIC = {
     "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
@@ -209,6 +219,33 @@ _PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
     "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS, "firebase": _JSTS,
     "django": _PYTHON, "sqlalchemy": _PYTHON,
 }
+# Needles read like the HTTP client names (:func:`.api_calls._ends_with_word`): a name in the
+# receiver chain must end with one of the needle's words, starting a word there, because the last
+# word of a name says what it is. ``userRepository``, ``this.userRepo``, ``order_repository``,
+# ``getRepository(User)`` and ``repositories.users`` are repositories; ``reportFile`` and
+# ``reportService`` only contain the letters, and ``repoUrl`` / ``repoDir`` are a URL and a folder.
+_WORD_HINTS: dict[str, tuple[str, ...]] = {
+    "repository": ("repository", "repositories"),
+    "repo": ("repo", "repos", "repository", "repositories"),
+}
+
+
+# Everything that cannot be part of a name separates two: a dot, a line break in a chain
+# (``this.getRepository()⏎ .createQueryBuilder()``) and type arguments, whose names count too
+# (``UoW.Repository<Booking>()``, ``Engine.Resolve<IContentItemRepository>()``).
+_NAME_SEPARATORS = re.compile(r"[^A-Za-z0-9_$]+")
+
+
+def _names_word(callee: str, words: tuple[str, ...]) -> bool:
+    """Whether a name in the call's receiver chain ends with one of ``words``, starting a word."""
+    if "." not in callee:
+        return False  # a bare call has no receiver
+    return any(
+        _ends_with_word(name, w)
+        for name in _NAME_SEPARATORS.split(_receiver_text(callee)) for w in words
+    )
+
+
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
 _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
@@ -409,10 +446,13 @@ def _is_prisma_chain(low: str) -> bool:
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None,
              vendor: str | None = None,
-             typed_receivers: "Mapping[str, str] | None" = None) -> str | None:
+             typed_receivers: "Mapping[str, str] | None" = None,
+             closure_arg: bool = False) -> str | None:
     """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
     imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``.
-    ``typed_receivers`` maps a name declared as a datastore client type to its product."""
+    ``typed_receivers`` maps a name declared as a datastore client type to its product.
+    ``closure_arg`` says the call's only argument is a closure (see
+    :data:`_CLOSURE_ITERATION_VERBS`)."""
     if language in {"php", "go", "c", "cpp"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php_data_access_common.py), Go from the receiver's declared
@@ -422,6 +462,8 @@ def match_db(callee: str, method: str, language: str | None = None,
         # for them yet, so their data access is left unrecorded.
         return None
     m = method.lower()
+    if closure_arg and m in _CLOSURE_ITERATION_VERBS:
+        return None
     low = callee.lower()
     if typed_receivers and "." in callee:
         product = typed_receivers.get(callee.rsplit(".", 1)[0].rsplit(".", 1)[-1])
@@ -482,6 +524,8 @@ def match_db(callee: str, method: str, language: str | None = None,
         for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
                 continue
+            if needle in _WORD_HINTS and not _names_word(callee, _WORD_HINTS[needle]):
+                continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
             if needle in _ANCHORED_HINTS:
@@ -495,6 +539,10 @@ def match_db(callee: str, method: str, language: str | None = None,
                 if m == "remove" or "httpcontext.session" in low:
                     return None
                 return "hibernate" if vendor == "hibernate" else "orm"
+            # ``objects`` is Django's model manager; in another language it is an ordinary
+            # name (``objects.findAll { … }`` filters a list), not evidence of data access.
+            if needle == "objects" and language is not None and language not in _PYTHON:
+                continue
             # The receiver shows data access; the product named must ship for this language.
             if language is not None and language not in langs:
                 return _orm(receiver, vendor)

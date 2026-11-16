@@ -15,8 +15,9 @@ still mis-parse (README's Groovy note lists them). See ``.todo/groovy-grammar-ev
 
 from __future__ import annotations
 
+from collections import ChainMap
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from tree_sitter import Node
 
@@ -25,11 +26,12 @@ from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
+from ..index_common import ClassHeritage
 from ..treesitter import parse_source
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
-from .imports import GroovyIndex, build_fqcn_index, extract_imports
+from .imports import GroovyIndex, build_fqcn_index, extract_imports, import_aliases
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
@@ -76,8 +78,16 @@ class GroovyParser(BaseParser):
             root, source, path, ctx.repo_root, fqcn
         )
         set_datastore_vendor(external)
-        resolve = make_resolver(
-            bindings, defined_names(root, source), path, type_map(root, source)
+        heritage: Mapping[str, ClassHeritage | None] | None = None
+        if isinstance(idx, GroovyIndex):  # `import a.Foo as Bar`: `Bar.m()` is looked up as `Foo`
+            known = idx.class_heritage
+            aliases = {a: known[real] for a, real in import_aliases(root, source).items()
+                       if real in known}
+            heritage = ChainMap(aliases, known) if aliases else known
+        resolve = make_resolver(  # calls[].path: imports, same file, receiver type (declared only)
+            bindings, defined_names(root, source), path, type_map(root, source),
+            heritage=heritage,
+            declared_only=True,
         )
         functions: list[Function] = []
         classes = []

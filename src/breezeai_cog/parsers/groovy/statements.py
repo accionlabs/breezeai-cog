@@ -21,12 +21,13 @@ _ANNOTATED_DECL_TYPES = {"field_declaration"}
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
+    """The first declared name. ``def x = 1`` and fields hold it in a ``variable_declarator``; a
+    typed local (``RestTemplate rt = …``, ``int a = 1, b = 2``) has its ``name`` fields directly."""
     if node.type in ("local_variable_declaration", "field_declaration"):
-        decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
-        if decl is not None:
-            name = decl.child_by_field_name("name")
-            if name is not None:
-                return node_text(name, source)
+        decl = next((c for c in node.named_children if c.type == "variable_declarator"), node)
+        name = decl.child_by_field_name("name")
+        if name is not None:
+            return node_text(name, source)
     return None
 
 
@@ -52,15 +53,52 @@ def _named_url_argument(arg_nodes: list[Node], source: bytes) -> Node | None:
     return None
 
 
+# A member access: ``a.b``, ``a?.b`` (safe navigation) or ``a*.b`` (spread), as (object field,
+# member field).
+MEMBER_ACCESS = {
+    "field_access": ("object", "field"),
+    "safe_navigation_expression": ("object", "property"),
+    "spread_dot_expression": ("object", "property"),
+}
+
+
+def _receiver_text(node: Node, source: bytes) -> str:
+    """A call's receiver as source text, without the bodies of closures passed along the
+    chain: ``ids.collect { it.repo }.findAll`` reads ``ids.collect.findAll``, so a name inside
+    a closure never looks like the receiver. Each member access is joined with ``.``; a call
+    keeps its argument list (``split(';')``)."""
+    fields = MEMBER_ACCESS.get(node.type)
+    if fields is not None:
+        obj = node.child_by_field_name(fields[0])
+        member = node.child_by_field_name(fields[1])
+        name = node_text(member, source) if member is not None else ""
+        return f"{_receiver_text(obj, source)}.{name}" if obj is not None else name
+    if node.type == _CALL_TYPE:
+        fn = node.child_by_field_name("function")
+        args = node.child_by_field_name("arguments")
+        head = _receiver_text(fn, source) if fn is not None else ""
+        return head + (node_text(args, source) if args is not None else "")
+    return node_text(node, source)
+
+
+def only_closure_argument(call: Node) -> bool:
+    """True when a call's one argument is a closure: ``items.findAll { it.active }`` or
+    ``items.findAll({ it.active })``."""
+    args = call.child_by_field_name("arguments")
+    arg_nodes = list(args.named_children) if args is not None else []
+    if call.child_by_field_name("closure") is not None:
+        return not arg_nodes
+    return len(arg_nodes) == 1 and arg_nodes[0].type == "closure"
+
+
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     fn = call.child_by_field_name("function")
     if fn is None:
         return None
     if fn.type == "field_access":
-        obj = fn.child_by_field_name("object")
         field = fn.child_by_field_name("field")
         method = node_text(field, source) if field is not None else ""
-        callee = f"{node_text(obj, source)}.{method}" if obj is not None else method
+        callee = _receiver_text(fn, source)
     else:
         method = node_text(fn, source)
         callee = method
@@ -87,6 +125,16 @@ def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
     return extract_annotations(node, source)
 
 
+def _is_block_command(node: Node) -> bool:
+    """A call without parentheses that passes a block: ``node { … }``, a DSL section such as a
+    whole Jenkins pipeline. It stays a call in ``Function.calls`` but is not a statement: its
+    text would hold the block and every comment in it, and the block's own statements are
+    captured where they are."""
+    return node.type == "command_chain" and any(
+        c.type == "closure" for c in node.children_by_field_name("argument")
+    )
+
+
 def _iter_in_scope(node: Node, descend_all: bool = False):
     """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks
     into inline closures, attributing their statements to this function; ``False``
@@ -95,7 +143,7 @@ def _iter_in_scope(node: Node, descend_all: bool = False):
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
-        if child.type in EMIT_TYPES:
+        if child.type in EMIT_TYPES and not _is_block_command(child):
             yield child
         yield from _iter_in_scope(child, descend_all)
 
@@ -120,6 +168,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="groovy",
+                closure_only=only_closure_argument,
                 decorators=_field_decorators(node, source),
             )
         )

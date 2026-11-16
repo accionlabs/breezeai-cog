@@ -158,7 +158,10 @@ the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`
 
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
-2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
+2. **The receiver:** `orderRepository.findOne` → `typeorm`. A repository name counts only where it
+   ends a name in the receiver chain, as the HTTP client names below do: `this.userRepo`,
+   `getRepository(User)` and `repositories.users` are repositories; `reportFile`, `reportService`
+   and `repoUrl` are not. A product is named only in a language
    it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
    verb, or a Firebase JavaScript SDK verb (`getDocs`, `onSnapshot`), in another language
    (`stream().findFirst()`, a Groovy `paperKit.getDocs()`) needs a data-access receiver too. A
@@ -169,6 +172,13 @@ the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`
    A cache's name is not evidence of a product: `cache.get(key)`, `cacheManager.Set(…)` or
    `HttpRuntime.Cache.Get(…)` is most often in memory, so only a name that says Redis
    (`redisClient.get`) or a Redis verb (`hset`, `lpush`) gives `redis`.
+   Django's `objects` manager counts only in Python; elsewhere `objects` is an ordinary name.
+   A collection-iteration method whose only argument is a closure (Groovy
+   `collection.find { it.id == id }`, `model.findAll { it.enabled }`) filters a list in memory,
+   so it is no data access whatever the receiver is called. The parser says when a call's only
+   argument is a closure (`classify_statement(closure_only=…)`, Groovy so far), and names inside
+   a closure along the call chain are not part of the receiver. A GORM query written with a
+   closure (`Book.findAll { author == a }`) is therefore left unrecorded, not guessed.
 3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
    entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
    `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the

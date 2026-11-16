@@ -107,3 +107,84 @@ def test_for_repo_threads_everything_through() -> None:
         assert isinstance(client, GitLabSCMClient)
         assert client._http.base_url == "https://git.acme.com/api/v4"
         assert client.clone_url(ref) == "https://oauth2:glpat-global@git.acme.com/grp/proj.git"
+
+
+# ── Bitbucket Data Center ──────────────────────────────────────────────────
+
+_DC_REF = RepoRef(
+    "bitbucket_server", "p3", "kit", host="stash.payroll.co.jp", context_path="/stash"
+)
+
+
+def test_bitbucket_server_without_a_token_is_a_400_before_any_call() -> None:
+    """`requires_credential` is enforced in the factory, so a tokenless request gets one
+    400 naming gitToken instead of a 401 per provider call."""
+    settings = Settings(_env_file=None)
+    with pytest.raises(SCMCredentialError) as info:
+        SCMClientFactory.for_repo(_DC_REF, settings)
+    assert info.value.status_code == 400 and "gitToken" in str(info.value)
+
+
+def test_bitbucket_server_has_no_deployment_wide_token_fallback() -> None:
+    """Every Data Center host is a different customer's instance, so there is no
+    `scm_token_bitbucket_server` for a tokenless request to fall back to."""
+    settings = Settings(_env_file=None)
+    assert not hasattr(settings, "scm_token_bitbucket_server")
+    assert resolve_scm_token("bitbucket_server", None, settings) is None
+    assert resolve_scm_token("bitbucket_server", "abc", settings) == "abc"
+
+
+def test_bitbucket_server_api_base_is_derived_from_the_context_path() -> None:
+    settings = Settings(_env_file=None)
+    assert resolve_api_base_url(_DC_REF, settings) == (
+        "https://stash.payroll.co.jp/stash/rest/api/1.0"
+    )
+
+
+def test_bitbucket_server_api_base_mapping_wins_over_the_derived_one() -> None:
+    settings = Settings(
+        _env_file=None,
+        scm_instance_base_url_mapping={
+            "stash.payroll.co.jp": "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+        },
+    )
+    assert resolve_api_base_url(_DC_REF, settings) == (
+        "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+    )
+
+
+# ── which hosts this service will connect to ───────────────────────────────
+
+def test_a_loopback_host_is_refused() -> None:
+    """The caller names the host, so without this the service probes its own pod."""
+    from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError
+
+    settings = Settings(_env_file=None)
+    ref = RepoRef("bitbucket_server", "P3", "kit", host="localhost", context_path="")
+    with pytest.raises(SCMHostNotAllowedError) as info:
+        SCMClientFactory.for_repo(ref, settings, request_token="dXNlcjpwYXNz")
+    assert info.value.status_code == 400
+
+
+def test_a_private_host_is_allowed_by_default() -> None:
+    """Self-hosted Bitbucket and GitHub Enterprise normally live on a private address;
+    blocking those by default would block the self-hosted providers entirely."""
+    from breezeai_cog.integrations.scm.netguard import ensure_host_allowed
+
+    ensure_host_allowed("10.0.0.5", Settings(_env_file=None))
+
+
+def test_private_hosts_can_be_blocked_explicitly() -> None:
+    from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError, ensure_host_allowed
+
+    with pytest.raises(SCMHostNotAllowedError):
+        ensure_host_allowed("10.0.0.5", Settings(_env_file=None, scm_block_private_networks=True))
+
+
+def test_an_allow_list_bounds_the_reachable_hosts() -> None:
+    from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError, ensure_host_allowed
+
+    settings = Settings(_env_file=None, scm_allowed_api_hosts=["stash.payroll.co.jp"])
+    ensure_host_allowed("stash.payroll.co.jp", settings)
+    with pytest.raises(SCMHostNotAllowedError):
+        ensure_host_allowed("evil.example.com", settings)
