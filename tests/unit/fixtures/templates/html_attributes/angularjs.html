@@ -1,0 +1,7 @@
+<div ng-app="shop" ng-controller="OrderCtrl as vm">
+  <form ng-submit="vm.save()">
+    <input name="email" ng-model="vm.email" />
+    <button type="button" ng-click="vm.remove(order)">Delete</button>
+  </form>
+  <a ng-href="/orders/{{ vm.id }}">Open</a>
+</div>

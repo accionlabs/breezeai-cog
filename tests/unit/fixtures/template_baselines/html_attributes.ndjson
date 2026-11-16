@@ -1,0 +1,4 @@
+{"behaviors": ["alpine"], "classes": [], "exports": [], "externalImports": [], "functions": [], "id": "alpine.html", "importFiles": [], "language": "html", "loc": 4, "path": "alpine.html", "statements": [], "type": "code"}
+{"classes": [], "exports": [], "externalImports": [], "framework": "angularjs", "functions": [], "id": "angularjs.html", "importFiles": [], "language": "html", "loc": 7, "path": "angularjs.html", "statements": [], "type": "code", "uiRole": "template"}
+{"behaviors": ["htmx"], "classes": [], "exports": [], "externalImports": [], "functions": [], "id": "htmx.html", "importFiles": [], "language": "html", "loc": 6, "path": "htmx.html", "statements": [], "type": "code"}
+{"classes": [], "exports": [], "externalImports": [], "framework": "knockout", "functions": [], "id": "knockout.html", "importFiles": [], "language": "html", "loc": 6, "path": "knockout.html", "statements": [], "type": "code", "uiRole": "template"}
