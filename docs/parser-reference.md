@@ -547,14 +547,7 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   `semanticType` = the kind, `text` = the file with secrets masked (cut at 64 KB on a line
   boundary, marked inline; masking keeps every line, so `endLine` is the file's line),
   `name` / `description` from the front matter. From 512 KB to 2 MB: the File record only;
-  over the scanner's `max_file_size` (2 MB by default) the file is skipped like any other. `doc`,
-  `readme` and `changelog` statements past `max_markdown_statements` (a count of the docs that
-  keep a statement, agent documents and files over 512 KB not counted; default 2000) or
-  past `max_markdown_bytes` (default 32 MB, each file costing its size up to the 64 KB cap) are
-  dropped, both decided in path order, and the File records `statementSkipped` with the cap's
-  name; `configs.markdownCapped` counts them. An incremental `analyze-diff` holds unchanged
-  files empty, so it cannot cost them and applies the count cap only. The agent-document kinds (`skill`, `agent`,
-  `command`, `agent_instructions`, `adr`) are always kept. Document statements are not embedded or split.
+  over the scanner's `max_file_size` (2 MB by default) the file is skipped like any other. Document statements are not embedded or split.
 - **Semantic types** (`classify.py`, first match wins; a type that needs front matter is never
   given on a guess):
 

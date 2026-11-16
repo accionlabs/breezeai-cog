@@ -318,16 +318,7 @@ class _Sink:
         self.meta = meta
 
 
-def _assemble(
-    records, *, max_markdown_statements: int = 0, root: Path | None = None, **kw
-) -> tuple[_Sink, ProjectMetaData]:
-    """``pipeline._assemble`` over ``records``, the doc-count cap decided from their paths as
-    the pipeline does from the scan (unless ``markdown_skips`` is given)."""
-    from breezeai_cog.core.scanner import ScanEntry
-
-    if max_markdown_statements and "markdown_skips" not in kw:
-        entries = [ScanEntry(r.path, r.language) for r in records]
-        kw["markdown_skips"] = pipeline._markdown_skips(entries, max_markdown_statements, 0, root)
+def _assemble(records, *, root: Path | None = None, **kw) -> tuple[_Sink, ProjectMetaData]:
     sink = _Sink()
     meta = pipeline._assemble(root or Path("."), iter((r.language, r) for r in records), sink, **kw)
     return sink, meta
@@ -344,58 +335,6 @@ def test_only_typed_docs_make_a_docs_only_folder_worth_writing() -> None:
     assert not meta.has_content()
     _, meta = _assemble([_parse("skills/s/SKILL.md", SKILL)])
     assert meta.configs["capturedAgentDocuments"] == 1 and meta.has_content()
-
-
-def test_untyped_docs_past_the_cap_keep_the_file_only() -> None:
-    docs = [_parse(f"docs/{i}.md", f"# {i}\n") for i in range(3)]
-    typed = _parse("CLAUDE.md", "# rules\n")
-    sink, meta = _assemble([*docs, typed], max_markdown_statements=2)
-    by_path = {r.path: r for r in sink.records}
-    assert [len(by_path[f"docs/{i}.md"].statements) for i in range(3)] == [1, 1, 0]
-    assert by_path["docs/2.md"].metadata["statementSkipped"] == "max_markdown_statements"
-    assert len(by_path["CLAUDE.md"].statements) == 1  # typed docs are always kept
-    assert meta.totalFiles == 4
-
-
-def test_untyped_docs_past_the_byte_budget_keep_the_file_only(tmp_path: Path) -> None:
-    from breezeai_cog.core.scanner import ScanEntry
-
-    texts = {f"docs/{i}.md": "x" * 99 + "\n" for i in range(3)}
-    texts["CLAUDE.md"] = "y" * 500 + "\n"
-    for path, text in texts.items():
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(text)
-    skips = pipeline._markdown_skips(
-        [ScanEntry(p, "markdown") for p in texts], 0, 250 + 501, tmp_path
-    )
-    docs = [_parse(f"docs/{i}.md", texts[f"docs/{i}.md"]) for i in range(3)]
-    typed = _parse("CLAUDE.md", texts["CLAUDE.md"])
-    sink, meta = _assemble([*docs, typed], markdown_skips=skips)
-    by_path = {r.path: r for r in sink.records}
-    assert [len(by_path[f"docs/{i}.md"].statements) for i in range(3)] == [1, 1, 0]
-    assert by_path["docs/2.md"].metadata["statementSkipped"] == "max_markdown_bytes"
-    assert len(by_path["CLAUDE.md"].statements) == 1  # typed docs are always kept
-    assert meta.configs["markdownCapped"] == 1
-
-
-def test_byte_budget_follows_path_order_and_file_size(tmp_path: Path) -> None:
-    from breezeai_cog.core.scanner import ScanEntry
-
-    sizes = {"a.md": 100, "a1.md": MAX_STATEMENT_FILE_BYTES + 1, "b.md": 100, "c.md": 10}
-    for name, size in sizes.items():
-        (tmp_path / name).write_bytes(b"x" * size)
-    entries = [ScanEntry(p, "markdown") for p in reversed(sorted(sizes))]
-    # a1.md keeps no statement, so it costs nothing; c.md is past the budget even though it
-    # would fit on its own: the docs kept are a prefix in path order.
-    assert pipeline._markdown_skips(entries, 0, 150, tmp_path) == {
-        "b.md": "max_markdown_bytes",
-        "c.md": "max_markdown_bytes",
-    }
-    # a1.md takes no place under the count cap either.
-    assert pipeline._markdown_skips(entries, 2, 1000, tmp_path) == {
-        "c.md": "max_markdown_statements",
-    }
-    assert pipeline._markdown_skips(entries, 0, 0, tmp_path) is None
 
 
 def test_front_matter_secrets_are_masked_in_the_text() -> None:
@@ -433,17 +372,6 @@ def test_env_secret_still_masked_and_non_secret_kept() -> None:
     st = _parse("docs/a.md", "export DB_PASSWORD=hunter2\nPATH_PREFIX=/usr\n").statements[0]
     assert "hunter2" not in st.text and "DB_PASSWORD=***" in st.text
     assert "PATH_PREFIX=/usr" in st.text
-
-
-def test_doc_cap_follows_path_order_not_arrival_order() -> None:
-    from breezeai_cog.core.scanner import ScanEntry
-
-    paths = [f"docs/{i}.md" for i in range(3)]
-    skips = pipeline._markdown_skips([ScanEntry(p, "markdown") for p in reversed(paths)], 2)
-    for order in (paths, list(reversed(paths))):
-        sink, _ = _assemble([_parse(p, "# x\n") for p in order], markdown_skips=skips)
-        kept = sorted(r.path for r in sink.records if r.statements)
-        assert kept == ["docs/0.md", "docs/1.md"]
 
 
 # ── review fixes ─────────────────────────────────────────────
@@ -697,15 +625,6 @@ def test_commands_folder_deeper_in_a_plugin_is_a_doc(tmp_path: Path) -> None:
     assert _kind("docs/agents/a.md", agent, repo_root=tmp_path) == "doc"
 
 
-def test_readme_and_changelog_count_against_the_doc_cap() -> None:
-    docs = [_parse(p, "# x\n") for p in ("CHANGELOG.md", "README.md", "docs/a.md")]
-    agents = [_parse("CLAUDE.md", "# rules\n"), _parse("skills/s/SKILL.md", SKILL)]
-    sink, meta = _assemble([*docs, *agents], max_markdown_statements=1)
-    kept = {r.path for r in sink.records if r.statements}
-    assert kept == {"CHANGELOG.md", "CLAUDE.md", "skills/s/SKILL.md"}
-    assert meta.configs["capturedAgentDocuments"] == 2
-
-
 def test_truncated_text_with_its_marker_fits_the_cap() -> None:
     for text in ("\n".join(["x" * 99] * 1000) + "\n", "y" * (MAX_TEXT_BYTES + 10)):
         st = _parse("docs/big.md", text).statements[0]
@@ -895,33 +814,6 @@ def test_prose_without_a_secret_literal_is_kept(line: str) -> None:
 def test_prose_env_pair_inside_inline_code_is_masked_once() -> None:
     out = _parse("docs/a.md", "Use `DB_PASSWORD=hunter2` here.\n").statements[0].text
     assert out == "Use `DB_PASSWORD=***` here.\n"
-
-
-def test_doc_cap_counts_only_non_agent_docs_with_a_statement(tmp_path: Path) -> None:
-    """Skills, agent instructions and files over the 512 KB File-only limit take no place
-    under ``max_markdown_statements``; the cap is on the docs that keep a statement."""
-    from breezeai_cog.core.scanner import ScanEntry
-
-    files = {
-        "a/SKILL.md": SKILL,
-        "b/CLAUDE.md": "# rules\n",
-        "c/big.md": "x" * (MAX_STATEMENT_FILE_BYTES + 1),
-        "d/one.md": "# one\n",
-        "e/two.md": "# two\n",
-        "f/three.md": "# three\n",
-    }
-    for path, text in files.items():
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(text)
-    entries = [ScanEntry(p, "markdown") for p in files]
-    assert pipeline._markdown_skips(entries, 2, 0, tmp_path) == {
-        "f/three.md": "max_markdown_statements"
-    }
-    records = [_parse(p, t, repo_root=tmp_path) for p, t in files.items()]
-    sink, meta = _assemble(records, max_markdown_statements=2, root=tmp_path)
-    kept = {r.path for r in sink.records if r.statements}
-    assert kept == {"a/SKILL.md", "b/CLAUDE.md", "d/one.md", "e/two.md"}
-    assert meta.configs["markdownCapped"] == 1
 
 
 def test_upper_case_markdown_suffixes_are_claimed(analyze_files) -> None:

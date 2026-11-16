@@ -471,31 +471,3 @@ def test_unhandled_exception_is_logged_and_returns_json(
     text = _log_text(file_log)
     assert "status=500" in text and "KeyError" in text and "Traceback" in text
 
-
-class _Lines:
-    def __init__(self) -> None:
-        self.lines: list[str] = []
-
-    def write_line(self, line: str) -> None:
-        self.lines.append(line)
-
-
-def test_incremental_diff_does_not_apply_the_doc_byte_budget(tmp_path: Path) -> None:
-    """The unchanged docs of an incremental diff are empty skeletons and cost nothing on disk,
-    so the byte budget cannot be measured as a full run would: it is not applied. A full clone
-    keeps it."""
-    from breezeai_cog.services.diff import run_diff_stream
-
-    (tmp_path / "a.md").write_text("a" * 300 + "\n")
-    (tmp_path / "b.md").write_text("b" * 300 + "\n")
-    settings = Settings(_env_file=None, max_markdown_bytes=400)
-
-    def skipped(filter_set: set[str] | None) -> dict[str, str | None]:
-        upload = _Lines()
-        run_diff_stream(settings, upload, tmp_path, filter_set, "repo")
-        records = [json.loads(line) for line in upload.lines]
-        return {r["path"]: r["metadata"].get("statementSkipped") for r in records}
-
-    assert skipped(None) == {"a.md": None, "b.md": "max_markdown_bytes"}
-    assert skipped({"b.md"}) == {"b.md": None}
-    assert settings.max_markdown_bytes == 400  # the caller's settings are not changed

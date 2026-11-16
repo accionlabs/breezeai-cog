@@ -27,7 +27,7 @@ from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..structured_json.redaction import redact_text
-from .classify import AGENT_DOCUMENT_KINDS, classify
+from .classify import classify
 from .frontmatter import (
     load_front_matter,
     secret_name,
@@ -663,20 +663,3 @@ def _plugin_check(repo_root: Path | str | None) -> Callable[[str], bool]:
 
     return plugin_root
 
-
-#: Front matter an agent document usually carries, for :func:`agent_documents_by_path`.
-_TYPICAL_AGENT_FRONT_MATTER = {"name": "x", "description": "x"}
-
-
-def agent_documents_by_path(paths: list[str], repo_root: Path | str | None) -> set[str]:
-    """The ``paths`` that are agent documents (:data:`~.classify.AGENT_DOCUMENT_KINDS`) by
-    their path, when their front matter has the usual ``name`` and ``description``: a
-    ``SKILL.md``, a ``.claude`` agent or command, a ``CLAUDE.md`` / ``AGENTS.md``, an ADR folder.
-    Read from paths only (the doc-count cap is decided at scan time); one that needs other
-    front-matter keys or headings to be an agent document is not included."""
-    plugin_root = _plugin_check(repo_root)
-    return {
-        p
-        for p in paths
-        if classify(p, _TYPICAL_AGENT_FRONT_MATTER, [], plugin_root) in AGENT_DOCUMENT_KINDS
-    }

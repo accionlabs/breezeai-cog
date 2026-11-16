@@ -20,11 +20,6 @@ from ..logging import DETAIL_LOGGER, get_logger
 from ..parsers.additive import fact_sources
 from ..parsers.contract import validate as validate_contract
 from ..parsers.markdown.classify import AGENT_DOCUMENT_KINDS
-from ..parsers.markdown.parser import (
-    MAX_STATEMENT_FILE_BYTES,
-    MAX_TEXT_BYTES,
-    agent_documents_by_path,
-)
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
@@ -250,7 +245,6 @@ class _ConfigSummary:
         self.dep_total = self.dep_prod = self.dep_dev = 0
         self.captured_documents = 0
         self.agent_documents = 0  # skill / agent / command / agent_instructions / adr
-        self.markdown_capped = 0  # docs past the Markdown count or byte cap: File record only
 
     def add(self, md: dict) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
@@ -261,8 +255,6 @@ class _ConfigSummary:
             self.captured_documents += 1
         if md.get("category") == "documentation" and md.get("kind") in AGENT_DOCUMENT_KINDS:
             self.agent_documents += 1
-        if md.get("category") == "documentation" and md.get("statementSkipped"):
-            self.markdown_capped += 1
         if md.get("packageManager"):
             self.package_managers.add(md["packageManager"])
         if md.get("buildTool"):
@@ -284,7 +276,6 @@ class _ConfigSummary:
             "totalConfigFiles": total,
             "capturedDataDocuments": self.captured_documents,
             "capturedAgentDocuments": self.agent_documents,
-            "markdownCapped": self.markdown_capped,
             "byType": self.by_type,
             "packageManagers": sorted(self.package_managers),
             "buildTools": sorted(self.build_tools),
@@ -297,54 +288,6 @@ class _ConfigSummary:
         }
 
 
-def _markdown_skips(
-    entries: list[ScanEntry], cap: int, budget: int = 0, repo_root: Path | None = None
-) -> dict[str, str] | None:
-    """``{path: reason}`` for the Markdown files whose ``doc`` / ``readme`` / ``changelog``
-    statement is dropped: past the first ``cap`` non-agent documentation files with a statement
-    in path order (``max_markdown_statements``), or past the ``budget`` bytes those files add
-    up to in path order (``max_markdown_bytes``). Decided from the scan, not from the order
-    parallel workers finish in, so the same repo always keeps the same docs. None when neither
-    cap is set.
-
-    An agent document (:func:`agent_documents_by_path`) and a file over the 512 KB File-only
-    limit take no place under ``cap``. Every file past it is listed, an agent document too: the
-    caller drops only a non-agent statement, so a path that turns out to be a plain doc is still
-    capped."""
-    if cap <= 0 and budget <= 0:
-        return None
-    docs = sorted(e.path for e in entries if e.language in DOC_LANGUAGES)
-    agents = agent_documents_by_path(docs, repo_root) if cap > 0 else set()
-    out: dict[str, str] = {}
-    used = counted = 0
-    for path in docs:
-        size = _doc_size(repo_root, path)
-        if size > MAX_STATEMENT_FILE_BYTES:
-            continue  # File only: no statement to drop, nothing counted
-        if 0 < cap <= counted:
-            out[path] = "max_markdown_statements"
-            continue
-        if path not in agents:
-            counted += 1
-        if budget > 0:
-            used += min(size, MAX_TEXT_BYTES)
-            if used > budget:
-                out[path] = "max_markdown_bytes"
-    return out
-
-
-def _doc_size(repo_root: Path | None, path: str) -> int:
-    """A documentation file's size on disk; 0 when it cannot be read (no root, or gone). The
-    most statement text it can produce is that size up to the 64 KB statement cap, and nothing
-    over the 512 KB File-only limit."""
-    if repo_root is None:
-        return 0
-    try:
-        return (repo_root / path).stat().st_size
-    except OSError:
-        return 0
-
-
 def _assemble(
     repo_root: Path,
     records: Iterator[tuple[str, FileRecord]],
@@ -352,7 +295,6 @@ def _assemble(
     *,
     statement_text_limit: int = 0,
     max_statement_parts: int = 0,
-    markdown_skips: dict[str, str] | None = None,
     candidates: int | None = None,
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
@@ -373,7 +315,7 @@ def _assemble(
     total_statements = 0
     languages: set[str] = set()
     cfg = _ConfigSummary()
-    markdown_docs = markdown_chars = markdown_capped = 0
+    markdown_docs = markdown_chars = 0
 
     if progress is not None and candidates is not None:
         progress(0, candidates)  # establish the total up front
@@ -387,16 +329,6 @@ def _assemble(
         is_doc = record.language in DOC_LANGUAGES
         if is_doc:
             markdown_docs += 1
-            md = record.metadata or {}
-            # Only agent documents are always kept; a README or changelog counts against the
-            # caps like any doc, so a monorepo of package READMEs stays bounded.
-            if record.statements and md.get("kind") not in AGENT_DOCUMENT_KINDS:
-                reason = (markdown_skips or {}).get(record.path)
-                if reason is not None:
-                    # Non-agent doc past a cap: keep the File (metadata + outline) only.
-                    record.statements = []
-                    md["statementSkipped"] = reason
-                    markdown_capped += 1
             markdown_chars += sum(len(st.text) for st in record.statements)
         sink.write(record)
         total_files += 1
@@ -461,7 +393,6 @@ def _assemble(
         languages=sorted(languages),
         markdown_docs=markdown_docs or None,
         markdown_chars=markdown_chars or None,
-        markdown_capped=markdown_capped or None,
     )
     return meta
 
@@ -502,9 +433,6 @@ def run(
     meta = _assemble(
         repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
         max_statement_parts=settings.max_statement_parts,
-        markdown_skips=_markdown_skips(
-            entries, settings.max_markdown_statements, settings.max_markdown_bytes, repo_root
-        ),
         candidates=len(entries), skips=report.counts,
         debug_on=debug_on, progress=progress, summary_out=summary_out,
     )
@@ -537,8 +465,5 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     return _assemble(
         repo_root, gen(), sink, statement_text_limit=settings.statement_text_limit,
         max_statement_parts=settings.max_statement_parts,
-        markdown_skips=_markdown_skips(
-            entries, settings.max_markdown_statements, settings.max_markdown_bytes, repo_root
-        ),
         candidates=len(entries), skips=report.counts, debug_on=debug_on,
     )
