@@ -24,7 +24,7 @@ A tool is recorded only when the object it is registered on is **proven an MCP s
 | A computed tool name (`name=NAME`, `Name = Const`, `addTool(name = computed())`) | None | — | The tool exists, but its name is unknown |
 | `@agent.tool` (pydantic-ai), LangChain `StructuredTool`, Spring AI `@Tool` without an MCP server, `.tool(…)` on any other object | None | — | Not an MCP server tool |
 
-**Incremental sync** (`/api/analyze-diff`): unchanged files are materialised empty, so the proof a changed tools file needs from another file is fetched with real content (not streamed): the build files (`pom.xml`, `build.gradle[.kts]`) in a changed Java or Kotlin file's folder and its ancestors, and the modules a changed Python file with an `@x.tool` imports from (`from .server import mcp`), at most 50 per sync.
+**Incremental sync** (`/api/analyze-diff`): unchanged files are materialised empty, so the proof a changed tools file needs from another file is fetched with real content (not streamed): the build files (`pom.xml`, `build.gradle[.kts]`) in the folder and ancestors of a changed Java or Kotlin file that holds the detectors' `Tool` marker, and the modules a changed Python file with an `@x.tool` imports from (`from .server import mcp`), at most 50 per sync.
 
 `build.gradle.kts` / `settings.gradle.kts` are scanned as config files (Gradle Kotlin DSL), so the starter is found there too.
 

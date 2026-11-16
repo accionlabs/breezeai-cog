@@ -168,7 +168,7 @@ def test_incremental_fetches_the_context_files_cross_file_facts_read(recorded_gi
         ],
         changed=["svc/src/main/java/T.java", "app/tools.py"],
         content={
-            "svc/src/main/java/T.java": "class T {}\n",
+            "svc/src/main/java/T.java": "class T { @Tool String f() { return \"\"; } }\n",
             "app/tools.py": tools_py,
             "pom.xml": "<project/>",
             "svc/pom.xml": "<project>mcp</project>",
@@ -190,7 +190,7 @@ def test_incremental_fetches_the_context_files_cross_file_facts_read(recorded_gi
 
 def test_context_paths_are_bounded_and_skip_plain_python() -> None:
     tree = [f"m{i}/pom.xml" for i in range(80)] + [f"m{i}/A.java" for i in range(80)]
-    changed = {f"m{i}/A.java": "" for i in range(80)}
+    changed = {f"m{i}/A.java": "@Tool" for i in range(80)}
     assert len(git_mod.context_paths(changed, tree)) == git_mod._MAX_CONTEXT_FILES
     tree = ["app/server.py", "app/x.py"]
     assert git_mod.context_paths({"app/x.py": "from .server import mcp\n"}, tree) == []
@@ -201,14 +201,24 @@ def test_context_paths_are_bounded_and_skip_plain_python() -> None:
 
 def test_context_paths_fetch_gradle_kts_for_a_kotlin_file() -> None:
     tree = ["build.gradle.kts", "svc/build.gradle.kts", "svc/src/main/kotlin/T.kt", "other/pom.xml"]
-    changed = {"svc/src/main/kotlin/T.kt": "class T\n"}
+    changed = {"svc/src/main/kotlin/T.kt": "class T { @Tool fun f() = \"\" }\n"}
     assert git_mod.context_paths(changed, tree) == ["build.gradle.kts", "svc/build.gradle.kts"]
+
+
+def test_context_paths_fetch_build_files_only_for_a_possible_mcp_tool() -> None:
+    """A Java / Kotlin change without the MCP detectors' ``Tool`` marker has no tool, so it
+    needs no build file; one with ``@Tool`` (or ``ToolSpecification``) still does."""
+    tree = ["pom.xml", "svc/pom.xml", "svc/A.java", "svc/B.java", "svc/C.kt", "svc/build.gradle"]
+    plain = {"svc/A.java": "class A { void f() {} }\n", "svc/C.kt": "class C\n"}
+    assert git_mod.context_plan(plain, tree) == ([], True)
+    tool = {**plain, "svc/B.java": "class B { @Tool String f() { return \"\"; } }\n"}
+    assert git_mod.context_paths(tool, tree) == ["pom.xml", "svc/pom.xml", "svc/build.gradle"]
 
 
 def test_context_paths_put_the_root_and_nearest_build_files_first() -> None:
     """The root build file, then each changed file's nearest, then the folders between."""
     tree = ["pom.xml", "a/pom.xml", "a/b/pom.xml", "a/b/c/X.java", "d/pom.xml", "d/Y.java"]
-    changed = {"a/b/c/X.java": "", "d/Y.java": ""}
+    changed = {"a/b/c/X.java": "@Tool", "d/Y.java": "@McpTool"}
     assert git_mod.context_plan(changed, tree) == (
         ["pom.xml", "a/b/pom.xml", "d/pom.xml", "a/pom.xml"],
         True,
@@ -222,7 +232,7 @@ def test_context_paths_build_files_have_their_own_budget_and_caps_warn(
     file imports is still fetched, and each truncation is logged."""
     tree = [f"m{i:02}/pom.xml" for i in range(80)] + [f"m{i:02}/A.java" for i in range(80)]
     tree += ["app/server.py", "app/tools.py"]
-    changed = {f"m{i:02}/A.java": "" for i in range(80)}
+    changed = {f"m{i:02}/A.java": "@Tool" for i in range(80)}
     changed["app/tools.py"] = "from app.server import mcp\n@mcp.tool\ndef f(): ...\n"
     with caplog.at_level("WARNING", logger=git_mod.__name__):
         paths = git_mod.context_paths(changed, tree)
@@ -241,7 +251,7 @@ def test_context_over_the_cap_abandons_the_diff(recorded_git) -> None:
     """More build files than the cap: parsing would leave some empty and drop the facts proven
     there, so the diff is abandoned (temp dir removed) with the compare's deletions."""
     tree = [f"m{i:02}/pom.xml" for i in range(60)] + [f"m{i:02}/A.java" for i in range(60)]
-    content = {f"m{i:02}/A.java": "class A {}\n" for i in range(60)}
+    content = {f"m{i:02}/A.java": "class A { @Tool void f() {} }\n" for i in range(60)}
     content.update({f"m{i:02}/pom.xml": "<project/>" for i in range(60)})
     client = FakeClient(tree=tree, changed=list(content)[:60], deleted=["old.py"], content=content)
     made: list[str] = []

@@ -102,6 +102,9 @@ def clone_repo_full(
 #: clone (:class:`IncompleteDiffContext`) rather than re-ingesting tools without their proof.
 _MAX_CONTEXT_FILES = 50
 _BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts")
+#: The prefilter of the Java and Kotlin MCP tool detectors (their ``Gate`` guard): a changed
+#: file without it has no tool, so it needs no build file.
+_JVM_TOOL_MARKER = "Tool"
 #: ``@x.tool`` in a Python file: a FastMCP tool whose server may be imported.
 _PY_TOOL = re.compile(r"@[ \t]*\w+[ \t]*\.[ \t]*tool\b")
 _PY_FROM_IMPORT = re.compile(r"^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import\b", re.MULTILINE)
@@ -208,8 +211,8 @@ def _capped(paths: dict[str, None], kind: str) -> tuple[list[str], bool]:
 
 def context_plan(changed: Mapping[str, str], tree: list[str]) -> tuple[list[str], bool]:
     """Unchanged files to fetch with real content for the facts the ``changed`` files (path →
-    content) depend on, and whether that list is complete. Build files in a changed Java /
-    Kotlin file's folder or an ancestor — the repository root's first, then each changed file's
+    content) depend on, and whether that list is complete. Build files in the folder or an
+    ancestor of a changed Java / Kotlin file that may declare an MCP tool — the repository root's first, then each changed file's
     nearest, then the folders between — and the modules a changed Python file with an
     ``@x.tool`` imports from. At most :data:`_MAX_CONTEXT_FILES` of each kind, in a stable
     order; ``False`` (and a logged warning) when a cap cut."""
@@ -220,7 +223,7 @@ def context_plan(changed: Mapping[str, str], tree: list[str]) -> tuple[list[str]
     between: dict[str, None] = {}
     modules: dict[str, None] = {}
     for path in sorted(changed):
-        if path.endswith((".java", ".kt")):
+        if path.endswith((".java", ".kt")) and _JVM_TOOL_MARKER in changed[path]:
             parts = path.split("/")[:-1]
             found = False
             for n in range(len(parts), -1, -1):
