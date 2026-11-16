@@ -132,18 +132,8 @@ def match_api(
         return None
     m = method.lower()
     low = callee.lower()
-<<<<<<< HEAD
     if language == "typescript" and (
             m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch")):
-=======
-    if language == "php":
-        return None
-    # JavaScript/TypeScript's global fetch forms are standard HTTP calls. Ruby's
-    # ``Hash#fetch``/``ENV.fetch`` share the suffix but are not outbound requests.
-    if low in _BARE_FUNCTIONS or (
-        language != "ruby" and (m in _BARE_FUNCTIONS or low.endswith(".fetch"))
-    ):
->>>>>>> ce1dffc0 (Enhanced Ruby parser coverage and performance across Rails, Grape, and Sinatra)
         return "GET"
     if language in _DOTNET:
         # .NET HttpClient verbs are async-suffixed (``GetAsync``/``PostAsync``…) or helpers
