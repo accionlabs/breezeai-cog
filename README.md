@@ -64,11 +64,10 @@ shapes still give a wrong statement record:
 
 | Code | What is captured |
 |---|---|
-| `// note` then `String name = load()` | two statements, `String` and `name = load()`; the `load` call is kept |
 | `Map<String, Object> errors` (generic or array type, no initializer) | one declaration statement that also holds the next line |
-| `(long) (y)` | the cast is read as a call, and the statement can run on into the next line |
 | `A { … },` (an enum constant with a body) | the constants after it are lost; they can surface as a field |
-| `println name`, `log.info "x"` (a call without parentheses) | no call; the line becomes separate statements. Only a bare name with literal or closure arguments (`println "x"`) parses as a call, and cog does not record it yet |
+| `println name`, `log.info "x"`, `log.info "a", name` (a call without parentheses whose argument is a name, or whose receiver is qualified) | no call; the line becomes separate statements. A bare name with literal, closure or named arguments (`println "x"`, `render view: 'show'`) is a call |
+| `for (var k : keys)` | the loop does not parse; the methods after it in the class can be lost |
 
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external

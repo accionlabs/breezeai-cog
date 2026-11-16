@@ -10,7 +10,7 @@ captured and parented to the file — mirroring the Python/TypeScript parsers.
 
 Groovy is a **best-effort / second-tier** language: the dekobon grammar recovers the
 package/class/method/field/enum skeleton reliably, but some method-body and enum shapes
-still mis-parse (README's Groovy note lists them). See ``.todo/groovy-grammar-evaluation.md``.
+still mis-parse (README's Groovy note lists them).
 """
 
 from __future__ import annotations

@@ -126,6 +126,20 @@ def test_top_level_script_method(tmp_path) -> None:
     assert helper.parentId == rec.id
 
 
+def test_script_method_with_no_return_type_is_named(tmp_path) -> None:
+    # An annotation or a modifier stands in for the return type; the name is not read as one.
+    rec = _parse_src(tmp_path, b"@Memoized fib(n) { n }\nprivate <T> first(List<T> xs) { xs }\n")
+    assert [(f.name, f.returnType) for f in rec.functions] == [("fib", None), ("first", None)]
+
+
+def test_a_def_parameter_has_no_type(tmp_path) -> None:
+    # `def item` and an untyped `item` mean the same in Groovy: no declared type.
+    rec = _parse_src(tmp_path, b"class A {\n  void save(def item, raw, final def kept, String s) { }\n}\n")
+    save = next(f for f in rec.functions if f.name == "save")
+    assert [(p.name, p.type) for p in save.params] == [
+        ("item", ""), ("raw", ""), ("kept", ""), ("s", "String")]
+
+
 def test_statements_and_detection(tmp_path) -> None:
     assert _parse(tmp_path, capture=False).statements == []
     rec = _parse(tmp_path, capture=True)
