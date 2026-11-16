@@ -194,4 +194,19 @@ def extract_statements(
                 typed_db_ids=typed_db_ids,
             )
         )
+        # A wrapper/DSL block is not itself a database query because SQL text occurs
+        # somewhere in its body. Its inner SQL statement is visited independently.
+        if node.type == "call" and any(
+            node_text(node.child_by_field_name("method"), source) == dsl
+            for dsl in ("safety_assured", "class_methods")
+            if node.child_by_field_name("method") is not None
+        ):
+            classified = [s for s in classified if s.semanticType != "query_statement"]
+        # Only Ruby-local evidence supports ActiveRecord and Redis here. The generic
+        # shared classifier's vendor-name hints do not establish another Ruby DB client.
+        classified = [
+            s for s in classified
+            if s.dataAccessHint in {None, "activerecord", "redis"}
+        ]
+        out.extend(classified)
     return out

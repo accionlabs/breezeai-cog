@@ -89,7 +89,15 @@ class RailsParser(RubyParser):
             root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            routes = detect_rails_routes(root, ctx.source, ctx.path, record, ctx.resolution_index)
+            split_routes = (
+                ctx.path.replace("\\", "/").startswith("config/routes/")
+                and is_drawn_route_file(ctx.resolution_index, ctx.path)
+            )
+            routes = detect_rails_routes(
+                root, ctx.source, ctx.path, record, ctx.resolution_index,
+                split_routes=split_routes,
+                split_prefix=drawn_route_prefix(ctx.resolution_index, ctx.path),
+            )
             if routes:
                 apply(record, routes, ctx.source, ctx.path)
                 record.framework = "rails"

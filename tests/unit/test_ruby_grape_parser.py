@@ -415,6 +415,25 @@ end
     assert [(item.method, item.endpoint) for item in routes] == [("GET", None)]
 
 
+def test_grape_duplicate_child_mount_emits_each_distinct_address_once(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class MainAPI < Grape::API
+  mount ChildAPI => "/child"
+  mount ChildAPI => "/child"
+  mount ChildAPI => "/other"
+end
+class ChildAPI < Grape::API
+  get "/users" do
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [
+        ("GET", "/child/users"), ("GET", "/other/users"),
+    ]
+
+
 def test_grape_static_version_arrays_expand_each_version(tmp_path: Path) -> None:
     source = b'''require "grape"
 class API < Grape::API

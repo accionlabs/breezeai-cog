@@ -159,9 +159,9 @@ class FactSpec:
     """A fact built from many files while the language index is built.
 
     ``collect(root, source, rel, repo_root)`` runs during the language's ``build_index`` on
-    files containing one of ``gate`` and returns a picklable value (or None). ``resolve(values,
-    index)`` runs once after every file is indexed, gets the values in file order, must not
-    depend on that order, and returns the fact read back with :func:`index_fact`."""
+    files containing one of ``gate`` and returns a value (or None). ``resolve(values, index)``
+    runs once after every file is indexed, gets the values in file order, must not depend on
+    that order, and returns the fact read back with :func:`index_fact`."""
 
     #: ``framework.concern``, e.g. ``hotchocolate.registered-roots``; unique per language.
     name: str
