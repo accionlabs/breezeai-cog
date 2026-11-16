@@ -1,0 +1,4 @@
+<div x-data="{ open: false }">
+  <button @click="open = !open">Toggle</button>
+  <form x-on:submit.prevent="save()"><input x-model="email" /></form>
+</div>

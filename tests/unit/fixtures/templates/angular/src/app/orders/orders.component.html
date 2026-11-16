@@ -1,0 +1,18 @@
+<h1>{{ title }}</h1>
+<form (ngSubmit)="save()">
+  <label for="email">E-mail</label>
+  <input id="email" name="email" [(ngModel)]="email" placeholder="E-mail" />
+  <button type="submit">Save</button>
+</form>
+@if (orders.length > 0) {
+  <ul>
+    @for (order of orders; track order.id) {
+      <li>
+        <app-order-row [order]="order"></app-order-row>
+        <button (click)="remove(order.id)">Delete</button>
+      </li>
+    }
+  </ul>
+}
+<a routerLink="/orders/new">New order</a>
+<a href="/help.html">Help</a>

@@ -1,0 +1,6 @@
+<form hx-post="/orders" hx-target="#list">
+  <input name="email" />
+  <button type="submit">Save</button>
+</form>
+<button hx-delete="/orders/1">Delete</button>
+<div id="list" hx-get="/orders" hx-trigger="load"></div>

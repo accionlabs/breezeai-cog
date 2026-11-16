@@ -1,0 +1,18 @@
+@page "/orders"
+@model Shop.Pages.OrdersModel
+<h1>@Model.Title</h1>
+<form method="post" asp-page-handler="Save">
+    <label asp-for="Email"></label>
+    <input asp-for="Email" />
+    <button type="submit">Save</button>
+</form>
+@if (Model.IsAdmin)
+{
+    <a asp-controller="Home" asp-action="Index">Home</a>
+}
+@foreach (var order in Model.Orders)
+{
+    <p>@order.Id</p>
+}
+<a href="/help.html">Help</a>
+<script>$.get('/api/orders');</script>
