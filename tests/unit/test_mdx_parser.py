@@ -301,6 +301,24 @@ def test_markdown_led_by_import_is_not_esm(text: str) -> None:
     assert _esm(text) == []
 
 
+def test_a_shadow_that_still_does_not_parse_gives_no_imports(capture, monkeypatch) -> None:
+    """When blanking the broken statements leaves a tree with errors, no import is read."""
+    from breezeai_cog.parsers.mdx import parser as mdx_parser
+
+    real = mdx_parser.blank_ranges
+    calls: list[int] = []
+
+    def blank_once_wrong(source: bytes, ranges: list[tuple[int, int]]) -> bytes:
+        calls.append(1)
+        return source if len(calls) == 1 else real(source, ranges)
+
+    shadow = b"import a from 'a'\nimport b from\n"
+    monkeypatch.setattr(mdx_parser, "esm_shadow", lambda *_a: shadow)
+    monkeypatch.setattr(mdx_parser, "blank_ranges", blank_once_wrong)
+    rec = capture({"docs/a.mdx": shadow.decode()})["docs/a.mdx"]
+    assert (rec.importFiles, rec.externalImports, rec.loc) == ([], [], 0)
+
+
 def test_parse_timeout_keeps_the_file_record(capture, monkeypatch) -> None:
     from breezeai_cog.parsers.mdx import parser as mdx_parser
 

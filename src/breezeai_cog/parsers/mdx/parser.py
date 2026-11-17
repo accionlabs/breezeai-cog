@@ -95,6 +95,11 @@ class MdxParser(BaseParser):
             if broken:
                 shadow = blank_ranges(shadow, broken)
                 root = parse_source(_GRAMMAR, shadow, timeout).root_node
+                if root.has_error:
+                    # Blanking moved the error instead of removing it: no import is read from
+                    # a tree that does not parse.
+                    shadow = blank_ranges(shadow, [(0, len(shadow))])
+                    root = parse_source(_GRAMMAR, shadow, timeout).root_node
         except ValueError:
             # Parse timeout: the file is still an MDX file, its imports are unknown (honest
             # null). Its detectors read the path, so they run on an empty tree.
