@@ -224,6 +224,23 @@ def test_parse_timeout_keeps_the_file_record(capture, monkeypatch) -> None:
     assert recs["docs/a.mdx"].language == "mdx"
 
 
+def test_shadow_parse_timeout_keeps_the_file_record_without_imports(capture, monkeypatch) -> None:
+    from breezeai_cog.parsers.mdx import parser as mdx_parser
+
+    real = mdx_parser.parse_source
+    source = "import { Chart } from '../components/Chart'\n\n# Sales\n"
+
+    def slow(grammar, code, timeout=0):
+        if len(code) == len(source):  # the whole-file shadow, not a block probe
+            raise ValueError("Parsing failed")
+        return real(grammar, code, timeout)
+
+    monkeypatch.setattr(mdx_parser, "parse_source", slow)
+    recs = capture({"docs/a.mdx": source, "components/Chart.tsx": "export const Chart = 1\n"})
+    rec = recs["docs/a.mdx"]
+    assert (rec.language, rec.importFiles, rec.externalImports, rec.exports) == ("mdx", [], [], [])
+
+
 def test_continuation_is_bounded_by_size() -> None:
     from breezeai_cog.parsers.mdx.esm import MAX_CONTINUATION_BYTES
 

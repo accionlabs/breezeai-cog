@@ -57,11 +57,17 @@ class MdxParser(BaseParser):
                 return False
 
         shadow = esm_shadow(ctx.source, parses)
-        root = parse_source(_GRAMMAR, shadow, timeout).root_node
-        broken = [(n.start_byte, n.end_byte) for n in root.children if n.has_error]
-        if broken:
-            shadow = blank_ranges(shadow, broken)
+        try:
             root = parse_source(_GRAMMAR, shadow, timeout).root_node
+            broken = [(n.start_byte, n.end_byte) for n in root.children if n.has_error]
+            if broken:
+                shadow = blank_ranges(shadow, broken)
+                root = parse_source(_GRAMMAR, shadow, timeout).root_node
+        except ValueError:
+            # Parse timeout: the file is still an MDX file, its imports are unknown (honest
+            # null). Its detectors read the path, so they run on an empty tree.
+            shadow = b""
+            root = parse_source(_GRAMMAR, shadow).root_node
 
         internal, external, exports, _ = extract_imports(
             root, shadow, ctx.path, ctx.repo_root, ctx.related_indexes.get("typescript")
