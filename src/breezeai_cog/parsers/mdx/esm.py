@@ -40,8 +40,11 @@ from dataclasses import dataclass, field
 
 #: MDX reads ESM only where the keyword is followed by a space (``import{a}`` is text).
 _ESM_START = re.compile(rb"(?:import|export) ")
-#: MDX turns indented code off, so a fence may be indented any amount (``    ```js`` is a fence).
-_FENCE_OPEN = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
+#: MDX turns indented code off, so a fence may be indented any amount (``    ```js`` is a fence),
+#: and a list item may open one on its marker line (``- ```bash``, ``1. ```js``): missing that
+#: would read the item's indented closing fence as an opening one and put every later fence
+#: out of step, so a code sample's ``import`` would be read as ESM.
+_FENCE_OPEN = re.compile(rb"[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)")
 _FRONT_MATTER = (b"---",)
 _BOM = b"\xef\xbb\xbf"
 

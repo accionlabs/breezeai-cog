@@ -157,6 +157,29 @@ def test_an_indented_fence_is_a_fence() -> None:
     assert _esm("\t~~~\n\nimport a from 'a'\n\n\t~~~\n") == []
 
 
+@pytest.mark.parametrize("marker", ["- ", "* ", "1. ", "2) "])
+def test_a_fence_opened_on_a_list_item_line_is_a_fence(marker: str) -> None:
+    """A list item may open a fence on its marker line; its indented closing fence then closes
+    it, so a later code sample's ``import`` is not read as ESM."""
+    item = f"{marker}```bash\n   npm i foo\n   ```\n\n"
+    sample = "```\nimport a from 'a'\n\nimport { Foo } from '../components/foo'\n\nrender(<Foo />)\n```\n"
+    assert _esm("# Install\n\n" + item + "Then use it:\n\n" + sample) == []
+    assert _esm(item + "import b from 'b'\n") == [(4, 5)]
+
+
+def test_a_code_sample_after_a_list_item_fence_is_not_an_import(capture) -> None:
+    recs = capture(
+        {
+            "components/foo.tsx": "export const Foo = () => null\n",
+            "docs/guide.mdx": "# Install\n\n- ```bash\n  npm i foo\n  ```\n\nThen use it:\n\n"
+            "```\nimport a from 'a'\n\nimport { Foo } from '../components/foo'\n\n"
+            "render(<Foo />)\n```\n",
+        }
+    )
+    rec = recs["docs/guide.mdx"]
+    assert (rec.importFiles, rec.externalImports) == ([], [])
+
+
 def test_import_inside_a_jsx_expression_is_not_an_import() -> None:
     text = (
         "<Code code={`\n\nimport { Button } from '@/components/button'\n\n`} />\n\n"
