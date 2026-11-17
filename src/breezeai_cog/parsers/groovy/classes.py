@@ -22,8 +22,10 @@ from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from .functions import (
+    STATEMENT_WORDS,
     build_method,
     class_fields,
+    decl_name,
     extract_annotations,
     extract_params,
     has_declaration_error,
@@ -36,7 +38,8 @@ _TYPE = {
     "enum_declaration": "enum",
     "trait_declaration": "trait",
 }
-_NESTED_CLASS_TYPES = tuple(_TYPE)  # member (inner) types nested in a class body
+_NESTED_CLASS_TYPES = tuple(_TYPE)
+_CONSTRUCTIBLE = ("class_declaration", "enum_declaration")  # member (inner) types nested in a class body
 _TYPE_NODES = ("type_identifier", "scoped_type_identifier", "generic_type", "qualified_type")
 _VISIBILITY = ("public", "private", "protected")
 
@@ -107,14 +110,22 @@ def build_class(
             if has_declaration_error(member):
                 continue  # corrupt declaration header — skip rather than emit fabricated data
             if member.type in ("method_declaration", "constructor_declaration"):
+                ctor = member.type == "constructor_declaration"
+                member_name = decl_name(member, source) if ctor else None
+                if member_name in STATEMENT_WORDS:
+                    continue  # `catch (E e) { }` left over from a method the grammar broke off
+                # The grammar reads any member with modifiers, a name and no return type as a
+                # constructor (`private helper(x) { }`, `static load(id) { }`); Groovy makes it one
+                # only when the name is the class's, in a class or an enum.
+                ctor = ctor and member_name == name and node.type in _CONSTRUCTIBLE
                 fn, fn_statements = build_method(
                     member, source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, fields=fields,
+                    resolve=resolve, fields=fields, constructor=ctor,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
-                if member.type == "constructor_declaration":
+                if ctor:
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)

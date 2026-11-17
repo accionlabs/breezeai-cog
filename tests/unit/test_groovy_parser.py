@@ -119,6 +119,53 @@ def test_methods(tmp_path) -> None:
     assert ping.isStatic is True
 
 
+def test_a_member_the_grammar_reads_as_a_constructor_is_a_method_unless_named_after_its_class(
+        tmp_path: Path) -> None:
+    # The grammar reads every member with modifiers or annotations, a name and no return type as
+    # a constructor; Groovy makes it one only when the name is the class's.
+    src = ("class Book {\n"
+           "    Book(String title) { }\n"
+           "    static load(id) { find(id) }\n"
+           "    private helper(x) { x }\n"
+           "    @Deprecated setOwner(String o) { }\n"
+           "    enum Kind {\n        A('a')\n        private Kind(String code) { }\n    }\n"
+           "}\n")
+    rec = _parse_src(tmp_path, src.encode())
+    kinds = {f.name: f.type for f in rec.functions}
+    assert kinds == {"Book": "constructor", "load": "method", "helper": "method",
+                     "setOwner": "method", "Kind": "constructor"}
+    by_name = {c.name: c for c in rec.classes}
+    assert by_name["Book"].constructorParams == [ConstructorParam(name="title", type="String")]
+    assert by_name["Kind"].constructorParams == [ConstructorParam(name="code", type="String")]
+    load = next(f for f in rec.functions if f.name == "load")
+    assert load.isStatic is True and [c.name for c in load.calls] == ["find"]
+
+
+def test_a_member_read_as_a_constructor_does_not_set_the_class_s_constructor_params(
+        tmp_path: Path) -> None:
+    rec = _parse_src(tmp_path, b"class Book {\n    static load(id) { id }\n}\n")
+    assert rec.classes[0].constructorParams == []
+    assert [(f.name, f.type) for f in rec.functions] == [("load", "method")]
+
+
+def test_an_untyped_field_before_a_typed_method_leaves_the_method_a_method(tmp_path: Path) -> None:
+    # `static count` then `int size()` reads as a field `int` of type `count` and a constructor
+    # `size`, with no ERROR.
+    rec = _parse_src(tmp_path, b"class Book {\n    static count\n    int size() { count }\n}\n")
+    assert [(f.name, f.type) for f in rec.functions] == [("size", "method")]
+
+
+def test_a_statement_keyword_left_as_a_constructor_is_not_emitted(tmp_path: Path) -> None:
+    # The typed local with no initializer breaks load() off before its `catch`, which the grammar
+    # then reads as a constructor named `catch`.
+    src = ("class Registry {\n    void load() {\n        Map<String, List<String>> names\n"
+           "        try {\n            names = read()\n"
+           "        } catch (Exception e) {\n            names = [:]\n        }\n    }\n}\n")
+    rec = _parse_src(tmp_path, src.encode())
+    assert "catch" not in {f.name for f in rec.functions}
+    assert rec.classes[0].constructorParams == []
+
+
 def test_top_level_script_method(tmp_path) -> None:
     # Groovy allows methods outside a class — attributed to the file, not dropped.
     rec = _parse(tmp_path)

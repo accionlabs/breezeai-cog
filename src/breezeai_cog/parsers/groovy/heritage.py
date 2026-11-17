@@ -39,15 +39,12 @@ from tree_sitter import Node
 
 from ..index_common import ClassHeritage, record_distinct
 from ..treesitter import node_text
-from .functions import name_text
+from .functions import STATEMENT_WORDS, name_text
 
 _CLASS_DECLS = ("class_declaration", "interface_declaration", "enum_declaration",
                 "trait_declaration")
 _TYPE_NODES = ("type_identifier", "generic_type", "qualified_type", "scoped_type_identifier")
 _VISIBILITY = frozenset({"public", "private", "protected"})
-#: Statement keywords error recovery can leave as a constructor's name.
-_STATEMENT_WORDS = frozenset({"catch", "finally", "for", "if", "else", "while", "do", "switch",
-                              "synchronized", "try", "return"})
 _NO_RETURN = frozenset({"void", "boolean", "byte", "char", "short", "int", "long", "float",
                         "double", "def", "var", "Object"})
 
@@ -251,7 +248,7 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
                     # still the class's method, for the check a class whose methods are not
                     # all known gets (`unknown_methods`) — unless error recovery made a
                     # statement keyword into one (`catch (Exception e) { … }`)
-                    if nm is not None and node_text(nm, source) not in _STATEMENT_WORDS:
+                    if nm is not None and node_text(nm, source) not in STATEMENT_WORDS:
                         add(node_text(nm, source), None)
             elif member.type == "method_declaration":
                 nm = member.child_by_field_name("name")

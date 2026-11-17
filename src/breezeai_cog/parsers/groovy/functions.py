@@ -25,6 +25,10 @@ from ..treesitter import line_span, node_text
 from .statements import MEMBER_ACCESS, extract_statements
 
 _VISIBILITY = ("public", "private", "protected")
+#: Statement keywords error recovery can leave as a constructor's name (``catch (E e) { }``
+#: after a method the grammar broke off).
+STATEMENT_WORDS = frozenset({"catch", "finally", "for", "if", "else", "while", "do", "switch",
+                             "synchronized", "try", "return"})
 
 
 def has_declaration_error(node: Node) -> bool:
@@ -296,9 +300,12 @@ def build_method(
     limit: int,
     resolve: CallResolver = noop_resolver,
     fields: Mapping[str, str | None] | None = None,
+    constructor: bool = False,
 ) -> tuple[Function, list[Statement]]:
     """``fields``: the enclosing class's fields (outer classes' included), for the method's
-    variable types; a script method has none of its own."""
+    variable types; a script method has none of its own. ``constructor``: the node is one of its
+    class's constructors (the caller checks the name; the grammar's ``constructor_declaration``
+    alone does not tell)."""
     name = decl_name(node, source)
     start, end = line_span(node)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
@@ -313,7 +320,7 @@ def build_method(
         parentId=parent_id,
         path=path,
         name=name,
-        type="constructor" if node.type == "constructor_declaration" else "method",
+        type="constructor" if constructor else "method",
         visibility=visibility,
         isStatic=is_static,
         params=extract_params(node.child_by_field_name("parameters"), source),
