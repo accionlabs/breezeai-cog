@@ -35,6 +35,14 @@ def test_app_router_mdx_page(analyze_files) -> None:
     assert p.authRequired is None and p.guards is None
 
 
+def test_mdx_page_without_handler_is_not_a_contract_gap(analyze_files) -> None:
+    from breezeai_cog.parsers.contract import _check
+
+    st = _run(analyze_files, {"next.config.mjs": MDX_CONFIG, "app/about/page.mdx": PAGE})
+    [p] = _pages(st)
+    assert _check(p) == []
+
+
 def test_pages_router_mdx_page_with_base_path(analyze_files) -> None:
     """Example 2 — an app whose pages are all MDX is still a Next.js app."""
     st = _run(
