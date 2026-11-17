@@ -273,7 +273,8 @@ def esm_lines(
     budget_spent: Callable[[], None] | None = None,
 ) -> list[tuple[int, int]]:
     """The ESM blocks of an MDX ``source`` as 0-based ``[start, end)`` line ranges.
-    ``parses(code)`` says whether a block of code parses without error; it is called at most
+    ``parses(code)`` says whether a block is ESM MDX compiles (it parses without error and holds
+    only ``import`` / ``export`` statements); it is called at most
     :data:`MAX_PARSES_PER_FILE` times. ``budget_spent()`` is called once when ESM is left
     unread because that budget is spent (not when the file simply used all of it)."""
     budget = MAX_PARSES_PER_FILE

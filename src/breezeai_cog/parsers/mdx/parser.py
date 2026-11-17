@@ -45,7 +45,23 @@ from .esm import MAX_PARSES_PER_FILE, blank_ranges, esm_shadow
 #: them parses too.
 _GRAMMAR = "tsx"
 
+#: What an ESM block may hold: MDX compiles a block only when its every statement is an
+#: ``import`` or an ``export``.
+_ESM_NODES = frozenset({"import_statement", "export_statement", "comment"})
+
 log = get_logger("breezeai_cog.parsers.mdx")
+
+
+def is_esm(code: bytes, timeout: int = 0) -> bool:
+    """Whether ``code`` is an ESM block MDX compiles: it parses without error and holds only
+    ``import`` / ``export`` statements. Any other statement is prose MDX would reject — a
+    ``~~~js`` fence glued under an import parses as an expression — so the block is read as
+    text and the fence it opens is still seen."""
+    try:
+        root = parse_source(_GRAMMAR, code, timeout).root_node
+    except ValueError:  # parse timeout: not code we can read
+        return False
+    return not root.has_error and all(n.type in _ESM_NODES for n in root.named_children)
 
 
 class MdxParser(BaseParser):
@@ -66,10 +82,7 @@ class MdxParser(BaseParser):
         timeout = ctx.parse_timeout_micros
 
         def parses(code: bytes) -> bool:
-            try:
-                return not parse_source(_GRAMMAR, code, timeout).root_node.has_error
-            except ValueError:  # parse timeout: not code we can read
-                return False
+            return is_esm(code, timeout)
 
         def budget_spent() -> None:
             # The scan stopped reading ESM here: imports after this point may be missing.

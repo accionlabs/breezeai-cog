@@ -10,7 +10,7 @@ import pytest
 from breezeai_cog import iter_file_records
 from breezeai_cog.core.registry import discover_builtin, language_candidates
 from breezeai_cog.parsers.mdx.esm import esm_lines
-from breezeai_cog.parsers.treesitter import parse_source
+from breezeai_cog.parsers.mdx.parser import is_esm
 from breezeai_cog.schemas import FileRecord
 
 CHART = "export function Chart() {\n  return null;\n}\n"
@@ -32,7 +32,7 @@ def capture(tmp_path: Path) -> Callable[..., dict[str, FileRecord]]:
 
 
 def _parses(code: bytes) -> bool:
-    return not parse_source("tsx", code, 0).root_node.has_error
+    return is_esm(code)
 
 
 def _esm(text: str) -> list[tuple[int, int]]:
@@ -261,6 +261,44 @@ def test_a_block_that_never_parses_still_opens_its_fence() -> None:
         "load()\n```\n\nimport ok from 'ok'\n"
     )
     assert _esm(text) == [(9, 10)]
+
+
+def test_a_fence_glued_under_an_import_is_still_a_fence() -> None:
+    """``~~~js`` parses as an expression, but MDX compiles only import / export statements: the
+    block is text, so its fence opens, the code sample's import is not ESM, and the closing
+    fence does not hide the ESM after it."""
+    text = "import a from 'a'\n~~~js\n\nimport evil from 'evil'\n\n~~~\n\nexport const later = 1\n"
+    assert _esm(text) == [(7, 8)]
+
+
+def test_a_code_sample_under_a_glued_fence_is_not_an_import(capture) -> None:
+    recs = capture(
+        {
+            "components/Real.tsx": CHART,
+            "components/Fake.tsx": CHART,
+            "docs/a.mdx": "import { Real } from '../components/Real'\n~~~js\n\n"
+            "import { Fake } from '../components/Fake'\n\n~~~\n\nexport const later = 1\n",
+        }
+    )
+    rec = recs["docs/a.mdx"]
+    assert (rec.importFiles, rec.exports) == ([], ["later"])
+
+
+def test_jsx_glued_under_an_import_still_opens_its_element() -> None:
+    assert _esm("import a from 'a'\n<Tabs>\n\nimport evil from 'evil'\n\n</Tabs>\n") == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "> import evil from 'evil'\n",  # blockquote
+        "```js\n\nimport evil from 'evil'\n",  # fence left open to the end of the file
+        "| a |\n|---|\n| import evil from 'evil' |\n",  # table row
+        "import evil from 'evil'\n---\n",  # setext heading
+    ],
+)
+def test_markdown_led_by_import_is_not_esm(text: str) -> None:
+    assert _esm(text) == []
 
 
 def test_parse_timeout_keeps_the_file_record(capture, monkeypatch) -> None:
