@@ -23,11 +23,14 @@ STATEMENT_TYPES: list[str] = [
     "for_statement",
     "switch_statement",
     "defer_statement",
+    # ``html`` grammar: an htmx request attribute (``hx-get="/items"``) → api_call.
+    "attribute",
 ]
 
-#: Frameworks whose templates this parser resolves and stamps (inherited from the owning
-#: component). P1 covers Angular; ``.vue`` templates are handled inside the Vue parser.
-FRAMEWORKS: list[str] = ["angular"]
+#: Frameworks this parser emits: ``angular`` for the templates it resolves and stamps (inherited
+#: from the owning component; ``.vue`` templates are handled inside the Vue parser), and
+#: ``htmx`` on the ``api_call`` statements of htmx request attributes.
+FRAMEWORKS: list[str] = ["angular", "htmx"]
 
 #: Comment node type for the shared whole-file comment pass (HTML ``<!-- … -->``).
 COMMENT_TYPES: frozenset[str] = frozenset({"comment"})

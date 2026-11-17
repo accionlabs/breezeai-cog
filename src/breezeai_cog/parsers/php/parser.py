@@ -23,7 +23,7 @@ from .handlers import handler_locator
 from .imports import extract_imports
 from .index import PhpIndex, build_fqcn_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, STATEMENT_TYPES
-from .statements import extract_statements
+from .statements import CLOSURES, bound_closure_name, extract_statements
 
 _CLASS_TYPES = {"class_declaration", "interface_declaration", "trait_declaration", "enum_declaration"}
 _FUNCTION_NAMES = {"function_definition", "method_declaration"}
@@ -82,6 +82,16 @@ class PhpParser(BaseParser):
         class_names: dict[tuple[int, int], str] = {}
         function_ids: dict[tuple[int, int], str] = {}
 
+        # Closures stored in a variable (`$notify = function …`) are Functions named after it;
+        # every other closure is inline code of the function, or file, around it.
+        bound: dict[tuple[int, int], str] = {}
+        for node in walk(root):
+            if node.type in CLOSURES:
+                name = bound_closure_name(node, source)
+                if name is not None:
+                    bound[(node.start_byte, node.end_byte)] = name
+        bound_spans = frozenset(bound)
+
         def extract_scope(node: Node) -> None:
             if node.type in _CLASS_TYPES:
                 parent_id = function_parent_id(node, class_ids, function_ids, fid)
@@ -98,14 +108,16 @@ class PhpParser(BaseParser):
                         extract_statements(
                             body, source, path, parent_id=cls.id,
                             capture=ctx.capture_statements, limit=ctx.statement_text_limit,
-                            seen_ids=seen_ids,
+                            seen_ids=seen_ids, bound=bound_spans,
                         )
                     )
                 for child in node.named_children:
                     extract_scope(child)
                 return
 
-            if function_node_type(node):
+            if function_node_type(node) and (
+                node.type not in CLOSURES or (node.start_byte, node.end_byte) in bound
+            ):
                 parent_id = function_parent_id(node, class_ids, function_ids, fid)
                 owner = node.parent
                 class_name: str | None = None
@@ -125,6 +137,8 @@ class PhpParser(BaseParser):
                     capture=ctx.capture_statements,
                     limit=ctx.statement_text_limit,
                     resolve=resolve,
+                    name=bound.get((node.start_byte, node.end_byte)),
+                    bound=bound_spans,
                 )
                 function_ids[(node.start_byte, node.end_byte)] = fn.id
                 functions.append(fn)
@@ -156,7 +170,7 @@ class PhpParser(BaseParser):
         statements.extend(
             extract_statements(
                 root, source, path, parent_id=fid, capture=ctx.capture_statements,
-                limit=ctx.statement_text_limit, seen_ids=seen_ids,
+                limit=ctx.statement_text_limit, seen_ids=seen_ids, bound=bound_spans,
             )
         )
         if ctx.capture_statements:

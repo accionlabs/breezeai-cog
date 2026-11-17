@@ -918,3 +918,102 @@ def test_client_proxy_outside_nestjs_is_not_outbound(analyze_files) -> None:
         "  go() { this.c.emit('q', 1); }\n}\n"
     ))
     assert out == []
+
+
+# ── API versioning (enableVersioning) ──────────────────────────────────────────────────────────
+_VERSIONED = (
+    "import { Controller, Get, Post, Version, VERSION_NEUTRAL } from '@nestjs/common';\n"
+    "@Controller('orders')\nexport class OrdersController {\n"
+    "  @Get()\n  list() {}\n"
+    "  @Version('2')\n  @Get(':id')\n  findOne() {}\n"
+    "  @Version(['2', '3'])\n  @Post()\n  create() {}\n"
+    "  @Version(VERSION_NEUTRAL)\n  @Get('health')\n  health() {}\n"
+    "}\n"
+    "@Controller({ path: 'payments', version: '2' })\nexport class PaymentsController {\n"
+    "  @Get(':id')\n  pay() {}\n}\n"
+)
+
+
+def _routes_v(stmts) -> list[tuple[str | None, str | None, str | None, str | None]]:
+    """(method, endpoint, handler, version) for NestJS HTTP routes, in capture order."""
+    return [(s.method, s.endpoint, s.handler, s.version) for s in stmts
+            if s.semanticType == "route" and s.framework == "nestjs"]
+
+
+def _versioned_app(analyze_files, versioning_call: str):
+    return analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main(f"app.setGlobalPrefix('api');\n  {versioning_call}"),
+        "src/orders.controller.ts": _VERSIONED,
+    })
+
+
+def test_uri_versioning_puts_the_version_in_the_address(analyze_files) -> None:
+    st = _versioned_app(
+        analyze_files, "app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });")
+    assert _routes_v(st) == [
+        ("GET", "/api/v1/orders", "list", None),            # defaultVersion
+        ("GET", "/api/v2/orders/:id", "findOne", None),
+        ("POST", "/api/v2/orders", "create", None),         # one statement per version
+        ("POST", "/api/v3/orders", "create", None),
+        ("GET", "/api/orders/health", "health", None),      # VERSION_NEUTRAL
+        ("GET", "/api/v2/payments/:id", "pay", None),       # controller-level version
+    ]
+
+
+def test_uri_versioning_prefix_option(analyze_files) -> None:
+    st = _versioned_app(
+        analyze_files, "app.enableVersioning({ type: VersioningType.URI, prefix: 'ver' });")
+    assert ("GET", "/api/ver2/orders/:id", "findOne", None) in _routes_v(st)
+    assert ("GET", "/api/orders", "list", None) in _routes_v(st)  # no default → unversioned
+    st = _versioned_app(analyze_files, "app.enableVersioning({ prefix: false });")  # URI default
+    assert ("GET", "/api/2/orders/:id", "findOne", None) in _routes_v(st)
+
+
+def test_uri_versioning_with_an_object_form_path_array(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.enableVersioning({ type: VersioningType.URI });"),
+        "src/users.controller.ts": (
+            "import { Controller, Get } from '@nestjs/common';\n"
+            "@Controller({ path: ['v1/users', 'legacy/users'], version: '2' })\n"
+            "export class UsersController {\n  @Get(':id')\n  find() {}\n}\n"
+        ),
+    })
+    assert sorted(_routes_v(st)) == [
+        ("GET", "/v2/legacy/users/:id", "find", None),
+        ("GET", "/v2/v1/users/:id", "find", None),
+    ]
+
+
+def test_header_versioning_keeps_the_address_and_sets_version(analyze_files) -> None:
+    st = _versioned_app(
+        analyze_files,
+        "app.enableVersioning({ type: VersioningType.HEADER, header: 'X-API-Version' });")
+    assert _routes_v(st) == [
+        ("GET", "/api/orders", "list", None),
+        ("GET", "/api/orders/:id", "findOne", "2"),
+        ("POST", "/api/orders", "create", "2"),
+        ("POST", "/api/orders", "create", "3"),
+        ("GET", "/api/orders/health", "health", None),
+        ("GET", "/api/payments/:id", "pay", "2"),
+    ]
+
+
+def test_unreadable_or_missing_versioning_keeps_version_field(analyze_files) -> None:
+    # The app's setting is a variable, or cog found none: the address is left unversioned and
+    # `version` says which version the route serves — never a guessed `/v2/`.
+    for call in ("app.enableVersioning(versioningOptions);", "// no versioning call"):
+        st = _versioned_app(analyze_files, call)
+        assert ("GET", "/api/orders/:id", "findOne", "2") in _routes_v(st)
+        assert ("POST", "/api/orders", "create", "3") in _routes_v(st)
+
+
+def test_non_literal_version_under_uri_leaves_the_address_unknown(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.enableVersioning({ type: VersioningType.URI });"),
+        "src/orders.controller.ts": _ctrl_src(
+            "OrdersController", "orders", "  @Version(API_V)\n  @Get()\n  list() {}\n"),
+    })
+    assert _routes_v(st) == [("GET", None, "list", None)]

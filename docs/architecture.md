@@ -811,7 +811,9 @@ become statements (`EMIT_TYPES`: declarations, control flow, jumps). It also lis
 (`NESTED_SCOPES`: nested classes, methods, lambdas…) that are extracted as their own
 `Class`/`Function`. At file and class level the extractor stops at those scopes. Inside a function
 body it walks into inline lambdas and gives their statements to the function, as in the
-[worked example](#5-worked-example-one-file-start-to-finish).
+[worked example](#5-worked-example-one-file-start-to-finish). A function stored in a variable
+(`const save = (x) => …`) is one `Function` and its declaration is not emitted again as a
+statement ([statement model §2](architecture/statement-model.md#2-which-statements-are-emitted)).
 
 **Enrich or append.** A detector that matches a call first looks for an existing statement on
 the same span:
@@ -898,11 +900,12 @@ flowchart LR
 | `extends` | `EXTENDS` edges to classes with that name in the repository |
 | `id` of Class / Function / Statement | The `captureId` property (the statement's unique key) |
 
-> **Decision —** `File` and `Class` are **open** nodes; `Function` and `Statement` are **allow-listed**.
-> **Why:** files and classes need room for parser-specific attributes (config metadata, UI
-> roles). Functions and statements are the most numerous nodes, so their shape is kept fixed.
-> **Cost:** a new field on `Function` or `Statement` is **silently dropped** at ingest unless the
-> backend's allow-list is updated in the same change.
+> **Decision —** `File` is an **open** node; `Class`, `Function` and `Statement` are
+> **allow-listed** by the backend.
+> **Why:** files need room for parser-specific attributes (config metadata, UI roles). Functions
+> and statements are the most numerous nodes, so their shape is kept fixed.
+> **Cost:** a new field on `Class`, `Function` or `Statement` is **silently dropped** at ingest
+> unless the backend's allow-list is updated in the same change.
 
 > **Decision —** fields a parser did not fill are left out of the output (`exclude_none`).
 > **Why:** a missing field means "not known", which is different from an empty or false value,

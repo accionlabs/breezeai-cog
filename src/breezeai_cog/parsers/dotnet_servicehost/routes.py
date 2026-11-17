@@ -63,8 +63,8 @@ _PROTOCOL_FACTORIES: dict[str, str] = {
     # simple type name (lower)              -> framework
     "dataservicehostfactory": "odata",  # WCF Data Services / OData
     "entityframeworkdataservicehostfactory": "odata",
-    "webservicehostfactory": "wcf-rest",  # WCF REST (WebHttpBinding)
-    "webscriptservicehostfactory": "wcf-rest",  # AJAX/JSON-enabled
+    "webservicehostfactory": "wcf",  # WCF REST (WebHttpBinding)
+    "webscriptservicehostfactory": "wcf",  # AJAX/JSON-enabled
 }
 
 

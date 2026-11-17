@@ -10,7 +10,7 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import bound_name, extract_statements
 
 
 def _receiver_info(node: Node, source: bytes) -> tuple[str | None, str | None]:
@@ -80,12 +80,19 @@ def _call_name(node: Node, source: bytes) -> tuple[str, str | None]:
     return "", None
 
 
-def _collect_calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _collect_calls(
+    node: Node, source: bytes, resolve: CallResolver = noop_resolver,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
+) -> list[Call]:
+    """Calls in ``node``, inline function literals included; a literal stored in a variable
+    (its span in ``barriers``) is a Function of its own and keeps its calls."""
     calls: list[Call] = []
     seen: set[str] = set()
 
     def walk(current: Node) -> None:
         for child in current.named_children:
+            if (child.start_byte, child.end_byte) in barriers:
+                continue
             if child.type == "call_expression":
                 name, receiver = _call_name(child, source)
                 if name and name not in seen:
@@ -105,21 +112,17 @@ class FileScan:
     names: set[str] = field(default_factory=set)
     #: ``x := expr`` → ``{"x": "expr"}`` (for call resolution).
     types: dict[str, str] = field(default_factory=dict)
-    #: Every ``func_literal`` in document order, with the start byte of its nearest enclosing
-    #: function/method/literal node (``None`` at package level).
-    literals: list[tuple[Node, int | None]] = field(default_factory=list)
+    #: Every ``func_literal`` stored in a variable, with that variable's name, in document order.
+    bound: list[tuple[Node, str]] = field(default_factory=list)
     #: ``x.Name`` selectors and ``pkg.Type`` qualified types: (``x`` / ``pkg``, ``Name``). Those
     #: whose qualifier is an import alias are the names the file uses from that package.
     qualified: set[tuple[str, str]] = field(default_factory=set)
 
 
-_FUNCTION_NODES = frozenset({"function_declaration", "method_declaration", "func_literal"})
-
-
 def scan_file(root: Node, source: bytes) -> FileScan:
     scan = FileScan()
 
-    def walk(node: Node, owner: int | None) -> None:
+    def walk(node: Node) -> None:
         for child in node.named_children:
             kind = child.type
             if kind in {"function_declaration", "method_declaration", "type_spec", "type_alias"}:
@@ -134,7 +137,9 @@ def scan_file(root: Node, source: bytes) -> FileScan:
                         if target.type == "identifier":
                             scan.types[node_text(target, source)] = node_text(rhs, source)
             elif kind == "func_literal":
-                scan.literals.append((child, owner))
+                bound = bound_name(child, source)
+                if bound is not None:
+                    scan.bound.append((child, bound))
             elif kind == "selector_expression":
                 operand, fld = child.child_by_field_name("operand"), child.child_by_field_name("field")
                 if operand is not None and fld is not None and operand.type == "identifier":
@@ -143,9 +148,9 @@ def scan_file(root: Node, source: bytes) -> FileScan:
                 pkg, name = child.child_by_field_name("package"), child.child_by_field_name("name")
                 if pkg is not None and name is not None:
                     scan.qualified.add((node_text(pkg, source), node_text(name, source)))
-            walk(child, child.start_byte if kind in _FUNCTION_NODES else owner)
+            walk(child)
 
-    walk(root, None)
+    walk(root)
     return scan
 
 
@@ -180,6 +185,7 @@ def build_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[Function, list[Statement]]:
     name = node.child_by_field_name("name")
     func_name = node_text(name, source) if name is not None else ""
@@ -205,32 +211,49 @@ def build_function(
         generics=node_text(type_parameters, source) if type_parameters is not None else None,
         params=params,
         returnType=result_type,
-        calls=_collect_calls(body, source, resolve) if body is not None else [],
+        calls=_collect_calls(body, source, resolve, barriers) if body is not None else [],
     )
-    statements = extract_statements(body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids, descend_all=True) if body is not None else []
+    statements = extract_statements(
+        body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids,
+        descend_all=True, barriers=barriers,
+    ) if body is not None else []
     return fn, statements
 
 
-def build_anonymous_function(
+def build_literal_function(
     node: Node,
+    name: str,
     source: bytes,
     path: str,
     *,
     parent_id: str,
+    package_level: bool,
     seen_ids: set[str],
+    capture: bool,
+    limit: int,
+    barriers: frozenset[tuple[int, int]],
     resolve: CallResolver = noop_resolver,
-) -> Function:
-    """Build a record for a Go function literal without re-emitting its body."""
+) -> tuple[Function, list[Statement]]:
+    """A function literal stored in a variable (``var notify = func(msg string) {…}``): a
+    ``Function`` named after the variable, of type ``function_expression``. Literals nested in
+    it that are stored in variables of their own (``barriers``) keep their own code."""
     start, end = line_span(node)
-    return Function(
-        id=disambiguate(function_id(path, "<anonymous>", start), seen_ids),
+    body = node.child_by_field_name("body")
+    fn = Function(
+        id=disambiguate(function_id(path, name, start), seen_ids),
         parentId=parent_id,
         path=path,
-        name="<anonymous>",
-        type="anonymous",
+        name=name,
+        type="function_expression",
         startLine=start,
         endLine=end,
+        visibility=("public" if name[:1].isupper() else "package") if package_level else None,
         params=_extract_params(node.child_by_field_name("parameters"), source),
-        calls=_collect_calls(node.child_by_field_name("body"), source, resolve)
-        if node.child_by_field_name("body") is not None else [],
+        returnType=_result_type(node, source),
+        calls=_collect_calls(body, source, resolve, barriers) if body is not None else [],
     )
+    statements = extract_statements(
+        body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids,
+        descend_all=True, barriers=barriers,
+    ) if body is not None else []
+    return fn, statements

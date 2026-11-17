@@ -189,6 +189,9 @@ class TypeScriptParser(BaseParser):
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
+        #: Spans of the declaration values extracted as Functions (`const f = () => …`): a
+        #: statement that only binds them is not emitted.
+        built: set[tuple[int, int]] = set()
 
         def walk(scope: Node) -> None:
             """Dispatch every declaration in ``scope``, descending into namespace/module
@@ -211,7 +214,7 @@ class TypeScriptParser(BaseParser):
                     statements.extend(
                         extract_statements(
                             block, source, path, parent_id=fid, capture=capture,
-                            limit=limit, seen_ids=seen_ids,
+                            limit=limit, seen_ids=seen_ids, built=frozenset(built),
                         )
                     )
                     continue
@@ -258,13 +261,15 @@ class TypeScriptParser(BaseParser):
                     classes,
                     statements,
                     resolve,
+                    built,
                 )
 
         walk(root)
 
         statements.extend(
             extract_statements(
-                root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+                root, source, path, parent_id=fid, capture=capture, limit=limit,
+                seen_ids=seen_ids, built=frozenset(built),
             )
         )
 
@@ -313,6 +318,7 @@ class TypeScriptParser(BaseParser):
         classes,
         statements,
         resolve,
+        built,
     ) -> None:
         if decl.type in _CLASSES:
             cls, methods, cls_stmts = build_class(
@@ -355,6 +361,7 @@ class TypeScriptParser(BaseParser):
                 name_node = vd.child_by_field_name("name")
                 decl_name = node_text(name_node, source) if name_node else ""
                 if value is not None and value.type in _FUNC_VALUES:
+                    built.add((value.start_byte, value.end_byte))
                     fns, fn_stmts = build_function(
                         value,
                         name=decl_name,

@@ -311,6 +311,80 @@ def test_array_route_path_is_one_binding_per_path(analyze_files) -> None:
     assert got == ["", "/users/a"]
 
 
+def test_object_form_class_path_array_is_one_binding_per_path(analyze_files) -> None:
+    # `@Controller({ path: [...] })` serves each path, like `@Controller([...])`.
+    src = (
+        COMMON
+        + "@Controller({ path: ['p1', 'p2'], version: '1' })\n"
+        + "export class B {\n  @Get('k')\n  k() {}\n}\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/b.controller.ts": src})
+    got = sorted((r.method, r.endpoint, r.handler) for r in _eps(st))
+    assert got == [("GET", "/p1/k", "k"), ("GET", "/p2/k", "k")]
+
+
+def _routes(st) -> list[tuple[str | None, str | None, str | None]]:
+    return sorted(((r.method, r.endpoint, r.handler) for r in _eps(st)), key=str)
+
+
+def test_constant_paths_resolve_through_the_repo_constants(analyze_files) -> None:
+    # A path written as a constant (class or method level, string, object or array form, or a
+    # template) is the constant's value, never the constant's name.
+    src = (
+        COMMON
+        + "import { BASE, PATHS } from './paths';\n"
+        + "@Controller(BASE)\nexport class A {\n  @Get(PATHS.one)\n  a() {}\n}\n"
+        + "@Controller({ path: BASE })\nexport class B {\n  @Get(`${PATHS.one}/x`)\n  b() {}\n}\n"
+        + "@Controller({ path: [BASE, 'plain'] })\nexport class C {\n  @Get()\n  c() {}\n}\n"
+    )
+    paths = "export const BASE = 'base';\nexport const PATHS = { one: 'one' } as const;\n"
+    st = analyze_files({"package.json": PKG, "src/a.controller.ts": src, "src/paths.ts": paths})
+    assert _routes(st) == [
+        ("GET", "/base", "c"),
+        ("GET", "/base/one", "a"),
+        ("GET", "/base/one/x", "b"),
+        ("GET", "/plain", "c"),
+    ]
+
+
+def test_unresolved_paths_leave_the_endpoint_empty(analyze_files) -> None:
+    # A constant cog cannot read (imported from a package, two different values in the repo, a
+    # call, a spread object) leaves `endpoint` empty: never the constant's name, never a route
+    # that silently lost its prefix.
+    src = (
+        COMMON
+        + "import { EXT } from 'some-package';\n"
+        + "import { DUP } from './a';\n"
+        + "@Controller(EXT)\nexport class A {\n  @Get('k')\n  a() {}\n}\n"
+        + "@Controller({ path: DUP })\nexport class B {\n  @Get('k')\n  b() {}\n}\n"
+        + "@Controller({ ...opts })\nexport class C {\n  @Get('k')\n  c() {}\n}\n"
+        + "@Controller(makePath())\nexport class D {\n  @Get('k')\n  d() {}\n}\n"
+        + "@Controller('ok')\nexport class E {\n  @Get(EXT)\n  e() {}\n"
+        + "  @Get(['x', EXT])\n  f() {}\n}\n"
+    )
+    st = analyze_files({
+        "package.json": PKG,
+        "src/c.controller.ts": src,
+        "src/a.ts": "export const DUP = 'one';\n",
+        "src/b.ts": "export const DUP = 'two';\n",
+    })
+    assert _routes(st) == [
+        ("GET", "/ok/x", "f"),
+        ("GET", None, "a"),
+        ("GET", None, "b"),
+        ("GET", None, "c"),
+        ("GET", None, "d"),
+        ("GET", None, "e"),
+        ("GET", None, "f"),
+    ]
+
+
+def test_object_form_without_path_has_no_prefix(analyze_files) -> None:
+    src = COMMON + "@Controller({ host: 'admin.example.com' })\nexport class H {\n  @Get('k')\n  k() {}\n}\n"
+    st = analyze_files({"package.json": PKG, "src/h.controller.ts": src})
+    assert _routes(st) == [("GET", "/k", "k")]
+
+
 def test_sse_decorator_is_a_get_binding(analyze_files) -> None:
     st = _ctrl(
         analyze_files,
