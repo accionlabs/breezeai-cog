@@ -269,7 +269,8 @@ def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int,
         if s.fence is not None:
             char, length = s.fence
             stripped = line.lstrip(b" \t")
-            if _run(stripped, 0, char) >= length and not stripped.lstrip(bytes([char])).strip(b" \t"):
+            info = stripped.lstrip(bytes([char])).strip(b" \t")
+            if _run(stripped, 0, char) >= length and not info:
                 s.fence = None
             k += 1
             prev_blank = False
