@@ -87,9 +87,10 @@ def _graphql_op_name(d: Decorator, mname: str) -> str:
     return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$][\w.$]*)")
-# `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
-# object form (the string form `@Controller('orders')` is handled directly).
-_PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
+# `@Controller({ path: 'orders', host: '...' })` — pull `path` out of the object form: a
+# string, or an array of strings (`path: ['v1/users', 'v2/users']`) kept as array text for
+# _paths. The string form `@Controller('orders')` is handled directly.
+_PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*(\[[^\]]*\]|['"`][^'"`]*['"`])""")
 _VERSION_PROP_RE = re.compile(r"""\bversion\s*:\s*(\[[^\]]*\]|'[^']*'|"[^"]*"|`[^`]*`|[\w.]+)""")
 
 
@@ -362,7 +363,10 @@ def _controller_base(decorators: list[Node], source: bytes) -> str | None:
             arg = d.args[0].strip()
             if arg.startswith("{"):  # object form: @Controller({ path: 'x', host: ... })
                 m = _PATH_PROP_RE.search(arg)
-                return m.group(1) if m else ""
+                if not m:
+                    return ""
+                value = m.group(1)
+                return value if value.startswith("[") else _unquote(value)
             return arg if arg.startswith("[") else _unquote(arg)  # an array: see _paths
     return None
 

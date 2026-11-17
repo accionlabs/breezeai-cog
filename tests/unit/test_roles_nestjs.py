@@ -311,6 +311,18 @@ def test_array_route_path_is_one_binding_per_path(analyze_files) -> None:
     assert got == ["", "/users/a"]
 
 
+def test_object_form_class_path_array_is_one_binding_per_path(analyze_files) -> None:
+    # `@Controller({ path: [...] })` serves each path, like `@Controller([...])`.
+    src = (
+        COMMON
+        + "@Controller({ path: ['p1', 'p2'], version: '1' })\n"
+        + "export class B {\n  @Get('k')\n  k() {}\n}\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/b.controller.ts": src})
+    got = sorted((r.method, r.endpoint, r.handler) for r in _eps(st))
+    assert got == [("GET", "/p1/k", "k"), ("GET", "/p2/k", "k")]
+
+
 def test_sse_decorator_is_a_get_binding(analyze_files) -> None:
     st = _ctrl(
         analyze_files,

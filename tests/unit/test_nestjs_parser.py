@@ -970,6 +970,22 @@ def test_uri_versioning_prefix_option(analyze_files) -> None:
     assert ("GET", "/api/2/orders/:id", "findOne", None) in _routes_v(st)
 
 
+def test_uri_versioning_with_an_object_form_path_array(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.enableVersioning({ type: VersioningType.URI });"),
+        "src/users.controller.ts": (
+            "import { Controller, Get } from '@nestjs/common';\n"
+            "@Controller({ path: ['v1/users', 'legacy/users'], version: '2' })\n"
+            "export class UsersController {\n  @Get(':id')\n  find() {}\n}\n"
+        ),
+    })
+    assert sorted(_routes_v(st)) == [
+        ("GET", "/v2/legacy/users/:id", "find", None),
+        ("GET", "/v2/v1/users/:id", "find", None),
+    ]
+
+
 def test_header_versioning_keeps_the_address_and_sets_version(analyze_files) -> None:
     st = _versioned_app(
         analyze_files,
