@@ -26,8 +26,8 @@ _CI_BUILDER = {
 _CI_MODEL = _CI_BUILDER | {"find", "findall", "first", "save", "findcolumn", "paginate", "chunk"}
 
 _KINDS: Kinds = {
-    "ci-db": (_CI_BUILDER, "codeigniter-builder"),
-    "ci-model": (_CI_MODEL, "codeigniter-builder"),
+    "ci-db": (_CI_BUILDER, "codeigniter"),
+    "ci-model": (_CI_MODEL, "codeigniter"),
 }
 
 

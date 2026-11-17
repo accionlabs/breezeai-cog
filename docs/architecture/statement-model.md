@@ -110,6 +110,28 @@ scopes depends on where it is:
 | The file root or a class body | **Stops** at them | They are extracted as their own `Class` / `Function`, with their own statements. |
 | A function body | **Walks into inline lambdas** and gives their statements to the function | A lambda is not a `Function` record, so its statements belong to the enclosing function. |
 
+**Functions without a name of their own.** Each piece of code is recorded once:
+
+- An **inline** function (a callback argument, a `go`/`defer` literal, an array value) is never
+  a `Function`. Its statements belong to the enclosing function. In Go and PHP, an inline
+  function at the file root gives its statements to the file
+  (Laravel `Route::get('/health', function () { return …; })`).
+- A function **stored in a variable or class field** (`const save = (x) => …`,
+  `var notify = func(msg string) {…}`, `$notify = function ($msg) {…};`,
+  `handle = () => {…}`) is one `Function`, named after the variable (`type`
+  `arrow_function` or `function_expression`). The declaration that stores it is not emitted
+  as a statement, because its text is that Function's code. A declaration that also stores
+  something else (`const a = 1, f = () => go();`) is still emitted.
+- An arrow function with an **expression body** (`const save = (x) => db.insert(x)`) gets
+  that expression as its one statement, with the expression's own `nodeType`
+  (`call_expression`), so the call is recorded under the Function.
+
+| Code | `Function` | Statements |
+|---|---|---|
+| `func Run() { r.GET("/x", func(c *gin.Context) { c.JSON(200, list()) }) }` | `Run` | `r.GET(…)` and `c.JSON(200, list())`, both under `Run` |
+| `var notify = func(msg string) { send(msg) }` | `notify` (`function_expression`) | `send(msg)` under `notify`; no `var_declaration` statement |
+| `const save = (x: string) => db.insert(x);` | `save` (`arrow_function`) | `db.insert(x)` (`call_expression`) under `save`; no `lexical_declaration` statement |
+
 **Example** (Java)
 
 ```java

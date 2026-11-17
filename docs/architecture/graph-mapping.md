@@ -164,9 +164,9 @@ What this means for cog:
 | Label | Policy | Stored | Notes |
 |---|---|---|---|
 | `File` | **Open** — everything except a strip list | `type`, `language`, `loc`, `framework`, `platform`, `project`, `projectRoot`, `uiRole`, `externalImports` (array), `imports` (= `importFiles`, array), `exports` (JSON string), `metadata` (JSON string), **and any extra key** | Removed: `id`, `functions`, `classes`, `importFiles`, `statements`. Added: `name`, `repositoryName`, `description`, `projectUuid`, `codeOntologyId`. Nx `project` / `projectRoot` are set only for files inside an Nx project; `project` is empty when the configuration names none. |
-| `Class` | **Open** — everything except a strip list | `name`, `type`, lines, `visibility`, `isAbstract`, `isSealed`, `uiRole`, `extends` (string), `alias` (string), `implements` / `decorators` / `constructorParams` / `metadata` / `generics` (JSON strings), **and any extra key** | Removed: `id` (→ `captureId`), `parentId`. `path` = the file's path. |
-| `Function` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `returnType`, and when present `visibility`, `isStatic`, `isAsync`, `receiverType`, `uiRole`, `generics`; `params` / `decorators` / `metadata` / `calls` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
-| `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath` (backend change needed: not stored before it), `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`, `description`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` and `params` as JSON strings (`params` only when it is a list of at most 16 KB as JSON, otherwise dropped whole; `description` and `params` need the same backend change as `handlerPath`) | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
+| `Class` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `visibility`, `isAbstract`, `isSealed`, `description`, `roles`, `uiRole`, `extends` (string), `alias` (string), `generics` (string, as written: `<T>`); `implements` / `decorators` / `constructorParams` / `metadata` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
+| `Function` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `returnType`, and when present `visibility`, `isStatic`, `isAsync`, `receiverType`, `uiRole`, `generics` (string, as written: `<T>`); `params` / `decorators` / `metadata` / `calls` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
+| `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`, `description`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` and `params` as JSON strings (`params` only when it is a list of at most 16 KB as JSON, otherwise dropped whole; `description` and `params` need a backend change: not stored before it) | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
 
 Further points:
 - **`semanticType` is stored as-is.** The backend does not check it against a list, so a new
@@ -180,28 +180,31 @@ Further points:
 - **Limits per file:** at most 5,000 functions (100 if the file looks minified), 100 classes,
   and 2,000 statements per parent (`MAX_STATEMENTS_PER_PARENT`). Anything over the limit is not stored.
 
-> **Decision —** `File` and `Class` are open; `Function` and `Statement` are allow-listed.
+> **Decision —** `File` is open; `Class`, `Function` and `Statement` are allow-listed.
 > **Why:** functions and statements are by far the most numerous nodes, so their shape is kept
-> fixed and small. Files and classes need room for parser-specific detail. **Cost:** a new
+> fixed and small; files need room for parser-specific detail. **Cost:** a new `Class`,
 > `Function` or `Statement` field needs a backend change at the same time. Without it, the field
-> is silently dropped (the allow-list is in `file-funcation-graph.service.ts` and in
-> `normalize()` / `setClause()` in `file-statement-graph.service.ts`).
+> is silently dropped (the allow-lists are in `file-class-graph.service.ts`,
+> `file-funcation-graph.service.ts` and `normalize()` / `setClause()` in
+> `file-statement-graph.service.ts`).
 
 ---
 
 ## 7. projectMetaData
 
-The first line of a capture (`projectMetaData`) is **skipped by the graph ingest** (it has no
-`path`). What the backend uses depends on the endpoint:
+The first line of a capture (`projectMetaData`) never becomes a graph node (it has no `path`).
+What the backend keeps of it depends on the endpoint:
 
 | Endpoint | Source of the summary | Kept |
 |---|---|---|
+| Capture file upload (S3 import) | the capture's first line | `repositoryName`, `repositoryPath`, `analyzedLanguages` (→ `languages`), `configs` (→ the CodeOntology record's `metadata`). File / function / class / LOC counts are **recomputed from the graph**. |
 | `/stream-ingest` | the `projectMetaData` object in the request body | `repositoryName`, `repositoryPath`, `analyzedLanguages`. File / function / class / LOC counts are **recomputed from the graph**. `configs`, `generatedAt`, `toolVersion` are accepted but not stored. |
 | `/generate` | none | stored as `{}` |
 | `/upsert` | the request body | totals, languages, repository name and path, commit |
 
-So `projectMetaData.configs` (dependencies, build tools, docker) does not currently reach the
-graph. The same information is available per file in `File.metadata` of the config files.
+So `projectMetaData.configs` (dependencies, build tools, docker) is kept for an uploaded capture
+but not for `/stream-ingest`. Either way the same information is available per file in
+`File.metadata` of the config files.
 
 ---
 
@@ -270,10 +273,9 @@ node on re-ingest. The old one is removed by the delete step.
 | 1 | cog emits `extends` as written in the source (`com.acme.Base`, `Repo<Order>`); the backend matches it to a class **name** exactly | No `EXTENDS` edge for qualified or generic parents; an edge to **every** same-name class otherwise | cog sends the resolved file path (as for `calls[]`), or the backend matches on the simple name plus path |
 | 2 | `implements` has no edge | Interface implementations can't be traversed | Add an `IMPLEMENTS` edge in the backend |
 | 3 | `CALLS` targets are matched by name and file only | An overloaded callee gets an edge to every overload | Accept (cog can't prove the overload), or carry the callee's arity |
-| 4 | `generics` is a string in cog but is JSON-encoded again by the backend | Stored with extra quotes (`"\"<T>\""`) | Store the string as-is |
-| 5 | `projectMetaData.configs` is not stored | Repository-level config summary is missing from the graph | Persist it on the CodeOntology record |
-| 6 | Incoming edges are not rebuilt on incremental ingest ([§9](#9-re-ingest-and-incremental-updates)) | Edges from unchanged files are lost | Rebuild edges that target re-ingested paths |
-| 7 | `Statement` nodes have no `createdAt` / `updatedAt` | Can't tell when a statement was last written | Set them in the statement write |
+| 4 | `projectMetaData.configs` is not stored for `/stream-ingest` (an uploaded capture keeps it) | Repository-level config summary is missing for server-mode ingests | Persist it on the CodeOntology record there too |
+| 5 | Incoming edges are not rebuilt on incremental ingest ([§9](#9-re-ingest-and-incremental-updates)) | Edges from unchanged files are lost | Rebuild edges that target re-ingested paths |
+| 6 | `Statement` nodes have no `createdAt` / `updatedAt` | Can't tell when a statement was last written | Set them in the statement write |
 
 ---
 
@@ -282,8 +284,8 @@ node on re-ingest. The old one is removed by the delete step.
 | You are adding… | Backend change needed? |
 |---|---|
 | A new `semanticType` value | No — stored and filterable at once. Document it in the Target Spec. |
-| A new field on `File` or `Class` | No, if it's a plain value. A nested object becomes a JSON string (or may be rejected), so prefer `metadata`. |
-| A new field on `Function` or `Statement` | **Yes** — add it to the allow-list in the same release, or it is dropped. |
+| A new field on `File` | No, if it's a plain value. A nested object becomes a JSON string (or may be rejected), so prefer `metadata`. |
+| A new field on `Class`, `Function` or `Statement` | **Yes** — add it to the allow-list in the same release, or it is dropped. |
 | A new edge type, or a new kind of edge target | **Yes** — and a decision first ([Extending Capture §5](../../skills/extend-capture/SKILL.md#5-choosing-how-to-store-what-you-capture)). |
 | Content that agents should find by meaning | Put it on File / Class / Function (field or `metadata`), not only on a Statement ([§8](#8-embeddings-and-search)). |
 

@@ -462,8 +462,8 @@ def test_records_report_the_node_they_stand_for(analyze_files) -> None:
 
 
 def test_a_handler_declaration_that_is_an_api_call_keeps_it(analyze_files) -> None:
-    # The shared HTTP classifier classified the one-line declaration as the outbound call; the route is a
-    # record beside it, at the same node, not an overwrite of it.
+    # The handler's expression body is its statement and carries the outbound call; the route is
+    # recorded at the declaration, which is otherwise not emitted (it would repeat the Function).
     st = analyze_files({
         "package.json": _NEXT_PKG,
         "pages/api/proxy.ts": (
@@ -475,9 +475,11 @@ def test_a_handler_declaration_that_is_an_api_call_keeps_it(analyze_files) -> No
     got = sorted((s.semanticType, s.nodeType, s.startLine, s.endpoint)
                  for s in st if s.semanticType in ("route", "api_call"))
     assert got == [
-        ("api_call", "lexical_declaration", 1, "https://api.example.com/b"),
+        ("api_call", "call_expression", 2, "https://api.example.com/b"),
         ("route", "lexical_declaration", 1, "/api/proxy"),
     ]
+    call = next(s for s in st if s.semanticType == "api_call")
+    assert call.parentId == "pages/api/proxy.ts#handler@1"
 
 
 _NEXT16_PKG = '{"dependencies": {"next": "^16.0.0", "react": "19"}}'

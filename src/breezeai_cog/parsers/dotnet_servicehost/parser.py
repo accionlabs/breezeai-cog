@@ -29,7 +29,7 @@ class ServiceHostParser(BaseParser):
     extensions = tuple(DIRECTIVES)  # (".svc", ".asmx")
     schema_version = SCHEMA_VERSION
     statement_types = _STATEMENT_TYPES
-    frameworks = ["wcf", "asmx"]
+    frameworks = ["wcf", "asmx", "odata"]
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")

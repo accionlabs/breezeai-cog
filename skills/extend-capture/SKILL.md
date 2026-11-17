@@ -261,8 +261,8 @@ A value counts only if it survives ingest and agents can reach it. Three rules (
 
 | You are adding… | What happens |
 |---|---|
-| A new field on `File` or `Class` | Kept — these nodes are **open**. Prefer `metadata` for anything nested. |
-| A new field on `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. Once approved, it needs a backend allow-list change in the same release; unit tests and schema validation pass either way, so they won't tell you. |
+| A new field on `File` | Kept — this node is **open**. Prefer `metadata` for anything nested. |
+| A new field on `Class`, `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. Once approved, it needs a backend allow-list change in the same release; unit tests and schema validation pass either way, so they won't tell you. |
 | A new `semanticType` value | Stored and filterable at once, with no backend change. Once approved, add it to the [Target Spec](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model). |
 | A new node type or relationship type | A schema-wide change for every query and agent — propose it only when no field, value or statement kind can carry the meaning. |
 

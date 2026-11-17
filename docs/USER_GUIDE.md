@@ -49,7 +49,7 @@ files (`.blade.php`) remain unsupported.
 PHP data access is recorded only where the code proves it: a static call on a class that extends an
 Eloquent model (`User::create([...])`, `Song::query()->get()`) or an instance typed as one →
 `dataAccessHint: "eloquent"`; a typed Doctrine `EntityManagerInterface` / repository → `"doctrine"`;
-a CodeIgniter `$this->db` builder or `CodeIgniter\Model` subclass → `"codeigniter-builder"`; the
+a CodeIgniter `$this->db` builder or `CodeIgniter\Model` subclass → `"codeigniter"`; the
 imported `DB` facade → no hint (it is the query builder, not Eloquent). Calls on untyped variables
 are not guessed.
 

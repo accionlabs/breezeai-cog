@@ -59,85 +59,12 @@ def build_class(
                 for param in extract_params(member.child_by_field_name("parameters"), source)
             ]
             break
-    properties: list[dict[str, object]] = []
-    if body is not None:
-        for member in body.named_children:
-            if member.type == "property_declaration":
-                prop_visibility = next(
-                    (node_text(child, source) for child in member.children
-                     if child.type == "visibility_modifier" or child.type in {"public", "protected", "private"}),
-                    None,
-                )
-                is_static = any(child.type == "static_modifier" or child.type == "static" for child in member.children)
-                is_readonly = any(child.type == "readonly_modifier" or child.type == "readonly" for child in member.children)
-                type_node = member.child_by_field_name("type")
-                if type_node is None:
-                    type_node = next(
-                        (c for c in member.named_children
-                         if c.type in {"named_type", "primitive_type", "optional_type", "union_type", "intersection_type"}),
-                        None,
-                    )
-                type_str = node_text(type_node, source) if type_node is not None else None
-
-                for elem in member.named_children:
-                    if elem.type != "property_element":
-                        continue
-                    var_node = elem.child_by_field_name("name")
-                    if var_node is None:
-                        var_node = next((c for c in elem.named_children if c.type == "variable_name"), None)
-                    var_name = node_text(var_node, source).lstrip("$") if var_node is not None else ""
-                    default_node = elem.child_by_field_name("default_value")
-                    if default_node is None:
-                        default_node = next((c for c in elem.named_children if c != var_node), None)
-                    default_str = node_text(default_node, source) if default_node is not None else None
-
-                    properties.append({
-                        "name": var_name,
-                        "type": type_str,
-                        "visibility": prop_visibility,
-                        "isStatic": is_static,
-                        "isReadonly": is_readonly,
-                        "isConst": False,
-                        "default": default_str,
-                        "startLine": member.start_point.row + 1,
-                        "endLine": member.end_point.row + 1,
-                    })
-            elif member.type == "const_declaration":
-                const_visibility = next(
-                    (node_text(child, source) for child in member.children
-                     if child.type == "visibility_modifier" or child.type in {"public", "protected", "private"}),
-                    "public",
-                )
-                for elem in member.named_children:
-                    if elem.type != "const_element":
-                        continue
-                    cname_node = elem.child_by_field_name("name")
-                    if cname_node is None:
-                        cname_node = next((c for c in elem.named_children if c.type == "name"), None)
-                    cname_str = node_text(cname_node, source) if cname_node is not None else ""
-                    cval_node = elem.child_by_field_name("value")
-                    if cval_node is None:
-                        cval_node = next((c for c in elem.named_children if c != cname_node), None)
-                    cval_str = node_text(cval_node, source) if cval_node is not None else None
-
-                    properties.append({
-                        "name": cname_str,
-                        "type": None,
-                        "visibility": const_visibility,
-                        "isStatic": True,
-                        "isReadonly": True,
-                        "isConst": True,
-                        "default": cval_str,
-                        "startLine": member.start_point.row + 1,
-                        "endLine": member.end_point.row + 1,
-                    })
-
     return Class.model_validate({
         "id": cid, "parentId": parent_id, "path": path, "name": name,
         "type": _CLASS_TYPES[node.type], "visibility": visibility,
         "isAbstract": is_abstract or None, "extends": extends,
         "implements": implements, "constructorParams": constructor_params,
-        "decorators": extract_attributes(node, source), "properties": properties,
+        "decorators": extract_attributes(node, source),
         "startLine": start, "endLine": end,
     })
 

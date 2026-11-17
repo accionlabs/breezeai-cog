@@ -19,9 +19,10 @@ A ``.html`` that matches neither tier is a plain html File — never claimed as 
 the graph isn't flooded with markup that has no component behind it.
 
 **Behavior libraries** (htmx / Alpine / Stimulus) are progressive enhancement layered on top
-of whatever renders the page — not a rendering framework. They are detected independently and
-carried on the ``behaviors`` marker, so a Django-or-Thymeleaf page with htmx is
-``framework`` + ``behaviors=["htmx"]``, not a collision.
+of whatever renders the page — not a rendering framework, so they are never named as the
+framework: a Django-or-Thymeleaf page with htmx is still that framework. What they do that the
+graph needs is recorded as statements: each htmx request attribute is an ``api_call``
+(``html_htmx``). Alpine and Stimulus only act in the browser and record nothing.
 
 P1 parses **Angular 2+** templates (the dedicated ``angular`` grammar in
 ``tree_sitter_language_pack`` — no new dependency). ``.aspx``/``.cshtml`` (HTML + server code
@@ -31,7 +32,7 @@ islands) are a later phase and a different technique (shadow-source), not this p
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
@@ -40,7 +41,8 @@ from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..typescript_jquery.calls import detect_inline_jquery
 from ..treesitter import parse_source
-from .fingerprint import detect_behaviors, detect_rendering_framework
+from ..html_htmx.calls import detect_htmx_calls
+from .fingerprint import detect_rendering_framework
 from .index import HtmlTemplateIndex, build_html_template_index
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
 from .statements import collect_template_statements
@@ -72,10 +74,6 @@ class HtmlParser(BaseParser):
         loc = count_loc(text)
         index = ctx.resolution_index
         component = index.component_for(ctx.path) if isinstance(index, HtmlTemplateIndex) else None
-        # Behavior libraries (htmx/Alpine/Stimulus) are additive enhancement, not the rendering
-        # framework — detected independently and carried on `behaviors` (open-node marker).
-        behaviors = detect_behaviors(text)
-
         # Framework: the cross-file resolver is authoritative (it also gives the component link);
         # the in-file fingerprint is the fallback (framework only, no owner link). Ambiguous or
         # unknown → None (honest-null).
@@ -87,8 +85,8 @@ class HtmlParser(BaseParser):
             import_files = []
 
         if framework is None:
-            # Not a recognized template — a plain html File (may still carry behaviors).
-            plain = self._file(fid, ctx.path, loc, behaviors=behaviors)
+            # Not a recognized template — a plain html File (it may still make htmx / jQuery calls).
+            plain = self._file(fid, ctx.path, loc)
             self._inline_scripts(plain, ctx)
             return plain
 
@@ -99,7 +97,6 @@ class HtmlParser(BaseParser):
             uiRole="template",
             framework=framework,
             import_files=import_files,
-            behaviors=behaviors,
         )
         grammar = _GRAMMAR_BY_FRAMEWORK.get(framework)
         if ctx.capture_statements and grammar is not None:
@@ -137,8 +134,10 @@ class HtmlParser(BaseParser):
 
     @staticmethod
     def _inline_scripts(record: FileRecord, ctx: ParseContext) -> None:
-        # The markup grammar never looks inside <script>; jQuery AJAX calls there → api_call.
+        # Outbound calls the markup makes: htmx request attributes, and jQuery AJAX calls inside
+        # <script> (the markup grammar never looks there) → api_call.
         if ctx.capture_statements:
+            detect_htmx_calls(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
             detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
 
     @staticmethod
@@ -150,13 +149,8 @@ class HtmlParser(BaseParser):
         uiRole: str | None = None,
         framework: str | None = None,
         import_files: list[str] | None = None,
-        behaviors: list[str] | None = None,
     ) -> FileRecord:
-        """Build the html FileRecord. ``behaviors`` is an open-node marker (like ``roles``) —
-        set only when non-empty so it stays absent otherwise."""
-        extra: dict[str, Any] = {}
-        if behaviors:
-            extra["behaviors"] = behaviors
+        """Build the html FileRecord."""
         return FileRecord(
             id=fid,
             path=path,
@@ -166,5 +160,4 @@ class HtmlParser(BaseParser):
             uiRole=uiRole,
             framework=framework,
             importFiles=import_files or [],
-            **extra,
         )
