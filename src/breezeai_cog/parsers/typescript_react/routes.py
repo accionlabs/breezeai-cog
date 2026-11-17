@@ -83,7 +83,7 @@ def _component_name(value: Node | None, source: bytes) -> str | None:
         if len(kids) > 1:
             return None
         node = kids[0]
-    if node is None:
+    if node is None or node.type not in _JSX_ELEMENTS:  # e.g. a `Component() {}` method
         return None
     tag = node.child(0) if node.type == "jsx_element" else node  # opening element
     name = tag.child_by_field_name("name") if tag is not None else None
@@ -205,8 +205,7 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
                 out[node_text(name, source).strip("'\"")] = c
         elif c.type == "shorthand_property_identifier":  # { loader } — a variable, not a literal
             key = node_text(c, source)
-            if key != "path":  # `{ path }` holds a variable: no readable URL (honest-null)
-                out[key] = c
+            out[key] = c
     return out
 
 
@@ -238,8 +237,24 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
-def _process_config(arr: Node, prefix: str, source: bytes, path: str,
-                    routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
+def _config_path(node: Node | None, source: bytes,
+                 const_values: dict[str, str | None] | None) -> str | None:
+    if node is None:
+        return None
+    if node.type == "shorthand_property_identifier":  # `{ path }`: a variable, never a literal
+        return const_values.get(node_text(node, source)) if const_values is not None else None
+    if node.type in ("identifier", "member_expression"):
+        return resolve_const_value(node, source, const_values) if const_values is not None else None
+    return _string_val(node, source)
+
+
+def _join_config_path(base: str | None, sub: str | None) -> str | None:
+    return _join(base, sub) if base is not None and sub is not None else None
+
+
+def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
+                    routes: list[Emit], const_values: dict[str, str | None] | None,
+                    inherited: tuple[str, ...] = ()) -> None:
     for elem in arr.named_children:
         if elem.type != "object":
             continue
@@ -257,9 +272,12 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
             if children is not None and nested:
                 guards = (*inherited, handler) if handler and _is_guard_element(handler) \
                     else inherited
-                _process_config(children, prefix, source, path, routes, guards)
+                _process_config(children, prefix, source, path, routes, const_values, guards)
             continue
-        full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
+        segment = "" if is_index else _config_path(pairs.get("path"), source, const_values)
+        full = _join_config_path(prefix, segment)
+        if full is None:  # the path is a variable we can't read: no URL, so no record
+            continue
         if handler in _REDIRECTS:
             continue
         shows = any(k in pairs for k in _ELEMENT_KEYS)
@@ -268,7 +286,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
             _fills_outlet(_pairs(c, source), source) for c in nested))
         if wiring and children is not None:
             guards = (*inherited, handler) if guard_layout and handler else inherited
-            _process_config(children, full, source, path, routes, guards)
+            _process_config(children, full, source, path, routes, const_values, guards)
             continue
         routes.append(Emit(elem, dict(
             semanticType="route",
@@ -279,7 +297,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
             guards=list(inherited) or None,
         ), parent=file_id(path), text=entry_text(elem, source)))
         if children is not None and nested:
-            _process_config(children, full, source, path, routes, inherited)
+            _process_config(children, full, source, path, routes, const_values, inherited)
 
 
 # ---- entry point ------------------------------------------------------------
@@ -445,7 +463,7 @@ def detect_react_routes(root: Node, source: bytes, path: str, *,
     _walk(root, "array", arrays)
     for arr in arrays:
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process_config(arr, "", source, path, routes)
+            _process_config(arr, "", source, path, routes, const_values)
     # v7 framework-mode config DSL (gated on the @react-router/dev import).
     _detect_v7(root, source, path, routes, const_values)
     return routes
