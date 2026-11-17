@@ -60,7 +60,7 @@ def test_inventory_in_run_order() -> None:
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda"],
         "java": ["quartz", "struts2", "apache-httpclient", "vertx"],
-        "python": ["celery", "flask", "drf-routers", "django-channels"],
+        "python": ["celery", "flask", "drf-routers", "django-channels", "aws-sdk-calls"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
