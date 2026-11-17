@@ -138,8 +138,8 @@ the route-table entry, or — for a registered container — the member.
 
 | Field | Content | Required |
 |---|---|---|
-| `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) | Yes |
-| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` | When the trigger has one |
+| `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) · `mcp_tool` (a tool an MCP server exposes to AI clients) | Yes |
+| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` · `TOOL` (an `mcp_tool`, whose `endpoint` is the tool name) | When the trigger has one |
 | `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
 | `endpoint` | **The address, fully resolved** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)) | If any part can't be determined: **empty**. Never guessed, never a code name |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
@@ -223,8 +223,8 @@ Records filed under `route` that are not entry points:
 | `mount` | A router mount whose routes aren't in the repo, in the spec's current form (§5); `layout` is no longer written | Names no handler of its own |
 | `navigation` | A link | Outbound |
 
-The entry points are the `route`, `eventbus_consumer` and `timer` records whose `routeKind` is
-not `field_resolver`, `mount`, `layout` or `navigation`.
+The entry points are the `mcp_tool` records, and the `route`, `eventbus_consumer` and `timer`
+records whose `routeKind` is not `field_resolver`, `mount`, `layout` or `navigation`.
 
 > **Decision —** the entry-point record lives at the binding construct, never at the wiring.
 > **Why:** the binding is the one construct that names exactly one handler, so one binding is
@@ -232,6 +232,40 @@ not `field_resolver`, `mount`, `layout` or `navigation`.
 > prefix) or sits in another file (a registration, a config), so it can never own an entry
 > point. **Cost:** wiring in another file must reach the binding's record through the repository
 > index ([cross-file route composition](cross-file-resolution.md#8-cross-file-route-composition)).
+
+### MCP tools
+
+A tool an MCP server exposes is an entry point an AI client calls by name. Every tool is one
+`mcp_tool` record at the construct that declares it:
+
+| Field | Content |
+|---|---|
+| `method` | `TOOL` |
+| `endpoint` | The name clients call, after any rename. A name that is not a literal → **no record** (the tool exists, but its name is unknown) |
+| `framework` | The SDK the tool is declared with: `fastmcp`, `python-mcp`, `typescript-mcp`, `spring-ai-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp`, `mcp-go` (`go-mcp` is kept for the official Go SDK, not read yet) |
+| `handler` / `handlerLine` | The function that runs the tool; a lambda gives only its line ([above](#anonymous-handlers)) |
+| `description` | The description the server gives the client, when it is a literal |
+| `params` | The input parameters, in the shape of a function's `params`: `[{name, type, default, decorators, required, description}]` |
+
+- **Only on a proven MCP server.** A tool counts only when the code shows that the object it is
+  declared on is an MCP server: a server object of the SDK, the SDK's own annotation or
+  attribute, or a module whose build file declares an MCP server. Agent frameworks and chat
+  clients use the same words (`@agent.tool`, Spring AI `@Tool`, `.tool(…)`); those are not
+  entry points. Each framework's proof is in its role table.
+- **Once.** A file can use two MCP frameworks; each tool is recorded once, by the package of
+  the framework its construct belongs to.
+- **`params` is all or nothing.** `[]` means the tool takes no input (no schema, or an empty
+  one). A schema that cannot be read whole (a variable, a spread, an unknown helper) leaves
+  `params` unset, never a partial list. `required` is `true` / `false` when the schema says so
+  and unset when it does not.
+- **`params` stays within 15 KB** as JSON (the backend drops the whole field over 16 KB). Past
+  it, parameter descriptions are kept in parameter order while they fit and the rest go
+  without; names, types and defaults are always kept.
+- **Incremental sync** (`/api/analyze-diff`): unchanged files are materialised empty, like for
+  every cross-file fact. A changed tools file whose proof is in an unchanged file (a server
+  imported from another module, a server starter in a build file) is re-ingested without its
+  tools, and a sync that adds or removes such a proof leaves the unchanged tool files as they
+  were. A full analysis restores them.
 
 ## 6. Address format (`endpoint`)
 

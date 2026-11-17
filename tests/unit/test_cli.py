@@ -30,7 +30,7 @@ def test_capabilities() -> None:
     result = runner.invoke(app, ["capabilities"])
     assert result.exit_code == 0
     caps = json.loads(result.stdout)
-    assert "python" in caps["languages"] and caps["schemaVersion"] == "2.4"
+    assert "python" in caps["languages"] and caps["schemaVersion"] == "2.5"
 
 
 def test_repo_to_json_tree(tmp_path) -> None:

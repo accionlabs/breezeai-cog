@@ -77,4 +77,23 @@ SemanticType = Literal[
     "iac_module",
     # .tfvars attribute assignment (variable values, not variable declarations)
     "iac_variable_value",
+    # MCP server tool — an entry point an AI client calls. ``endpoint`` = the
+    # tool name the client calls (after any rename), ``method="TOOL"``, ``framework`` = the SDK
+    # (fastmcp | python-mcp | typescript-mcp | spring-ai-mcp | java-mcp | kotlin-mcp |
+    # csharp-mcp | mcp-go), plus ``description`` and ``params``. Treated like a route by the entry-point contract.
+    "mcp_tool",
+    # Markdown documents — one whole-file statement per ``.md`` / ``.mdx`` /
+    # ``.mdc`` file (``nodeType="synthetic"``, the full text, unembedded; a long one is split
+    # into parts like any statement), typed by file name / location (parsers/markdown/classify.py):
+    #   skill              — ``SKILL.md`` with front-matter name + description (Agent Skills)
+    #   agent              — sub-agent definition (``agents/*.md`` / ``.claude/agents``, ``*.agent.md``)
+    #   command            — slash command (``.claude/commands``, plugin ``commands/``, ``*.prompt.md``)
+    #   agent_instructions — CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions / cursor rules
+    #   doc                — any other Markdown (``File.metadata.kind`` tells a README, a
+    #                        decision record and a changelog apart)
+    "skill",
+    "agent",
+    "command",
+    "agent_instructions",
+    "doc",
 ]

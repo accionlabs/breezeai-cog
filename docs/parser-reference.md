@@ -457,7 +457,7 @@ register_detector(Detector(
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.
-- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `vb`, `java`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`); `order` must be
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `vb`, `java`, `kotlin`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
@@ -502,7 +502,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     ...
 ```
 
-- The language must be in `INDEX_HOOKED_LANGUAGES` (`apex`, `c`, `cpp`, `csharp`, `cuda`, `go`, `graphql`, `groovy`, `java`, `php`, `python`, `ruby`, `scala`, `typescript`, `vb`): those are the languages
+- The language must be in `INDEX_HOOKED_LANGUAGES` (`apex`, `c`, `cpp`, `csharp`, `cuda`, `go`, `graphql`, `groovy`, `java`, `kotlin`, `php`, `python`, `ruby`, `scala`, `typescript`, `vb`): those are the languages
   whose `build_index` calls `collect_additive` / `resolve_additive`. The gate is required. Both
   are checked at registration.
 - **Files another parser owns.** `sources=(".svc",)` (and optionally `grammar="graphql"`) makes
@@ -530,6 +530,106 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 **error**; a missing handler is a **gap** (honest-null, like an empty `endpoint`). The
 `analyze_files` test fixture fails on errors; `--verbose` logs every violation as
 `contract.violation`. It never changes output.
+
+### Document parser: Markdown (`parsers/markdown/`)
+Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
+project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`, `.mdx`,
+`.mdc` (in any case: `README.MD`), `README.rst` and `.cursorrules`; it reads text and never builds a tree.
+
+- **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
+  document never counts as an analyzed language and adds no lines of code — in the full scan
+  and in `analyze-diff` alike. `metadata` holds `kind` (the table below),
+  `category: "documentation"`, `frontmatter` (YAML reduced to JSON values, secret-named keys
+  `***`), `title` and `headings` (levels 1–3, outside code fences). Invalid front matter is
+  logged as a warning (`markdown.front_matter_unreadable`); a header YAML rejects only for an unquoted value (Cursor's
+  `globs: **/*.ts`) still gives `name` / `description`.
+- **Statement.** Under statement capture, one whole-file `Statement`: `nodeType="synthetic"`,
+  `semanticType` = `skill`, `agent`, `command`, `agent_instructions` or `doc`, `text` = the
+  file with secrets masked (masking keeps every line, so `endLine` is the file's last line),
+  `name` / `description` from the front matter. Document statements are not embedded.
+- **Size.** No limit is specific to Markdown. A file over the scanner's `max_file_size` (2 MB
+  by default) is skipped like any other. A document longer than `statement_text_limit` (8,000
+  characters by default) is split at emit time like any other statement into ordered parts
+  with ids `…#part1ofN` … `…#partNofN`, every part `isPartial`; joined in order they give the
+  whole text. Only part 1 keeps `semanticType`, `name` and `description`, so a filter on
+  `semanticType` lists each document once.
+- **A long document is several statements.** Anything that lists a File's statements (a file
+  view, a "statements of this file" call, a `HAS_STATEMENT` traversal) shows one row per part,
+  and must read the parts in order to get the whole text.
+- **Kinds** (`classify.py`, first match wins; a kind that needs front matter is never given on
+  a guess). `File.metadata.kind` is the kind; the statement's `semanticType` is the kind for
+  the first four rows and `doc` for the rest:
+
+| `metadata.kind` | When |
+|---|---|
+| `skill` | `SKILL.md` with front-matter `name` and `description` |
+| `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin root's `agents/`, or with an agent key (`tools`, `model`, `color`) |
+| `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin root's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
+| `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md` (in that exact case: `docs/agents.md` is a `doc`), `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
+| `readme` | `README.md` / `.mdx` / `.rst` |
+| `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md` / `.mdx`) |
+| `adr` | under `docs/adr/` or `docs/decisions/`; under another `adr/`, named `NNNN-*.md` or with `## Status` and `## Decision`; elsewhere `NNNN-*.md` with both headings. Never a folder's `index` / `README` or a `*template*` file |
+| `doc` | anything else |
+
+  A plugin root is the folder holding `.claude-plugin/plugin.json` or
+  `.cursor-plugin/plugin.json`; only the `commands/` and `agents/` folders directly in it count
+  (a `docs/commands/` or a skill's `references/commands/` in the plugin is documentation).
+  `skill`, `agent`, `command` and `agent_instructions` are the agent-document kinds counted in
+  `configs.capturedAgentDocuments`. An `adr` is a plain `doc`, like a README or a changelog: it
+  is not counted, and a folder holding only such files yields no ontology.
+- **Secrets.** One secret-name rule (`password`, `secret`, `token`, `api_key`, `credential`,
+  `authorization`, …, `pass` as a whole `_` / `-` / `.`-separated word, as in `DB_PASS`
+  or `mysql_pass` but not `passage` or `bypass`, `pwd` likewise but joined to another word
+  (`DB_PWD`, not a bare `PWD`), and any other `*_key` name (`ENCRYPTION_KEY`, `signing_key`)
+  except a schema or lookup one such as `primary_key`, `sort_key`, `cache_key`,
+  `routing_key` or `public_key`) applies to front-matter keys, env assignments and code
+  keys. PEM private-key bodies (to the matching footer; without one, only
+  the key-shaped lines after the header), provider tokens, JWTs and URL credentials are masked
+  anywhere; so is an authorization-style header with a scheme word (`Authorization: Bearer x`,
+  `curl -H "Authorization: Basic x"` — scheme and credential both). Secret-named upper-case env
+  assignments (`DB_PASSWORD=`) are masked anywhere; secret-named `key = value` / `key: value`
+  pairs of any case inside fenced code blocks (at any indent), on indented code lines and in
+  inline code spans in prose (`` `DB_PASSWORD=x` ``), except values that are lookups
+  (`os.environ['X']`, `get_token()`, `settings.PASSWORD`); in a pipe-table row, a one-word
+  cell after a secret-named key cell (`| DB_PASSWORD | x |`; a header row is not a key); and
+  secret-named front-matter values, including indented, block-scalar and flow-collection
+  (`env: {DB_PASSWORD: x}`) values. A token count (`max_tokens: 4096`, `MAX_TOKENS=4096`) is a
+  number, not a secret, and is kept everywhere. In fenced blocks and front matter (text and
+  `metadata.frontmatter`), a `value:` whose sibling `name:` is secret-named (the Kubernetes /
+  Compose `- name: DB_PASSWORD` / `value: x` shape) is masked too. PEM covers armored PGP
+  private-key blocks; provider tokens include OpenAI keys (`sk-proj-…` and the legacy
+  `sk-` + 32 or more letters and digits).
+  The title, headings, `name`, `description` and every front-matter string value (list
+  items and nested values included) are masked by the rules for a prose line of the text, so
+  `# Deploy with API_TOKEN=x` keeps no secret in `metadata.headings` either.
+- **Volume.** Every Markdown file the scan keeps becomes a File node, so a docs-heavy
+  repository can leave prose folders it does not need in the graph out with `.repoignore`.
+
+### MCP tool detectors (one package per framework)
+A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,
+`endpoint` = the tool name), recorded by additive detectors under the
+[entry-point contract](architecture/entry-points.md#mcp-tools), which has the rules every MCP
+framework shares; the per-construct rules are in each framework's table in
+[`entry-point-roles/`](entry-point-roles/README.md). The shared fields (`description`, and
+`params` in the shape of a function's `params`) are built by `parsers/mcp_common.py`. A tool is
+emitted once, by the package of the framework its construct belongs to.
+
+| Package (detector) | Language | `framework` | Server proof |
+|---|---|---|---|
+| `python_fastmcp` (`python-fastmcp`) | Python | `fastmcp` | `@<server>.tool` on a name built with `FastMCP(…)` of the standalone `fastmcp` package, typed `FastMCP`, or imported from where it is built |
+| `python_mcp` (`python-mcp`) | Python | `python-mcp` | The same, the server built with the official SDK's `mcp.server.fastmcp` |
+| `typescript_mcp` (`typescript-mcp`) | TypeScript / JavaScript | `typescript-mcp` | `.tool(…)` / `.registerTool(…)` on `new McpServer(…)` or a parameter typed `McpServer` |
+| `java_springai` (`java-springai`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
+| `java_mcp` (`java-mcp`) | Java | `java-mcp` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
+| `kotlin_springai` (`kotlin-springai`) | Kotlin | `spring-ai-mcp` | The `java_springai` rules in Kotlin syntax (`required` from the annotation only, as in Java); import aliases of Spring AI classes followed |
+| `kotlin_mcp` (`kotlin-mcp`) | Kotlin | `kotlin-mcp`, `java-mcp` | `addTool(name, description, inputSchema) { … }`, or `addTools(listOf(RegisteredTool(Tool(…)) { … }, …))` with the list written inline, in a file importing `io.modelcontextprotocol.kotlin.sdk.server` (`kotlin-mcp`); the MCP Java SDK's tool specifications in Kotlin syntax (`java-mcp`); import aliases of MCP classes followed |
+| `csharp_mcp` (`csharp-mcp`) | C# | `csharp-mcp` | `[McpServerTool]`; without `Name =` the endpoint is the SDK-derived name (snake_case, `Async` dropped on an async method) |
+| `go_mcpgo` (`go-mcpgo`) | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` / `server.ServerTool` literal that registers it. `go_mcp` and the value `go-mcp` are kept for the official Go SDK |
+
+Code two packages share is in a common module next to them, not in either package:
+`python_mcp_common.py` (the `@<server>.tool` reader and the `mcp.servers` fact, for
+`python_fastmcp` and `python_mcp`) and `jvm_mcp_common.py` (the `spring-ai.mcp-server` fact, the
+JSON-schema reader and the string-literal readers, for the four Java / Kotlin packages).
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

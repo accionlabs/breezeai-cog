@@ -174,7 +174,11 @@ class GoParser(BaseParser):
                     target_name = _constructor_target_name(fn.name, fn.returnType)
                     target = class_by_name.get(target_name)
                     if target is not None:
-                        target.constructorParams = [ConstructorParam(name=p.name, type=p.type) for p in fn.params]
+                        target.constructorParams = [
+                            ConstructorParam(name=p.name, type=p.type)
+                            for p in fn.params
+                            if p.type is not None
+                        ]
 
         for node, name in scan.bound:  # document order: an enclosing literal comes first
             enclosing = _owner(node, bound)

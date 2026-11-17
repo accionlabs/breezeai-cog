@@ -34,6 +34,8 @@ class ConfigParser(BaseParser):
         ".ini",
         ".xml",
         ".gradle",
+        "build.gradle.kts",  # Gradle Kotlin DSL; any other ``.kts`` is a Kotlin script
+        "settings.gradle.kts",
         ".sbt",
         ".csproj",
         ".vbproj",
@@ -49,8 +51,7 @@ class ConfigParser(BaseParser):
         ".gitignore",
         ".dockerignore",
         "LICENSE",
-        "README.md",
-        "README.rst",
+        # README.md / README.rst are owned by the Markdown parser (parsers/markdown).
         ".env",
     )
 

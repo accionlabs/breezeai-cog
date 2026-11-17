@@ -166,11 +166,14 @@ What this means for cog:
 | `File` | **Open** — everything except a strip list | `type`, `language`, `loc`, `framework`, `platform`, `project`, `projectRoot`, `uiRole`, `externalImports` (array), `imports` (= `importFiles`, array), `exports` (JSON string), `metadata` (JSON string), **and any extra key** | Removed: `id`, `functions`, `classes`, `importFiles`, `statements`. Added: `name`, `repositoryName`, `description`, `projectUuid`, `codeOntologyId`. Nx `project` / `projectRoot` are set only for files inside an Nx project; `project` is empty when the configuration names none. |
 | `Class` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `visibility`, `isAbstract`, `isSealed`, `description`, `roles`, `uiRole`, `extends` (string), `alias` (string), `generics` (string, as written: `<T>`); `implements` / `decorators` / `constructorParams` / `metadata` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
 | `Function` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `returnType`, and when present `visibility`, `isStatic`, `isAsync`, `receiverType`, `uiRole`, `generics` (string, as written: `<T>`); `params` / `decorators` / `metadata` / `calls` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
-| `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` as a JSON string | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
+| `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`, `description`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` and `params` as JSON strings (`params` only when it is a list of at most 16 KB as JSON, otherwise dropped whole; `description` and `params` need a backend change: not stored before it) | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
 
 Further points:
 - **`semanticType` is stored as-is.** The backend does not check it against a list, so a new
   value works at once and can be filtered on.
+- **Entry points are Statements told by `semanticType`:** `route`, `eventbus_consumer`, `timer`
+  and `mcp_tool` (a tool an MCP server exposes; `method` `TOOL`, `endpoint` = the tool name, with
+  `description` and `params`). See the [entry-point contract](entry-points.md).
 - **Nested values become JSON strings** (`metadata`, `decorators`, `params`…). They can be read
   and are included in embeddings (for File, Class, Function), but cannot be filtered on field by
   field. Filters on nested names (`metadata.kind`) are rejected.
@@ -220,7 +223,7 @@ How agents reach the graph (Breeze MCP tools → backend):
 |---|---|---|
 | Semantic search (`Code_Graph_Search` → `POST /code-ontology/:projectUuid/semantic-search`) | File, Function, Class by meaning (vector search) | "Where is order checkout handled?" |
 | Context of a hit | The hit's direct children: a File's file-level statements and class/function stubs; a Class's statements and methods; a Function's statements | Seeing what's inside a result |
-| Label query (`Get_Code_Nodes_By_Label` → `GET /code-ontology/:uuid/:label`) | File, Function, Class, **Statement**, by field filters (`$eq`, `$in`, `$contains`, `$regex`, `$startsWith`…) | "All `route` statements", "every `api_call` to `/billing`" |
+| Label query (`Get_Code_Nodes_By_Label` → `GET /code-ontology/:uuid/:label`) | File, Function, Class, **Statement**, by field filters (`$eq`, `$in`, `$contains`, `$regex`, `$startsWith`…) | "All `route` statements", "every `mcp_tool`", "every `api_call` to `/billing`" |
 
 Where to put a captured value:
 

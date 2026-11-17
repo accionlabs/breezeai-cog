@@ -19,6 +19,7 @@ from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
 from ..parsers.additive import fact_sources
 from ..parsers.contract import validate as validate_contract
+from ..parsers.markdown.classify import AGENT_DOCUMENT_KINDS
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
@@ -226,6 +227,10 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
             yield entry, record
 
 
+#: File languages that are documentation, not code (parsers/markdown): no LOC.
+DOC_LANGUAGES: frozenset[str] = frozenset({"markdown", "rst"})
+
+
 class _ConfigSummary:
     """Aggregates config-file ``metadata`` into ``projectMetaData.configs`` — category
     counts, package managers / build tools, docker info, and dependency totals."""
@@ -239,6 +244,7 @@ class _ConfigSummary:
         self.has_dockerfile = self.has_compose = False
         self.dep_total = self.dep_prod = self.dep_dev = 0
         self.captured_documents = 0
+        self.agent_documents = 0  # skill / agent / command / agent_instructions
 
     def add(self, md: dict) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
@@ -247,6 +253,8 @@ class _ConfigSummary:
         # it, so this counts real captured content regardless of the source file type.
         if md.get("format"):
             self.captured_documents += 1
+        if md.get("category") == "documentation" and md.get("kind") in AGENT_DOCUMENT_KINDS:
+            self.agent_documents += 1
         if md.get("packageManager"):
             self.package_managers.add(md["packageManager"])
         if md.get("buildTool"):
@@ -267,6 +275,7 @@ class _ConfigSummary:
         return {
             "totalConfigFiles": total,
             "capturedDataDocuments": self.captured_documents,
+            "capturedAgentDocuments": self.agent_documents,
             "byType": self.by_type,
             "packageManagers": sorted(self.package_managers),
             "buildTools": sorted(self.build_tools),
@@ -306,6 +315,7 @@ def _assemble(
     total_statements = 0
     languages: set[str] = set()
     cfg = _ConfigSummary()
+    markdown_docs = markdown_chars = 0
 
     if progress is not None and candidates is not None:
         progress(0, candidates)  # establish the total up front
@@ -316,12 +326,17 @@ def _assemble(
         record.statements = split_oversized_statements(
             record.statements, statement_text_limit, max_statement_parts
         )
+        is_doc = record.language in DOC_LANGUAGES
+        if is_doc:
+            markdown_docs += 1
+            markdown_chars += sum(len(st.text) for st in record.statements)
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
         total_classes += len(record.classes)
         total_statements += len(record.statements)
-        total_loc += record.loc
+        if not is_doc:  # documentation is not code: no LOC
+            total_loc += record.loc
         if record.type == "config":
             config_files += 1
             cfg.add(record.metadata or {})
@@ -376,6 +391,8 @@ def _assemble(
         functions=total_functions, classes=total_classes,
         statements=total_statements, loc=total_loc,
         languages=sorted(languages),
+        markdown_docs=markdown_docs or None,
+        markdown_chars=markdown_chars or None,
     )
     return meta
 

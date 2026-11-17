@@ -82,3 +82,29 @@ def capture_routes(tmp_path: Path) -> Callable[..., dict[str, list[dict[str, obj
         return out
 
     return run
+
+
+@pytest.fixture
+def capture_mcp_tools(tmp_path: Path) -> Callable[..., dict[str, dict[str, object]]]:
+    """As ``capture_routes``, for MCP tools: tool name → its ``mcp_tool`` statement as a dict."""
+
+    def run(files: dict[str, str], jobs: int) -> dict[str, dict[str, object]]:
+        import gzip
+        import json
+
+        from breezeai_cog import analyze_repo
+
+        repo = tmp_path / f"repo{jobs}"
+        for rel, src in files.items():
+            p = repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(src)
+        result = analyze_repo(repo, capture_statements=True, out=tmp_path / f"out{jobs}", jobs=jobs)
+        tools: dict[str, dict[str, object]] = {}
+        for line in gzip.open(result.out_path, "rt", encoding="utf-8"):
+            for s in json.loads(line).get("statements", []):
+                if s.get("semanticType") == "mcp_tool":
+                    tools[s["endpoint"]] = s
+        return tools
+
+    return run
