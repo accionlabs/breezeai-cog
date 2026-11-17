@@ -19,7 +19,8 @@ def _run(analyze_files, files: dict[str, str], pkg: str = PKG):
 
 
 def test_app_router_mdx_page(analyze_files) -> None:
-    """Example 1."""
+    """``pageExtensions`` lists ``mdx``: ``app/about/page.mdx`` is the ``/about`` page, with no
+    handler, a synthetic node and the file's first line as its text."""
     st = _run(analyze_files, {"next.config.mjs": MDX_CONFIG, "app/about/page.mdx": PAGE})
     [p] = _pages(st)
     assert (p.semanticType, p.routeKind, p.framework, p.endpoint, p.handler) == (
@@ -44,7 +45,8 @@ def test_mdx_page_without_handler_is_not_a_contract_gap(analyze_files) -> None:
 
 
 def test_pages_router_mdx_page_with_base_path(analyze_files) -> None:
-    """Example 2 — an app whose pages are all MDX is still a Next.js app."""
+    """``basePath`` prefixes a Pages Router MDX page's URL; an app whose pages are all MDX is
+    still a Next.js app."""
     st = _run(
         analyze_files,
         {
@@ -57,7 +59,8 @@ def test_pages_router_mdx_page_with_base_path(analyze_files) -> None:
 
 
 def test_mdx_page_covered_by_proxy(analyze_files) -> None:
-    """Example 3."""
+    """A ``proxy.ts`` matcher covering the page adds the ``proxy`` guard; it does not set
+    ``authRequired``."""
     st = _run(
         analyze_files,
         {
