@@ -371,7 +371,7 @@ How (`parsers/constfold.py`):
 
 Used by: the Java and Groovy indexes, and the Vert.x parsers (Java and Groovy). TypeScript has its
 own constant map in its index (top-level `const`s, enum members, `static readonly`), used for
-Angular, React and Express route paths, URLs and NestJS patterns and schedules. It holds strings,
+Angular, React, Express and NestJS route paths, URLs and NestJS patterns and schedules. It holds strings,
 and numbers as JavaScript writes them in a string (`` `/api/v${VERSION}` `` with `const VERSION =
 2` → `/api/v2`) — a number only from a constant declaration (`const`, an enum member, a
 `readonly` field), as a `let` number is often a counter.

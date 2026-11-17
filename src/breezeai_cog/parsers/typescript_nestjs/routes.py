@@ -31,6 +31,7 @@ from .cron_expressions import CRON_EXPRESSIONS
 from .patterns import message_pattern
 from .prefixes import Versioning, Versions, nest_prefixes, version_values
 from ..treesitter import node_text
+from ..typescript.imports import resolve_const_value
 
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
@@ -87,10 +88,6 @@ def _graphql_op_name(d: Decorator, mname: str) -> str:
     return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$][\w.$]*)")
-# `@Controller({ path: 'orders', host: '...' })` — pull `path` out of the object form: a
-# string, or an array of strings (`path: ['v1/users', 'v2/users']`) kept as array text for
-# _paths. The string form `@Controller('orders')` is handled directly.
-_PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*(\[[^\]]*\]|['"`][^'"`]*['"`])""")
 _VERSION_PROP_RE = re.compile(r"""\bversion\s*:\s*(\[[^\]]*\]|'[^']*'|"[^"]*"|`[^`]*`|[\w.]+)""")
 
 
@@ -98,18 +95,25 @@ def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
 
 
-_STRING_ITEM_RE = re.compile(r"""^\s*(['"`])([^'"`]*)\1\s*$""")
+def _decorator_args(dec: Node) -> list[Node]:
+    """The argument nodes of a decorator call (``@Get(':id')`` → the ``':id'`` node); [] when
+    the decorator is not called."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    args = call.child_by_field_name("arguments") if call is not None else None
+    return [c for c in args.named_children if c.type != "comment"] if args is not None else []
 
 
-def _paths(arg: str) -> list[str | None]:
-    """A route path argument as the paths it declares: ``'users'`` → one; an array
-    ``[':id', ':slug']`` → one per element (Nest serves each). An array element that is not a
-    plain string (a constant, a call) is unknown → None, never its source text."""
-    text = arg.strip()
-    if not (text.startswith("[") and text.endswith("]")):
-        return [_unquote(text)]
-    items = [i for i in text[1:-1].split(",") if i.strip()]
-    return [m.group(2) if (m := _STRING_ITEM_RE.match(i)) else None for i in items] or [""]
+def _paths(arg: Node | None, source: bytes, consts: dict[str, str | None]) -> list[str | None]:
+    """A route path argument as the paths it declares: none → ``[""]``; ``'users'`` → one; an
+    array ``[':id', ':slug']`` → one per element (Nest serves each). A constant or a template is
+    folded through the repo's constants (``BASE`` → ``'base'``); a path that does not resolve (an
+    unknown or ambiguous constant, a call) is None, never its source text."""
+    if arg is None:
+        return [""]
+    if arg.type == "array":
+        items = [c for c in arg.named_children if c.type != "comment"]
+        return [resolve_const_value(i, source, consts) for i in items] or [""]
+    return [resolve_const_value(arg, source, consts)]
 
 
 def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
@@ -354,20 +358,31 @@ def _join(base: str, sub: str) -> str:
 _CONTROLLER_DECORATORS = {"Controller", "JsonController"}  # NestJS + routing-controllers
 
 
-def _controller_base(decorators: list[Node], source: bytes) -> str | None:
+def _controller_bases(
+    decorators: list[Node], source: bytes, consts: dict[str, str | None],
+) -> list[str | None] | None:
+    """The class paths of a ``@Controller`` / ``@JsonController`` class (see :func:`_paths`):
+    ``@Controller('x')``, ``@Controller(['x', 'y'])``, ``@Controller(BASE)`` and the object form
+    ``@Controller({ path: … })``. An object without ``path`` declares no prefix; an object that is
+    not a plain literal (a spread, a variable) leaves the prefix unknown. None when the class is
+    not a controller."""
     for dec in decorators:
-        d = decorator(dec, source)
-        if d.name in _CONTROLLER_DECORATORS:
-            if not d.args:
-                return ""
-            arg = d.args[0].strip()
-            if arg.startswith("{"):  # object form: @Controller({ path: 'x', host: ... })
-                m = _PATH_PROP_RE.search(arg)
-                if not m:
-                    return ""
-                value = m.group(1)
-                return value if value.startswith("[") else _unquote(value)
-            return arg if arg.startswith("[") else _unquote(arg)  # an array: see _paths
+        if decorator(dec, source).name not in _CONTROLLER_DECORATORS:
+            continue
+        args = _decorator_args(dec)
+        arg = args[0] if args else None
+        if arg is None or arg.type != "object":
+            return _paths(arg, source, consts)
+        path: Node | None = None
+        for c in arg.named_children:
+            if c.type == "comment":
+                continue
+            if c.type != "pair":  # a spread / shorthand may carry `path`: unknown
+                return [None]
+            key = c.child_by_field_name("key")
+            if key is not None and node_text(key, source).strip("'\"") == "path":
+                path = c.child_by_field_name("value")
+        return _paths(path, source, consts)
     return None
 
 
@@ -517,8 +532,8 @@ def detect_nest_routes(
     schedules = framework == "nestjs" and b"@nestjs/schedule" in source
     stub_parents: dict[str, str] = index_fact(index, STUB_PARENTS) or {}
     for cls, decs in _class_with_decorators(root):
-        base = _controller_base(decs, source)  # None when the class is not a @Controller
-        is_controller = base is not None
+        bases = _controller_bases(decs, source, consts)  # None when the class is not one
+        is_controller = bases is not None
         is_resolver = any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
         is_gateway = framework == "nestjs" and any(
             decorator(dec, source).name in _GATEWAY_DECORATORS for dec in decs)
@@ -581,8 +596,10 @@ def detect_nest_routes(
                         declared = _versions(pending, source)  # × version (see _version_variants)
                         variants = _version_variants(
                             ctrl_versions if declared is None else declared, versioning)
-                        for b in _paths(base or ""):
-                            for sub in (_paths(d.args[0]) if d.args else [""]):
+                        method_args = _decorator_args(dec)
+                        for b in bases or [""]:
+                            for sub in _paths(method_args[0] if method_args else None,
+                                              source, consts):
                                 local = _join(b, sub) if b is not None and sub is not None \
                                     else None
                                 for version, segment, known in variants:
