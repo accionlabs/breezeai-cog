@@ -268,3 +268,34 @@ def test_src_app_and_pages_roots(analyze_files) -> None:
         },
     )
     assert sorted(p.endpoint for p in _pages(st)) == ["/about", "/blog/post"]
+
+
+def test_nested_app_without_its_own_config_does_not_take_the_parents(analyze_files) -> None:
+    """``docs`` is a Next.js app (its ``package.json``) with no ``next.config``: Next.js's
+    default applies there, so the root config's ``mdx`` does not make its ``.mdx`` pages."""
+    st = _run(
+        analyze_files,
+        {
+            "next.config.mjs": MDX_CONFIG,
+            "app/about/page.mdx": PAGE,
+            "docs/package.json": PKG,
+            "docs/pages/intro.mdx": PAGE,
+        },
+    )
+    assert [(p.parentId, p.endpoint) for p in _pages(st)] == [("app/about/page.mdx", "/about")]
+
+
+def test_nested_app_with_its_own_config(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "next.config.mjs": "export default { pageExtensions: ['tsx'] };\n",
+            "app/about/page.mdx": PAGE,
+            "docs/package.json": PKG,
+            "docs/next.config.mjs": "export default { basePath: '/docs', pageExtensions: ['mdx'] };\n",
+            "docs/pages/intro.mdx": PAGE,
+        },
+    )
+    assert [(p.parentId, p.endpoint) for p in _pages(st)] == [
+        ("docs/pages/intro.mdx", "/docs/intro")
+    ]

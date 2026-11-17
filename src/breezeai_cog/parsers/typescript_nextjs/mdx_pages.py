@@ -9,7 +9,9 @@ Without that — Next.js's default serves only ``.tsx`` / ``.ts`` / ``.jsx`` / `
 * App Router ``app/**/page.mdx``, Pages Router ``pages/**/*.mdx`` outside ``pages/api``; not
   ``_app`` / ``_document`` / ``_error`` / ``404`` / ``500``, nor under a private folder ``_x``,
   an intercepting route ``(.)x`` or a parallel-route slot ``@x``;
-* the file is inside a Next.js app (``next.apps``, which counts ``.mdx`` paths too);
+* the file is inside a Next.js app (``next.apps``, which counts ``.mdx`` paths too), and the
+  ``next.config`` it is read against is that app's own — a nested app without one does not
+  take a parent folder's ``pageExtensions``;
 * route groups ``(x)`` are dropped from the URL, dynamic segments stay literal (``[id]``),
   ``index`` is its folder, and the app's ``basePath`` goes in front;
 * the app's ``middleware.ts`` / ``proxy.ts`` puts its name in ``guards`` when its matcher
@@ -28,7 +30,7 @@ from __future__ import annotations
 from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from .facts import next_apps, page_extensions, router_root
+from .facts import config_root, next_apps, page_extensions, router_root
 from .pages import _app_router_endpoint, _pages_router_endpoint
 from .routes import _middleware_guards, _served
 
@@ -71,7 +73,12 @@ def detect_nextjs_mdx_page(dc: DetectContext) -> Emit | None:
     if found is None:
         return None
     router_dir, local = found
-    if router_root(dc.path, router_dir) not in next_apps(index):
+    app = router_root(dc.path, router_dir)
+    if app not in next_apps(index):
+        return None
+    if config_root(index, dc.path) != app:
+        # The pageExtensions read are another app's (a parent folder's next.config): this
+        # app has no config of its own, so Next.js's default — no .mdx pages — applies.
         return None
     return Emit(
         dc.root,

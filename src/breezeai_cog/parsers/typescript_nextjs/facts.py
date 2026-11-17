@@ -86,15 +86,21 @@ def next_page_extensions(index: Any | None) -> dict[str, tuple[str, ...] | None]
     return index_fact(index, PAGE_EXTENSIONS) or {}
 
 
+def config_root(index: Any | None, path: str) -> str | None:
+    """The deepest directory above ``path`` holding a ``next.config`` (``""``: the repo root);
+    None when there is none."""
+    anchors = [d for d in next_base_paths(index) if d == "" or path.startswith(d + "/")]
+    return max(anchors, key=len) if anchors else None
+
+
 def page_extensions(index: Any | None, path: str) -> tuple[str, ...] | None:
     """The ``pageExtensions`` of the app a ``path`` belongs to — the deepest directory above it
     holding a ``next.config``: ``()`` when that config sets none (Next.js's default), None when
     it is set but unknown."""
-    configs = next_base_paths(index)
-    anchors = [d for d in configs if d == "" or path.startswith(d + "/")]
-    if not anchors:
+    anchor = config_root(index, path)
+    if anchor is None:
         return ()
-    return next_page_extensions(index).get(max(anchors, key=len), ())
+    return next_page_extensions(index).get(anchor, ())
 
 
 def page_stem(filename: str, extensions: tuple[str, ...]) -> str | None:

@@ -37,6 +37,7 @@ With `@next/mdx`, an `.mdx` file is a page like a `.tsx` one. The MDX parser own
 | `.mdx` page when `pageExtensions` is not a literal list | — | — | Unknown which files are pages |
 | `.mdx` under `_x`, `(.)x`, `@x`, `pages/api`, or `_app` / `_document` / `_error` / `404` / `500` | — | — | Same rules as `.tsx` pages |
 | `.mdx` outside a Next.js app | — | — (File record only) | Not a Next.js page |
+| `.mdx` in a nested app with no `next.config` of its own (a parent folder's lists `mdx`) | — | — (File record only) | That app runs on Next.js's default, which serves no `.mdx` |
 
 `basePath` goes in front of the endpoint, and `middleware.ts` / `proxy.ts` add their guard, as
 for `.tsx` pages. The record comes from the file path, so `nodeType` is `synthetic`, on line 1,
