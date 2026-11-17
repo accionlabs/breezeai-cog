@@ -52,6 +52,11 @@ MAX_CONTINUATION_PARAGRAPHS = 20
 #: The most code a continued block may hold. ESM headers are short; a block that would need more
 #: is a broken file, and re-parsing large prose would only cost time.
 MAX_CONTINUATION_BYTES = 16 * 1024
+#: The most block parses one file may spend. A real MDX file has a few ESM blocks; a file with
+#: thousands of ``import``-led paragraphs (generated, or broken) would otherwise cost up to
+#: ``1 + MAX_CONTINUATION_PARAGRAPHS`` parses each. Past the budget no more ESM is read: the
+#: rest of the file's imports are missing, never guessed.
+MAX_PARSES_PER_FILE = 1000
 
 
 @dataclass
@@ -256,7 +261,17 @@ def _block_end(lines: list[bytes], start: int, parses: Callable[[bytes], bool]) 
 
 def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int, int]]:
     """The ESM blocks of an MDX ``source`` as 0-based ``[start, end)`` line ranges.
-    ``parses(code)`` says whether a block of code parses without error."""
+    ``parses(code)`` says whether a block of code parses without error; it is called at most
+    :data:`MAX_PARSES_PER_FILE` times."""
+    budget = MAX_PARSES_PER_FILE
+
+    def counted(code: bytes) -> bool:
+        nonlocal budget
+        if budget <= 0:
+            return False  # out of budget: not read as code (a miss, never a false edge)
+        budget -= 1
+        return parses(code)
+
     lines = source.split(b"\n")
     if lines and lines[0].startswith(_BOM):
         lines[0] = lines[0][len(_BOM) :]
@@ -290,7 +305,9 @@ def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int,
                 prev_blank = False
                 continue
         if prev_blank and s.at_top() and _ESM_START.match(line):
-            end, ok = _block_end(lines, k, parses)
+            if budget <= 0:
+                break
+            end, ok = _block_end(lines, k, counted)
             if ok:  # a block that never parses is not code (prose, or a broken file)
                 blocks.append((k, end))
             k = end

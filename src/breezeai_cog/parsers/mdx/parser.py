@@ -24,6 +24,8 @@ The file's framework detectors run on it (``run_additive("mdx", …)``) — a fr
 
 from __future__ import annotations
 
+from pathlib import Path, PurePosixPath
+
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
@@ -46,6 +48,11 @@ class MdxParser(BaseParser):
     related_languages = ("typescript",)
     statement_types = ["route"]
     frameworks = ["nextjs"]
+
+    def matches(self, path: str | Path) -> bool:
+        """The base suffix gate, and ``.mdx`` in any case (``Guide.MDX``): no other parser
+        registers it."""
+        return super().matches(path) or PurePosixPath(path).suffix.lower() == ".mdx"
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         timeout = ctx.parse_timeout_micros

@@ -261,3 +261,27 @@ def test_continuation_is_bounded_by_size() -> None:
     para = ("word " * 200 + "\n\n").encode()
     esm_lines(b"export const meta = {\n\n" + para * 100, parses)
     assert max(calls) <= MAX_CONTINUATION_BYTES
+
+
+def test_block_parses_are_bounded_per_file() -> None:
+    """A file of thousands of ``import``-led paragraphs that never parse costs at most the
+    file's budget, not ``1 + MAX_CONTINUATION_PARAGRAPHS`` parses per paragraph."""
+    from breezeai_cog.parsers.mdx.esm import MAX_PARSES_PER_FILE
+
+    calls = 0
+
+    def parses(code: bytes) -> bool:
+        nonlocal calls
+        calls += 1
+        return False
+
+    assert esm_lines(b"import a\n\n" * 20_000, parses) == []
+    assert calls == MAX_PARSES_PER_FILE
+
+
+def test_upper_case_mdx_suffix(capture) -> None:
+    recs = capture(
+        {"docs/Guide.MDX": "import { Chart } from './Chart'\n\n# Guide\n", "docs/Chart.tsx": CHART}
+    )
+    rec = recs["docs/Guide.MDX"]
+    assert (rec.language, rec.importFiles) == ("mdx", ["docs/Chart.tsx"])

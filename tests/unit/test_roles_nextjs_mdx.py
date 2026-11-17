@@ -256,3 +256,15 @@ def test_jobs_one_and_two_agree(capture_routes) -> None:
     assert one == two
     assert one["app/about/page.mdx"][0]["endpoint"] == "/docs/about"
     assert one["pages/blog/post.mdx"][0]["endpoint"] == "/docs/blog/post"
+
+
+def test_src_app_and_pages_roots(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "next.config.mjs": MDX_CONFIG,
+            "src/app/about/page.mdx": PAGE,
+            "src/pages/blog/post.mdx": PAGE,
+        },
+    )
+    assert sorted(p.endpoint for p in _pages(st)) == ["/about", "/blog/post"]
