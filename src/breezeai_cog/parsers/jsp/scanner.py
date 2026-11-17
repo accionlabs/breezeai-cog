@@ -18,15 +18,10 @@ and scripting code writes a literal ``%>`` as ``%\\>``, so a plain search for th
 never splits an element. Constructs a container removed or deprecated (``isThreadSafe``,
 ``<jsp:plugin>``, both gone in 4.0) are still scanned like any other: tolerated, never an error.
 
-The two **shadows** are copies of the source with the same length (newlines kept), so every
-offset, line and column taken from a tree parsed over a shadow is true for the original file
-(except the column shift of XML escapes noted above):
-
-* :func:`shadow_markup` blanks every scripting element and directive, leaving the markup for
-  the ``html`` grammar (the approach of the Web Forms markup pass).
-* :func:`shadow_java` keeps only the code of scriptlets, expressions and declarations for the
-  ``java`` grammar, which accepts statements and method declarations at the top level. An
-  expression ``<%= x %>`` becomes ``  (x);`` so it parses as a statement.
+Finding the constructs and splitting the page into its markup and its code is the template
+splitter's job (``parsers/template_common/server_code``, JSP dialect), shared with Web Forms;
+:func:`scan_islands`, :func:`shadow_markup` and :func:`shadow_java` are its JSP entry points.
+This module keeps what is JSP's own: decoding, directive attributes and EL.
 """
 
 from __future__ import annotations
@@ -34,24 +29,15 @@ from __future__ import annotations
 import codecs
 import re
 from bisect import bisect_right
-from dataclasses import dataclass
 
-#: ``bytes.translate`` table that blanks every byte except a newline.
-_BLANK = bytes(0x0A if i == 0x0A else 0x20 for i in range(256))
+from ..template_common.server_code import CODE_KINDS, JSP, Island, shadow_code, shadow_markup
+from ..template_common.server_code import scan_islands as _scan_islands
 
-#: The opening of any scripting element or directive, standard or XML syntax.
-_OPEN = re.compile(rb"<%|<jsp:(scriptlet|expression|declaration|directive\.[A-Za-z]+)(?=[\s/>])")
-#: An XML-syntax directive's start tag (attributes only, so ``>`` inside a value is safe).
-_XML_DIRECTIVE = re.compile(
-    rb"""<jsp:directive\.([A-Za-z]+)((?:\s+[\w:.-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(/?)>"""
-)
-#: A directive name at the start of a ``<%@ … %>`` body.
-_DIRECTIVE_NAME = re.compile(rb"\s*([A-Za-z]+)")
+__all__ = ["CODE_KINDS", "Island", "Lines", "decode_source", "directive_attrs", "el_spans",
+           "scan_islands", "shadow_java", "shadow_markup"]
+
 #: One ``name="value"`` / ``name='value'`` attribute.
 _ATTR = re.compile(rb"""([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
-#: XML text escapes and CDATA markers inside an XML-syntax scripting element.
-_XML_TEXT = re.compile(rb"&(?:lt|gt|amp|quot|apos);|<!\[CDATA\[|\]\]>")
-_XML_CHAR = {b"&lt;": b"<", b"&gt;": b">", b"&amp;": b"&", b"&quot;": b'"', b"&apos;": b"'"}
 #: The start of an EL expression (``\\${`` is escaped and skipped by the scanner).
 _EL_OPEN = re.compile(rb"[$#]\{")
 #: The longest EL expression scanned; an unterminated one stops here, keeping the pass linear.
@@ -61,27 +47,6 @@ _DECLARED_ENCODING = re.compile(
     rb"""(?:pageEncoding\s*=\s*["']|charset\s*=\s*|<\?xml[^>]{0,200}?encoding\s*=\s*["'])"""
     rb"""([A-Za-z0-9._:-]+)"""
 )
-
-#: Kinds whose body is Java code.
-CODE_KINDS = frozenset({"scriptlet", "expression", "declaration"})
-
-
-@dataclass(frozen=True, slots=True)
-class Island:
-    """One scripting element, directive or JSP comment.
-
-    ``start``/``end`` cover the whole construct; ``body_start``/``body_end`` its content (the
-    code, the directive's name and attributes, or the comment text). ``closed`` is False when
-    the file ends before the closing delimiter; ``xml`` marks the XML-syntax form."""
-
-    kind: str  # comment | directive | expression | declaration | scriptlet
-    start: int
-    end: int
-    body_start: int
-    body_end: int
-    closed: bool
-    xml: bool = False
-    name: str | None = None  # the directive name (page, include, taglib, tag, …)
 
 
 def decode_source(raw: bytes) -> bytes:
@@ -122,64 +87,7 @@ def _transcode(raw: bytes, encoding: str) -> bytes | None:
 
 def scan_islands(src: bytes) -> list[Island]:
     """Every scripting element, directive and JSP comment, in source order (one pass)."""
-    out: list[Island] = []
-    pos, n = 0, len(src)
-    while (m := _OPEN.search(src, pos)) is not None:
-        start = m.start()
-        island = _standard(src, start, n) if m.group(1) is None else _xml(src, m, n)
-        if island is None:
-            pos = m.end()
-            continue
-        out.append(island)
-        pos = max(island.end, start + 2)
-    return out
-
-
-def _standard(src: bytes, start: int, n: int) -> Island:
-    if src.startswith(b"<%--", start):
-        kind, body, close = "comment", start + 4, b"--%>"
-    else:
-        marker = src[start + 2:start + 3]
-        kind = {b"@": "directive", b"=": "expression", b"!": "declaration"}.get(marker, "scriptlet")
-        body, close = (start + 2 if kind == "scriptlet" else start + 3), b"%>"
-    stop = src.find(close, body)
-    closed = stop != -1
-    body_end = stop if closed else n
-    name = None
-    if kind == "directive":
-        found = _DIRECTIVE_NAME.match(src, body)
-        name = found.group(1).decode("ascii") if found is not None else None
-    return Island(kind, start, body_end + len(close) if closed else n, body, body_end, closed,
-                  name=name)
-
-
-def _xml(src: bytes, m: re.Match[bytes], n: int) -> Island | None:
-    tag = m.group(1)
-    start = m.start()
-    if tag.startswith(b"directive."):
-        found = _XML_DIRECTIVE.match(src, start)
-        if found is None:
-            return None
-        end = found.end()
-        if not found.group(3):  # <jsp:directive.page …></jsp:directive.page>
-            close = b"</jsp:" + tag + b">"
-            stop = src.find(close, end)
-            if stop != -1:
-                end = stop + len(close)
-        return Island("directive", start, end, found.start(2), found.end(2), True, xml=True,
-                      name=found.group(1).decode("ascii"))
-    gt = src.find(b">", m.end())
-    if gt == -1:
-        return None
-    kind = tag.decode("ascii")
-    if src[gt - 1:gt] == b"/":  # an empty element: no code
-        return Island(kind, start, gt + 1, gt + 1, gt + 1, True, xml=True)
-    close = b"</jsp:" + tag + b">"
-    stop = src.find(close, gt + 1)
-    closed = stop != -1
-    body_end = stop if closed else n
-    return Island(kind, start, body_end + len(close) if closed else n, gt + 1, body_end, closed,
-                  xml=True)
+    return _scan_islands(src, JSP)
 
 
 def directive_attrs(src: bytes, island: Island) -> list[tuple[str, str]]:
@@ -192,36 +100,9 @@ def directive_attrs(src: bytes, island: Island) -> list[tuple[str, str]]:
     ]
 
 
-def shadow_markup(src: bytes, islands: list[Island]) -> bytes:
-    """``src`` with every island blanked: the markup the ``html`` grammar parses."""
-    out = bytearray(src)
-    for i in islands:
-        out[i.start:i.end] = src[i.start:i.end].translate(_BLANK)
-    return bytes(out)
-
-
 def shadow_java(src: bytes, islands: list[Island]) -> bytes:
     """Only the code of scriptlets, expressions and declarations, at their true offsets."""
-    out = bytearray(src.translate(_BLANK))
-    for i in islands:
-        if i.kind not in CODE_KINDS:
-            continue
-        body = src[i.body_start:i.body_end]
-        if i.xml:
-            body = b"\n".join(_xml_line(line) for line in body.split(b"\n"))
-        out[i.body_start:i.body_end] = body
-        if i.kind == "expression" and i.closed and i.body_start > i.start:
-            # `<%= x %>` → `  (x);` — the opener's last byte and the closer's first two.
-            out[i.body_start - 1] = 0x28
-            out[i.body_end:i.body_end + 2] = b");"
-    return bytes(out)
-
-
-def _xml_line(line: bytes) -> bytes:
-    """One line of XML text as code: escapes decoded, CDATA markers dropped, padded at the end
-    of the line so ``&amp;&amp;`` reads ``&&`` and the line keeps its length."""
-    decoded = _XML_TEXT.sub(lambda m: _XML_CHAR.get(m.group(0), b""), line)
-    return decoded + b" " * (len(line) - len(decoded))
+    return shadow_code(src, islands, JSP)
 
 
 def el_spans(markup: bytes, *, deferred: bool) -> list[tuple[int, int]]:
