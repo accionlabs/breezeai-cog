@@ -136,6 +136,14 @@ def test_nested_fences_follow_commonmark() -> None:
     assert _esm(text) == [(7, 8)]
 
 
+def test_an_indented_fence_is_a_fence() -> None:
+    """MDX has no indented code, so a fence indented 4+ spaces (or a tab) still opens and
+    closes a code block; the column-0 ``import`` inside it is a code sample."""
+    text = "Install:\n\n    ```js\n    npm i\n\nimport { X } from '../internal/x'\n\n    ```\n\n"
+    assert _esm(text + "import b from 'b'\n") == [(9, 10)]
+    assert _esm("\t~~~\n\nimport a from 'a'\n\n\t~~~\n") == []
+
+
 def test_import_inside_a_jsx_expression_is_not_an_import() -> None:
     text = (
         "<Code code={`\n\nimport { Button } from '@/components/button'\n\n`} />\n\n"

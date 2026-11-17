@@ -23,6 +23,10 @@ put a false edge in the graph, which is worse than missing one. Where the scan c
 quote in JSX text inside an expression), it stays inside the expression, so later lines are
 not read as ESM.
 
+Known misses (never false edges): ESM right after a heading, a closing fence or a JSX line with
+no blank line between — MDX reads it, this scan needs the blank line — and ESM after a ``{…}``
+expression whose JSX text holds a lone quote (``{ok && <p>it's</p>}``).
+
 :func:`esm_shadow` returns a copy of the source of the same byte length with only the ESM
 lines kept (everything else spaces, line breaks kept), so node positions are the file's own —
 the same technique as the Vue ``<script>`` shadow.
@@ -36,7 +40,8 @@ from dataclasses import dataclass, field
 
 #: MDX reads ESM only where the keyword is followed by a space (``import{a}`` is text).
 _ESM_START = re.compile(rb"(?:import|export) ")
-_FENCE_OPEN = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
+#: MDX turns indented code off, so a fence may be indented any amount (``    ```js`` is a fence).
+_FENCE_OPEN = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
 _FRONT_MATTER = (b"---",)
 _BOM = b"\xef\xbb\xbf"
 
@@ -263,12 +268,8 @@ def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int,
         line = lines[k].rstrip(b"\r")
         if s.fence is not None:
             char, length = s.fence
-            stripped = line.lstrip(b" ")
-            if (
-                len(line) - len(stripped) <= 3
-                and _run(stripped, 0, char) >= length
-                and not stripped.lstrip(bytes([char])).strip(b" \t")
-            ):
+            stripped = line.lstrip(b" \t")
+            if _run(stripped, 0, char) >= length and not stripped.lstrip(bytes([char])).strip(b" \t"):
                 s.fence = None
             k += 1
             prev_blank = False
