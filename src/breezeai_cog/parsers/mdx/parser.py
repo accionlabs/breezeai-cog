@@ -15,7 +15,8 @@ by the TypeScript import extraction — relative paths, ``index`` files and the 
 aliases resolve exactly as they do from a ``.tsx`` file. The aliases come from the TypeScript
 index (``related_languages``); without it only relative imports resolve and the rest stay
 external. A top-level statement that does not parse (prose that starts with ``import``, a cut-off
-block) is dropped, never read as an import. The Markdown content itself is not captured.
+block) is dropped, never read as an import. The Markdown content itself is not captured, and
+``loc`` counts only the ESM lines that parse — prose is not lines of code.
 
 The file's framework detectors run on it (``run_additive("mdx", …)``) — a framework that serves
 ``.mdx`` files as pages registers one with a ``Gate("mdx", …)`` (Next.js:
@@ -79,13 +80,13 @@ class MdxParser(BaseParser):
         internal, external, exports, _ = extract_imports(
             root, shadow, ctx.path, ctx.repo_root, ctx.related_indexes.get("typescript")
         )
-        text = ctx.source.decode("utf-8-sig", "replace")
         record = FileRecord(
             id=file_id(ctx.path),
             path=ctx.path,
             type="code",
             language="mdx",
-            loc=count_loc(text),
+            # Only the ESM code counts: an MDX page's prose is a document, not lines of code.
+            loc=count_loc(shadow.decode("utf-8", "replace")),
             importFiles=[m for m in internal if m],
             externalImports=[m for m in external if m],
             exports=exports,

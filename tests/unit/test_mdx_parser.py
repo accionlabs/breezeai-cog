@@ -42,8 +42,21 @@ def _esm(text: str) -> list[tuple[int, int]]:
 def test_mdx_file_is_a_code_file_of_language_mdx(capture) -> None:
     recs = capture({"docs/intro.mdx": "# Intro\n\nSome text.\n"})
     rec = recs["docs/intro.mdx"]
-    assert (rec.type, rec.language, rec.loc) == ("code", "mdx", 2)
+    assert (rec.type, rec.language, rec.loc) == ("code", "mdx", 0)
     assert rec.importFiles == [] and rec.externalImports == [] and rec.statements == []
+
+
+def test_loc_counts_only_the_esm_lines(capture) -> None:
+    """Prose, code samples and prose starting with ``import`` are not lines of code."""
+    recs = capture(
+        {
+            "components/Chart.tsx": CHART,
+            "docs/a.mdx": "import {\n  Chart,\n} from '../components/Chart'\n\n"
+            "export const meta = {\n\n  title: 'A',\n}\n\n# A\n\nSome text.\n\n"
+            "```js\nimport x from 'x'\n```\n\nimport the CSV and run it.\n",
+        }
+    )
+    assert recs["docs/a.mdx"].loc == 6
 
 
 def test_only_the_mdx_parser_registers_mdx() -> None:
