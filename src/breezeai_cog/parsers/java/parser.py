@@ -20,6 +20,8 @@ from ..statements_common import begin_datastore_vendor, end_datastore_vendor, se
 from .classes import build_class
 from .functions import class_method_names, defined_names, type_map
 from .imports import JavaIndex, build_fqcn_index, extract_imports
+from ..groovy.imports import GroovyIndex
+from ..jvm_related import file_heritage, jvm_view
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -29,6 +31,7 @@ _CLASS_TYPES = ("class_declaration", "interface_declaration", "enum_declaration"
 class JavaParser(BaseParser):
     name = "java"
     extensions = (".java",)
+    related_languages = ("groovy",)  # Java imports, calls and extends the repo's Groovy classes
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -58,16 +61,19 @@ class JavaParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
-        fqcn = idx.fqcn if isinstance(idx, JavaIndex) else idx  # bare FqcnIndex/None still ok
+        view = (jvm_view(idx, ctx.related_indexes.get("groovy"), GroovyIndex, ".groovy")
+                if isinstance(idx, JavaIndex) else None)
+        fqcn = view.fqcn if view is not None else idx  # bare FqcnIndex/None still ok
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn
         )
         set_datastore_vendor(external)
         resolve = make_resolver(  # calls[].path (Tiers 1+2, receiver type, inherited methods)
             bindings, defined_names(root, source), path, type_map(root, source),
-            heritage=idx.class_heritage if isinstance(idx, JavaIndex) else None,
+            heritage=file_heritage(view, bindings, {}) if view is not None else None,
             declared_only=True,
             owner_defs=class_method_names(root, source),
+            unknown_methods=view.unknown_methods if view is not None else None,
         )
         functions: list[Function] = []
         classes = []

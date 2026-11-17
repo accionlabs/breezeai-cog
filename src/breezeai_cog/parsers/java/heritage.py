@@ -131,6 +131,21 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
     return out
 
 
+def foreign_bases(
+    frags: list[tuple[str, HeritageFrag]], fqcn_index: dict[str, str | None],
+) -> dict[str, tuple[str, ...] | None]:
+    """Class simple name → the FQCNs its base class may be, for each class whose base is no Java
+    class of the repository (a library class, or one of the repository's Groovy classes:
+    ``jvm_related.py`` looks the candidates up in the Groovy index). ``None`` when two classes of
+    one simple name name different bases."""
+    out: dict[str, tuple[str, ...] | None] = {}
+    for _, frag in frags:
+        if frag.base is None or frag.local or any(c in fqcn_index for c in frag.candidates):
+            continue
+        record_distinct(out, frag.fqcn.rsplit(".", 1)[-1], frag.candidates)
+    return out
+
+
 def build_heritage(
     frags: list[tuple[str, HeritageFrag]], fqcn_index: dict[str, str | None],
 ) -> dict[str, ClassHeritage | None]:

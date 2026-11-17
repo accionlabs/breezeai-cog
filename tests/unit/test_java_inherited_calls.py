@@ -264,3 +264,23 @@ def test_a_call_on_an_imported_name_needs_a_declaring_class(tmp_path: Path) -> N
     # inside the enum, its own generated methods are declared nowhere either
     own = _calls(tmp_path, files, "Mode.java")
     assert own["of"] == {"values": None} and own["label"] == {"name": None}
+
+
+def test_a_type_name_two_classes_share_keeps_its_file_only_for_a_method_it_declares(
+    tmp_path: Path,
+) -> None:
+    # `Plan` is declared twice, so the index cannot describe it; the import names the file, and
+    # only a method that file's Plan declares itself resolves there.
+    files = {
+        "a/Plan.java": "package com.acme.a;\npublic class Plan extends Root {\n"
+                       "    public void price() {}\n    public static class Row { public void fill() {} }\n}\n",
+        "b/Plan.java": "package com.acme.b;\npublic class Plan { public void fill() {} }\n",
+        "Root.java": _ROOT_CLASS,
+        "web/Use.java": "package com.acme.web;\nimport com.acme.a.Plan;\npublic class Use {\n"
+                        "    void a(Plan p) { p.price(); p.top(); p.fill(); p.getClass(); }\n"
+                        "    void b() { Plan.price(); Plan.top(); }\n}\n",
+    }
+    calls = _calls(tmp_path, files, "web/Use.java")
+    assert calls["a"] == {"price": f"{_ROOT}/a/Plan.java", "top": None, "fill": None,
+                          "getClass": None}
+    assert calls["b"] == {"price": f"{_ROOT}/a/Plan.java", "top": None}

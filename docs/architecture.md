@@ -264,9 +264,11 @@ Additive detectors can add their own facts to it by registering them (`register_
 A parser reads its own language's index, and after it the indexes of the languages it lists in
 `related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
 resolves, and C reads the C++ index for the functions defined in `extern "C"`. CUDA reads the
-C++ and C indexes, so a `.cu` file's includes and calls resolve into both. MDX reads the
-TypeScript index: an `.mdx` file's imports resolve through the tsconfig aliases, and the Next.js
-MDX page detector reads the `next.*` facts the `.tsx` pages use, so no `next.config` is read twice.
+C++ and C indexes, so a `.cu` file's includes and calls resolve into both. Groovy and Java read
+each other's index, so a file's imports of, calls on and subclasses of the repository's classes
+in the other language resolve into that language's files. MDX reads the TypeScript index: an
+`.mdx` file's imports resolve through the tsconfig aliases, and the Next.js MDX page detector
+reads the `next.*` facts the `.tsx` pages use, so no `next.config` is read twice.
 
 > **Decision —** a parser reads related languages' indexes only after its own, and binds a name
 > from them only when they agree on one file.
@@ -578,7 +580,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, Kotlin, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 

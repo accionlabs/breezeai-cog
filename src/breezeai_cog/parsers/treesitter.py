@@ -9,7 +9,7 @@ standalone PyPI grammar because the language-pack build is unusable — those ar
 registered in ``_EXTERNAL_GRAMMARS`` and loaded from their own module. Groovy is the
 first: the language-pack ``groovy`` grammar is a structureless "command soup" (no
 ``class``/``method``/``import`` nodes), so we use ``dekobon-tree-sitter-groovy``, a
-real structural grammar. See ``.todo/groovy-grammar-evaluation.md``.
+real structural grammar; the README's Groovy note lists its known gaps.
 """
 
 from __future__ import annotations
@@ -28,9 +28,8 @@ def _load_dekobon_groovy() -> Language:
     """Load the Groovy grammar from ``dekobon_tree_sitter_groovy``.
 
     ``pyproject.toml`` pins this distribution to the Accionlabs fork
-    (github.com/accionlabs/tree-sitter-groovy): upstream v0.5.0 plus fixes still under
-    upstream review. The pin moves back to a released dekobon version once they release.
-    See ``.todo/groovy-grammar-evaluation.md``.
+    (github.com/accionlabs/tree-sitter-groovy): upstream v0.6.0 plus one fix not yet
+    released upstream. The pin moves back to a released dekobon version once it releases.
     """
     import dekobon_tree_sitter_groovy
 

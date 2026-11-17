@@ -125,8 +125,6 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _ignorefile(name, text)
     if name == "LICENSE":
         return _license(text)
-    if name in ("README.md", "README.rst"):
-        return {"kind": "readme", "category": "other", "lines": len(text.splitlines())}
     if is_dotnet_config(name):  # Web.config / App.config (+ transforms) — XML, .NET runtime config
         return _dotnet_config(text)
     # generic by extension

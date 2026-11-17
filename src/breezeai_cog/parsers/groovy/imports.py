@@ -20,10 +20,16 @@ from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
 from ..constfold import Token, resolve_all
-from ..index_common import ClassHeritage, parallel_map, record_distinct, seed_same_package
+from ..index_common import (
+    ClassHeritage,
+    methods_where_unknown,
+    parallel_map,
+    record_distinct,
+    seed_same_package,
+)
 from ..treesitter import node_text, parse_source
 from .constants import collect_constants
-from .heritage import HeritageFrag, build_heritage, collect_heritage
+from .heritage import HeritageFrag, build_heritage, collect_heritage, foreign_bases
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration", "trait_declaration",
@@ -45,6 +51,12 @@ class GroovyIndex:
     #: Simple class name → its in-repo base and the methods a call on it reaches (→ the declaring
     #: file), for call resolution (``heritage.py``); ``None`` when the name is declared twice.
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
+    #: ``(file, class simple name)`` → the methods that class declares there, for each class
+    #: ``class_heritage`` maps to ``None`` (``index_common.methods_where_unknown``).
+    unknown_methods: dict[tuple[str, str], frozenset[str] | None] = field(default_factory=dict)
+    #: Class simple name → the FQCNs its base may be, when that base is no Groovy class of the
+    #: repository (``heritage.foreign_bases``): a Java class of the repository, or a library's.
+    foreign_bases: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
@@ -128,8 +140,12 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> G
             record_distinct(raw_consts, name, tokens)
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
-    index = GroovyIndex(fqcn=fqcn, consts=resolve_all(raw_consts),
-                        class_heritage=build_heritage(heritage, fqcn))
+    class_heritage = build_heritage(heritage, fqcn)
+    index = GroovyIndex(fqcn=fqcn, consts=resolve_all(raw_consts), class_heritage=class_heritage,
+                        unknown_methods=methods_where_unknown(
+                            ((rel, c.fqcn.rsplit(".", 1)[-1], c.methods) for rel, c in heritage),
+                            class_heritage),
+                        foreign_bases=foreign_bases(heritage, fqcn))
     # Registered facts may need the whole index, so they resolve after it is built.
     index.facts.update(resolve_additive("groovy", collected, index))
     return index

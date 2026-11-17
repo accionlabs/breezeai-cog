@@ -47,7 +47,9 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | MDX | `.mdx` | Markdown with JSX — the top-level `import` / `export` blocks are parsed (`tsx` grammar) for `importFiles` / `externalImports` / `exports`, resolved like TypeScript (tsconfig aliases); Next.js MDX pages (additive) |
 | JSLT | `.jslt` | JSON query/transform language — hand-rolled structural scan (no tree-sitter grammar): `def` → `Function` (untyped params, same-file `calls[]` resolved), `import` / `let` declarations plus the trailing module expression |
 | Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
-| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
+| Markdown / docs | `.md .mdx .mdc`, `README.rst`, `.cursorrules` | One whole-file statement per file (`nodeType: synthetic`, secrets masked; a long one is split into ordered parts like any other statement), with `semanticType` `skill` (`SKILL.md`), `agent`, `command`, `agent_instructions` (`CLAUDE.md`, `AGENTS.md`, Cursor / Copilot rules) or `doc` (`File.metadata.kind` tells a `readme`, an `adr` and a `changelog` apart); front-matter `name` / `description` on the statement; title + heading outline on the File. Not code: no language, no LOC. |
+| MCP servers | (additive, across languages) | Every tool an MCP server declares → `mcp_tool` (`method: TOOL`, `endpoint` = tool name, `description`, `params`): Python FastMCP (`fastmcp`) and the official SDK's `mcp.server.fastmcp` (`python-mcp`), TypeScript `@modelcontextprotocol/sdk` `tool` / `registerTool` (`typescript-mcp`), Java / Kotlin Spring AI `@McpTool` / `@Tool` in an MCP server (`spring-ai-mcp`), the MCP Java SDK tool specifications (`java-mcp`), the Kotlin SDK `addTool` (`kotlin-mcp`), C# `[McpServerTool]` (`csharp-mcp`), Go `mark3labs/mcp-go` (`mcp-go`). See the MCP tables in `docs/entry-point-roles/` |
+| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle[.kts]`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
 ‡ **Markup/view files are skipped by default.** `.html .htm .cshtml .razor .aspx .ascx .master
 .vue .jsp .jspx .jspf .tag .tagx` are gated behind `--capture-templates`, because markup produces a large number of low-value
@@ -65,11 +67,10 @@ shapes still give a wrong statement record:
 
 | Code | What is captured |
 |---|---|
-| `// note` then `String name = load()` | two statements, `String` and `name = load()`; the `load` call is kept |
 | `Map<String, Object> errors` (generic or array type, no initializer) | one declaration statement that also holds the next line |
-| `(long) (y)` | the cast is read as a call, and the statement can run on into the next line |
 | `A { … },` (an enum constant with a body) | the constants after it are lost; they can surface as a field |
-| `println name`, `log.info "x"` (a call without parentheses) | no call; the line becomes separate statements. Only a bare name with literal or closure arguments (`println "x"`) parses as a call, and cog does not record it yet |
+| `println name`, `log.info "x"`, `log.info "a", name` (a call without parentheses whose argument is a name, or whose receiver is qualified) | no call; the line becomes separate statements. A bare name with literal, closure or named arguments (`println "x"`, `render view: 'show'`) is a call |
+| `for (var k : keys)` | the loop does not parse; the methods after it in the class can be lost |
 
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external

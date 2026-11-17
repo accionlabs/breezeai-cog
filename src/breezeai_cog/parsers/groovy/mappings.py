@@ -4,7 +4,7 @@ Groovy structurally mirrors Java (package/import/class/method/field/enum), so th
 node sets mirror Java's — but the dekobon grammar names a few nodes differently
 (``for_in_statement``, ``super_interfaces``, ``trait_declaration``, ``closure``).
 Groovy is a **best-effort** language: some method-body and enum shapes still mis-parse
-(README's Groovy note lists them) — see ``.todo/groovy-grammar-evaluation.md``.
+(README's Groovy note lists them).
 """
 
 from __future__ import annotations
