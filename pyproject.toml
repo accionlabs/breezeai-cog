@@ -25,12 +25,12 @@ dependencies = [
   "tree-sitter-language-pack>=0.2",
   # Standalone Groovy grammar — the language-pack `groovy` grammar is a structureless
   # "command soup" (no class/method/import nodes); dekobon's is a real structural
-  # grammar. See .todo/groovy-grammar-evaluation.md and parsers/treesitter.py.
-  # Pinned to the Accionlabs fork's `groovy-grammar-upstream` branch: upstream v0.5.0 plus
-  # fixes still open as upstream PRs — `synchronized` blocks, enum `implements`, Unicode
-  # identifiers, typed/multi-parameter closures, modifier-led methods after a comment, enum
-  # members after a trailing comma, and the open v0.5.0 PRs it merges. The fork's `main` mirrors upstream without them. Move
-  # this back to a released `dekobon-tree-sitter-groovy` version once those PRs release.
+  # grammar. See parsers/treesitter.py and the README's Groovy note.
+  # Pinned to the Accionlabs fork's `groovy-grammar-upstream` branch: upstream v0.6.0 plus
+  # one fix not yet released upstream — a method whose annotation or modifier stands in for
+  # the return type (`@Memoized fib(n) { }`, `private <T> first(xs) { }`) keeps its name.
+  # The fork's `main` mirrors upstream without it. Move this back to a released
+  # `dekobon-tree-sitter-groovy` version once the fix releases.
   "dekobon-tree-sitter-groovy @ git+https://github.com/accionlabs/tree-sitter-groovy@groovy-grammar-upstream",
   "pyyaml>=6.0",
   # --upload (services/upload.py) and notify (services/notify.py) are first-class

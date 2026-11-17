@@ -249,7 +249,7 @@ Two optional `BaseParser` settings, both used by C and C++ today
   other languages whose files this one can reference) and `default_for`. Each is a module-level
   function or a tuple; the step reads files as bytes and never parses them.
 - **`related_languages`** — the languages whose indexes this one may read after its own (C++
-  calls C functions). The parser finds them in `ctx.related_indexes` and must check its own index
+  calls C functions; Groovy and Java call each other's classes). The parser finds them in `ctx.related_indexes` and must check its own index
   first.
 
 ### Step 6b — `link_handlers` (when handlers are declared in other files)

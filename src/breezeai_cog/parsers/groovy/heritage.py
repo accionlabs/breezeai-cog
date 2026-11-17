@@ -14,9 +14,10 @@ repository, each mapped to the file that declares it:
   parent interfaces) declare is ambiguous, so it maps to ``None``.
 
 A class whose body has a parse error anywhere may have lost members to it, so its methods are
-not known:
-it is recorded as ``None``, like an ambiguous name, and so is every class whose in-repo parent
-chain reaches it; a call on one keeps the type's file.
+not known: it is recorded as ``None``, like an ambiguous name, and so is every class whose
+in-repo parent chain reaches it. A call on one keeps the type's file only when that class
+declares the method there (``unknown_methods``, built from the members the parse kept; a
+method the grammar read as a constructor counts).
 
 ``callresolve.py`` then sends ``obj.m()`` on an ``obj`` of this type to the file of the class or
 nearest in-repo ancestor that declares ``m``, and leaves it empty when none does: a method from
@@ -24,8 +25,10 @@ a library base class, one added at runtime (GORM's ``save``) or by an AST transf
 
 A base or trait is kept only when exactly one of its candidate FQCNs is a repository class
 (its import, the same package, a wildcard import) or it is declared in the same file. Only
-``.groovy`` files are indexed, so a Java base class ends the chain. Two repository classes
-sharing a simple name make that name ambiguous: nothing resolves through it.
+``.groovy`` files are indexed here; a base that is no Groovy class keeps its candidates
+(:func:`foreign_bases`), and ``related.py`` continues the chain into the repository's Java
+classes. Two repository classes sharing a simple name make that name ambiguous: nothing
+resolves through it.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from tree_sitter import Node
 
 from ..index_common import ClassHeritage, record_distinct
 from ..treesitter import node_text
-from .functions import name_text
+from .functions import STATEMENT_WORDS, name_text
 
 _CLASS_DECLS = ("class_declaration", "interface_declaration", "enum_declaration",
                 "trait_declaration")
@@ -81,6 +84,44 @@ def _capitalize(name: str) -> str:
     if len(name) > 1 and name[1].isupper():
         return name
     return name[:1].upper() + name[1:]
+
+
+_CLASS_DECLS = ("class_declaration", "interface_declaration", "enum_declaration", "trait_declaration")
+
+
+def class_method_names(root: Node, source: bytes) -> dict[str, set[str]]:
+    """Class simple name → the methods a bare or ``this`` call in it can mean in this file: its
+    own (generated property accessors included) and its enclosing classes'. An anonymous
+    class's methods belong to no named class, so a call in a named method never lands on them.
+    A class whose body has a parse error is left out."""
+    out: dict[str, set[str]] = {}
+
+    def walk(node: Node, outer: set[str]) -> None:
+        for child in node.named_children:
+            if child.type in _CLASS_DECLS:
+                nm = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
+                if nm is None or body is None:
+                    continue
+                own: set[str] = set()
+                for m in body.named_children:
+                    if m.type in ("method_declaration", "constructor_declaration"):
+                        name = m.child_by_field_name("name")
+                        if name is not None:
+                            own.add(name_text(name, source))
+                    elif m.type == "field_declaration":
+                        own.update(a for a, _ in property_accessors(m, source))
+                names = own | outer
+                # A parse error in the body may have moved members out of it: leave the class
+                # out, so a call in it checks every method the file declares.
+                if not body.has_error:
+                    out.setdefault(node_text(nm, source), set()).update(names)
+                walk(body, names)
+            elif child.type != "class_body":  # an anonymous class is not a named scope
+                walk(child, outer)
+
+    walk(root, set())
+    return out
 
 
 def property_accessors(field: Node, source: bytes) -> list[tuple[str, str | None]]:
@@ -204,6 +245,11 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
                 if (node.type in ("interface_declaration", "trait_declaration")
                         or nm is None or node_text(nm, source) != own_name):
                     complete = False
+                    # still the class's method, for the check a class whose methods are not
+                    # all known gets (`unknown_methods`) — unless error recovery made a
+                    # statement keyword into one (`catch (Exception e) { … }`)
+                    if nm is not None and node_text(nm, source) not in STATEMENT_WORDS:
+                        add(node_text(nm, source), None)
             elif member.type == "method_declaration":
                 nm = member.child_by_field_name("name")
                 if nm is None:
@@ -227,6 +273,21 @@ def _in_repo(ref: tuple[str, tuple[str, ...], bool],
     if local or len([c for c in candidates if fqcn_index.get(c) is not None]) == 1:
         return written.rsplit(".", 1)[-1]
     return None
+
+
+def foreign_bases(
+    frags: list[tuple[str, HeritageFrag]], fqcn_index: dict[str, str | None],
+) -> dict[str, tuple[str, ...] | None]:
+    """Class simple name → the FQCNs its base class may be, for each class whose base is no
+    Groovy class of the repository (a library class, or one of the repository's Java classes:
+    ``related.py`` looks the candidates up in the Java index). ``None`` when two classes of one
+    simple name name different bases."""
+    out: dict[str, tuple[str, ...] | None] = {}
+    for _, frag in frags:
+        if frag.base is None or frag.base[2] or any(c in fqcn_index for c in frag.base[1]):
+            continue
+        record_distinct(out, frag.fqcn.rsplit(".", 1)[-1], frag.base[1])
+    return out
 
 
 def build_heritage(
@@ -277,7 +338,7 @@ def build_heritage(
             inherited = trait_methods(frag, {simple}) if frag.complete else None
         except _Unknown:
             inherited = None
-        if inherited is None:  # its methods are not known: a call on it keeps the type's file
+        if inherited is None:  # its methods are not known (see `unknown_methods`)
             out[simple] = None
             unknown.add(simple)
             continue

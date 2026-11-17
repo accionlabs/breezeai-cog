@@ -230,8 +230,8 @@ wheels = [
 
 [[package]]
 name = "dekobon-tree-sitter-groovy"
-version = "0.5.0"
-source = { git = "https://github.com/accionlabs/tree-sitter-groovy?rev=groovy-grammar-upstream#a8c71ebe4bc9d1815982bf854a5e3b8809340aef" }
+version = "0.6.0"
+source = { git = "https://github.com/accionlabs/tree-sitter-groovy?rev=groovy-grammar-upstream#833593dec373265e8fa80e1efaa33a126f0ef19f" }
 
 [[package]]
 name = "fastapi"

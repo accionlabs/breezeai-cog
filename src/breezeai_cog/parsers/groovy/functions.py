@@ -13,15 +13,22 @@ Default visibility in Groovy is **public** (Java's is package-private).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
-from ..callresolve import CallResolver, noop_resolver
+from ..callresolve import CallResolver, method_types, noop_resolver
+from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
 from .statements import MEMBER_ACCESS, extract_statements
 
 _VISIBILITY = ("public", "private", "protected")
+#: Statement keywords error recovery can leave as a constructor's name (``catch (E e) { }``
+#: after a method the grammar broke off).
+STATEMENT_WORDS = frozenset({"catch", "finally", "for", "if", "else", "while", "do", "switch",
+                             "synchronized", "try", "return"})
 
 
 def has_declaration_error(node: Node) -> bool:
@@ -34,8 +41,13 @@ def has_declaration_error(node: Node) -> bool:
     becomes a method ``ID(...)``). Such a node must NOT be emitted — capturing nothing is a
     known gap, but capturing a method that does not exist is high-confidence wrong data
     (§ reliability: absent beats wrong). A messy method *body* (an error nested deeper) is
-    fine — the header is trustworthy — so we check only direct children."""
-    return any(c.type == "ERROR" or c.is_missing for c in node.children)
+    fine — the header is trustworthy — so we check only direct children, and the name: one the
+    grammar could not read (``default Class<? extends T> kind()`` leaves a ``MISSING`` inside
+    it) would be emitted empty."""
+    if any(c.type == "ERROR" or c.is_missing for c in node.children):
+        return True
+    name = node.child_by_field_name("name")
+    return name is not None and (name.has_error or not name.text)
 
 
 _INTERPOLATIONS = ("gstring_dollar_interpolation", "gstring_brace_interpolation")
@@ -133,25 +145,33 @@ def _callee(call: Node, source: bytes) -> tuple[str, str | None, bool]:
     return node_text(fn, source), None, True
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
+    scope: Mapping[str, str | None] | None = None, owner: str | None = None,
+) -> list[Call]:
+    """The calls in a method body; ``scope`` is the method's own variable types, ``owner`` the
+    simple name of the class it is declared in: a bare, ``this`` or ``super`` call may mean
+    one of that class's own or inherited methods."""
     if body is None:
         return []
     calls: list[Call] = []
     seen: set[str] = set()
 
-    def visit(node: Node) -> None:
+    def visit(node: Node, inner: bool) -> None:
         # Descend into every scope, including inline closures — their calls belong to
-        # the nearest named enclosing function (mirrors Java lambda handling).
+        # the nearest named enclosing function (mirrors Java lambda handling). Inside an
+        # anonymous class body (`inner`), `this` and a bare name mean that class's members.
         for child in node.named_children:
             if child.type in ("method_invocation", "command_chain"):
                 name, receiver, resolvable = _callee(child, source)
                 if name and name not in seen:
                     seen.add(name)
-                    path = resolve(name, receiver) if resolvable else None
+                    path = (resolve(name, receiver, None if inner else owner, scope)
+                            if resolvable else None)
                     calls.append(Call(name=name, path=path))
-            visit(child)
+            visit(child, inner or child.type == "class_body")
 
-    visit(body)
+    visit(body, False)
     return calls
 
 
@@ -179,48 +199,92 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     return names
 
 
-def type_map(root: Node, source: bytes) -> dict[str, str]:
-    """Variable name → declared type, for receiver-type call resolution (Phase 2).
-    Fields (the DI pattern) win over params/locals on name collisions. Untyped Groovy
-    declarations (``def x`` / no type) simply contribute nothing — honest-null."""
-    types: dict[str, str] = {}
-
-    def add(name_node: Node | None, type_node: Node | None, *, override: bool) -> None:
-        if name_node is None or type_node is None:
-            return
-        name = node_text(name_node, source)
-        if override or name not in types:
-            types[name] = node_text(type_node, source)
-
-    _KEYWORD_TYPES = {"class", "interface", "enum", "trait"}
+def type_map(root: Node, source: bytes) -> dict[str, str | None]:
+    """Variable name → declared type across the whole file, for a name a method does not
+    declare itself (a field it inherits): kept only while every typed declaration of the name
+    in the file agrees, else ``None``. Untyped ones (``def x = f()``, ``x -> …``) say nothing;
+    a declaration with a corrupt header is skipped."""
+    types: dict[str, str | None] = {}
 
     def walk(n: Node) -> None:
         for c in n.named_children:
             if has_declaration_error(c):
                 continue  # corrupt header — do not seed receiver-type resolution
-            if c.type == "field_declaration":
-                tnode = c.child_by_field_name("type")
-                # A nested type misparsed as a field has a keyword as its "type" — inert for
-                # resolution, but drop it so the type index stays honest.
-                if tnode is not None and node_text(tnode, source) in _KEYWORD_TYPES:
-                    continue
-                for d in c.named_children:
-                    if d.type == "variable_declarator":
-                        add(d.child_by_field_name("name"), tnode, override=True)
-            elif c.type == "formal_parameter":
-                add(c.child_by_field_name("name"), c.child_by_field_name("type"), override=False)
-            elif c.type == "local_variable_declaration":
-                tnode = c.child_by_field_name("type")
-                for d in c.named_children:
-                    if d.type == "variable_declarator":
-                        add(d.child_by_field_name("name"), tnode, override=False)
-                # A typed local (``RestTemplate rt = …``) holds its names directly.
-                for name_node in c.children_by_field_name("name"):
-                    add(name_node, tnode, override=False)
+            for name, typ in declarations(c, source):
+                if typ is not None:
+                    record_distinct(types, name, typ)
             walk(c)
 
     walk(root)
     return types
+
+
+#: A nested type the grammar misread as a field has a keyword as its "type".
+_KEYWORD_TYPES = frozenset({"class", "interface", "enum", "trait"})
+
+
+def _created(declarator: Node, source: bytes) -> str | None:
+    """``def x = new T(…)``: the type it creates; None for any other initializer."""
+    value = declarator.child_by_field_name("value")
+    if value is None or value.type != "object_creation_expression":
+        return None
+    created = value.child_by_field_name("type")
+    return node_text(created, source) if created is not None else None
+
+
+def declarations(node: Node, source: bytes) -> list[tuple[str, str | None]]:
+    """The names one declaration node introduces, with their written type (None: untyped —
+    ``def x``, ``x ->``, ``for (x in xs)``)."""
+    t = node.type
+    typ_node = node.child_by_field_name("type")
+    typ = node_text(typ_node, source) if typ_node is not None else None
+    if t in ("field_declaration", "local_variable_declaration"):
+        if has_declaration_error(node) or typ in _KEYWORD_TYPES:
+            return []
+        out: list[tuple[str, str | None]] = []
+        for d in node.named_children:
+            if d.type == "variable_declarator" and (nm := d.child_by_field_name("name")) is not None:
+                out.append((node_text(nm, source), typ if typ is not None else _created(d, source)))
+        # a typed local holds its names directly: `Audit w = null, w2 = null`
+        out += [(node_text(n, source), typ) for n in node.children_by_field_name("name")]
+        return out
+    if t in ("formal_parameter", "catch_formal_parameter", "closure_parameter"):
+        nm = node.child_by_field_name("name")
+        return [(node_text(nm, source), typ)] if nm is not None else []
+    if t == "for_in_statement":
+        nm = node.child_by_field_name("variable")
+        return [(node_text(nm, source), typ)] if nm is not None else []
+    return []
+
+
+def class_fields(body: Node | None, source: bytes) -> dict[str, str | None]:
+    """A class body's own fields and properties → their written type (None for ``def``)."""
+    out: dict[str, str | None] = {}
+    for member in body.named_children if body is not None else ():
+        if member.type == "field_declaration":
+            out.update(declarations(member, source))
+    return out
+
+
+def method_scope(
+    node: Node, source: bytes, fields: Mapping[str, str | None],
+) -> dict[str, str | None]:
+    """The variable types a method's calls resolve with (``callresolve.method_types``)."""
+    params: list[tuple[str, str | None]] = []
+    ps = node.child_by_field_name("parameters")
+    for p in ps.named_children if ps is not None else ():
+        params.extend(declarations(p, source))
+    locals_: list[tuple[str, str | None]] = []
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            locals_.extend(declarations(c, source))
+            walk(c)
+
+    body = node.child_by_field_name("body")
+    if body is not None:
+        walk(body)
+    return method_types(fields, params, locals_)
 
 
 def build_method(
@@ -235,7 +299,13 @@ def build_method(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    fields: Mapping[str, str | None] | None = None,
+    constructor: bool = False,
 ) -> tuple[Function, list[Statement]]:
+    """``fields``: the enclosing class's fields (outer classes' included), for the method's
+    variable types; a script method has none of its own. ``constructor``: the node is one of its
+    class's constructors (the caller checks the name; the grammar's ``constructor_declaration``
+    alone does not tell)."""
     name = decl_name(node, source)
     start, end = line_span(node)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
@@ -250,7 +320,7 @@ def build_method(
         parentId=parent_id,
         path=path,
         name=name,
-        type="constructor" if node.type == "constructor_declaration" else "method",
+        type="constructor" if constructor else "method",
         visibility=visibility,
         isStatic=is_static,
         params=extract_params(node.child_by_field_name("parameters"), source),
@@ -258,7 +328,7 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, method_scope(node, source, fields or {}), class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
