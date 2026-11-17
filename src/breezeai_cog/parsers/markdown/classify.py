@@ -108,9 +108,9 @@ def classify(
         return "agent_instructions"
 
     stem, _, suffix = upper.partition(".")
-    if stem == "README" and suffix in ("MD", "MDX", "RST"):
+    if stem == "README" and suffix in ("MD", "RST"):
         return "readme"
-    if stem in _CHANGELOG_NAMES and suffix in ("MD", "MDX"):
+    if stem in _CHANGELOG_NAMES and suffix == "MD":
         return "changelog"
 
     if _is_adr(name, dirs, headings):
