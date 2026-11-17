@@ -459,8 +459,10 @@ REACT_GUARDS = (b"react-router", b"'react'", b'"react"')
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    if not any(g in dc.source for g in REACT_GUARDS):
-        return None  # a Vue / Angular `{ path, component }` array is not a React route
+    # Routes need a router import. A bare ``react`` import (every component file) is enough to be
+    # claimed by the React parser, but not to make a ``{ path, component }`` array a route.
+    if b"react-router" not in dc.source:
+        return None
     routes = detect_react_routes(
         dc.root, dc.source, dc.path,
         const_values=getattr(dc.ctx.resolution_index, "const_values", None),
