@@ -130,7 +130,7 @@ def _framework_served(s: Statement) -> bool:
         return True
     # A Next.js MDX page: the file's content is the page, no named component handles it.
     if (s.framework == "nextjs" and s.routeKind == "page" and s.nodeType == "synthetic"
-            and s.parentId.endswith(".mdx")):
+            and s.parentId.lower().endswith(".mdx")):
         return True
     # A Relay node field of a server's schema: the GraphQL server resolves it.
     return (s.framework == "graphql" and s.routeKind == "query" and s.responseDTO == "Node"
