@@ -18,6 +18,10 @@ external. A top-level statement that does not parse (prose that starts with ``im
 block) is dropped, never read as an import. The Markdown content itself is not captured, and
 ``loc`` counts only the ESM lines that parse — prose is not lines of code.
 
+This parser alone owns ``.mdx``, so an MDX document (a ``README.mdx``, a Docusaurus or Nextra
+page) is a code file with its imports, not a Markdown ``doc`` / ``readme`` / ``changelog``
+statement: its title, front matter and headings are not captured.
+
 The file's framework detectors run on it (``run_additive("mdx", …)``) — a framework that serves
 ``.mdx`` files as pages registers one with a ``Gate("mdx", …)`` (Next.js:
 ``parsers/typescript_nextjs/mdx_pages.py``).
@@ -28,17 +32,20 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from ...emit import file_id
+from ...logging import get_logger
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..typescript.imports import extract_imports
-from .esm import blank_ranges, esm_shadow
+from .esm import MAX_PARSES_PER_FILE, blank_ranges, esm_shadow
 
 #: The ESM blocks are JavaScript with JSX (``export const x = <A />``); TypeScript syntax in
 #: them parses too.
 _GRAMMAR = "tsx"
+
+log = get_logger("breezeai_cog.parsers.mdx")
 
 
 class MdxParser(BaseParser):
@@ -57,14 +64,20 @@ class MdxParser(BaseParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         timeout = ctx.parse_timeout_micros
+        probes = 0
 
         def parses(code: bytes) -> bool:
+            nonlocal probes
+            probes += 1
             try:
                 return not parse_source(_GRAMMAR, code, timeout).root_node.has_error
             except ValueError:  # parse timeout: not code we can read
                 return False
 
         shadow = esm_shadow(ctx.source, parses)
+        if probes >= MAX_PARSES_PER_FILE:
+            # The scan stopped reading ESM here: imports after this point may be missing.
+            log.warning("mdx.esm_parse_budget_reached", path=ctx.path, budget=MAX_PARSES_PER_FILE)
         try:
             root = parse_source(_GRAMMAR, shadow, timeout).root_node
             broken = [(n.start_byte, n.end_byte) for n in root.children if n.has_error]

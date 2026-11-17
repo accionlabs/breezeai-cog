@@ -50,7 +50,8 @@ _BOM = b"\xef\xbb\xbf"
 #: not parse at all fails to compile — so the bound only keeps a broken file linear.
 MAX_CONTINUATION_PARAGRAPHS = 20
 #: The most code a continued block may hold. ESM headers are short; a block that would need more
-#: is a broken file, and re-parsing large prose would only cost time.
+#: is a broken file, and re-parsing large prose would only cost time. A block's first paragraph
+#: is not capped: one ``export const data = [...]`` may be large, and it is parsed once.
 MAX_CONTINUATION_BYTES = 16 * 1024
 #: The most block parses one file may spend. A real MDX file has a few ESM blocks; a file with
 #: thousands of ``import``-led paragraphs (generated, or broken) would otherwise cost up to
@@ -244,17 +245,21 @@ def _block_end(lines: list[bytes], start: int, parses: Callable[[bytes], bool]) 
     if parses(b"\n".join(lines[start:end])):
         return end, True
     stop = end
+    #: Byte length of ``b"\n".join(lines[start:stop])``, kept as lines are added so a large
+    #: paragraph is measured before it is copied into the joined code.
+    size = sum(len(line) for line in lines[start:end]) + end - start - 1
     for _ in range(MAX_CONTINUATION_PARAGRAPHS):
         k = stop
         while k < len(lines) and not lines[k].strip():
             k += 1
         if k >= len(lines):
             break
-        stop = _paragraph_end(lines, k)
-        code = b"\n".join(lines[start:stop])
-        if len(code) > MAX_CONTINUATION_BYTES:
+        nxt = _paragraph_end(lines, k)
+        size += sum(len(line) + 1 for line in lines[stop:nxt])
+        if size > MAX_CONTINUATION_BYTES:
             break
-        if parses(code):
+        stop = nxt
+        if parses(b"\n".join(lines[start:stop])):
             return stop, True
     return end, False
 

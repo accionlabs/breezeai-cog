@@ -302,6 +302,56 @@ def test_block_parses_are_bounded_per_file() -> None:
     assert calls == MAX_PARSES_PER_FILE
 
 
+def test_shadow_keeps_byte_offsets_with_bom_crlf_and_front_matter() -> None:
+    """The shadow is the file's own length and an ESM line keeps its byte offset, so node
+    positions in it are the file's lines and columns."""
+    from breezeai_cog.parsers.mdx.esm import esm_shadow
+
+    src = (
+        "\ufeff---\r\ntitle: x\r\n---\r\n\r\nimport A from './a'\r\n\r\n# Hi\r\n\r\n"
+        "```js\r\nimport B from './b'\r\n```\r\n\r\nexport const m = {\r\n\r\n  t: 1\r\n}\r\n"
+    ).encode()
+    shadow = esm_shadow(src, _parses)
+    assert len(shadow) == len(src)
+    assert shadow.count(b"\n") == src.count(b"\n")
+    for code in (b"import A from './a'", b"export const m = {", b"  t: 1"):
+        assert shadow.index(code) == src.index(code)
+    assert b"import B" not in shadow and b"title" not in shadow and b"\xef" not in shadow
+
+
+def test_parse_budget_reached_is_logged(capture) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        capture({"docs/a.mdx": "import a\n\n" * 200})
+    [event] = [e for e in logs if e["event"] == "mdx.esm_parse_budget_reached"]
+    assert event["path"] == "docs/a.mdx"
+
+
+def test_parse_budget_not_reached_is_not_logged(capture) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        capture({"docs/a.mdx": "import Head from 'next/head'\n\n# A\n"})
+    assert not [e for e in logs if e["event"] == "mdx.esm_parse_budget_reached"]
+
+
+def test_a_paragraph_over_the_cap_is_not_parsed_as_continuation() -> None:
+    """A paragraph that would take a continued block past the cap ends the search: only the
+    block's own paragraph is parsed."""
+    from breezeai_cog.parsers.mdx.esm import MAX_CONTINUATION_BYTES
+
+    calls: list[int] = []
+
+    def parses(code: bytes) -> bool:
+        calls.append(len(code))
+        return False
+
+    big = ("word " * (MAX_CONTINUATION_BYTES // 4) + "\n").encode()
+    esm_lines(b"export const meta = {\n\n" + big, parses)
+    assert calls == [len(b"export const meta = {")]
+
+
 def test_upper_case_mdx_suffix(capture) -> None:
     recs = capture(
         {"docs/Guide.MDX": "import { Chart } from './Chart'\n\n# Guide\n", "docs/Chart.tsx": CHART}
