@@ -1,6 +1,6 @@
 # Next.js — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/typescript_nextjs/` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_nextjs.py`
+Parser: `src/breezeai_cog/parsers/typescript_nextjs/` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_nextjs.py`, `tests/unit/test_roles_nextjs_mdx.py`
 
 Next.js routes by file location, so the address comes from the path. Route handlers
 (`nextjs-routes`) and pages (`nextjs-pages`) are additive detectors: a route file another parser
@@ -22,6 +22,27 @@ routes.
 | `middleware.ts` / `proxy.ts` at an app's root or its `src/` (a folder with a `next.config.*` or a `package.json` declaring `next`); `proxy.ts` only when `next` is 16+ (a version that can't be read, e.g. `workspace:*`, counts as unknown) | Guard | `middleware` / `proxy` in `guards` of the paths its `matcher` covers; `authRequired` stays empty | Runs before many handlers; may only rewrite or log |
 | `fetch(...)` | Outbound | `api_call` | Our code calling out |
 
-Every record reports the node it stands for: `nodeType` is `export_statement` (a page's default
+## MDX pages
+
+With `@next/mdx`, an `.mdx` file is a page like a `.tsx` one. The MDX parser owns the file
+(`language: "mdx"`); the `nextjs-mdx-pages` detector
+(`typescript_nextjs/mdx_pages.py`) adds the page, reading the same `next.config` facts as the
+`.tsx` pages — no config file is read twice.
+
+| Construct | Role | Record | Why |
+|---|---|---|---|
+| `app/**/page.mdx`, with `mdx` (or `page.mdx`) in the app's `pageExtensions` | Binding | `route`, `routeKind: page`, directory path as `endpoint`, `handler` empty | A page reached by URL; it is the file's content, not a named component |
+| `pages/**/*.mdx` outside `pages/api`, with `mdx` in `pageExtensions` | Binding | `route`, `routeKind: page`, file path as `endpoint` (`index` → its folder), `handler` empty | A page reached by URL |
+| `.mdx` page when `pageExtensions` is unset or does not list `mdx` | — | — | Next.js serves only `.tsx` / `.ts` / `.jsx` / `.js` by default |
+| `.mdx` page when `pageExtensions` is not a literal list | — | — | Unknown which files are pages |
+| `.mdx` under `_x`, `(.)x`, `@x`, `pages/api`, or `_app` / `_document` / `_error` / `404` / `500` | — | — | Same rules as `.tsx` pages |
+| `.mdx` outside a Next.js app | — | — (File record only) | Not a Next.js page |
+
+`basePath` goes in front of the endpoint, and `middleware.ts` / `proxy.ts` add their guard, as
+for `.tsx` pages. The record comes from the file path, so `nodeType` is `synthetic`, on line 1,
+and `text` is the file's first line. An app whose pages are all `.mdx` is still found as a
+Next.js app (`next.apps` reads `.mdx` paths too).
+
+Every `.ts` / `.tsx` / `.js` / `.jsx` record reports the node it stands for: `nodeType` is `export_statement` (a page's default
 export, a route's exported verb or default handler) or the handler's declaration
 (`export default handler`), and `text` is that node's source.

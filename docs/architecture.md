@@ -264,7 +264,9 @@ Additive detectors can add their own facts to it by registering them (`register_
 A parser reads its own language's index, and after it the indexes of the languages it lists in
 `related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
 resolves, and C reads the C++ index for the functions defined in `extern "C"`. CUDA reads the
-C++ and C indexes, so a `.cu` file's includes and calls resolve into both.
+C++ and C indexes, so a `.cu` file's includes and calls resolve into both. MDX reads the
+TypeScript index: an `.mdx` file's imports resolve through the tsconfig aliases, and the Next.js
+MDX page detector reads the `next.*` facts the `.tsx` pages use, so no `next.config` is read twice.
 
 > **Decision —** a parser reads related languages' indexes only after its own, and binds a name
 > from them only when they agree on one file.
