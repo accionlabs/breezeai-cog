@@ -32,7 +32,8 @@ from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
 from .heritage import class_method_names
 from .imports import GroovyIndex, build_fqcn_index, extract_imports, import_aliases
-from .related import Overlay, file_heritage, groovy_view
+from ..java.imports import JavaIndex
+from ..jvm_related import Overlay, file_heritage, jvm_view
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
@@ -75,7 +76,8 @@ class GroovyParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
-        view = groovy_view(idx, ctx.related_indexes.get("java")) if isinstance(idx, GroovyIndex) else None
+        view = (jvm_view(idx, ctx.related_indexes.get("java"), JavaIndex, ".java")
+                if isinstance(idx, GroovyIndex) else None)
         fqcn = view.fqcn if view is not None else idx  # bare FqcnIndex/None still ok
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn

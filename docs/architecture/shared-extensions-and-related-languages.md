@@ -363,8 +363,9 @@ flowchart TD
 | C++ | C | C++ can call any C function |
 | C | C++ | only C++ functions marked `extern "C"`, which the C++ index must flag |
 | Kotlin | Java | Kotlin calls Java classes |
-| Groovy | Java | Groovy imports, calls and extends Java classes (adopted; Java does not read the Groovy index) |
-| Java | Kotlin | Java calls Kotlin classes |
+| Groovy | Java | Groovy imports, calls and extends Java classes (adopted) |
+| Java | Groovy | Java imports, calls and extends Groovy classes (adopted) |
+| Java | Kotlin | Java calls Kotlin classes (not yet) |
 | TypeScript | (JavaScript is already the same parser) | — |
 
 ### 5.4 It's separate from mechanism A
@@ -835,21 +836,21 @@ competing languages (VB6, MATLAB, Pascal).
 | Family | Members | What it would link |
 |---|---|---|
 | C | C, C++, Objective-C, CUDA | calls across C-family files |
-| JVM | Java, Kotlin, Scala, Groovy | Groovy calling a Java class (adopted, see below); Kotlin calling a Java class and the reverse; the Java, Groovy and Kotlin indexes already share the same `fqcn` shape |
+| JVM | Java, Kotlin, Scala, Groovy | Groovy and Java calling each other's classes (adopted, see below); Kotlin calling a Java class and the reverse; the Java, Groovy and Kotlin indexes already share the same `fqcn` shape |
 | .NET | C#, VB.NET | calls across a mixed solution; the VB index already matches a slice of the C# index |
 
 **Groovy → Java is adopted.** Groovy and Java compile together, and a Groovy file's imports of
 the repository's Java classes were listed as external, its calls on them unlinked. The Groovy
 parser lists `related_languages = ("java",)` and combines the two indexes once per worker
-(`parsers/groovy/related.py`): fully-qualified names and the same-package rule look in the Groovy
+(`parsers/jvm_related.py`): fully-qualified names and the same-package rule look in the Groovy
 classes, then the Java ones; a simple name only one language declares takes that language's
 class entry. One both declare means the Groovy class, as before Java was read, except in a file
 whose import or package binds it to the Java class: there it is ambiguous, so a call on it
 checks only the methods that class declares in the file the binding names, and a Java class
 whose parent has such a name ends its chain there. A Groovy class whose base is no Groovy class
 keeps the base's candidate names, and exactly one Java class among them becomes its parent.
-The Java index's shape (`fqcn`, `class_heritage`, `unknown_methods`) is the Groovy index's, so
-no new index format was needed. The reverse (Java calling Groovy classes) is not adopted.
+The Java index's shape (`fqcn`, `class_heritage`, `unknown_methods`, `foreign_bases`) is the
+Groovy index's, so no new index format was needed.
 
 Measured before adopting it, on three public mixed Groovy/Java repositories (Grails, Groovy
 itself, Spock): about 4,150 Groovy imports moved from `externalImports` to `importFiles`
@@ -857,6 +858,21 @@ itself, Spock): about 4,150 Groovy imports moved from `externalImports` to `impo
 (Grails 1,830, Groovy 647, Spock 6). No call lost or changed its `path`, except two bare calls
 whose name the class declares and also imports statically, which are now null (Groovy picks
 between the two by the arguments). Java captures did not change.
+
+**Java → Groovy is adopted too**, with the same rules mirrored (the same module builds
+both views): Java looks in the Java classes, then the Groovy ones; a name both declare means the
+Java class unless the file binds it to the Groovy one; a Java class whose base is no Java class
+continues into exactly one Groovy class of that name. A Groovy class's entry already holds the
+methods Java sees on it without their being written (generated property accessors, trait
+methods), so `job.getName()` from Java resolves to the Groovy file. Methods Groovy adds at run
+time (`getMetaClass`, `invokeMethod`, dynamic finders) are in no index and stay null.
+
+Measured on the same three repositories: 671 Java imports moved from `externalImports` to
+`importFiles`, all to Groovy files (Grails 665, Groovy 6, Spock 0), and 781 calls gained a
+`path` (Grails 685, Groovy 96, Spock 0). 758 land in a Groovy file and 23 in a Java ancestor
+reached through a Groovy class (`IOUtils.groovy extends SpringIOUtils.java`); two of the 781 are
+Groovy calls that now follow a Java class's chain into its Groovy parent. No call lost or changed
+its `path`, and no other field changed.
 
 The other JVM pairs and .NET are **expected, not yet measured**. Each of those parsers receives
 only its own index today, so cross-language calls there are probably unlinked. That should be
@@ -937,7 +953,7 @@ Two interactions with existing options:
    each subclass it with their own grammar, index and evidence. Adds the C/C++ ownership evidence, C++ → C and `extern "C"` lookups, and the two C++
    scope fixes in [§6](#6-how-c-and-c-link-end-to-end), checked with a before/after capture diff.
 3. **On evidence.** Measure cross-language calls on JVM and .NET captures; adopt
-   `related_languages` there if links are missing. Groovy → Java is done (§7.2); the other JVM
+   `related_languages` there if links are missing. Groovy ↔ Java is done (§7.2); the other JVM
    pairs and .NET are not measured yet. Cross-runtime bindings (§7.3) follow as their
    own proposal.
 
