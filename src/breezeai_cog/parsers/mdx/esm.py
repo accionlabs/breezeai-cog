@@ -308,11 +308,13 @@ def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int,
             if budget <= 0:
                 break
             end, ok = _block_end(lines, k, counted)
-            if ok:  # a block that never parses is not code (prose, or a broken file)
+            if ok:
                 blocks.append((k, end))
-            k = end
-            prev_blank = False
-            continue
+                k = end
+                prev_blank = False
+                continue
+            # A block that never parses is not code (prose, or a broken file): it is read as
+            # text, so a fence, tag or expression its lines open is still seen.
         _scan_line(s, line)
         prev_blank = False
         k += 1

@@ -230,6 +230,16 @@ def test_a_block_that_never_parses_does_not_hide_the_next_import() -> None:
     assert _esm("export const a = [\n\n# Heading\n\n]x\n\nimport ok from 'ok'\n") == [(6, 7)]
 
 
+def test_a_block_that_never_parses_still_opens_its_fence() -> None:
+    """The fence under a prose ``import`` line is still a fence: the code sample's import is
+    not an import, and the closing fence does not open a new one."""
+    text = (
+        "import the CSV like this:\n```js\n// load\n\nimport { load } from './loader'\n\n"
+        "load()\n```\n\nimport ok from 'ok'\n"
+    )
+    assert _esm(text) == [(9, 10)]
+
+
 def test_parse_timeout_keeps_the_file_record(capture, monkeypatch) -> None:
     from breezeai_cog.parsers.mdx import parser as mdx_parser
 
