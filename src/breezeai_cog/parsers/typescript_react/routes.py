@@ -199,6 +199,14 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
             value = c.child_by_field_name("value")
             if key and value is not None:
                 out[key] = value
+        elif c.type == "method_definition":  # loader() {…}, Component() {…}, async lazy() {…}
+            name = c.child_by_field_name("name")
+            if name is not None:
+                out[node_text(name, source).strip("'\"")] = c
+        elif c.type == "shorthand_property_identifier":  # { loader } — a variable, not a literal
+            key = node_text(c, source)
+            if key != "path":  # `{ path }` holds a variable: no readable URL (honest-null)
+                out[key] = c
     return out
 
 
