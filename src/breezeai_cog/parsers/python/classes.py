@@ -144,7 +144,8 @@ def build_class(
                 if fns[0].name == "__init__":
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
-                        for p in fns[0].params if p.name not in ("self", "cls")
+                        for p in fns[0].params
+                        if p.name not in ("self", "cls") and p.type is not None
                     ]
             else:  # class_definition — nested class, extracted parented to this one
                 sub_classes, sub_methods, sub_statements = build_class(

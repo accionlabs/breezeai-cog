@@ -107,6 +107,7 @@ def build_class(
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
+                        if p.type is not None
                     ]
             elif member.type in _NESTED_CLASS_TYPES:
                 # Member (inner) class / interface / enum / trait — its own Class parented

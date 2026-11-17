@@ -57,6 +57,7 @@ def build_class(
             constructor_params = [
                 ConstructorParam(name=param.name, type=param.type)
                 for param in extract_params(member.child_by_field_name("parameters"), source)
+                if param.type is not None
             ]
             break
     return Class.model_validate({

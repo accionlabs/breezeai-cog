@@ -574,8 +574,9 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   A plugin root is the folder holding `.claude-plugin/plugin.json` or
   `.cursor-plugin/plugin.json`; only the `commands/` and `agents/` folders directly in it count
   (a `docs/commands/` or a skill's `references/commands/` in the plugin is documentation).
-  `skill`, `agent`, `command`, `agent_instructions` and `adr` are the agent-document kinds
-  counted in `configs.capturedAgentDocuments`.
+  `skill`, `agent`, `command` and `agent_instructions` are the agent-document kinds counted in
+  `configs.capturedAgentDocuments`. An `adr` is a plain `doc`, like a README or a changelog: it
+  is not counted, and a folder holding only such files yields no ontology.
 - **Secrets.** One secret-name rule (`password`, `secret`, `token`, `api_key`, `credential`,
   `authorization`, …, `pass` as a whole `_` / `-` / `.`-separated word, as in `DB_PASS`
   or `mysql_pass` but not `passage` or `bypass`, `pwd` likewise but joined to another word

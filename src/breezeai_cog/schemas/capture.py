@@ -262,9 +262,9 @@ class ProjectMetaData(BaseModel):
         # count. Format-neutral: covers every full-capture parser, not just JSON.
         if (cfg.get("capturedDataDocuments") or 0) > 0:
             return True
-        # A typed AI / decision document (skill, agent, command, agent instructions, ADR —
-        # parsers/markdown) is content an agent uses, even in a repo with no code. Untyped docs
-        # (a README, a changelog, prose) alone are not.
+        # A typed AI document (skill, agent, command, agent instructions — parsers/markdown)
+        # is content an agent uses, even in a repo with no code. Plain docs (a README, a
+        # changelog, a decision record, prose) alone are not.
         if (cfg.get("capturedAgentDocuments") or 0) > 0:
             return True
         # IaC repos (Terraform, etc.) have no code language or functions but are real

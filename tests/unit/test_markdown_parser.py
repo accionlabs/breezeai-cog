@@ -358,6 +358,17 @@ def test_only_typed_docs_make_a_docs_only_folder_worth_writing() -> None:
     assert meta.configs["capturedAgentDocuments"] == 1 and meta.has_content()
 
 
+def test_a_folder_of_only_decision_records_is_empty_like_a_readme_only_one() -> None:
+    adr = "# Use Postgres\n\n## Status\nAccepted\n\n## Decision\nWe use Postgres.\n"
+    records = [
+        _parse("docs/adr/0001-use-postgres.md", adr),
+        _parse("docs/decisions/0002-x.md", adr),
+    ]
+    assert [r.metadata["kind"] for r in records] == ["adr", "adr"]
+    _, meta = _assemble(records)
+    assert not meta.configs.get("capturedAgentDocuments") and not meta.has_content()
+
+
 def test_front_matter_secrets_are_masked_in_the_text() -> None:
     text = (
         "---\nname: x\ndescription: d\napi_token: abc123\npassword: 'hunter2'\n"

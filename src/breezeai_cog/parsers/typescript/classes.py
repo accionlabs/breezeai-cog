@@ -133,6 +133,7 @@ def build_class(
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(child.child_by_field_name("parameters"), source)
+                        if p.type is not None
                     ]
             elif child.type in ("public_field_definition", "field_definition"):
                 # Arrow/function class field: `handleClick = () => {}` (React handler idiom).

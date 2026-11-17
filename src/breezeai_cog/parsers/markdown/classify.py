@@ -18,11 +18,10 @@ from typing import Any
 
 from .frontmatter import string_field
 
-#: The typed documents an AI agent can use, or that record a decision. A folder whose only
-#: files are untyped docs (a README, a changelog, prose) yields no ontology; one with any of
-#: these does.
+#: The typed documents an AI agent can use. A folder whose only files are plain docs (a README,
+#: a changelog, a decision record, prose) yields no ontology; one with any of these does.
 AGENT_DOCUMENT_KINDS: frozenset[str] = frozenset(
-    {"skill", "agent", "command", "agent_instructions", "adr"}
+    {"skill", "agent", "command", "agent_instructions"}
 )
 
 #: Kinds that are a ``semanticType`` of their own; a README, a changelog and a decision record

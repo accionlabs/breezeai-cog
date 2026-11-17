@@ -137,7 +137,9 @@ def _builder_chain(
         callee = cur.named_children[0] if cur.named_children else None
         if callee is None or callee.type != "navigation_expression":
             return None
-        calls.append((kotlin_suffix_name(callee, source), _positional(kotlin_call_args(cur, source))))
+        calls.append(
+            (kotlin_suffix_name(callee, source), _positional(kotlin_call_args(cur, source)))
+        )
         cur = callee.named_children[0]
     if cur is None or len(calls) < 2 or calls[-1][0] != "builder" or calls[0][0] != "build":
         return None
@@ -199,7 +201,11 @@ def _tool_fields(
                 json_schema_params(_literal_text(schema, source)) if schema else None,
             )
         if len(pos) == 3:  # Tool(name, description, inputSchema)
-            return name, kotlin_string(pos[1], source), json_schema_params(_literal_text(pos[2], source))
+            return (
+                name,
+                kotlin_string(pos[1], source),
+                json_schema_params(_literal_text(pos[2], source)),
+            )
         return name, None, None  # other overloads: positions differ by SDK version
     root, calls = chain
     if root != "Tool":
@@ -484,13 +490,22 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
                 and first.type == "call_expression"
                 and _type_callee(first, source, aliases) == "Tool"
             ):
-                fields, pos = kotlin_call_args(first, source), []  # addTool(Tool(name = …, …)) { … }
+                fields, pos = (
+                    kotlin_call_args(first, source),
+                    [],
+                )  # addTool(Tool(name = …, …)) { … }
             emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, methods, aliases))
         elif method == "addTools":
             for element, tool, handler in _registered_tools(node, source, aliases):
                 emits.append(
                     _kotlin_sdk_tool(
-                        element, kotlin_call_args(tool, source), [], handler, source, methods, aliases
+                        element,
+                        kotlin_call_args(tool, source),
+                        [],
+                        handler,
+                        source,
+                        methods,
+                        aliases,
                     )
                 )
         found.extend(e for e in emits if e is not None)

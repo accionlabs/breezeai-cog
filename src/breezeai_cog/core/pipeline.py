@@ -244,7 +244,7 @@ class _ConfigSummary:
         self.has_dockerfile = self.has_compose = False
         self.dep_total = self.dep_prod = self.dep_dev = 0
         self.captured_documents = 0
-        self.agent_documents = 0  # skill / agent / command / agent_instructions / adr
+        self.agent_documents = 0  # skill / agent / command / agent_instructions
 
     def add(self, md: dict) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1

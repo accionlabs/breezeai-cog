@@ -293,7 +293,9 @@ def test_kotlin_aliased_tool_needs_the_starter_and_the_spring_class(analyze_file
     [{"pom.xml": POM_MCP}, {"build.gradle.kts": GRADLE_KTS_MCP}],
     ids=["pom", "gradle-kts"],
 )
-def test_spring_ai_tools_with_a_build_file_starter_for_any_jobs(capture_mcp_tools, build, jobs) -> None:
+def test_spring_ai_tools_with_a_build_file_starter_for_any_jobs(
+    capture_mcp_tools, build, jobs
+) -> None:
     files = {
         **build,
         "src/main/java/demo/WeatherTools.java": JAVA_TOOLS,

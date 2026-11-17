@@ -169,7 +169,9 @@ def _collect_servers(root: Node, source: bytes, rel: str, repo_root: Path | None
     return (rel, tuple(sorted(names)), sdk_framework(source)) if names else None
 
 
-def _resolve_servers(values: list[Any], index: object) -> dict[str, tuple[frozenset[str], str]] | None:
+def _resolve_servers(
+    values: list[Any], index: object
+) -> dict[str, tuple[frozenset[str], str]] | None:
     out = {rel: (frozenset(names), framework) for rel, names, framework in values}
     return out or None
 

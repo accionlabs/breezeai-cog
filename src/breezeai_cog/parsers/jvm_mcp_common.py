@@ -100,7 +100,6 @@ def in_mcp_server_module(path: str, index: Any | None) -> bool:
     return bool(modules) and any(m == "" or path.startswith(f"{m}/") for m in modules or ())
 
 
-
 for _language in ("java", "kotlin"):
     register_fact(
         FactSpec(
@@ -242,7 +241,9 @@ def kotlin_string(node: Node | None, source: bytes) -> str | None:
     if node.type == "call_expression":  # """…""".trimIndent()
         callee = node.named_children[0] if node.named_children else None
         if callee is not None and callee.type == "navigation_expression":
-            if kotlin_suffix_name(callee, source) == "trimIndent" and not kotlin_call_args(node, source):
+            if kotlin_suffix_name(callee, source) == "trimIndent" and not kotlin_call_args(
+                node, source
+            ):
                 return kotlin_string(callee.named_children[0], source)
         return None
     if node.type != "string_literal":
