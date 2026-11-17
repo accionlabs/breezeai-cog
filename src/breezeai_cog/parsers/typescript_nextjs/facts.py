@@ -4,7 +4,8 @@
   file under ``app/`` or ``pages/`` (its parent when that is ``src``) holding a
   ``next.config.*``, or whose ``package.json`` depends on ``next``. A file-based page counts
   only inside one of these — Gatsby also routes ``src/pages/*.tsx``, and Angular has
-  ``src/app``.
+  ``src/app``. ``.mdx`` files count by their path too (a fact source), so an app whose pages
+  are all MDX is an app.
 * ``next.middlewares`` — ``middleware.(ts|js)``, or ``proxy.(ts|js)`` (its Next.js 16 name):
   app directory → (the file's name — ``middleware`` / ``proxy``, the guard its routes get —
   its ``config.matcher`` patterns, or ``None`` when it has no matcher: runs on every route). A
@@ -314,6 +315,7 @@ def _resolve_middlewares(
 # Every file: where a file lives decides it, not what it says.
 register_fact(FactSpec(
     name=APPS, language="typescript", gate=(b"",), collect=_collect_app, resolve=_resolve_apps,
+    sources=(".mdx",),  # read by path only: no tree
 ))
 register_fact(FactSpec(
     name=MIDDLEWARES, language="typescript", gate=(b"export",),
