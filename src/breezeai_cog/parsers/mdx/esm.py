@@ -267,15 +267,28 @@ def _block_end(lines: list[bytes], start: int, parses: Callable[[bytes], bool]) 
     return end, False
 
 
-def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int, int]]:
+def esm_lines(
+    source: bytes,
+    parses: Callable[[bytes], bool],
+    budget_spent: Callable[[], None] | None = None,
+) -> list[tuple[int, int]]:
     """The ESM blocks of an MDX ``source`` as 0-based ``[start, end)`` line ranges.
     ``parses(code)`` says whether a block of code parses without error; it is called at most
-    :data:`MAX_PARSES_PER_FILE` times."""
+    :data:`MAX_PARSES_PER_FILE` times. ``budget_spent()`` is called once when ESM is left
+    unread because that budget is spent (not when the file simply used all of it)."""
     budget = MAX_PARSES_PER_FILE
+    reported = False
+
+    def spent() -> None:
+        nonlocal reported
+        if budget_spent is not None and not reported:
+            reported = True
+            budget_spent()
 
     def counted(code: bytes) -> bool:
         nonlocal budget
         if budget <= 0:
+            spent()
             return False  # out of budget: not read as code (a miss, never a false edge)
         budget -= 1
         return parses(code)
@@ -314,6 +327,7 @@ def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int,
                 continue
         if prev_blank and s.at_top() and _ESM_START.match(line):
             if budget <= 0:
+                spent()
                 break
             end, ok = _block_end(lines, k, counted)
             if ok:
@@ -329,9 +343,13 @@ def esm_lines(source: bytes, parses: Callable[[bytes], bool]) -> list[tuple[int,
     return blocks
 
 
-def esm_shadow(source: bytes, parses: Callable[[bytes], bool]) -> bytes:
+def esm_shadow(
+    source: bytes,
+    parses: Callable[[bytes], bool],
+    budget_spent: Callable[[], None] | None = None,
+) -> bytes:
     """``source`` with only its ESM lines kept: every other byte but ``\\n`` becomes a space."""
-    keep = esm_lines(source, parses)
+    keep = esm_lines(source, parses, budget_spent)
     return keep_lines(source, keep)
 
 

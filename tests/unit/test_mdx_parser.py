@@ -351,6 +351,23 @@ def test_parse_budget_reached_is_logged(capture) -> None:
     assert event["path"] == "docs/a.mdx"
 
 
+def test_budget_spent_is_reported_only_when_esm_is_left_unread() -> None:
+    """A file that uses exactly its whole budget and has no more ESM lost nothing: not
+    reported. One more ESM block after it is left unread: reported once."""
+    from breezeai_cog.parsers.mdx.esm import MAX_PARSES_PER_FILE
+
+    reports: list[None] = []
+    full = b"import a from 'a'\n\n" * MAX_PARSES_PER_FILE
+    assert len(esm_lines(full, lambda _: True, lambda: reports.append(None))) == MAX_PARSES_PER_FILE
+    assert reports == []
+    esm_lines(
+        full + b"import b from 'b'\n\nimport c from 'c'\n",
+        lambda _: True,
+        lambda: reports.append(None),
+    )
+    assert reports == [None]
+
+
 def test_parse_budget_not_reached_is_not_logged(capture) -> None:
     from structlog.testing import capture_logs
 

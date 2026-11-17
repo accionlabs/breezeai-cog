@@ -64,20 +64,18 @@ class MdxParser(BaseParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         timeout = ctx.parse_timeout_micros
-        probes = 0
 
         def parses(code: bytes) -> bool:
-            nonlocal probes
-            probes += 1
             try:
                 return not parse_source(_GRAMMAR, code, timeout).root_node.has_error
             except ValueError:  # parse timeout: not code we can read
                 return False
 
-        shadow = esm_shadow(ctx.source, parses)
-        if probes >= MAX_PARSES_PER_FILE:
+        def budget_spent() -> None:
             # The scan stopped reading ESM here: imports after this point may be missing.
             log.warning("mdx.esm_parse_budget_reached", path=ctx.path, budget=MAX_PARSES_PER_FILE)
+
+        shadow = esm_shadow(ctx.source, parses, budget_spent)
         try:
             root = parse_source(_GRAMMAR, shadow, timeout).root_node
             broken = [(n.start_byte, n.end_byte) for n in root.children if n.has_error]
