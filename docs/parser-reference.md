@@ -533,8 +533,9 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 
 ### Document parser: Markdown (`parsers/markdown/`)
 Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
-project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`, `.mdx`,
+project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`,
 `.mdc` (in any case: `README.MD`), `README.rst` and `.cursorrules`; it reads text and never builds a tree.
+`.mdx` is not a document here: it is code (JSX and imports), owned by the MDX parser.
 
 - **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
   document never counts as an analyzed language and adds no lines of code — in the full scan
@@ -566,8 +567,8 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 | `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin root's `agents/`, or with an agent key (`tools`, `model`, `color`) |
 | `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin root's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
 | `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md` (in that exact case: `docs/agents.md` is a `doc`), `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
-| `readme` | `README.md` / `.mdx` / `.rst` |
-| `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md` / `.mdx`) |
+| `readme` | `README.md` / `.rst` |
+| `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md`) |
 | `adr` | under `docs/adr/` or `docs/decisions/`; under another `adr/`, named `NNNN-*.md` or with `## Status` and `## Decision`; elsewhere `NNNN-*.md` with both headings. Never a folder's `index` / `README` or a `*template*` file |
 | `doc` | anything else |
 

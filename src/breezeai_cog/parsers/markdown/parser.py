@@ -1,6 +1,6 @@
 """MarkdownParser — one File + one whole-file Statement per Markdown document.
 
-Every ``.md`` / ``.mdx`` / ``.mdc`` file (plus ``README.rst`` and ``.cursorrules``) becomes a
+Every ``.md`` / ``.mdc`` file (plus ``README.rst`` and ``.cursorrules``) becomes a
 ``type="config"`` FileRecord — so it never counts as an analyzed language — whose ``metadata``
 holds ``{kind, category: "documentation", frontmatter, title, headings}``, and, under statement
 capture, one Statement:
@@ -141,7 +141,7 @@ _CODE_KEYWORDS = frozenset(
 #: A ``key:`` line in YAML front matter (optionally a list item).
 _FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
 #: Suffixes the parser owns in any case (:meth:`MarkdownParser.matches`).
-_SUFFIXES_ANY_CASE = frozenset({".md", ".mdx", ".mdc"})
+_SUFFIXES_ANY_CASE = frozenset({".md", ".mdc"})
 #: Folders whose ``plugin.json`` marks a plugin root (Claude Code, Cursor).
 _PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
 
@@ -149,7 +149,7 @@ _PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
 class MarkdownParser(BaseParser):
     name = "markdown"
     schema_version = SCHEMA_VERSION
-    extensions = (".md", ".mdx", ".mdc", "README.rst", ".cursorrules")
+    extensions = (".md", ".mdc", "README.rst", ".cursorrules")
 
     def matches(self, path: str | Path) -> bool:
         """The base suffix gate, and a Markdown suffix in any case (``README.MD``,
