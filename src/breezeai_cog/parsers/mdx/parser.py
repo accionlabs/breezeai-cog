@@ -1,0 +1,81 @@
+"""MdxParser — the **language parser** owning ``.mdx`` files (Markdown with JSX).
+
+An MDX file is recorded as ``language: "mdx"``, ``type: "code"``, with the files its ESM
+``import`` lines bring in (``importFiles`` / ``externalImports``) and what it ``export``s::
+
+    import { Chart } from '../components/Chart'     → importFiles ["components/Chart.tsx"]
+    export const meta = { title: 'Sales' }          → exports ["meta"]
+
+    # Sales report
+    <Chart values={[1, 2, 3]} />
+
+Only the ESM blocks are code (:mod:`.esm`); they are parsed with the ``tsx`` grammar in a
+shadow of the file (everything else blanked, so lines and columns are the file's own) and read
+by the TypeScript import extraction — relative paths, ``index`` files and the tsconfig / Vite
+aliases resolve exactly as they do from a ``.tsx`` file. The aliases come from the TypeScript
+index (``related_languages``); without it only relative imports resolve and the rest stay
+external. A top-level statement that does not parse (prose that starts with ``import``, a cut-off
+block) is dropped, never read as an import. The Markdown content itself is not captured.
+
+The file's framework detectors run on it (``run_additive("mdx", …)``) — a framework that serves
+``.mdx`` files as pages registers one with a ``Gate("mdx", …)`` (Next.js:
+``parsers/typescript_nextjs/mdx_pages.py``).
+"""
+
+from __future__ import annotations
+
+from ...emit import file_id
+from ...schemas import SCHEMA_VERSION, FileRecord
+from ...utils import count_loc
+from ..additive import run_additive
+from ..base import BaseParser, ParseContext
+from ..treesitter import parse_source
+from ..typescript.imports import extract_imports
+from .esm import blank_ranges, esm_shadow
+
+#: The ESM blocks are JavaScript with JSX (``export const x = <A />``); TypeScript syntax in
+#: them parses too.
+_GRAMMAR = "tsx"
+
+
+class MdxParser(BaseParser):
+    name = "mdx"
+    extensions: tuple[str, ...] = (".mdx",)
+    schema_version = SCHEMA_VERSION
+    #: The tsconfig / Vite aliases and the Next.js facts its detectors read.
+    related_languages = ("typescript",)
+    statement_types = ["route"]
+    frameworks = ["nextjs"]
+
+    def parse_file(self, ctx: ParseContext) -> FileRecord:
+        timeout = ctx.parse_timeout_micros
+
+        def parses(code: bytes) -> bool:
+            try:
+                return not parse_source(_GRAMMAR, code, timeout).root_node.has_error
+            except ValueError:  # parse timeout: not code we can read
+                return False
+
+        shadow = esm_shadow(ctx.source, parses)
+        root = parse_source(_GRAMMAR, shadow, timeout).root_node
+        broken = [(n.start_byte, n.end_byte) for n in root.children if n.has_error]
+        if broken:
+            shadow = blank_ranges(shadow, broken)
+            root = parse_source(_GRAMMAR, shadow, timeout).root_node
+
+        internal, external, exports, _ = extract_imports(
+            root, shadow, ctx.path, ctx.repo_root, ctx.related_indexes.get("typescript")
+        )
+        text = ctx.source.decode("utf-8-sig", "replace")
+        record = FileRecord(
+            id=file_id(ctx.path),
+            path=ctx.path,
+            type="code",
+            language="mdx",
+            loc=count_loc(text),
+            importFiles=[m for m in internal if m],
+            externalImports=[m for m in external if m],
+            exports=exports,
+        )
+        run_additive("mdx", root, ctx, record, is_fixture=self.is_fixture_file(ctx.path))
+        return record
