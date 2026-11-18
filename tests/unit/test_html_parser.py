@@ -225,6 +225,55 @@ def test_rendering_and_htmx_coexist(tmp_path) -> None:
     assert _htmx(rec) == [("POST", "/save", "attribute")]
 
 
+def _script_calls(rec) -> list[tuple[int, str | None, str | None, str | None]]:
+    return sorted((s.startLine, s.framework, s.method, s.endpoint)
+                  for s in rec.statements if s.semanticType == "api_call" and s.framework != "htmx")
+
+
+def test_page_scripts_are_read_by_every_detector(tmp_path) -> None:
+    # A plain page's inline scripts: jQuery (with the page's own jquery*.js), fetch and axios
+    # are all api_calls on the page itself; the <script src> and the htmx attribute stay as before.
+    page = ('<script src="/js/jquery.min.js"></script>\n'
+            "<script>\n"
+            "  function load() { fetch('/api/stock'); }\n"
+            "  $.get('/shop/api/orders');\n"
+            "  axios.post('/api/c', { a: 1 });\n"
+            "</script>\n"
+            '<button hx-get="/api/items">Go</button>\n')
+    rec = _parse(tmp_path, {"page.html": page}, "page.html")
+    assert _script_calls(rec) == [
+        (3, None, "GET", "/api/stock"),
+        (4, "jquery", "GET", "/shop/api/orders"),
+        (5, None, "POST", "/api/c"),
+    ]
+    assert _htmx(rec) == [("GET", "/api/items", "attribute")]
+    assert rec.functions == []
+    assert {s.parentId for s in rec.statements if s.semanticType == "api_call"} == {rec.id}
+
+
+def test_external_script_only_adds_nothing(tmp_path) -> None:
+    rec = _parse(tmp_path, {"p.html": '<script src="/js/app.js"></script>\n<p>Hi</p>'}, "p.html")
+    assert rec.statements == []
+
+
+def test_angular_template_script_calls_are_read(tmp_path) -> None:
+    # A component template keeps its markup statements; an inline script's call is added to them.
+    html = _TEMPLATE_HTML + "\n<script>fetch('/api/audit');</script>"
+    rec = _parse(
+        tmp_path,
+        {"order.component.ts": _COMPONENT_TS, "order.component.html": html},
+        "order.component.html",
+    )
+    assert rec.framework == "angular"
+    assert _script_calls(rec) == [(7, None, "GET", "/api/audit")]
+    assert {s.handler for s in rec.statements if s.nodeType == "event_binding"} == {"load", "remove"}
+
+
+def test_page_scripts_need_statement_capture(tmp_path) -> None:
+    rec = _parse(tmp_path, {"p.html": "<script>fetch('/api/x');</script>"}, "p.html", capture=False)
+    assert rec.statements == []
+
+
 def test_alpine_not_mislabeled_vue(tmp_path) -> None:
     # Alpine's @click/:class shorthand once collided with Vue — Vue needs `v-`, so an Alpine page
     # is framework=None (never vue), and Alpine records nothing.

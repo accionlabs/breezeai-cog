@@ -12,5 +12,7 @@
   <script>var API = '/api/track';</script>
   <script>$.post(API, { page: 'contact' });</script>
   <script>$.get('/api/config');</script>
+  <script>fetch('/api/contact/stats');</script>
+  <script>axios.post('/api/contact/messages', { text: 'hi' });</script>
 </body>
 </html>
