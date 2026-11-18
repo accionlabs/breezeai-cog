@@ -377,6 +377,26 @@ def _typescript_mcp(n: int) -> str:
     )
 
 
+def _php_laravel(n: int) -> str:
+    # Receiver tracking: a file-level client, closures capturing it, typed properties and
+    # promoted parameters, and chained calls — each walks scopes, so a per-item scan shows.
+    body = "".join(
+        f"// route {i}\n"
+        f"Route::get('/r{i}', function () use ($c) {{ $c->get('https://h{i}.example'); }});\n"
+        f"$f{i} = fn($x) => $c->post('https://p{i}.example');\n"
+        for i in range(n)
+    )
+    classes = "".join(
+        f"class S{i} {{ public function __construct(private Client $http) {{}}\n"
+        f"  public function m{i}() {{ return $this->http->get('https://s{i}.example'); }} }}\n"
+        for i in range(n)
+    )
+    return (
+        "<?php\nuse GuzzleHttp\\Client;\nuse Illuminate\\Support\\Facades\\Route;\n"
+        f"$c = new Client();\n{body}{classes}"
+    )
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -405,6 +425,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "markdown": ("docs/guide.md", _markdown),
     "python-mcp": ("server.py", _python_mcp),
     "typescript-mcp": ("server.ts", _typescript_mcp),
+    "php-laravel": ("routes/web.php", _php_laravel),
 }
 
 

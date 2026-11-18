@@ -202,8 +202,14 @@ class _Receivers:
                     this_kind: str | None) -> dict[str, str]:
         """Variable → kind inside one function: typed parameters plus its own assignments."""
         scope = {**inherited, **self._params(fn)}
+        return self._assigned_kinds(fn.child_by_field_name("body"), scope, props, this_kind)
+
+    def _assigned_kinds(self, body: Node | None, scope: Mapping[str, str],
+                        props: Mapping[str, str], this_kind: str | None) -> dict[str, str]:
+        """Add proven local assignments from a scope body to an inherited receiver scope."""
+        scope = dict(scope)
         assigned: dict[str, str | None] = {}
-        for node in _own_nodes(fn.child_by_field_name("body")):
+        for node in _own_nodes(body):
             if node.type != "assignment_expression":
                 continue
             left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
@@ -219,12 +225,34 @@ class _Receivers:
                 scope[name] = kind
         return scope
 
+    def file_kinds(self, root: Node) -> dict[str, str]:
+        """Receiver kinds assigned in file-level code, available to captured closures."""
+        return self._assigned_kinds(root, {}, {}, None)
+
 
 def outermost_calls(dc: DetectContext, rules: Rules) -> Iterator[tuple[Node, list[Node], str]]:
     """Every outermost call chain of the file whose receiver is one of ``rules``' kinds:
     ``(outermost call, calls from the innermost, kind)``."""
     rx = _Receivers(dc, rules)
     found: list[tuple[Node, list[Node], str]] = []
+
+    def captured(node: Node) -> set[str]:
+        """Variables a closure's ``use (...)`` clause imports — by value or by reference."""
+        use = next((c for c in node.named_children
+                    if c.type == "anonymous_function_use_clause"), None)
+        if use is None:
+            return set()
+        names: set[str] = set()
+        for item in use.named_children:
+            variable = item.named_children[0] if item.type == "by_ref" and item.named_children else item
+            if variable.type == "variable_name":
+                names.add(node_text(variable, dc.source))
+        return names
+
+    def parameter_names(node: Node) -> set[str]:
+        params = node.child_by_field_name("parameters")
+        names = (p.child_by_field_name("name") for p in params.named_children) if params is not None else ()
+        return {node_text(n, dc.source) for n in names if n is not None}
 
     def visit(node: Node, scope: Mapping[str, str], props: Mapping[str, str],
               this_kind: str | None) -> None:
@@ -233,7 +261,15 @@ def outermost_calls(dc: DetectContext, rules: Rules) -> Iterator[tuple[Node, lis
                 visit(child, {}, rx.properties(child), rx.class_kind(child))
                 continue
             if child.type in _SCOPES:
-                inherited = scope if child.type in {"anonymous_function", "arrow_function"} else {}
+                if child.type == "arrow_function":
+                    # A parameter of the same name hides the outer variable, typed or not.
+                    shadowed = parameter_names(child)
+                    inherited = {name: kind for name, kind in scope.items() if name not in shadowed}
+                elif child.type == "anonymous_function":
+                    names = captured(child)
+                    inherited = {name: kind for name, kind in scope.items() if name in names}
+                else:
+                    inherited = {}
                 visit(child, rx.local_kinds(child, inherited, props, this_kind), props, this_kind)
                 continue
             if child.type in PHP_CALL_TYPES and _outermost(child):
@@ -243,5 +279,5 @@ def outermost_calls(dc: DetectContext, rules: Rules) -> Iterator[tuple[Node, lis
                     found.append((child, calls, kind))
             visit(child, scope, props, this_kind)
 
-    visit(dc.root, {}, {}, None)
+    visit(dc.root, rx.file_kinds(dc.root), {}, None)
     return iter(found)

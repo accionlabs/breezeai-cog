@@ -21,31 +21,36 @@ class SymfonyParser(PhpParser):
 
     def claims(self, path: str, source: bytes) -> bool:
         lower = source.lower()
+        if b"namespace illuminate\\" in lower:
+            return False
         # Symfony components (HttpFoundation, EventDispatcher, Messenger) are used by many
         # non-Symfony applications — Laravel, Drupal, Slim — so they are not ownership
         # evidence. Require Symfony's routing or framework namespace instead; the event
         # components are detected additively (php_symfony/events.py).
-        if b"illuminate\\" in lower:
-            return False
-        return (
+        if (
             b"namespace symfony\\" in lower
             or b"symfony\\component\\routing\\" in lower
             or b"symfony\\bundle\\frameworkbundle\\" in lower
-            or b"#[route" in lower
             or b"routingconfigurator" in lower
-            or (b"routecollection" in lower and b"symfony\\component\\routing" in lower)
-        )
+        ):
+            # Symfony's own namespaces are proof; an unrelated Illuminate import (a
+            # Collection, a Carbon helper) in the same file does not take the file away.
+            return True
+        # ``#[Route]`` alone is weak: Laravel route-attribute packages use the same name.
+        return b"#[route" in lower and b"illuminate\\" not in lower
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         record.framework = "symfony"
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):
+        test_directory = any(
+            segment.lower() in {"test", "tests"}
+            for segment in ctx.path.replace("\\", "/").split("/")[:-1]
+        )
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path) and not test_directory:
             index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
             route_names = detect_symfony_routes(root, ctx.source, ctx.path, record, index)
             detect_symfony_route_builders(root, ctx.source, ctx.path, record)
             if route_names:
                 strip_route_decorators(record, route_names)
         return record
-
-

@@ -51,8 +51,12 @@ class PhpParser(BaseParser):
         value = str(path).lower().replace("\\", "/")
         return not value.endswith(".blade.php") and super().matches(path)
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> PhpIndex:
-        return build_fqcn_index(repo_root, files, jobs)
+    build_index_accepts_timeout = True
+
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = 0
+    ) -> PhpIndex:
+        return build_fqcn_index(repo_root, files, jobs, parse_timeout_micros)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
