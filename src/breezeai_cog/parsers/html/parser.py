@@ -39,13 +39,13 @@ from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
-from ..typescript_jquery.calls import detect_inline_jquery
 from ..treesitter import parse_source
 from ..html_htmx.calls import detect_htmx_calls
 from .fingerprint import detect_rendering_framework
 from .index import HtmlTemplateIndex, build_html_template_index
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
 from .statements import collect_template_statements
+from ..template_common.scripts import read_page_scripts
 
 #: framework → the tree-sitter grammar that models its template dialect. A framework absent
 #: here is still tagged (role + framework) but its markup is not parsed into statements
@@ -85,7 +85,7 @@ class HtmlParser(BaseParser):
             import_files = []
 
         if framework is None:
-            # Not a recognized template — a plain html File (it may still make htmx / jQuery calls).
+            # Not a recognized template — a plain html File (it may still make htmx / script calls).
             plain = self._file(fid, ctx.path, loc)
             self._inline_scripts(plain, ctx)
             return plain
@@ -134,11 +134,12 @@ class HtmlParser(BaseParser):
 
     @staticmethod
     def _inline_scripts(record: FileRecord, ctx: ParseContext) -> None:
-        # Outbound calls the markup makes: htmx request attributes, and jQuery AJAX calls inside
-        # <script> (the markup grammar never looks there) → api_call.
+        # Outbound calls the markup makes: htmx request attributes, and what every script
+        # detector (jQuery, fetch, axios, client routers, …) finds inside the inline <script>
+        # blocks — the markup grammar never looks there.
         if ctx.capture_statements:
             detect_htmx_calls(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
-            detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
+            read_page_scripts(record, ctx)
 
     @staticmethod
     def _file(
