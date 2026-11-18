@@ -535,7 +535,8 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
 project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`,
 `.mdc` (in any case: `README.MD`), `README.rst` and `.cursorrules`; it reads text and never builds a tree.
-`.mdx` is not a document here: it is code (JSX and imports), owned by the MDX parser.
+`.mdx` is owned by the MDX parser (below), which reads its prose through this parser's
+`read_document`.
 
 - **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
   document never counts as an analyzed language and adds no lines of code — in the full scan
@@ -605,6 +606,40 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   `# Deploy with API_TOKEN=x` keeps no secret in `metadata.headings` either.
 - **Volume.** Every Markdown file the scan keeps becomes a File node, so a docs-heavy
   repository can leave prose folders it does not need in the graph out with `.repoignore`.
+
+### Language parser: MDX (`parsers/mdx/`)
+`MdxParser` (`name = "mdx"`) owns `.mdx` in any case. An MDX file is Markdown with JSX and ESM
+`import` / `export` blocks, so it gets both readings:
+
+- **Record.** One `type="code"`, `language="mdx"` `FileRecord`, with `importFiles` /
+  `externalImports` / `exports` from the ESM blocks, resolved like a `.tsx` file's (relative
+  paths, `index` files, tsconfig / Vite aliases from the TypeScript index via
+  `related_languages`).
+- **Document.** The prose is read by the Markdown parser's `read_document`, so `metadata` and
+  the whole-file `doc` / `readme` / `changelog` / … statement are what the same text in an
+  `.md` file gives (front matter, title, headings, secrets masked). ESM lines are left out of
+  the outline: a `#` line in an `export` template literal is not a heading. The statement is
+  added before the detectors run, so it keeps the id `<path>:1:0` and a Next.js page record
+  at the same spot gets `<path>:1:0#2`.
+- **How it is read.** There is no MDX grammar, and tree-sitter-markdown (CommonMark: indented
+  code blocks, no JSX) would misread MDX, so the block structure — fences, JSX tags, `{…}`
+  expressions, code spans, HTML comments — is found by a scanner (`esm.py`). Only the ESM code
+  is parsed by tree-sitter (`tsx`), in a shadow of the file with everything else blanked, so
+  lines and columns are the file's own. A paragraph led by `import` / `export` is a block only
+  when it parses and holds nothing but `import` / `export` statements; anything else is prose.
+  These block parses are bounded (see [architecture §11](architecture.md#11-performance-model)).
+- **Scope.** The ESM code is read for its imports and export names only: `export function
+  Hero() { … }` gets no Function record (Vue's `<script>` gets full TypeScript extraction).
+  `loc` counts only the ESM lines that parse — prose is a document, not lines of code (JSP,
+  Razor and WebForms count the whole file, markup included).
+- **Failures.** A parse that times out keeps the File record and logs `mdx.parse_timeout`
+  once per stage. `stage: block`: that block and the rest of the file are not probed (their
+  imports are missing) and the document has no headings, since which lines are code is
+  unknown. `stage: file`: the shadow parse timed out and no import is read. A file whose block
+  budget is spent logs `mdx.esm_parse_budget_reached`.
+- **Detectors.** `run_additive("mdx", …)`: a framework that serves `.mdx` files registers a
+  `Gate("mdx", …)` detector in its own package (Next.js: `typescript_nextjs/mdx_pages.py`,
+  see [Next.js MDX pages](entry-point-roles/nextjs.md#mdx-pages)).
 
 ### MCP tool detectors (one package per framework)
 A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,

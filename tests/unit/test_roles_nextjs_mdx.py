@@ -31,7 +31,10 @@ def test_app_router_mdx_page(analyze_files) -> None:
         None,
     )
     assert (p.nodeType, p.text, p.startLine, p.endLine) == ("synthetic", "# About us", 1, 1)
-    assert p.id == "app/about/page.mdx:1:0"
+    # The page's document statement keeps ``:1:0``; the page record at the same spot follows it.
+    assert p.id == "app/about/page.mdx:1:0#2"
+    [doc] = [s for s in st if s.semanticType == "doc" and s.path == "app/about/page.mdx"]
+    assert doc.id == "app/about/page.mdx:1:0"
     assert p.parentId == "app/about/page.mdx"
     assert p.authRequired is None and p.guards is None
 

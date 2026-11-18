@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from breezeai_cog import iter_file_records
 from breezeai_cog.core.registry import discover_builtin, language_candidates
@@ -43,7 +44,8 @@ def test_mdx_file_is_a_code_file_of_language_mdx(capture) -> None:
     recs = capture({"docs/intro.mdx": "# Intro\n\nSome text.\n"})
     rec = recs["docs/intro.mdx"]
     assert (rec.type, rec.language, rec.loc) == ("code", "mdx", 0)
-    assert rec.importFiles == [] and rec.externalImports == [] and rec.statements == []
+    assert rec.importFiles == [] and rec.externalImports == []
+    assert [s.semanticType for s in rec.statements] == ["doc"]
 
 
 def test_loc_counts_only_the_esm_lines(capture) -> None:
@@ -330,8 +332,12 @@ def test_parse_timeout_keeps_the_file_record(capture, monkeypatch) -> None:
         return real(grammar, code, timeout)
 
     monkeypatch.setattr(mdx_parser, "parse_source", slow)
-    recs = capture({"docs/a.mdx": "export const meta = {\n\n" + "word " * 20 + "\n"})
+    with capture_logs() as logs:
+        recs = capture({"docs/a.mdx": "export const meta = {\n\n" + "word " * 20 + "\n"})
     assert recs["docs/a.mdx"].language == "mdx"
+    # Several block probes time out; the file is reported once.
+    [event] = [e for e in logs if e["event"] == "mdx.parse_timeout"]
+    assert (event["path"], event["stage"]) == ("docs/a.mdx", "block")
 
 
 def test_shadow_parse_timeout_keeps_the_file_record_without_imports(capture, monkeypatch) -> None:
@@ -346,9 +352,20 @@ def test_shadow_parse_timeout_keeps_the_file_record_without_imports(capture, mon
         return real(grammar, code, timeout)
 
     monkeypatch.setattr(mdx_parser, "parse_source", slow)
-    recs = capture({"docs/a.mdx": source, "components/Chart.tsx": "export const Chart = 1\n"})
+    with capture_logs() as logs:
+        recs = capture({"docs/a.mdx": source, "components/Chart.tsx": "export const Chart = 1\n"})
     rec = recs["docs/a.mdx"]
     assert (rec.language, rec.importFiles, rec.externalImports, rec.exports) == ("mdx", [], [], [])
+    [event] = [e for e in logs if e["event"] == "mdx.parse_timeout"]
+    assert (event["path"], event["stage"]) == ("docs/a.mdx", "file")
+    # The document is still read; the import line, code the scan found, is not its outline.
+    assert rec.metadata["title"] == "Sales"
+
+
+def test_a_file_that_parses_logs_no_timeout(capture) -> None:
+    with capture_logs() as logs:
+        capture({"docs/a.mdx": "import Head from 'next/head'\n\n# A\n"})
+    assert not [e for e in logs if e["event"] == "mdx.parse_timeout"]
 
 
 def test_continuation_is_bounded_by_size() -> None:
@@ -454,3 +471,138 @@ def test_upper_case_mdx_suffix(capture) -> None:
     )
     rec = recs["docs/Guide.MDX"]
     assert (rec.language, rec.importFiles) == ("mdx", ["docs/Chart.tsx"])
+
+
+def test_the_prose_is_captured_as_a_markdown_document(capture) -> None:
+    """An MDX file is read as the Markdown parser reads a document: front matter, title and
+    headings in ``metadata``, and the whole file as one ``doc`` statement — and it is still a
+    code file with its imports."""
+    src = (
+        "---\ntitle: Button\ndescription: The button component\n---\n\n"
+        "import { Meta } from '@storybook/addon-docs/blocks'\n\n"
+        '# Button\n\n## Usage\n\n<Meta title="Button" />\n'
+    )
+    rec = capture({"libs/button.mdx": src})["libs/button.mdx"]
+    assert (rec.type, rec.language, rec.externalImports) == (
+        "code",
+        "mdx",
+        ["@storybook/addon-docs/blocks"],
+    )
+    assert rec.metadata["kind"] == "doc" and rec.metadata["category"] == "documentation"
+    assert rec.metadata["frontmatter"] == {"title": "Button", "description": "The button component"}
+    assert rec.metadata["title"] == "Button"
+    assert [(h["level"], h["text"], h["line"]) for h in rec.metadata["headings"]] == [
+        (1, "Button", 8),
+        (2, "Usage", 10),
+    ]
+    [doc] = rec.statements
+    assert (doc.semanticType, doc.nodeType, doc.id, doc.parentId) == (
+        "doc",
+        "synthetic",
+        "libs/button.mdx:1:0",
+        "libs/button.mdx",
+    )
+    assert (doc.name, doc.description, doc.startLine, doc.endLine) == (
+        "Button",
+        "The button component",
+        1,
+        12,
+    )
+    assert doc.text == src
+
+
+def test_a_hash_line_inside_an_esm_block_is_not_a_heading(capture) -> None:
+    src = "export const md = `\n# Not a heading\n`\n\n# Real\n"
+    rec = capture({"docs/a.mdx": src})["docs/a.mdx"]
+    assert [h["text"] for h in rec.metadata["headings"]] == ["Real"]
+    assert rec.metadata["title"] == "Real"
+
+
+def test_a_hash_line_in_a_code_sample_is_not_a_heading(capture) -> None:
+    rec = capture({"docs/a.mdx": "```sh\n# install\n```\n\n# Guide\n"})["docs/a.mdx"]
+    assert [h["text"] for h in rec.metadata["headings"]] == ["Guide"]
+
+
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [("README.mdx", "readme"), ("CHANGELOG.mdx", "changelog"), ("docs/guide.mdx", "doc")],
+)
+def test_the_document_kind_follows_the_markdown_rules(capture, path: str, kind: str) -> None:
+    assert capture({path: "# Title\n"})[path].metadata["kind"] == kind
+
+
+def test_secrets_in_the_document_are_masked(capture) -> None:
+    src = "# Setup\n\n```sh\nexport DB_PASSWORD=hunter2\n```\n"
+    [doc] = capture({"docs/a.mdx": src})["docs/a.mdx"].statements
+    assert "hunter2" not in doc.text and "DB_PASSWORD=***" in doc.text
+
+
+def test_document_metadata_without_statement_capture(capture) -> None:
+    rec = capture({"docs/a.mdx": "# Intro\n"}, capture_statements=False)["docs/a.mdx"]
+    assert rec.metadata["title"] == "Intro" and rec.statements == []
+
+
+def test_the_mdx_document_matches_the_markdown_one(capture) -> None:
+    """Pure Markdown in an ``.mdx`` file gives the same document as the same text in ``.md``."""
+    src = "---\ntitle: T\n---\n\n# T\n\n## Part\n\nText with `code`.\n"
+    recs = capture({"docs/a.mdx": src, "docs/a.md": src})
+    mdx, md = recs["docs/a.mdx"], recs["docs/a.md"]
+    assert mdx.metadata == md.metadata
+    [mdx_doc], [md_doc] = mdx.statements, md.statements
+    assert (mdx_doc.semanticType, mdx_doc.text, mdx_doc.name) == (
+        md_doc.semanticType,
+        md_doc.text,
+        md_doc.name,
+    )
+
+
+def test_lone_carriage_returns_keep_the_outline_on_its_lines(capture) -> None:
+    """A lone ``\\r`` ends a document line but not a scanner line: the ESM line is mapped into
+    the document's numbering, so the heading above it is kept."""
+    src = "a\rb\rc\n# Intro\n\nimport A from './a'\n\n## Next\n"
+    rec = capture({"docs/a.mdx": src})["docs/a.mdx"]
+    assert [(h["text"], h["line"]) for h in rec.metadata["headings"]] == [("Intro", 4), ("Next", 8)]
+
+
+def test_a_block_timeout_stops_probing_and_leaves_no_outline(capture, monkeypatch) -> None:
+    """After one block probe times out the file is not probed again, and since which lines are
+    code is then unknown, no heading is guessed — a ``#`` in an export is never one."""
+    from breezeai_cog.parsers.mdx import parser as mdx_parser
+
+    real = mdx_parser.parse_source
+    probes: list[bytes] = []
+
+    def slow(grammar, code, timeout=0):
+        if b"md" in code and len(code) < 200:  # a block probe of the export
+            probes.append(code)
+            raise ValueError("Parsing failed")
+        return real(grammar, code, timeout)
+
+    monkeypatch.setattr(mdx_parser, "parse_source", slow)
+    src = (
+        "export const md = `\n# Not a heading\n`\n\n# Real\n\n"
+        "export const md2 = 1\n\nimport A from 'a'\n"
+    )
+    with capture_logs() as logs:
+        rec = capture({"docs/a.mdx": src})["docs/a.mdx"]
+    assert len(probes) == 1
+    assert rec.metadata["headings"] == [] and rec.metadata["title"] is None
+    assert rec.externalImports == []
+    assert [e["stage"] for e in logs if e["event"] == "mdx.parse_timeout"] == ["block"]
+
+
+def test_block_and_file_timeouts_are_both_logged(capture, monkeypatch) -> None:
+    from breezeai_cog.parsers.mdx import parser as mdx_parser
+
+    def slow(grammar, code, timeout=0):
+        raise ValueError("Parsing failed")
+
+    real = mdx_parser.parse_source
+    monkeypatch.setattr(
+        mdx_parser, "parse_source", lambda g, c, t=0: slow(g, c, t) if c else real(g, c, t)
+    )
+    with capture_logs() as logs:
+        rec = capture({"docs/a.mdx": "import A from 'a'\n\n# T\n"})["docs/a.mdx"]
+    assert rec.language == "mdx"
+    stages = [e["stage"] for e in logs if e["event"] == "mdx.parse_timeout"]
+    assert stages == ["block", "file"]

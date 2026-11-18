@@ -34,8 +34,8 @@ _AGENT_INSTRUCTION_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md
 #: File stems in a decisions folder that are its index or template, not a decision.
 _ADR_NON_RECORD_STEMS = frozenset({"readme", "index", "_index", "template"})
 _CHANGELOG_NAMES = frozenset({"CHANGELOG", "HISTORY", "RELEASES"})
-_MARKDOWN_SUFFIXES = (".md",)
-_ADR_NAME = re.compile(r"^\d{4}-.+\.md$", re.IGNORECASE)
+_MARKDOWN_SUFFIXES = (".md", ".mdx")
+_ADR_NAME = re.compile(r"^\d{4}-.+\.mdx?$", re.IGNORECASE)
 #: Front-matter keys only a Claude Code slash command / subagent file has.
 _COMMAND_KEYS = ("argument-hint", "allowed-tools", "model", "disable-model-invocation")
 _AGENT_KEYS = ("tools", "model", "color")
@@ -108,9 +108,9 @@ def classify(
         return "agent_instructions"
 
     stem, _, suffix = upper.partition(".")
-    if stem == "README" and suffix in ("MD", "RST"):
+    if stem == "README" and suffix in ("MD", "MDX", "RST"):
         return "readme"
-    if stem in _CHANGELOG_NAMES and suffix == "MD":
+    if stem in _CHANGELOG_NAMES and suffix in ("MD", "MDX"):
         return "changelog"
 
     if _is_adr(name, dirs, headings):
