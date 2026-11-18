@@ -31,8 +31,8 @@ from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from .facts import config_root, next_apps, page_extensions, router_root
-from .pages import _app_router_endpoint, _pages_router_endpoint
-from .routes import _middleware_guards, _served
+from .pages import app_router_endpoint, pages_router_endpoint
+from .routes import middleware_guards, served
 
 #: Cap for the page record's one-line text, as for ``.tsx`` pages.
 _TEXT_LIMIT = 200
@@ -52,9 +52,9 @@ def _page(path: str, index: object | None) -> tuple[str, str] | None:
     mdx = _mdx_extensions(exts)
     if not mdx:
         return None  # Next.js serves .mdx only when pageExtensions lists it
-    if (url := _app_router_endpoint(path, mdx)) is not None:
+    if (url := app_router_endpoint(path, mdx)) is not None:
         return "app", url
-    if (url := _pages_router_endpoint(path, mdx)) is not None:
+    if (url := pages_router_endpoint(path, mdx)) is not None:
         return "pages", url
     return None
 
@@ -84,11 +84,11 @@ def detect_nextjs_mdx_page(dc: DetectContext) -> Emit | None:
         dc.root,
         {
             "semanticType": "route",
-            "endpoint": _served(local, dc.path, index),
+            "endpoint": served(local, dc.path, index),
             "framework": "nextjs",
             "handler": None,
             "handlerLine": None,
-            "guards": _middleware_guards(index, dc.path, local) or None,
+            "guards": middleware_guards(index, dc.path, local) or None,
             "routeKind": "page",
             "isRegex": False,
         },
