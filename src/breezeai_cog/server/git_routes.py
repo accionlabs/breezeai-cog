@@ -78,7 +78,9 @@ def _with_client(
         with deps.open_scm(ref, settings, token) as client:
             return fn(client, ref)
     except SCMError as exc:
-        raise ApiError(str(exc), exc.status_code) from None
+        raise ApiError(
+            str(exc), exc.status_code, provider_status=getattr(exc, "http_status", None)
+        ) from None
 
 
 async def _body(request: Request) -> dict[str, Any]:
