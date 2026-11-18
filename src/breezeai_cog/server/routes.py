@@ -67,9 +67,13 @@ def _normalize_ignore_patterns(raw: object) -> list[str]:
 
 def _stream_records_to_infra(deps: ServerDeps, key: str, records: list[dict]) -> str:
     stream = deps.open_storage(key)
-    for record in records:
-        stream.write_line(json.dumps(record) + "\n")
-    return stream.close()
+    try:
+        for record in records:
+            stream.write_line(json.dumps(record) + "\n")
+        return stream.close()
+    except BaseException:
+        stream.abort()  # release the upload thread and the multipart upload
+        raise
 
 @router.get("/health")
 async def health() -> dict[str, str]:
@@ -146,6 +150,8 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
         ) from exc
     storage_key = f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
     has_changed = filter_set is None or len(filter_set) > 0
+    upload = None
+    upload_finished = False
     try:
         if ignore_patterns:
             # Fail loudly: a silent write failure would ship files the caller
@@ -185,6 +191,7 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
             await run_in_threadpool(upload.close)
         except Exception as exc:
             raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
+        upload_finished = True
         # Logged only here: `close()` returning is the contract's proof that the object
         # is complete and readable, so a URL printed any earlier could point at a
         # partial upload the backend would then fail to ingest.
@@ -194,6 +201,10 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
             settings.aws_s3_bucket, settings.aws_region, storage_key,
         )
     finally:
+        if upload is not None and not upload_finished:
+            # A failure before close(): stop the upload thread and abandon the multipart
+            # upload now instead of leaving them open until the idle timeout.
+            upload.abort()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     meta["repoUrl"] = repo_url

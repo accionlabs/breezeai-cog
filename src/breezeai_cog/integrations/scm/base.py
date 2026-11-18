@@ -168,11 +168,19 @@ class ChangeSet:
     per provider entry (a rename is **one** entry under its new path) — the per-file
     view ``/api/git/compare`` returns; the orchestration in ``server/git.py`` reads only
     ``changed`` / ``deleted``.
+
+    ``relation`` and ``merge_base_sha`` say how ``head`` relates to ``base`` (BREEZEAI-1160):
+    ``relation`` is ``identical`` / ``ahead`` (``base`` is an ancestor of ``head``, the normal
+    case) / ``behind`` (``head`` is older) / ``diverged`` (the two are on different lines of
+    history), and ``merge_base_sha`` is their common ancestor. Only GitHub reports them; every
+    other provider leaves both ``None`` ("unknown"), and ``/api/git/compare`` then omits them.
     """
 
     changed: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     files: list[FileDiff] = field(default_factory=list)
+    relation: str | None = None
+    merge_base_sha: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -294,6 +302,16 @@ class AbstractSCMClient(ABC):
     @abstractmethod
     def compare(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
         """Files changed and deleted going from ``base`` to ``head``."""
+
+    def compare_relation(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
+        """How ``head`` relates to ``base`` without listing the changed files.
+
+        Returns a ``ChangeSet`` whose ``relation`` / ``merge_base_sha`` are set where the
+        provider reports them; ``files`` / ``changed`` / ``deleted`` are not meaningful.
+        Raises the same errors as ``compare`` for an unknown commit. The default runs the
+        full ``compare``; a provider that can answer from one cheap request overrides it.
+        """
+        return self.compare(ref, base, head)
 
     @abstractmethod
     def file_content(self, ref: RepoRef, path: str, commit: str) -> str:

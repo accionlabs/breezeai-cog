@@ -54,6 +54,11 @@ class FakeClient(AbstractSCMClient):
         self._maybe_fail()
         return self._changes
 
+    def compare_relation(self, ref, base, head):
+        self.calls.append(("compare_relation", base, head))
+        self._maybe_fail()
+        return ChangeSet(relation="ahead", merge_base_sha=base)
+
     def tree(self, ref, commit):
         self.calls.append(("tree", commit))
         self._maybe_fail()
@@ -227,10 +232,32 @@ def test_compare_returns_git_diff_result() -> None:
     assert fake.calls == [("compare", OLD, SHA)]
 
 
+def test_compare_relation_only_skips_the_file_list() -> None:
+    fake = FakeClient(changed=["a.py"], files=[FileDiff("a.py", "modified", 1, 0)])
+    r = _app(fake).post(
+        "/api/git/compare",
+        json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA, "relationOnly": True},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"baseSha": OLD, "headSha": SHA, "relation": "ahead", "mergeBaseSha": OLD}
+    assert fake.calls == [("compare_relation", OLD, SHA)]
+
+
 def test_compare_empty_diff() -> None:
     r = _app(FakeClient()).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
     assert r.status_code == 200
     assert r.json() == {"baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": []}
+
+
+def test_compare_reports_relation_and_merge_base_when_known() -> None:
+    fake = FakeClient()
+    fake._changes.relation, fake._changes.merge_base_sha = "behind", "c" * 40
+    r = _app(fake).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
+    assert r.status_code == 200
+    assert r.json() == {
+        "baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": [],
+        "relation": "behind", "mergeBaseSha": "c" * 40,
+    }
 
 
 def test_compare_requires_both_commits() -> None:
