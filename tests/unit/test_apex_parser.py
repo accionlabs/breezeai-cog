@@ -378,3 +378,36 @@ def test_index_is_the_same_for_any_job_count(tmp_path) -> None:
     assert one == two
     assert one.classes == {"a": "a/A.cls", "b": "a/B.cls"}
     assert one.facts["apex.method-lines"][("A", "execute")] == (("a/A.cls", 1),)
+
+
+def test_database_convert_lead_and_empty_recycle_bin(tmp_path) -> None:
+    src = b"""public class DmlTest {
+        public void run(Database.LeadConvert lc, List<Id> ids) {
+            Database.convertLead(lc);
+            Database.emptyRecycleBin(ids);
+        }
+    }"""
+    rec = _parse(tmp_path, src, "DmlTest.cls")
+    dml = [(s.semanticType, s.method, s.dataAccessHint) for s in rec.statements]
+    assert dml == [
+        ("db_method_call", "convertlead", "salesforce"),
+        ("db_method_call", "emptyrecyclebin", "salesforce"),
+    ]
+
+
+def test_callout_scaling_linear(tmp_path) -> None:
+    import time
+    count = 1600
+    body = (
+        "Http h = new Http(); HttpRequest r = new HttpRequest(); "
+        "r.setMethod('GET'); r.setEndpoint('https://api.com'); "
+        + ("h.send(r); " * count)
+    )
+    src = f"public class ScaleTest {{ public void m() {{ {body} }} }}".encode("utf-8")
+    t0 = time.perf_counter()
+    rec = _parse(tmp_path, src, "ScaleTest.cls")
+    duration = time.perf_counter() - t0
+    api_calls = [s for s in rec.statements if s.semanticType == "api_call"]
+    assert len(api_calls) == count
+    assert duration < 2.0
+
