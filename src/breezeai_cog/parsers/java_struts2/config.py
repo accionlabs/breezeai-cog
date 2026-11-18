@@ -30,8 +30,6 @@ builds, so it keeps its ``metadata``; it only adds the routes, ``framework`` and
 
 from __future__ import annotations
 
-import re
-
 import posixpath
 from pathlib import Path
 
@@ -39,6 +37,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
+from ..additive import index_fact
 from ..base import BaseParser, ParseContext
 from ..config.parser import ConfigParser
 from ..handler_sites import method_sites
@@ -46,10 +45,10 @@ from ..treesitter import parse_source
 from ..treesitter import node_text
 from ..xml_common import child_elements, document_root, element_attr, element_tag
 from .common import (
-    FRAMEWORK, PROPERTIES_LEVEL, STRUTS_ROOT, WEB_XML_LEVEL, XML_LEVEL, Layered, action_endpoint,
-    ActionTable, bare_of, namespace_key, read_properties, suffix_of, web_xml_constants,
-    xml_constants,
+    FRAMEWORK, STRUTS_ROOT, XML_LEVEL, Layered, action_endpoint, ActionTable, bare_of,
+    namespace_key, suffix_of, xml_constants,
 )
+from .facts import SETTINGS, module_settings
 from .views import Target, result_target, web_root
 
 #: Markers that make a ``<struts>`` document a Struts2 configuration.
@@ -90,7 +89,7 @@ class Struts2ConfigParser(BaseParser):
                 record.importFiles.append(included)
         # Routes and navigation are statements (gated); view edges are core and always kept.
         emit = ctx.capture_statements and not self.is_fixture_file(path)
-        suffix, bare = _suffix(ctx.repo_root, path, source)
+        suffix, bare = _suffix(ctx, path, source)
         web = web_root(ctx.repo_root, posixpath.dirname(path))
         handlers = _Handlers(ctx)
         seen: set[str] = set()
@@ -238,63 +237,23 @@ def _bare_redirect(target: Target, declared: ActionTable, suffix: str | None) ->
     return Target(action_endpoint(serving, name, suffix), target.file)
 
 
-#: ``<include file="…"/>`` in a Struts configuration.
-_INCLUDE = re.compile(rb"""<include\s+file\s*=\s*["']([^"']+)["']""")
-#: How many configuration files one ``struts.xml`` include chain is followed through.
-_MAX_INCLUDES = 200
-
-
-def _configuration(repo_root: Path, main: str) -> list[str]:
-    """The files of one Struts configuration: ``main`` and every file its ``<include>`` chain
-    reaches (cycles and missing files skipped), in a stable order."""
-    seen = [main]
-    queue = [main]
-    while queue and len(seen) < _MAX_INCLUDES:
-        current = queue.pop(0)
-        for ref in _INCLUDE.findall(_read(repo_root / current)):
-            rel = _sibling(repo_root, current, ref.decode("utf-8", "replace"))
-            if rel is not None and rel not in seen:
-                seen.append(rel)
-                queue.append(rel)
-    return seen
-
-
-def _suffix(repo_root: Path, path: str, source: bytes) -> tuple[str | None, bool]:
+def _suffix(ctx: ParseContext, path: str, source: bytes) -> tuple[str | None, bool]:
     """``(suffix, bare)``: the action suffix for this configuration's actions, from
-    ``struts.action.extension`` as
-    Struts resolves it (:class:`.common.Layered`): ``<constant>`` in this file, in the
-    classpath root's ``struts.xml`` (the nearest one at or above it) and in every file its
-    ``<include>`` chain reaches — a constant applies to the whole configuration, and two files
-    setting different values leave it unknown — overridden by ``struts.properties`` there,
-    overridden by the Struts filter's init-param in the web application's ``web.xml``."""
-    layered = Layered()
-    layered.add("", XML_LEVEL, xml_constants(source))
-    here = (repo_root / path).parent
-    classpath = here
-    for directory in (here, *here.parents):
-        main = directory / "struts.xml"
-        if main.is_file():
-            classpath = directory
-            main_rel = main.relative_to(repo_root).as_posix()
-            for rel in _configuration(repo_root, main_rel):
-                if rel != path:
-                    layered.add("", XML_LEVEL, xml_constants(_read(repo_root / rel)))
-            break
-        if directory == repo_root:
-            break
-    layered.add("", PROPERTIES_LEVEL, read_properties(classpath))
-    web = web_root(repo_root, posixpath.dirname(path))
-    if web is not None:
-        layered.add("", WEB_XML_LEVEL, web_xml_constants(_read(repo_root / web / "WEB-INF" / "web.xml")))
-    settings = layered.resolve().get("", {})
+    ``struts.action.extension`` as Struts resolves it for the module (``struts2.settings`` on the
+    ``config`` index — the same rules as the annotated actions): ``<constant>`` in any Struts
+    file of the module, overridden by ``struts.properties``, overridden by the Struts filter's
+    init-param in ``web.xml``; two sources at one level that disagree leave it unknown.
+
+    With no settings on the index (no index passed, or no Struts constant anywhere in the repo)
+    only this file's own constants apply: no other file is opened while parsing."""
+    fact = index_fact(ctx.resolution_index, SETTINGS)
+    if fact is not None:
+        settings = module_settings(fact, path)
+    else:
+        own = Layered()
+        own.add("", XML_LEVEL, xml_constants(source))
+        settings = own.resolve().get("", {})
     return suffix_of(settings), bare_of(settings)
-
-
-def _read(path: Path) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError:
-        return b""
 
 
 class _Handlers:

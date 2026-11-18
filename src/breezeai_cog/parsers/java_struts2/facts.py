@@ -170,12 +170,19 @@ def namespaces_of(annotations: list[Node], source: bytes) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+_SETTINGS_GATE = (b"<struts", b"struts.action.extension", b"struts.convention.",
+                  b"struts.mapper.class", _PLUGIN)
 register_fact(FactSpec(
-    name=SETTINGS, language="java",
-    gate=(b"<struts", b"struts.action.extension", b"struts.convention.",
-          b"struts.mapper.class", _PLUGIN),
+    name=SETTINGS, language="java", gate=_SETTINGS_GATE,
     collect=_collect_settings, resolve=_resolve_settings,
     sources=(".xml", ".gradle"),
+))
+# The same settings on the ``config`` index, for the ``struts.xml`` parser: a configuration file
+# is not Java, so it never sees the Java index. One collect and resolve, so the XML actions and
+# the annotated ones follow the same module-wide rules.
+register_fact(FactSpec(
+    name=SETTINGS, language="config", gate=_SETTINGS_GATE,
+    collect=_collect_settings, resolve=_resolve_settings,
 ))
 register_fact(FactSpec(
     name=PACKAGE_NAMESPACES, language="java", gate=(b"@Namespace",),

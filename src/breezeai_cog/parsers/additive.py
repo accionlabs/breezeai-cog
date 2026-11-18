@@ -67,8 +67,8 @@ HOOKED_LANGUAGES: frozenset[str] = frozenset(
 #: A fact for any other language is an error: it would never be built, and the detector
 #: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"apex", "c", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "kotlin", "php", "python",
-     "ruby", "scala", "typescript", "vb"})
+    {"apex", "c", "config", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "kotlin", "php",
+     "python", "ruby", "scala", "typescript", "vb"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
 _MARKERS = (b"register_detector(", b"register_fact(")
@@ -372,11 +372,12 @@ def run_additive(
 
 
 def collect_additive(
-    language: str, root: Node, source: bytes, rel: str, repo_root: Path | None
+    language: str, root: Node | None, source: bytes, rel: str, repo_root: Path | None
 ) -> dict[str, Any]:
     """Run every fact ``collect`` registered for ``language`` on one file, from the language's
     ``build_index`` per-file pass. Returns fact name → collected value, for the facts whose
-    gate matched and that found something."""
+    gate matched and that found something. ``root`` is None for a language whose index reads
+    bytes only (``config``)."""
     out: dict[str, Any] = {}
     for spec in facts_for(language):
         if not any(g in source for g in spec.gate):
