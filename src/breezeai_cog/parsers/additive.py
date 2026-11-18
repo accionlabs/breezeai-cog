@@ -178,6 +178,9 @@ class FactSpec:
     #: tree-sitter grammar ``collect`` gets those files parsed with; ``None`` = no tree (the
     #: fact reads the bytes, e.g. a ``<%@ ServiceHost %>`` directive).
     grammar: str | None = None
+    #: ``collect`` reads only the path of a ``sources`` file: it gets ``b""`` and no tree, the
+    #: file is not read and ``gate`` is not applied to it.
+    path_only: bool = False
 
 
 _DETECTORS: dict[str, list[Detector]] = {}
@@ -294,21 +297,27 @@ def split_fact_sources(language: str, files: list[Path]) -> tuple[list[Path], li
 def _collect_source_one(args: tuple[str, str, str, str]) -> dict[str, Any]:
     """Collect every fact of ``language`` that reads this fact-source file (picklable worker)."""
     language, file_s, rel, repo_root_s = args
-    try:
-        source = Path(file_s).read_bytes()
-    except OSError:
-        return {}
+    specs = [spec for spec in facts_for(language) if rel.lower().endswith(spec.sources)]
+    source = b""
+    if not all(spec.path_only for spec in specs):
+        try:
+            source = Path(file_s).read_bytes()
+        except OSError:
+            return {}
     out: dict[str, Any] = {}
     roots: dict[str, Node | None] = {}
-    for spec in facts_for(language):
-        if not rel.lower().endswith(spec.sources) or not any(g in source for g in spec.gate):
+    for spec in specs:
+        if not spec.path_only and not any(g in source for g in spec.gate):
             continue
         try:
-            if spec.grammar is not None and spec.grammar not in roots:
-                from .treesitter import parse_source
-                roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
-            value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
-                                 source, rel, Path(repo_root_s))
+            if spec.path_only:
+                value = spec.collect(None, b"", rel, Path(repo_root_s))
+            else:
+                if spec.grammar is not None and spec.grammar not in roots:
+                    from .treesitter import parse_source
+                    roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
+                value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
+                                     source, rel, Path(repo_root_s))
         except Exception as exc:  # a fact never takes the index down: this file adds nothing
             from ..logging import get_logger
             get_logger("breezeai_cog.index").warning(

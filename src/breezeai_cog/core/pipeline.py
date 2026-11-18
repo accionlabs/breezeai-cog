@@ -327,7 +327,9 @@ def _assemble(
             record.statements, statement_text_limit, max_statement_parts
         )
         is_doc = record.language in DOC_LANGUAGES
-        if is_doc:
+        # A document is any record read as one (``category: documentation``) — an ``.mdx`` file
+        # too, which is code (its ESM lines count as LOC) with a Markdown document in it.
+        if (record.metadata or {}).get("category") == "documentation":
             markdown_docs += 1
             markdown_chars += sum(len(st.text) for st in record.statements)
         sink.write(record)

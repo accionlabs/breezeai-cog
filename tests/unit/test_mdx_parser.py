@@ -231,6 +231,37 @@ def test_a_closed_string_in_an_expression_keeps_reading_esm() -> None:
     assert _esm("{show && <p>{'ok'}</p>}\n\nimport a from 'a'\n") == [(2, 3)]
 
 
+class _Info:
+    """Records the pipeline's ``info`` events; its other log calls are dropped."""
+
+    def __init__(self) -> None:
+        self.events: dict[str, dict] = {}
+
+    def info(self, event: str, **kw) -> None:
+        self.events[event] = kw
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        return lambda *a, **kw: None
+
+
+def test_mdx_documents_count_in_the_document_totals(tmp_path, monkeypatch) -> None:
+    """An ``.mdx`` file is a Markdown document too: counted in ``markdown_docs``, while only
+    its ESM lines count as LOC."""
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+    from breezeai_cog.emit.sinks import MemorySink
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.md").write_text("# A\n\nText.\n")
+    (repo / "b.mdx").write_text("import x from 'x'\n\n# B\n\nText.\n")
+    log = _Info()
+    monkeypatch.setattr(pipeline, "log", log)
+    meta = pipeline.run(repo, Settings(jobs=1), MemorySink())
+    assert log.events["analysis.complete"]["markdown_docs"] == 2
+    assert meta.totalLinesOfCode == 1
+
+
 def test_front_matter_is_skipped(capture) -> None:
     recs = capture(
         {

@@ -80,7 +80,8 @@ class MdxParser(BaseParser):
     schema_version = SCHEMA_VERSION
     #: The tsconfig / Vite aliases and the Next.js facts its detectors read.
     related_languages = ("typescript",)
-    statement_types = ["route"]
+    #: ``route`` from the page detectors; the rest from the document (:func:`read_document`).
+    statement_types = ["route", "doc", "skill", "agent", "command", "agent_instructions"]
     frameworks = ["nextjs"]
 
     def matches(self, path: str | Path) -> bool:

@@ -321,7 +321,7 @@ def _resolve_middlewares(
 # Every file: where a file lives decides it, not what it says.
 register_fact(FactSpec(
     name=APPS, language="typescript", gate=(b"",), collect=_collect_app, resolve=_resolve_apps,
-    sources=(".mdx",),  # read by path only: no tree
+    sources=(".mdx",), path_only=True,  # an .mdx file counts by its path: it is not read
 ))
 register_fact(FactSpec(
     name=MIDDLEWARES, language="typescript", gate=(b"export",),
