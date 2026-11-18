@@ -20,12 +20,11 @@ it continues across blank lines while the code so far does not parse
 
 Code shown in a document (a fence, ``code={`…`}``) is never ESM: reading it as an import would
 put a false edge in the graph, which is worse than missing one. Where the scan cannot tell (a
-quote in JSX text inside an expression), it stays inside the expression, so later lines are
-not read as ESM.
+quote in JSX text inside an expression), it stops: no later line is read as ESM.
 
 Known misses (never false edges): ESM right after a heading, a closing fence or a JSX line with
-no blank line between — MDX reads it, this scan needs the blank line — and ESM after a ``{…}``
-expression whose JSX text holds a lone quote (``{ok && <p>it's</p>}``).
+no blank line between — MDX reads it, this scan needs the blank line — and any ESM after a
+``{…}`` expression whose JSX text holds a lone quote (``{ok && <p>it's</p>}``).
 
 :func:`esm_shadow` returns a copy of the source of the same byte length with only the ESM
 lines kept (everything else spaces, line breaks kept), so node positions are the file's own —
@@ -83,10 +82,14 @@ class _Scan:
     code_span: int | None = None
     #: Inside an HTML comment ``<!-- … -->`` (MDX 1 files use them to comment code out).
     html_comment: bool = False
+    #: The scan lost track inside an expression (a string ran to the end of its line): which
+    #: lines are fences from here on is unknown, so no later line is read as ESM.
+    lost: bool = False
 
     def at_top(self) -> bool:
         return (
-            not self.stack
+            not self.lost
+            and not self.stack
             and not self.in_tag
             and not self.in_comment
             and self.elements == 0
@@ -126,11 +129,16 @@ def _scan_expression(s: _Scan, line: bytes, i: int) -> int:
         return i + 1
     if c in (ord("'"), ord('"')):
         # A string ends on its own line; one left open ends with the line (JSX text such as
-        # ``it's`` reads as a string: the expression then stays open — no ESM, never a false one).
+        # ``it's`` reads as a string). Its ``}`` was read as string text, so a later stray ``}``
+        # (a code sample's) would close the expression mid-fence and swap fences and text: the
+        # scan is lost, and no later line is ESM — a miss, never a false edge.
         j = i + 1
         while j < len(line) and line[j] != c:
             j += 2 if line[j] == ord("\\") else 1
-        return j + 1 if j < len(line) else len(line)
+        if j >= len(line):
+            s.lost = True
+            return len(line)
+        return j + 1
     if line.startswith(b"//", i):
         return len(line)
     if line.startswith(b"/*", i):

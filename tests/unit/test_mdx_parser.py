@@ -207,6 +207,30 @@ def test_inline_code_with_a_brace_does_not_open_an_expression() -> None:
     assert _esm("Use `{` here.\n\nimport a from 'a'\n") == [(2, 3)]
 
 
+#: A lone quote in an expression's JSX text, then a code sample whose stray ``}`` would close
+#: that expression mid-fence: the ``~~~`` lines after it would swap fence and text.
+LOST_IN_EXPRESSION = (
+    "{show && <p>Don't</p>}\n\n~~~css\n.a { }\n}\n~~~\n\n~~~\n\n"
+    "import secret from './secret'\n\n~~~\n"
+)
+
+
+def test_a_lone_quote_in_an_expression_stops_reading_esm() -> None:
+    """Once the scan loses track in an expression, no later line is ESM — not even after a
+    stray ``}`` seems to close it."""
+    assert _esm(LOST_IN_EXPRESSION) == []
+    assert _esm("{show && <p>Don't</p>}\n\nText }\n\nimport a from 'a'\n") == []
+
+
+def test_a_code_sample_after_a_lone_quote_gives_no_import(capture) -> None:
+    recs = capture({"secret.ts": "export default 1\n", "docs/a.mdx": LOST_IN_EXPRESSION})
+    assert (recs["docs/a.mdx"].importFiles, recs["docs/a.mdx"].externalImports) == ([], [])
+
+
+def test_a_closed_string_in_an_expression_keeps_reading_esm() -> None:
+    assert _esm("{show && <p>{'ok'}</p>}\n\nimport a from 'a'\n") == [(2, 3)]
+
+
 def test_front_matter_is_skipped(capture) -> None:
     recs = capture(
         {
