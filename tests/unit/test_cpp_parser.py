@@ -632,6 +632,56 @@ def test_namespaced_definition_attaches_by_qualified_name(tmp_path) -> None:
     assert run.parentId == class_id("a.h", "Foo")  # A::Foo — never B::Foo in b.h
 
 
+def test_a_deeply_qualified_definition_is_named_by_its_declared_name(tmp_path) -> None:
+    # The grammar nests `Shop::Model::get` as scope `Shop` / name `Model::get`. The function
+    # is named `get` whatever the qualification, as in-class and one-level definitions are, so
+    # a call `get` matches it; its statements keep pointing at its id.
+    from breezeai_cog.emit import class_id
+    (tmp_path / "model.h").write_bytes(
+        b"namespace Shop { class Model { public:\n Model();\n ~Model();\n int get(char c);\n"
+        b" int get(int n);\n struct stats_t { static void mark(int v); };\n}; }\n")
+    (tmp_path / "model.cpp").write_bytes(
+        b'#include "model.h"\n'
+        b"namespace Shop { int Model::get(char c) { return get(1); } }\n"
+        b'int Shop::Model::get(int n) { db_exec("SELECT 1"); return n; }\n'
+        b"Shop::Model::Model() { Shop::Model::stats_t::mark(1); }\n"
+        b"Shop::Model::~Model() { }\n"
+        b"void a::b::Shop::Model::stats_t::mark(int v) { if (v) mark(v - 1); }\n"
+        b"template <typename T> struct Box { Box(); };\n"
+        b"template <typename T> Box<T>::Box() { }\n"
+        b"static void helper() { }\n")
+    (tmp_path / "use.cpp").write_bytes(
+        b'#include "model.h"\n'
+        b"void use(Shop::Model* m) { m->get('P'); Shop::Model::stats_t::mark(2); }\n")
+    rec = _parse_cross_file(tmp_path, "model.cpp")
+    got = {(f.startLine, f.name, f.type, f.id) for f in rec.functions}
+    assert got == {
+        (2, "get", "method", "model.cpp#Model#get@2"),
+        (3, "get", "method", "model.cpp#Model#get@3"),
+        (4, "Model", "constructor", "model.cpp#Model#Model@4"),
+        (5, "~Model", "method", "model.cpp#Model#~Model@5"),
+        (6, "mark", "method", "model.cpp#stats_t#mark@6"),
+        (7, "Box", "constructor", "model.cpp#Box#Box@7"),  # the in-class declaration
+        (8, "Box", "constructor", "model.cpp#Box<T>#Box@8"),
+        (9, "helper", "function", "model.cpp#helper@9"),
+    }
+    by_line = {f.startLine: f for f in rec.functions}
+    assert by_line[3].parentId == class_id("model.h", "Model")
+    # a qualified call is named by its declared name too, its scope kept as the receiver
+    assert [(c.name, c.path) for c in by_line[4].calls] == [("mark", "model.cpp")]
+    assert [(c.name, c.path) for c in by_line[6].calls] == [("mark", "model.cpp")]
+    use = _parse_cross_file(tmp_path, "use.cpp").functions[0]
+    assert [(c.name, c.path) for c in use.calls] == [("get", "model.cpp"), ("mark", "model.cpp")]
+
+
+def test_statements_of_a_deeply_qualified_definition_point_at_its_id(tmp_path) -> None:
+    src = b'int Shop::Model::get(int n) { db_exec("SELECT 1"); return n; }\n'
+    rec = _parse_src(tmp_path, src, "m.cpp", capture=True)
+    (fn,) = rec.functions
+    assert fn.id == "m.cpp#Model#get@1"
+    assert rec.statements and {s.parentId for s in rec.statements} == {fn.id}
+
+
 def test_definition_of_external_namesake_does_not_attach(tmp_path) -> None:
     # The repo has A::Widget; a .cpp defines a method on a DIFFERENT namespace's Widget, whose
     # class is not in the repo. The qualified name doesn't match A::Widget → no edge (honest-null).
