@@ -121,12 +121,18 @@ class ClassHeritage:
     ``returns`` maps method name → the simple name of its declared return type, or ``None``
     when overloads disagree; void and primitive returns are left out. It lets a call on a call
     (``builder.dataApi().get()``) resolve through the first call's type. Empty for builders
-    that don't record it."""
+    that don't record it.
+
+    ``fields`` maps each field a subclass inherits (not ``private``) → the simple name of its
+    declared type when that type is a repository class as the declaring file sees it (its
+    imports and package), else ``None``. It lets ``helper.run()`` in a subclass resolve through
+    a ``helper`` field its in-repo base class declares. Empty for builders that don't record it."""
 
     extends: str | None
     decorators: list[Decorator]
     methods: dict[str, str | None] = field(default_factory=dict)
     returns: dict[str, str | None] = field(default_factory=dict)
+    fields: dict[str, str | None] = field(default_factory=dict)
 
 
 def record_heritage(

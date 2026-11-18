@@ -80,21 +80,41 @@ def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, scope: Mapping[str, str | None] | None = None,
 ) -> list[Call]:
-    """The calls in a method body. ``owner`` is the simple name of the class it is declared in:
-    a call on ``this`` or ``super``, or a bare call (Java's implicit ``this``), may resolve to an
-    inherited method. ``scope`` is the method's own variable types (``method_types``)."""
+    """The calls in a method body, one per name in order of first appearance. ``owner`` is the
+    simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
+    (Java's implicit ``this``), may resolve to an inherited method. ``scope`` is the method's own
+    variable types (``method_types``).
+
+    A name's ``path`` comes from the first of its calls that resolves: in ``config.getString(k)``
+    then ``JsonUtil.getString(o, k)`` the second, in-repo call gives ``getString`` its file."""
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    at: dict[str, int] = {}
     # In an anonymous or local class body `this.x` is that class's field, not the outer one's.
     inner_scope = None if scope is None else {k: v for k, v in scope.items() if not k.startswith("this.")}
 
-    def visit(node: Node, inner: bool) -> None:
+    def target(name: str, receiver: str | None, through: tuple[str | None, ...] | None) -> str | None:
+        inner = through is not None
+        if receiver is not None and receiver.endswith(".this"):
+            # `Outer.this.m()` compiles only when `Outer` is this class or an enclosing one, so
+            # it is `this.m()` written in `Outer`, inside an anonymous class body or not.
+            qualifier = receiver[: -len(".this")].rsplit(".", 1)[-1]
+            return resolve(name, "this", qualifier) if qualifier else None
+        if inner:
+            path = resolve(name, receiver, None, inner_scope, field_owner=owner, through=through)
+        else:
+            path = resolve(name, receiver, owner, scope)
+        if path is None and receiver is None and owner is not None:
+            path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
+        return path
+
+    def visit(node: Node, through: tuple[str | None, ...] | None) -> None:
         # Descend into every scope, including inline lambdas — their calls belong to
         # the nearest named enclosing function (see build_function). Inside an anonymous or
-        # local class body (`inner`), `this` and a bare name may mean that class's own members,
-        # so the call is not credited to the enclosing class's own methods.
+        # local class body (`through` is not None: each enclosing such class's type, innermost
+        # first, None for a local class), `this` and a bare name may mean that class's own
+        # members, so the call is not credited to the enclosing class's own methods.
         for child in node.named_children:
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
@@ -102,16 +122,22 @@ def _calls(
                     name = node_text(name_node, source)
                     obj = child.child_by_field_name("object")
                     receiver = node_text(obj, source) if obj is not None else None
-                    if name and name not in seen:
-                        seen.add(name)
-                        path = resolve(name, receiver, None if inner else owner,
-                                       inner_scope if inner else scope)
-                        if path is None and receiver is None and owner is not None:
-                            path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
-                        calls.append(Call(name=name, path=path))
-            visit(child, inner or child.type == "class_body")
+                    if name and (name not in at or calls[at[name]].path is None):
+                        path = target(name, receiver, through)
+                        if name not in at:
+                            at[name] = len(calls)
+                            calls.append(Call(name=name, path=path))
+                        elif path is not None:
+                            calls[at[name]] = Call(name=name, path=path)
+            nested = through
+            if child.type == "class_body":
+                created = node.child_by_field_name("type") \
+                    if node.type == "object_creation_expression" else None
+                nested = (node_text(created, source) if created is not None else None,
+                          *(through or ()))
+            visit(child, nested)
 
-    visit(body, False)
+    visit(body, None)
     return calls
 
 

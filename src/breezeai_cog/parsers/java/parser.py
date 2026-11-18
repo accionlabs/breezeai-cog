@@ -27,6 +27,33 @@ from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "interface_declaration", "enum_declaration", "record_declaration")
 
+#: Library interfaces known to declare no fields. Inside an anonymous class of one of these
+#: (`new Handler<Message>() { … }`), a bare name the class does not declare is a field of the
+#: enclosing class — inherited ones included — exactly as outside it. Any other anonymous type
+#: may declare a field of that name itself, so the call is left unresolved there.
+_FIELDLESS_INTERFACES = frozenset({
+    "java.lang.Runnable",
+    "java.util.concurrent.Callable",
+    "org.vertx.java.core.Handler",
+    "org.vertx.java.core.AsyncResultHandler",
+    "io.vertx.core.Handler",
+})
+
+
+def fieldless_types(external: list[str]) -> frozenset[str]:
+    """The simple names that mean a field-less interface in a file with these external imports:
+    a single-type import of it, its package imported on demand, or ``java.lang`` — unless a
+    single-type import binds the simple name to another class."""
+    single = {imp.rsplit(".", 1)[-1]: imp for imp in external if not imp.endswith(".*")}
+    out: set[str] = set()
+    for fqcn in _FIELDLESS_INTERFACES:
+        package, simple = fqcn.rsplit(".", 1)
+        bound = single.get(simple)
+        if bound == fqcn or (bound is None and (package == "java.lang"
+                                                or f"{package}.*" in external)):
+            out.add(simple)
+    return frozenset(out)
+
 
 class JavaParser(BaseParser):
     name = "java"
@@ -74,6 +101,7 @@ class JavaParser(BaseParser):
             declared_only=True,
             owner_defs=class_method_names(root, source),
             unknown_methods=view.unknown_methods if view is not None else None,
+            fieldless_types=fieldless_types(external),
         )
         functions: list[Function] = []
         classes = []

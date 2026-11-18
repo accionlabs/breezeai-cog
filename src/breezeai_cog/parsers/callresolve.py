@@ -25,6 +25,15 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
   base call ``super.M()`` / ``base.M()`` / ``MyBase.M()`` → the nearest ancestor (up the
   enclosing ``owner``'s heritage chain) that declares ``M``, resolved to that ancestor's file.
 
+* **Inherited field** (with ``declared_only``): ``x.m()`` / ``this.x.m()`` where the calling
+  method does not declare ``x`` and the calling class or its nearest in-repo ancestor declares a
+  field ``x`` (``heritage`` ``fields``) with a repository class type → the file that declares
+  ``m`` on that type. The first class up the chain that declares ``x`` decides; when it gives
+  ``x`` a library type the tier adds nothing and the receiver-type tier runs as before. Inside an anonymous class body the caller passes ``field_owner`` (the
+  enclosing class) and ``through`` (each enclosing anonymous class's type, innermost first):
+  only types in ``fieldless_types`` that are no repository class let the lookup continue, since
+  any other type may declare a field of that name itself.
+
 * **Call receiver** (with ``declared_only``): ``x.m().n()`` / ``m().n()`` / ``Type.m().n()``
   → ``m``'s declared return type (``heritage`` ``returns``, from ``x``'s type, the enclosing
   class or ``Type``, ancestors included) → the file that declares ``n`` on that type. One call
@@ -114,6 +123,7 @@ def make_resolver(
     declared_only: bool = False,
     owner_defs: dict[str, set[str]] | None = None,
     unknown_methods: Mapping[tuple[str, str], frozenset[str] | None] | None = None,
+    fieldless_types: frozenset[str] = frozenset(),
 ) -> CallResolver:
     """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
     callee's qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -132,7 +142,9 @@ def make_resolver(
     unknown one) the whole file's ``local_defs`` apply. ``unknown_methods`` (``(file, class
     simple name)`` → the methods that class declares there, for each class ``heritage`` maps to
     ``None``: :func:`~.index_common.methods_where_unknown`) lets such a type keep its file only
-    for a method declared there; without it the type's file is kept for any method."""
+    for a method declared there; without it the type's file is kept for any method.
+    ``fieldless_types`` (simple names of library interfaces known to declare no fields) lets the
+    inherited-field tier see through an anonymous class of one of those types."""
     types = types or {}
 
     def _type_of(key: str, scope: Mapping[str, str | None] | None) -> tuple[bool, str | None]:
@@ -154,6 +166,30 @@ def make_resolver(
             if name in anc.methods:  # nearest ancestor declaring it wins (matches C# binding)
                 return anc.methods[name]  # its file, or None when that name is file-ambiguous
         return None
+
+    def _field_type(var: str, owner: str) -> str | None:
+        """The repository class type of field ``var`` as the nearest class declaring it (``owner``
+        or an in-repo ancestor) declares it; None when no such class declares it, or the nearest
+        one gives it a type that is no repository class (a farther ancestor's field of the same
+        name is hidden by it, so it is never used)."""
+        assert heritage is not None
+        own = heritage.get(owner)
+        if own is None:
+            return None
+        for cls in (own, *walk_heritage(owner, own.extends, heritage).ancestors):
+            if var in cls.fields:
+                return cls.fields[var]
+        return None
+
+    def _sees_outer_fields(through: tuple[str | None, ...]) -> bool:
+        """Whether a name in an anonymous class body of these types can mean an outer field: only
+        when every one is a known field-less library interface, not a repository class."""
+        for t in through:
+            simple = _base_type(t)
+            if simple is None or simple not in fieldless_types or simple in bindings \
+                    or (heritage is not None and simple in heritage):
+                return False
+        return True
 
     def _lookup(typ: str, name: str, table: str) -> tuple[bool, str | None]:
         """``(found, value)`` for ``name`` in ``typ``'s ``methods`` / ``returns``, else in its
@@ -220,6 +256,7 @@ def make_resolver(
     def resolve(
         name: str, receiver: str | None, owner: str | None = None,
         scope: Mapping[str, str | None] | None = None,
+        *, field_owner: str | None = None, through: tuple[str | None, ...] = (),
     ) -> str | None:
         if receiver in ("self", "this"):
             if name in _own(owner):  # same-file method
@@ -252,6 +289,18 @@ def make_resolver(
         # scope keeps fields under `this.<name>` too; the file-wide map has bare names only.
         var = receiver[len("this."):] if receiver.startswith("this.") else receiver
         if var and "." not in var:
+            # A name the method does not declare is a field it inherits: the class hierarchy
+            # says which, before the file-wide map's guess (`this.x` in an anonymous class is
+            # that class's own field, so only a bare name looks outward there).
+            fowner = owner if owner is not None else (
+                field_owner if not receiver.startswith("this.") and _sees_outer_fields(through)
+                else None)
+            # Only with the method's own scope: without it a local could hide the field unseen.
+            if declared_only and heritage and fowner is not None and scope is not None \
+                    and receiver not in scope:
+                ftype = _field_type(var, fowner)
+                if ftype is not None:
+                    return _lookup(ftype, name, "methods")[1]
             typ = _base_type(_type_of(receiver, scope)[1])
             if typ:
                 resolved = bindings.get(typ) or (path if typ in local_defs else None)
@@ -267,6 +316,6 @@ def make_resolver(
 
 def noop_resolver(
     name: str, receiver: str | None, owner: str | None = None,
-    types: dict[str, str | None] | None = None,
+    types: dict[str, str | None] | None = None, **_: object,
 ) -> None:
     return None  # default when unresolved
