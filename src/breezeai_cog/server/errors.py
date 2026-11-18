@@ -9,9 +9,20 @@ class ApiError(Exception):
     """``failed_step`` names the pipeline stage that failed (``git_acquire``,
     ``ignore_patterns``, ``parse_stream``, ``upload``). When set, the app handler adds
     ``failedStep`` to the JSON body so the Breeze backend can persist which step
-    broke next to the reason (BREEZEAI-520 / BREEZEAI-681)."""
+    broke next to the reason (BREEZEAI-520 / BREEZEAI-681).
 
-    def __init__(self, message: str, status_code: int = 500, failed_step: str | None = None) -> None:
+    ``provider_status`` is the git provider's own HTTP status when the failure came from a
+    provider REST call. The app handler adds it as ``providerStatus`` so the backend can
+    tell "commit not found" (404/422) from an outage while ``status_code`` stays 502."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 500,
+        failed_step: str | None = None,
+        provider_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.failed_step = failed_step
+        self.provider_status = provider_status

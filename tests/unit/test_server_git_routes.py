@@ -317,6 +317,17 @@ def test_pull_request_provider_404_is_502() -> None:
     assert r.status_code == 502 and "HTTP 404" in r.json()["error"]
 
 
+def test_provider_status_is_reported_so_the_backend_can_tell_not_found_from_an_outage() -> None:
+    fake = FakeClient(fail=SCMAPIError("GitHub API GET /compare failed with HTTP 404", http_status=404))
+    r = _app(fake).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": "a", "headCommitId": "b"})
+    assert r.status_code == 502 and r.json()["providerStatus"] == 404
+
+
+def test_error_without_a_provider_status_omits_providerStatus() -> None:
+    r = _app(FakeClient()).post("/api/git/compare", json={"repoUrl": REPO})
+    assert r.status_code == 400 and "providerStatus" not in r.json()
+
+
 # --- pr-comment ---------------------------------------------------------------------
 
 
