@@ -18,7 +18,12 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
+from .source import generic_group_end, shadow
 from .statements import extract_statements
+
+#: A type argument list right after a type node (``(Of …)``, or a further ``.Inner(Of …)``
+#: segment of a qualified type); the ``(`` is group 1.
+_BLANKED_GROUP = re.compile(rb"[ \t]*(?:\.[\w\[\]]+[ \t]*)?(\()(?=[ \t]*Of\b)", re.IGNORECASE)
 
 _VISIBILITY = {"Public": "public", "Private": "private", "Protected": "protected", "Friend": "internal"}
 
@@ -91,8 +96,10 @@ def _is_sub(node: Node, source: bytes) -> bool:
 def type_text(node: Node, source: bytes) -> str | None:
     """A type node's text with the closing parentheses its generic arguments lost to the grammar
     (``Task(Of List(Of Customer``, then ``))`` in the source → ``Task(Of List(Of Customer))``);
-    only ``)`` directly after the node (spaces between) are taken, as many as are missing. None
-    when they are not there: a partial type is not a type."""
+    only ``)`` directly after the node (spaces between) are taken, as many as are missing. A type
+    argument list the shadow blanked (``Dictionary``, then ``(Of String, Integer)`` in the source;
+    see :func:`~.source.blank_generic_arguments`) is taken back whole. None when they are not
+    there: a partial type is not a type."""
     end = node.end_byte
     missing = node_text(node, source).count("(") - node_text(node, source).count(")")
     while missing > 0:
@@ -102,7 +109,14 @@ def type_text(node: Node, source: bytes) -> str | None:
         if source[j:j + 1] != b")":
             return None
         end, missing = j + 1, missing - 1
-    return source[node.start_byte:end].decode("utf-8", "replace") if missing == 0 else None
+    if missing != 0:
+        return None
+    while (m := _BLANKED_GROUP.match(source, end)) is not None:
+        group_end = generic_group_end(source, m.start(1))
+        if group_end is None:
+            return None
+        end = group_end
+    return source[node.start_byte:end].decode("utf-8", "replace")
 
 
 def as_clause_type(container: Node, source: bytes) -> str | None:
@@ -116,9 +130,50 @@ def as_clause_type(container: Node, source: bytes) -> str | None:
     return None
 
 
+#: The text between two parameters (one ``,``) or around them (none): whitespace, `` _``
+#: continuations, comments, and an attribute block the grammar did not attach to its parameter
+#: (``<[In], Out> ByVal a() As T`` on the line after ``(``: the parameter is read, only its
+#: attributes are not).
+_PARAM_GAP = re.compile(rb"""(?:[ \t\r\n_]|'[^\n]*|<(?:[^<>"\n]|"(?:[^"]|"")*")*>)*""")
+
+
+#: What separates a parameter list's ``)`` from its return type: `` As `` (continued lines too).
+_RETURN_AS = re.compile(rb"(?:[ \t\r\n]|_[ \t]*\r?\n)*As(?:[ \t\r\n]|_[ \t]*\r?\n)+", re.IGNORECASE)
+
+
+def _directly_after(ret: Node, params_node: Node, source: bytes) -> bool:
+    """Whether the return type ``ret`` follows the parameter list's ``)`` with only `` As ``
+    between, as the grammar saw it."""
+    return _RETURN_AS.fullmatch(shadow(source)[params_node.end_byte:ret.start_byte]) is not None
+
+
+def params_broken(params_node: Node | None, source: bytes) -> bool:
+    """Whether the grammar lost text between a parameter list's parameters — anything but the
+    separators (``<FromQuery> toY As String`` reads as the keyword ``To`` and falls into an
+    ``ERROR`` between them). Its parameters are then not read: none rather than some. An error
+    inside one parameter (``<[In], Out> ByVal a() As T``) loses no parameter and is not counted."""
+    if params_node is None:
+        return False
+    source = shadow(source)  # the gaps as the grammar saw them (a blanked ``(Of …)`` is not lost)
+    params = [c for c in params_node.named_children if c.type == "parameter"]
+    kids = params_node.children
+    pos = kids[0].end_byte if kids and kids[0].type == "(" else params_node.start_byte
+    end = kids[-1].start_byte if kids and kids[-1].type == ")" else params_node.end_byte
+    gaps = [source[pos:params[0].start_byte]] if params else [source[pos:end]]
+    gaps += [source[a.end_byte:b.start_byte] for a, b in zip(params, params[1:])]
+    if params:
+        gaps.append(source[params[-1].end_byte:end])
+    for i, gap in enumerate(gaps):
+        inner = 0 < i < len(gaps) - 1
+        rest = gap.replace(b",", b"", 1) if inner else gap
+        if (inner and b"," not in gap) or _PARAM_GAP.fullmatch(rest) is None:
+            return True
+    return False
+
+
 def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     out: list[Parameter] = []
-    if params_node is None:
+    if params_node is None or params_broken(params_node, source):
         return out
     for p in params_node.named_children:
         if p.type != "parameter":
@@ -247,8 +302,12 @@ def build_method(
     fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
     # A broken header's parameter list and return type are read from the wrong text: empty.
-    ret = None if header_broken or _is_sub(node, source) else node.child_by_field_name("return_type")
     params_node = None if header_broken else node.child_by_field_name("parameters")
+    ret = None if header_broken or _is_sub(node, source) else node.child_by_field_name("return_type")
+    if params_node is not None and params_broken(params_node, source):
+        if ret is not None and not _directly_after(ret, params_node, source):
+            ret = None  # the list closed early: the "return type" may be one of its parameters
+        params_node = None
     fn = Function(
         id=fid,
         parentId=parent_id,

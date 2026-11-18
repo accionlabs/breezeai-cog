@@ -344,15 +344,16 @@ End Class
 def test_a_broken_method_header_keeps_its_declared_name(tmp_path) -> None:
     # This header shape (an attributed parameter named ``to…``, a generic return type, an
     # ``If … OrElse …`` call condition) makes the grammar fail inside the header; its ``name`` field then points at
-    # ``IsNullOrWhiteSpace`` on the If line; the name comes from the header text instead, and the
-    # mis-read parameters and return type stay empty rather than wrong.
+    # ``IsNullOrWhiteSpace`` on the If line; the name comes from the header text instead. The
+    # mis-read parameters stay empty rather than partial; the return type, right after the
+    # list's ``)``, is still read.
     p = tmp_path / "R.vb"
     p.write_bytes(BROKEN_HEADER)
     ctx = ParseContext(path="R.vb", abs_path=p, source=BROKEN_HEADER, repo_root=tmp_path)
     rec = VbParser().parse_file(ctx)
     fns = {f.name: f for f in rec.functions}
     assert set(fns) == {"GetRate", "Other"}
-    assert fns["GetRate"].params == [] and fns["GetRate"].returnType is None
+    assert fns["GetRate"].params == [] and fns["GetRate"].returnType == "Task(Of IActionResult)"
     assert fns["GetRate"].id == "R.vb#ReportsController#GetRate@2"
     # nothing in the file is named IsNullOrWhiteSpace, so that call resolves to no local function
     assert [c.path for c in fns["Other"].calls if c.name == "IsNullOrWhiteSpace"] == [None]
@@ -460,7 +461,7 @@ def test_implements_is_left_alone_off_a_member_header() -> None:
         b"    Implements IOrderService",                                 # the class statement
         b'    Dim s = "Function F() Implements I.J"',                     # in a string
         b"    ' Public Function F() As X Implements I.J",                 # a comment
-        b"    Public Function F() As X _",                                # continued header
+        b"    Public Function F() As X _",                                # continued header, no clause
     ]
     for line in kept:
         assert blank_implements(line) == line, line
@@ -484,7 +485,119 @@ def test_a_generic_type_keeps_its_closing_parentheses(tmp_path) -> None:
     rec = _parse_source(tmp_path, _GENERICS)
     got = {f.name: (f.returnType, [(p.name, p.type) for p in f.params]) for f in rec.functions}
     assert got["B"] == ("Task(Of List(Of Customer))", [])
-    # A parameter after a generic one is lost to the grammar; a Sub still returns nothing.
-    assert got["S"][0] is None and got["S"][1][0] == ("xs", "List(Of Customer)")
+    # A parameter after a generic one is kept; a Sub still returns nothing.
+    assert got["S"] == (None, [("xs", "List(Of Customer)"), ("n", "Integer")])
     assert got["D"][0] == "Dictionary(Of String, List(Of Integer))"
     assert got["E"][0] == "Customer"
+
+
+_MULTI_ARG_GENERICS = b"""Public Interface IOrders
+    Function Find(f As Dictionary(Of String, String), take As Integer) As List(Of Order)
+End Interface
+Public Class C
+    Implements IOrders
+    Private _map As Dictionary(Of String, Integer), _s3 As IAmazonS3
+    Public Sub New(repo As IRepository(Of Order, Integer), <FromServices> log As ILogger)
+    End Sub
+    Public Function A2(a As Dictionary(Of String, Integer), b As String) As Integer
+        Return 1
+    End Function
+    Public Function A3(d As Dictionary(Of String, List(Of Integer))) As Integer
+        Return 1
+    End Function
+    Public Function Pat(d As Dictionary(Of String, List(Of Integer)), ParamArray z() As String) As Task(Of List(Of Dictionary(Of String, Integer))) Implements IA.Pat, IB.Pat
+        Return Nothing
+    End Function
+    Public Function Multi(
+        a As Dictionary(Of String,
+                           Integer),
+        <FromBody> b As String) As Integer
+        Return 1
+    End Function
+    Public Function FromAsync(Of T1, T2)(
+            begin As Func(Of T1, T2, IAsyncResult),
+            state As Object) As Task
+        Return Nothing
+    End Function
+    Public Function Q(x As Outer(Of Integer).Inner(Of String, Long), y As Integer) As Integer
+        Return 1
+    End Function
+    Public Function Find(f As Dictionary(Of String, String),
+                         take As Integer) As List(Of Order) _
+        Implements IOrders.Find
+        Dim s = "x As Dictionary(Of A, B)"
+        Return Nothing
+    End Function
+End Class
+"""
+
+
+def test_a_generic_with_several_type_arguments_keeps_the_parameter_list(tmp_path) -> None:
+    # The grammar reads the comma in `(Of A, B)` as the end of the parameter list, and a nested
+    # `(Of …)` as a parameter; the shadow blanks the group, the type is read whole from the source.
+    rec = _parse_source(tmp_path, _MULTI_ARG_GENERICS)
+    got = {(f.name, f.startLine): ([(p.name, p.type) for p in f.params], f.returnType)
+           for f in rec.functions}
+    assert got[("A2", 9)] == ([("a", "Dictionary(Of String, Integer)"), ("b", "String")], "Integer")
+    assert got[("A3", 12)] == ([("d", "Dictionary(Of String, List(Of Integer))")], "Integer")
+    assert got[("Pat", 15)] == (
+        [("d", "Dictionary(Of String, List(Of Integer))"), ("z", "String")],
+        "Task(Of List(Of Dictionary(Of String, Integer)))")
+    multi = got[("Multi", 18)]
+    assert [n for n, _ in multi[0]] == ["a", "b"] and multi[1] == "Integer"
+    # a method's own type parameters are not its parameter list
+    assert got[("FromAsync", 24)] == (
+        [("begin", "Func(Of T1, T2, IAsyncResult)"), ("state", "Object")], "Task")
+    assert got[("Q", 29)] == (
+        [("x", "Outer(Of Integer).Inner(Of String, Long)"), ("y", "Integer")], "Integer")
+    # an interface member, and a member whose Implements clause is on a continued line
+    assert got[("Find", 2)] == (
+        [("f", "Dictionary(Of String, String)"), ("take", "Integer")], "List(Of Order)")
+    assert got[("Find", 32)] == got[("Find", 2)]
+    from breezeai_cog.parsers.vb.source import member_implements
+    assert member_implements(_MULTI_ARG_GENERICS)[32] == ["IOrders.Find"]
+    ctor = next(f for f in rec.functions if f.name == "New")
+    assert [(p.name, p.type, [d.name for d in p.decorators]) for p in ctor.params] == [
+        ("repo", "IRepository(Of Order, Integer)", []), ("log", "ILogger", ["FromServices"])]
+    assert [(p.name, p.type) for p in rec.classes[-1].constructorParams] == [
+        ("repo", "IRepository(Of Order, Integer)"), ("log", "ILogger")]
+
+
+def test_generic_arguments_are_blanked_only_after_as_and_a_method_name() -> None:
+    from breezeai_cog.parsers.vb.source import blank_generic_arguments
+
+    src = b"Function F(Of T)(a As List(Of T)) As Dictionary(Of K, V)\n"
+    out = blank_generic_arguments(src)
+    assert len(out) == len(src)
+    # the method's type parameters and both type argument lists: spaces, same length
+    assert out == b"Function F      (a As List      ) As Dictionary         \n"
+    kept = [
+        b"Public Class Repo(Of K, V)",                 # a type's own type parameters
+        b"    Inherits Base(Of K, V)",
+        b"    x = New List(Of Integer)()",             # an expression, no As
+        b'    s = "a As List(Of A, B)"',               # in a string
+        b"    ' a As List(Of A, B)",                   # in a comment
+        b"    Dim d As Dictionary(Of String,",         # not closed on its logical line
+    ]
+    for line in kept:
+        assert blank_generic_arguments(line + b"\n    End Sub\n") == line + b"\n    End Sub\n", line
+
+
+def test_a_parameter_list_the_grammar_lost_text_from_is_empty_not_partial(tmp_path) -> None:
+    # `<FromQuery> toY` reads as the keyword `To`: the second parameter falls into an ERROR
+    # between the parameters. No partial list; an error inside one parameter
+    # (`<[In], Out>` on a parameter after a line break) loses no parameter and is kept.
+    src = b"""Public Class R
+    Public Function GetRate(<FromQuery> fromX As String, <FromQuery> toY As String) As Task(Of IActionResult)
+        Return Ok()
+    End Function
+    Friend Shared Function Test(
+        <[In], Out> ByVal pointArray() As MyPoint, ByVal size As Integer) _
+        As Integer
+    End Function
+End Class
+"""
+    rec = _parse_source(tmp_path, src)
+    got = {f.name: ([p.name for p in f.params], f.returnType) for f in rec.functions}
+    assert got["GetRate"] == ([], "Task(Of IActionResult)")
+    assert got["Test"] == (["pointArray", "size"], "Integer")

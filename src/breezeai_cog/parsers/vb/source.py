@@ -41,7 +41,19 @@ Nor has it a member's ``Implements`` clause: in ``Function Fetch(id As String) A
 IOrderService.GetOrder`` the ``As`` type falls into an ``ERROR`` node and ``IOrderService.GetOrder``
 reads as the return type. The shadow blanks the clause on a ``Function``/``Sub``/``Property``/
 ``Event`` header line (:func:`blank_implements`); :func:`member_implements` reads it from the
-original source. A header continued onto the next line (`` _``) is left as written.
+original source — on a header continued over several lines too (`` _``, or a parameter list
+broken after a ``,``).
+
+Nor can it read a type argument list with a comma or a nested generic: in
+``Function A(a As Dictionary(Of String, Integer), b As String)`` the comma closes the parameter
+list (``b`` is lost), and ``(Of String, List(Of Integer))`` adds a parameter named ``List``. The
+shadow blanks each ``(Of …)`` group that follows an ``As [New] <Type>`` (parameters, return
+types, fields, locals) — :func:`blank_generic_arguments` — so the grammar reads
+``a As Dictionary, b As String``; :func:`~.functions.type_text` takes the group back from the
+original source. A method's own type parameters (``Function FromAsync(Of T1, T2)(``, read
+otherwise as its parameter list) are blanked too; VB records no generics of a method. A type's
+generic parameters (``Class Repo(Of K, V)``) and generic expressions (``New List(Of T)()``
+without ``As``) parse as written.
 """
 
 from __future__ import annotations
@@ -137,14 +149,19 @@ def blank_await(source: bytes) -> bytes:
 
 
 #: One implemented member, as written: ``IOrders.Get``, ``IRepository(Of T).GetAll``.
-_MEMBER = rb"[\w\[\]]+(?:[ \t]*\([ \t]*Of\b[^()\n]*\))?(?:\.[\w\[\]]+(?:[ \t]*\([ \t]*Of\b[^()\n]*\))?)*"
+_OF_ARGS = rb"[ \t]*\([ \t]*Of\b(?:[^()\n]|\([^()\n]*\))*\)"  # ``(Of K, List(Of V))``: one nested level
+_MEMBER = rb"[\w\[\]]+(?:" + _OF_ARGS + rb")?(?:\.[\w\[\]]+(?:" + _OF_ARGS + rb")?)*"
+#: A line break inside a header the next line continues: after an explicit `` _``, or (implicit
+#: continuation) after a ``,`` or ``(`` in the parameter list.
+_CONTINUED_LINE = rb"(?:[ \t]_|[,(])[ \t]*\r?\n"
 #: A member header line ending with an ``Implements A.B[, C.D]`` clause (group 1; group 2 the list);
 #: a generic interface is named with its arguments (``IRepository(Of T).GetAll``).
 #: The header may start with a joined attribute block and modifiers; a ``'`` before the clause
 #: (a string or a comment) or a continuation keeps the line out.
 _IMPLEMENTS_HEADER = re.compile(
     rb"^[ \t]*(?:<[^\n]*>[ \t]*)?(?:[A-Za-z]+[ \t]+)*?(?:Function|Sub|Property|Event)[ \t]+"
-    rb"[^\n'\"]*?([ \t]Implements[ \t]+(" + _MEMBER + rb"(?:[ \t]*,[ \t]*" + _MEMBER + rb")*))"
+    rb"(?:[^\n'\"]|" + _CONTINUED_LINE + rb")*?"
+    rb"([ \t]Implements[ \t]+(" + _MEMBER + rb"(?:[ \t]*,[ \t]*" + _MEMBER + rb")*))"
     rb"[ \t]*(?:'[^\n]*)?\r?$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -160,6 +177,79 @@ def blank_implements(source: bytes) -> bytes:
         if out is None:
             out = bytearray(source)
         out[m.start(1):m.end(1)] = b" " * (m.end(1) - m.start(1))
+        # A clause on its own continued line: the `` _`` before it would now continue onto a
+        # blank line — blank it too.
+        j = m.start(1)
+        while j > 0 and source[j - 1] in b" \t\r\n":
+            j -= 1
+        if source[j - 1:j] == b"_" and b"\n" in source[j:m.start(1)]:
+            out[j - 1] = 0x20
+    return bytes(out) if out is not None else source
+
+
+#: A string, a comment, an ``As [New] <Type>`` directly followed by a ``(Of`` group (its ``(`` is
+#: group 1), or a ``Function``/``Sub`` name directly followed by its type parameters (group 2:
+#: ``Function FromAsync(Of T1, T2)(…)`` — read otherwise as the parameter list). The type may be
+#: qualified or escaped (``System.Collections.Generic.List``, ``[Of]``).
+_AS_GENERIC_SCAN = re.compile(
+    rb'"(?:[^"]|"")*"|\'[^\n]*|\bREM\b[^\n]*'
+    rb"|(?<![\w.])As[ \t]+(?:New[ \t]+)?[\w.\[\]]+[ \t]*(\()(?=[ \t]*Of\b)"
+    rb"|(?<![\w.])(?:Function|Sub)[ \t]+(?:\[[^\]\n]+\]|[A-Za-z_]\w*)[ \t]*(\()(?=[ \t]*Of\b)",
+    re.IGNORECASE,
+)
+#: A further generic segment of a qualified type: ``.Inner(Of B)`` after ``Outer(Of A)``; the
+#: ``(`` is group 1.
+_NEXT_GENERIC_SEGMENT = re.compile(rb"\.[\w\[\]]+[ \t]*(\()(?=[ \t]*Of\b)", re.IGNORECASE)
+#: What ends a line that VB continues onto the next one inside a type argument list: an explicit
+#: ``_``, or (implicit continuation) a ``,`` or ``(``.
+_CONTINUES = re.compile(rb"(?:[ \t]_|[,(])[ \t]*\r?$")
+
+
+def generic_group_end(source: bytes, start: int) -> int | None:
+    """The offset just past the ``)`` that closes the bracket at ``source[start]``, or None when
+    the group is not closed on its logical line (a line ends without a continuation) — one
+    forward scan, so the cost is the group's own length."""
+    depth, i, n = 0, start, len(source)
+    while i < n:
+        ch = source[i]
+        if ch == 0x28:  # (
+            depth += 1
+        elif ch == 0x29:  # )
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif ch == 0x0A and not _CONTINUES.search(source, source.rfind(b"\n", 0, i) + 1, i):
+            return None
+        i += 1
+    return None
+
+
+def blank_generic_arguments(source: bytes) -> bytes:
+    """``source`` with each type argument list after an ``As [New] <Type>`` blanked in place
+    (spaces, newlines kept) — ``As Dictionary(Of String, Integer)`` parses as
+    ``As Dictionary``; ``source`` itself when there is none. A group not closed on its logical
+    line is left as written."""
+    if not re.search(rb"(?i)\(\s*Of\b", source):
+        return source
+    out: bytearray | None = None
+    for m in _AS_GENERIC_SCAN.finditer(source):
+        start = m.start(1) if m.start(1) != -1 else m.start(2)
+        while start != -1:
+            end = generic_group_end(source, start)
+            if end is None:
+                break
+            # A group written over several lines stays one logical line for the grammar: a
+            # `` _`` continuation before each newline in it (the line break itself is kept).
+            breaks = [i - (source[i - 1] == 0x0D) for i in range(start, end) if source[i] == 0x0A]
+            if any(b - 2 < start for b in breaks):
+                break  # no room for `` _`` (``(`` alone on its line): leave it as written
+            if out is None:
+                out = bytearray(source)
+            _blank(out, start, end)
+            for b in breaks:
+                out[b - 1] = ord("_")
+            nxt = _NEXT_GENERIC_SEGMENT.match(source, end)
+            start = nxt.start(1) if nxt is not None else -1
     return bytes(out) if out is not None else source
 
 
@@ -246,9 +336,16 @@ class _Layout(NamedTuple):
 
 @lru_cache(maxsize=8)
 def _layout(source: bytes) -> _Layout:
-    joined = blank_implements(blank_await(join_attribute_blocks(source)))
+    joined = blank_generic_arguments(
+        blank_implements(blank_await(join_attribute_blocks(source))))
     blocks = _type_blocks(joined)
     return _Layout(joined, [b for b in blocks or [] if b.depth > 0])
+
+
+def shadow(source: bytes) -> bytes:
+    """The text the grammar parsed for ``source`` (same length; nested types not blanked) — for
+    a check that must see what the grammar saw, not the original."""
+    return _layout(source).joined
 
 
 def _level_shadow(layout: _Layout, depth: int) -> bytes:
