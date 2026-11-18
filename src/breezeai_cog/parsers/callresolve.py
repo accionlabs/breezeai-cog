@@ -25,7 +25,7 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
   base call ``super.M()`` / ``base.M()`` / ``MyBase.M()`` → the nearest ancestor (up the
   enclosing ``owner``'s heritage chain) that declares ``M``, resolved to that ancestor's file.
 
-* **Inherited field** (with ``declared_only``): ``x.m()`` / ``this.x.m()`` where the calling
+* **Inherited field** (with ``declared_only`` and ``inherited_fields``, Java only): ``x.m()`` / ``this.x.m()`` where the calling
   method does not declare ``x`` and the calling class or its nearest in-repo ancestor declares a
   field ``x`` (``heritage`` ``fields``) with a repository class type → the file that declares
   ``m`` on that type. The first class up the chain that declares ``x`` decides; when it gives
@@ -123,6 +123,7 @@ def make_resolver(
     declared_only: bool = False,
     owner_defs: dict[str, set[str]] | None = None,
     unknown_methods: Mapping[tuple[str, str], frozenset[str] | None] | None = None,
+    inherited_fields: bool = False,
     fieldless_types: frozenset[str] = frozenset(),
 ) -> CallResolver:
     """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
@@ -143,6 +144,9 @@ def make_resolver(
     simple name)`` → the methods that class declares there, for each class ``heritage`` maps to
     ``None``: :func:`~.index_common.methods_where_unknown`) lets such a type keep its file only
     for a method declared there; without it the type's file is kept for any method.
+    ``inherited_fields`` turns on the inherited-field tier: a language whose name lookup the
+    tier models (Java) opts in, so no other language's calls change with the ``fields`` its
+    classes' heritage may carry (Groovy reads the Java classes' heritage too).
     ``fieldless_types`` (simple names of library interfaces known to declare no fields) lets the
     inherited-field tier see through an anonymous class of one of those types."""
     types = types or {}
@@ -296,8 +300,8 @@ def make_resolver(
                 field_owner if not receiver.startswith("this.") and _sees_outer_fields(through)
                 else None)
             # Only with the method's own scope: without it a local could hide the field unseen.
-            if declared_only and heritage and fowner is not None and scope is not None \
-                    and receiver not in scope:
+            if inherited_fields and declared_only and heritage and fowner is not None \
+                    and scope is not None and receiver not in scope:
                 ftype = _field_type(var, fowner)
                 if ftype is not None:
                     return _lookup(ftype, name, "methods")[1]

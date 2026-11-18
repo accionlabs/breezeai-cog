@@ -27,16 +27,14 @@ from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "interface_declaration", "enum_declaration", "record_declaration")
 
-#: Library interfaces known to declare no fields. Inside an anonymous class of one of these
-#: (`new Handler<Message>() { … }`), a bare name the class does not declare is a field of the
-#: enclosing class — inherited ones included — exactly as outside it. Any other anonymous type
-#: may declare a field of that name itself, so the call is left unresolved there.
+#: JDK interfaces that declare no fields. Inside an anonymous class of one of these
+#: (`new Runnable() { … }`), a bare name the class does not declare is a field of the enclosing
+#: class — inherited ones included — exactly as outside it. Any other anonymous type (a
+#: framework's handler interface included) may declare a field of that name itself, so the call
+#: is left to the other rules there.
 _FIELDLESS_INTERFACES = frozenset({
     "java.lang.Runnable",
     "java.util.concurrent.Callable",
-    "org.vertx.java.core.Handler",
-    "org.vertx.java.core.AsyncResultHandler",
-    "io.vertx.core.Handler",
 })
 
 
@@ -101,6 +99,7 @@ class JavaParser(BaseParser):
             declared_only=True,
             owner_defs=class_method_names(root, source),
             unknown_methods=view.unknown_methods if view is not None else None,
+            inherited_fields=True,
             fieldless_types=fieldless_types(external),
         )
         functions: list[Function] = []

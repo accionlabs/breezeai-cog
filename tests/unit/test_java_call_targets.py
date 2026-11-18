@@ -148,6 +148,9 @@ public class Child extends Base {
     void privateField() { hidden.inst(); }
     void libraryType() { client.inst(); }
     void localWins() { Other shadowed = null; shadowed.inst(); }
+    void inRunnable() {
+        submit(new Runnable() { public void run() { helper.inst(); } });
+    }
     void inHandler() {
         vertx.eventBus().registerHandler("a", new Handler<Message<Object>>() {
             public void handle(Message<Object> m) { helper.inst(); }
@@ -188,9 +191,15 @@ def test_a_local_hides_the_inherited_field(tmp_path: Path) -> None:
     assert calls["localWins"] == {"inst": _f("web/Other.java")}
 
 
-def test_inside_a_handler_a_bare_name_is_the_outer_field(tmp_path: Path) -> None:
+def test_inside_an_anonymous_runnable_a_bare_name_is_the_outer_field(tmp_path: Path) -> None:
     calls = _child_calls(tmp_path)
-    assert calls["inHandler"]["inst"] == _f("Helper.java")
+    assert calls["inRunnable"]["inst"] == _f("Helper.java")
+
+
+def test_inside_a_framework_handler_the_inherited_field_is_not_resolved(tmp_path: Path) -> None:
+    # A framework's handler interface is not known to the Java parser to declare no fields.
+    calls = _child_calls(tmp_path)
+    assert calls["inHandler"]["inst"] is None
 
 
 def test_inside_an_anonymous_class_this_field_is_not_the_outer_one(tmp_path: Path) -> None:
@@ -252,14 +261,28 @@ public class Addr { public static final String BUS = Helper.util2(); void m() {}
 # --- which simple names mean a field-less interface in a file ---------------------------------
 
 def test_fieldless_types_follow_the_imports() -> None:
-    assert "Handler" in fieldless_types(["org.vertx.java.core.Handler"])
-    assert "Handler" in fieldless_types(["org.vertx.java.core.*"])
-    assert "Handler" in fieldless_types(["io.vertx.core.Handler"])
     assert "Runnable" in fieldless_types([])  # java.lang
-    assert "Handler" not in fieldless_types([])
-    assert "Handler" not in fieldless_types(["java.util.logging.Handler"])
+    assert "Callable" in fieldless_types(["java.util.concurrent.Callable"])
+    assert "Callable" in fieldless_types(["java.util.concurrent.*"])
+    assert "Callable" not in fieldless_types([])
     assert "Runnable" not in fieldless_types(["com.lib.Runnable"])
-    assert "Handler" not in fieldless_types(["com.lib.Handler", "org.vertx.java.core.*"])
+    assert "Callable" not in fieldless_types(["com.lib.Callable", "java.util.concurrent.*"])
+    assert "Handler" not in fieldless_types(["org.vertx.java.core.Handler"])  # a framework's
+
+
+def test_the_inherited_field_tier_is_off_unless_a_language_turns_it_on() -> None:
+    from breezeai_cog.parsers.callresolve import make_resolver
+    from breezeai_cog.parsers.index_common import ClassHeritage
+
+    heritage = {
+        "Base": ClassHeritage(extends=None, decorators=[], fields={"helper": "Helper"}),
+        "Child": ClassHeritage(extends="Base", decorators=[]),
+        "Helper": ClassHeritage(extends=None, decorators=[], methods={"inst": "Helper.java"}),
+    }
+    for on, expected in ((False, None), (True, "Helper.java")):
+        resolve = make_resolver({}, set(), "Child.java", heritage=heritage, declared_only=True,
+                                inherited_fields=on)
+        assert resolve("inst", "helper", "Child", {}) == expected
 
 
 # --- end to end, so the index reaches the workers ---------------------------------------------
@@ -280,4 +303,4 @@ def test_inherited_fields_reach_the_workers_for_any_jobs(tmp_path: Path, jobs: i
                or f'"path":"{_f("web/Child.java")}"' in line)
     calls = {f["name"]: {c["name"]: c.get("path") for c in f["calls"]} for f in rec["functions"]}
     assert calls["direct"] == {"inst": _f("Helper.java")}
-    assert calls["inHandler"]["inst"] == _f("Helper.java")
+    assert calls["inRunnable"]["inst"] == _f("Helper.java")

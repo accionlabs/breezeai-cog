@@ -298,7 +298,7 @@ different types:
 | A field of the class and of its enclosing classes; not of another class in the file | inner class using an outer field | the field's type |
 | Java: a name the method and its classes never declare is a field an in-repo ancestor declares (any but `private`), its type read where that ancestor is declared; the nearest class declaring it decides, and one that gives it a library type adds nothing (the next row applies) | `Base` declares `protected Helper helper`; `Child extends Base` calls `helper.run()` | `Helper` |
 | A name no in-repo ancestor declares (a field of a library base) takes the file's type for that name, only while every typed declaration of it in the file agrees | constructor `Service(Repo repo) { super(repo) }`, `run() { repo.save() }` | `Repo` |
-| Java, inside an anonymous class body: a bare name is an outer (or inherited outer) field only when the anonymous class's type is a library interface known to declare no fields (Vert.x `Handler` / `AsyncResultHandler`, `Runnable`, `Callable`, imported as such); `this.name` there is the anonymous class's own | `new Handler<Message>() { void handle(Message m) { helper.run(); } }` | `Helper`; under `new org.lib.Task() { … }` null |
+| Java, inside an anonymous class body: a bare name is an outer (or inherited outer) field only when the anonymous class's type is a JDK interface that declares no fields (`Runnable`, `Callable`); `this.name` there is the anonymous class's own | `new Runnable() { public void run() { helper.run(); } }` | `Helper`; under a framework's handler (`new Handler<Message>() { … }`) or `new org.lib.Task() { … }` the other rules apply |
 
 **Which languages use which steps:**
 
