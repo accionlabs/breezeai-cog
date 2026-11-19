@@ -14,8 +14,9 @@
   three-argument constructor's second argument, or ``.description("…")``).
 * ``params`` from a JSON-schema string literal (``properties`` / ``required``); a schema that is
   not a literal, or does not parse → None (unknown).
-* ``handler`` — a method reference (``this::calc``, ``Calc::calc``) names it; a lambda has no
-  name, only its line.
+* ``handler`` — a method reference (``this::calc``, ``Calc::calc``) names it, with the line of
+  the one method of the name in the class it names when that class is in this file (``this``:
+  the class around it); a lambda has no name, only its line.
 
 The server builder's shortcut registers a ``Tool`` directly::
 
@@ -146,9 +147,104 @@ def _tool_fields(
     return name, description, params
 
 
+#: Type declarations whose body holds methods a method reference can name.
+_TYPE_DECLS = frozenset(
+    {"class_declaration", "enum_declaration", "interface_declaration", "record_declaration"}
+)
+#: Nodes that declare a variable (a local, field, parameter or lambda parameter) by ``name``.
+_VARIABLE_DECLS = frozenset(
+    {
+        "variable_declarator",
+        "formal_parameter",
+        "spread_parameter",
+        "catch_formal_parameter",
+        "enhanced_for_statement",
+        "resource",
+    }
+)
+
+
+def _body_methods(body: Node | None, name: str, source: bytes) -> list[Node]:
+    """The methods named ``name`` declared directly in a class / interface / enum body."""
+    if body is None:
+        return []
+    members = list(body.named_children)
+    for c in body.named_children:
+        if c.type == "enum_body_declarations":
+            members.extend(c.named_children)
+    out = []
+    for m in members:
+        nm = m.child_by_field_name("name") if m.type == "method_declaration" else None
+        if nm is not None and node_text(nm, source) == name:
+            out.append(m)
+    return out
+
+
+class _HandlerSites:
+    """Where a method reference passed as a handler is declared, in this file only:
+    ``this::calc`` is the method ``calc`` of the class around the reference (an anonymous class
+    included); ``Type::calc`` the method ``calc`` of the one class ``Type`` this file declares
+    (a variable of that name hides it: ``expr::calc``). One method of the name, or no line: an
+    overload, ``super::calc``, ``a.b::calc``, a generic type or a class of another file."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        self.source = source
+        self.types: dict[str, list[Node]] = {}
+        self.variables: set[str] = set()
+        #: A ``this::`` reference (by its span) → the body of the class around it, found in this
+        #: one walk down (walking up from each reference would cost a deep chain's depth each).
+        self.this_bodies: dict[tuple[int, int], Node | None] = {}
+        self._found: dict[tuple[int, int, str], int | None] = {}
+        stack: list[tuple[Node, Node | None]] = [(root, None)]
+        while stack:
+            node, body = stack.pop()
+            if node.type in _TYPE_DECLS or node.type in _VARIABLE_DECLS:
+                nm = node.child_by_field_name("name")
+                if nm is not None and node.type in _TYPE_DECLS:
+                    self.types.setdefault(node_text(nm, source), []).append(node)
+                    body = node.child_by_field_name("body")
+                elif nm is not None:
+                    self.variables.add(node_text(nm, source))
+            elif (
+                node.type == "class_body"
+                and node.parent is not None
+                and (node.parent.type == "object_creation_expression")
+            ):
+                body = node  # an anonymous class: `this` is its instance
+            elif node.type == "method_reference":
+                self.this_bodies[(node.start_byte, node.end_byte)] = body
+            elif node.type == "lambda_expression":
+                params = node.child_by_field_name("parameters")
+                if params is not None and params.type == "identifier":
+                    self.variables.add(node_text(params, source))
+                elif params is not None and params.type == "inferred_parameters":
+                    self.variables.update(node_text(c, source) for c in params.named_children)
+            stack.extend((c, body) for c in node.named_children)
+
+    def line(self, ref: Node, target: Node, name: str) -> int | None:
+        body: Node | None = None
+        if target.type == "this":
+            body = self.this_bodies.get((ref.start_byte, ref.end_byte))
+        elif target.type == "identifier":
+            type_name = node_text(target, self.source)
+            decls = self.types.get(type_name, [])
+            if type_name in self.variables or len(decls) != 1:
+                return None
+            body = decls[0].child_by_field_name("body")
+        if body is None:
+            return None
+        key = (body.start_byte, body.end_byte, name)
+        if key not in self._found:
+            found = _body_methods(body, name, self.source)
+            self._found[key] = found[0].start_point[0] + 1 if len(found) == 1 else None
+        return self._found[key]
+
+
 def _sdk_handler(
-    node: Node | None, source: bytes, methods: dict[str, int | None]
+    node: Node | None, source: bytes, sites: _HandlerSites
 ) -> tuple[str | None, int | None]:
+    """A lambda → its line; a method reference → the method's name, and the line
+    :class:`_HandlerSites` finds for it."""
     if node is None:
         return None, None
     if node.type == "lambda_expression":
@@ -157,7 +253,7 @@ def _sdk_handler(
         parts = [c for c in node.named_children if c.type != "comment"]
         name = node_text(parts[-1], source) if len(parts) >= 2 else ""
         if name and name != "new":
-            return name, methods.get(name)
+            return name, sites.line(node, parts[0], name) if len(parts) == 2 else None
     return None, None
 
 
@@ -181,10 +277,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
     if b"ToolSpecification" not in source:
         return []
     variables = _local_variables(dc.root, source)
-    lines: dict[str, list[int]] = {}
-    for f in dc.record.functions:
-        lines.setdefault(f.name, []).append(f.startLine)
-    methods = {name: ls[0] if len(ls) == 1 else None for name, ls in lines.items()}
+    sites = _HandlerSites(dc.root, source)
     found: list[Emit] = []
     for node in walk(dc.root):
         tool: Node | None = None
@@ -215,7 +308,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
         if fields is None:
             continue
         name, description, params = fields
-        handler_name, handler_line = _sdk_handler(handler, source, methods)
+        handler_name, handler_line = _sdk_handler(handler, source, sites)
         found.append(
             tool_emit(
                 node,
@@ -272,10 +365,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
         return []
     servers = mcp_server_names(source, index_types(dc.ctx))
     variables = _local_variables(dc.root, source)
-    lines: dict[str, list[int]] = {}
-    for f in dc.record.functions:
-        lines.setdefault(f.name, []).append(f.startLine)
-    methods = {name: ls[0] if len(ls) == 1 else None for name, ls in lines.items()}
+    sites = _HandlerSites(dc.root, source)
     found: list[Emit] = []
     rooted: dict[tuple[int, int], bool] = {}
     for node in walk(dc.root):
@@ -291,7 +381,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
         if fields is None:
             continue
         found.append(
-            shortcut_emit(node, name_node, fields, _sdk_handler(args[1], source, methods), source)
+            shortcut_emit(node, name_node, fields, _sdk_handler(args[1], source, sites), source)
         )
     return found
 
