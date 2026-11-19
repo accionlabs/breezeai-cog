@@ -3,31 +3,20 @@ title: "breezeai-cog — Symbol Reference: Tests and Tooling"
 date: 2026-10-30
 ---
 
-Scope: `tests/unit/`, `scripts/`, `skills/extend-capture/`, `.github/workflows/`, `pyproject.toml`.
+Scope: `tests/`, `scripts/`, `skills/`, `.github/workflows/`, `pyproject.toml`.
 
 ## tests/unit/
 
-166 test files. All use `pytest`. Key groups:
-
-| Path | Covers |
-|---|---|
-| `tests/unit/test_cli.py` | CLI command dispatch, flag parsing, batch mode |
-| `tests/unit/test_config.py` | `Settings` validation, env aliases, upload guards |
-| `tests/unit/test_pipeline.py` | `core/pipeline` scan, assemble, run |
-| `tests/unit/test_schema.py` | Capture contract fields, JSON Schema generation, `SCHEMA_VERSION` match |
-| `tests/unit/test_c_parser.py` | C parser: includes, struct/union/enum records, typedef `alias`, K&R definitions, `extern "C"` calls into C++ |
-| `tests/unit/test_cpp_parser.py` | C++ parser: classes, namespaces, templates, cross-file call resolution |
-| `tests/unit/test_ownership.py` | Ownership step: content, references, neighbours/repo and default rules; `cpp_only_syntax`; `--language` runs |
-| `tests/unit/test_<lang>_parser.py` | One flat file per language/framework |
-| `tests/unit/infra/`, `tests/unit/integrations/` | Storage sink and SCM provider tests |
+The suite uses `pytest`. Run it with `uv run pytest -q`; see `AGENTS.md` for setup and check
+commands. Consult the current test files before making claims about coverage.
 
 ## scripts/
 
-Utility scripts (e.g. batch-upload helpers, one-off data processing). Not part of the production runtime. Content varies by baseline.
+Utility scripts (including `bench_parse_scaling.py`). Not part of the production runtime.
 
-## skills/extend-capture/
+## skills/
 
-A Claude Code skill that guides adding a new parser to cog. Used with `@extend-capture` in Claude Code sessions. Content: step-by-step parser addition recipe, template files, test scaffolding instructions.
+The `extend-capture` and `gap-review` skills are under `skills/`; each currently contains its `SKILL.md`. Use these maintained skills for parser work and review.
 
 ## .github/workflows/main.yml
 

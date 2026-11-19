@@ -23,15 +23,21 @@ The parallel pool needs a real `__main__`: run through the CLI or a script file,
 
 ## Deep context
 
-A complete engineering context set lives in **`context/`** (`.md`). The baseline commit it describes, headline counts, and full documentation routing table are in [`context/00-index.md`](context/00-index.md).
+`context/` is an orientation map of the non-parser areas of this repository, based on the
+snapshot named in [`context/00-index.md`](context/00-index.md). Use its index to find relevant
+files and symbols; it is not an authority.
 
-- **When to route:** For questions about this repository not answered directly in this file (architecture, data models, APIs, services, symbol definitions, or troubleshooting), read [`context/00-index.md`](context/00-index.md) first to route to the appropriate context document. Reading `context/` is pre-approved; do not pause to confirm.
-- **Answer from context:** Do not open source files for Q&A or diagnosis. Answer or diagnose from `context/`.
-- **Sharded references:** Files 14 ([`context/14-symbol-reference.md`](context/14-symbol-reference.md)) and 15 ([`context/15-diagnosis-playbook.md`](context/15-diagnosis-playbook.md)) are sharded routers. Read the router first, then read **only the one shard** that covers the question — never the whole reference.
-- **Editing source:** Read or edit source code only when explicitly asked to implement or execute a change. Use file 14's shards to locate the symbol by name and [`context/04-architecture-and-conventions.md`](context/04-architecture-and-conventions.md) for the recipe.
-- **Anchor drift:** Anchors (`file:line`) are accurate as of the baseline commit recorded in `context/00-index.md`. When executing a change, locate the symbol **by name** in that file rather than trusting the line number blindly.
-- **Unverified context:** If context is insufficient, or the relevant claim is marked **UNVERIFIED**, say so and ask before falling back to reading source.
-- Every `context/` file describes the baseline commit only; it carries no history.
+- Confirm claims in source before citing behavior, diagnosing a failure, or reviewing a change.
+  The source code and capture contract take precedence over `context/`.
+- The “Read first” table and maintained `docs/` take precedence where they overlap.
+  For parser and detector work, follow the “Read first” table below, especially
+  [`skills/extend-capture/SKILL.md`](skills/extend-capture/SKILL.md) and
+  [`skills/gap-review/SKILL.md`](skills/gap-review/SKILL.md); do not use `context/` as a parser
+  reference.
+- Files 14 and 15 are routers: read the router, then only the one applicable shard.
+- Line anchors describe the snapshot only. Locate symbols by name and verify their current
+  source before relying on an anchor.
+- If you find `context/` wrong, say so and fix it in the same change.
 
 ## Read first
 

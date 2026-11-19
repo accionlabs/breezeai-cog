@@ -36,7 +36,7 @@ Job: validates PR title contains `BREEZEAI-<N>` (Jira ticket key). Fails the che
 
 Source: `breezeai-cog-deploy.yaml`
 
-- Container port: 3004 (differs from default local 3000).
+- Container port: 3000.
 - Env vars injected from k8s `ConfigMap` / `Secret`.
 
 ## Runtime topology
@@ -49,33 +49,30 @@ breezeai-backend  →  POST /api/analyze-diff   →  breezeai-cog (server)
 breezeai-cog (server)  →  AWS S3 (upload NDJSON.gz)
                         →  breezeai-backend /code-ontology/stream-ingest (notify)
 
-breeze:onboard-repository skill  →  breezeai-cog CLI (subprocess; requires Node 22)
 ```
 
 ## Runbook
 
-### Parse failures
+### Capture failures
 
-If files fail to parse (`parse.file.failed` in logs):
-- Check if grammar covers the language: `breezeai-cog capabilities | jq '.languages'`
-- Check for tree-sitter timeout: `BREEZEAI_COG_PARSE_TIMEOUT` (default 10 s); set to 0 to disable for debugging.
-- Oversized files: check `skipped.json` sidecar for `reason: oversized`; raise `BREEZEAI_COG_MAX_FILE_SIZE` if needed.
+For missing or incorrect parser/detector output, follow `skills/gap-review/SKILL.md` and
+`docs/parser-review-guide.md`, and verify behavior in source. For a runtime parse failure, use
+the `parse.file.failed` log entry to identify the file and error. The `<repo>-skipped-report.json`
+sidecar covers scanner skips such as oversized files; adjust `BREEZEAI_COG_MAX_FILE_SIZE` only
+when the skip reason warrants it.
 
 ### Upload failures
 
 - 4xx: check `baseurl`, `uuid`, `user_api_key` settings. Backend may have rejected the ontology.
-- 5xx / timeout: the run already produced the `.ndjson.gz`; re-run with `--upload` only (batch resume via `UploadState`).
-
-### Groovy parse issues
-
-The Groovy grammar pin is `dekobon-tree-sitter-groovy @ git+https://github.com/accionlabs/tree-sitter-groovy@groovy-grammar-upstream`. Real Groovy class-collapse bugs are tracked in `.todo/groovy-grammar-evaluation.md`. Workaround: `--language java` to skip Groovy until the grammar matures.
+- 5xx / timeout: rerun the CLI analysis with `--upload`; the command analyzes and uploads in that run. Batch mode resumes completed repositories using `UploadState`.
 
 ### S3 stream ingest not triggered
 
-Check that `BREEZEAI_COG_BASEURL` (or `BREEZE_API_URL`) is set and reachable. The notify is a `BackgroundTask` — a 4xx from the backend is logged but not surfaced to the caller. Check `breezeai-cog` logs for `notify.failed`.
+Check that `BREEZEAI_COG_BASEURL` (or `BREEZE_API_URL`) is set and reachable. Notification runs as a `BackgroundTask`, after the response is sent; a failure is logged but cannot be returned to the caller.
 
 ### Known failure modes
 
-- `ValueError` from tree-sitter timeout: isolated per-file; run continues. File appears in `skipped-report.json`.
-- `pickle.PicklingError` on indexes: some custom parser index objects may not be picklable; index falls back to None.
+- A parse timeout is isolated to the file and logged as `parse.file.failed`; it is not listed in the scanner skip report.
+- The `<repo>-skipped-report.json` sidecar lists scanner skips (unsupported, ignored, template, oversized); parse failures are logged separately.
+- Index serialization catches `OSError` while managing the worker pickle file. Index-build failures are logged as `build_index.failed` and that index is unavailable for the run.
 - Temp dir cleanup: `shutil.rmtree(temp_dir, ignore_errors=True)` in finally; a failed cleanup leaves orphaned temp dirs — safe to manually remove.

@@ -19,9 +19,10 @@ The Pydantic models in `schemas/capture.py` are the **source of truth**. The JSO
 
 ## NDJSON structure
 
-Every `.ndjson.gz` file from cog:
-- **Line 1**: `ProjectMetaData` record (`__type: "projectMetaData"`)
-- **Line 2+**: `FileRecord` records (one per source file; `type: "code"` or `"config"`)
+The CLI `FileSink` output starts with a `ProjectMetaData` record
+(`__type: "projectMetaData"`) followed by `FileRecord` records (`type: "code"` or
+`"config"`). Do not assume server streaming outputs use this line-header format: the
+analyze-diff stream carries metadata in the backend notification payload.
 
 ## Record types
 

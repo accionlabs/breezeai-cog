@@ -41,7 +41,7 @@ Output: `<out>/<repo-name>-project-analysis.ndjson.gz`; skip report: `<repo>/.co
 ### `capabilities`
 
 Source: `src/breezeai_cog/cli.py:704`
-Print supported languages, frameworks, statement types, extensions as JSON. Derived from the parser registry at runtime — do not run the command to find the list; derive it from `core/registry.capabilities()` or the shard docs.
+Print the current supported languages, frameworks, statement types, and extensions as JSON. This runtime registry output is the authoritative list.
 
 ### `schema`
 

@@ -9,19 +9,15 @@ Scope: Prerequisites, uv commands, entrypoints, ports, Docker, local-dev gotchas
 
 - Python ≥3.11
 - `uv` (PEP 517 package manager)
-- Node 22 on the host when driven by the `breeze:onboard-repository` skill (Node 24 fails silently on tree-sitter native bindings)
 
 ## Install and sync
 
 ```bash
-# Standard dev install (includes dev group: pytest, ruff, mypy)
-uv sync
-
-# With FastAPI server extras (fastapi, uvicorn, gitpython, boto3, sqlglot)
-uv sync --extra server
-
-# All extras
+# Runtime, server extras, and dev tools
 uv sync --extra all
+
+# With server extras only
+uv sync --extra server
 ```
 
 ## CLI entrypoint
@@ -66,7 +62,7 @@ No lifespan startup hook; no Neo4j or DB connection. State is per-request.
 | Context | Port | Setting |
 |---|---|---|
 | Local dev (CLI `serve`) | 3000 | `BREEZEAI_COG_PORT` / `--port` / `$PORT` |
-| Docker / k8s | 3004 | set in `breezeai-cog-deploy.yaml` |
+| Docker / k8s | 3000 | `Dockerfile` and `breezeai-cog-deploy.yaml` |
 
 ## Docker
 
@@ -91,7 +87,6 @@ uv run mypy                          # type-check (strict; packages = breezeai_c
 
 ```bash
 uv run pytest                        # all tests (testpaths = tests)
-uv run pytest tests/unit/parsers/    # single subdirectory
 uv run pytest tests/unit/test_cli.py # single file
 uv run pytest -k "test_java"         # single test by name
 uv run pytest --timeout=60           # override timeout (pytest-timeout installed)

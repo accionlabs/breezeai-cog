@@ -3,7 +3,7 @@ title: "breezeai-cog — Symbol Reference: Core and Schemas"
 date: 2026-10-30
 ---
 
-Scope: `core/`, `schemas/`, `emit/`, `parsers/base`, `parsers/additive`.
+Scope: `core/`, `schemas/`, and `emit/split`. Parser implementation details are intentionally excluded.
 
 ## schemas/version.py
 
@@ -27,25 +27,6 @@ Scope: `core/`, `schemas/`, `emit/`, `parsers/base`, `parsers/additive`.
 | `FileRecord` | `src/breezeai_cog/schemas/capture.py:176` | `extra="allow"`; root per-file record |
 | `ProjectMetaData` | `src/breezeai_cog/schemas/capture.py:208` | Line-1 record; `has_content()` determines if ontology is worth persisting |
 | `ProjectMetaData.has_content()` | `src/breezeai_cog/schemas/capture.py:230` | Returns True if any code, functions, classes, captured data docs, IaC, deps, or Docker |
-
-## parsers/base.py
-
-| Symbol | Anchor | Notes |
-|---|---|---|
-| `_GLOBAL_FIXTURE_MARKERS` | `src/breezeai_cog/parsers/base.py:42` | `(".test.", ".spec.")` — route-only fixture markers |
-| `_GLOBAL_FIXTURE_DIRS` | `src/breezeai_cog/parsers/base.py:49` | `{"mock", "mocks", "__mocks__", "fixtures", "__fixtures__"}` |
-| `ParseContext` | `src/breezeai_cog/parsers/base.py:55` | Frozen dataclass: `path, abs_path, source, repo_root, capture_statements, statement_text_limit, parse_timeout_micros, resolution_index, related_indexes` |
-| `LanguageParser` | `src/breezeai_cog/parsers/base.py:92` | Runtime-checkable Protocol: `name, extensions, schema_version, statement_types, frameworks, parse_file(ctx)` |
-| `BaseParser` | `src/breezeai_cog/parsers/base.py:105` | Convenience base with defaults; subclasses implement `parse_file` |
-| `BaseParser.matches(path)` | `src/breezeai_cog/parsers/base.py:137` | Extension/filename candidacy; templates matched case-insensitively |
-| `BaseParser.claims(path, source)` | `src/breezeai_cog/parsers/base.py:150` | Framework sniff; base returns `True` (fallback) |
-| `Ownership` | `src/breezeai_cog/parsers/base.py:72` | Frozen dataclass of optional evidence hooks for the ownership step: `proves`, `references`, `includes`, `default_for`. Functions must be module-level (pickled to workers) and read bytes only |
-| `BaseParser.related_languages` | `src/breezeai_cog/parsers/base.py:129` | Languages whose indexes the parser may read after its own; the pipeline passes them as `ctx.related_indexes` |
-| `BaseParser.ownership` | `src/breezeai_cog/parsers/base.py:132` | `Ownership` for a language that shares an extension with another; `None` otherwise |
-| `BaseParser.build_index_accepts_timeout` | `src/breezeai_cog/parsers/base.py:135` | When set, the pipeline passes the run's `parse_timeout_micros` to `build_index` |
-| `BaseParser.build_index(repo_root, files, jobs)` | `src/breezeai_cog/parsers/base.py:156` | Optional pre-pass; base returns `None` |
-| `BaseParser.link_handlers(record, ctx)` | `src/breezeai_cog/parsers/base.py:161` | Optional post-parse; resolves handler locations |
-| `BaseParser.is_fixture_file(path)` | `src/breezeai_cog/parsers/base.py:208` | Checks fixture markers and fixture dirs |
 
 ## core/registry.py
 

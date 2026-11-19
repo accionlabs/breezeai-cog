@@ -10,7 +10,7 @@ Scope: Test layout, how to run, fixtures, coverage posture.
 - `pytest ≥8` + `pytest-timeout ≥2.3`
 - `jsonschema ≥4.21` (schema validation tests)
 - `testpaths = ["tests"]`; `pythonpath = ["src"]` (set in `pyproject.toml`)
-- 166 test files, all under `tests/unit/`
+- Tests are under `tests/unit/`.
 
 ## Layout
 
@@ -35,14 +35,14 @@ tests/
 # All tests
 uv run pytest
 
-# Single directory
+# Single test module
 uv run pytest tests/unit/test_c_parser.py
 
 # Single file
 uv run pytest tests/unit/test_cli.py
 
 # Single test by name
-uv run pytest -k "test_java_class"
+uv run pytest -k "test_java"
 
 # With timeout override
 uv run pytest --timeout=120
@@ -50,17 +50,16 @@ uv run pytest --timeout=120
 
 ## Test posture
 
-- **Real cog**: ~166 test files is a large suite for a parser-heavy repo — this is the only cog/mcp/backend repo with meaningful test coverage.
+- **Test coverage**: tests cover server routes, SCM integrations, batch upload, and Groovy parsing. Avoid inferring that an area has no tests without checking the current test suite.
 - **Parser tests**: each test provides a synthetic source snippet and asserts on the `FileRecord` fields returned by the parser.
-- **No integration tests**: no live backend, no real git repos, no S3 calls in the test suite.
+- **External services**: the suite includes SCM integration tests; it does not exercise a live backend or real S3 service.
 - **CI**: no automated test run on PR (CI only validates PR title). Tests are run manually by developers.
 
-## Coverage gaps
+## Coverage notes
 
-- Server routes: no automated tests for `/api/analyze-diff`, `/api/analyze-sql`, `/api/analyze-nosql`, `/api/analyze-es`.
-- SCM provider integrations: no tests for the `integrations/scm/` modules (would require live provider credentials).
-- Batch upload / resume: no tests for `services/batch_upload.py` resumable state.
-- Groovy parser: limited test coverage due to the skeleton-only implementation.
+The test suite includes coverage for server routes, SCM integrations, batch upload, and Groovy
+parsing. Consult the current tests before making claims about coverage gaps; this snapshot does
+not maintain an exhaustive gap inventory.
 
 ## Fixtures
 

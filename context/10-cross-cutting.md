@@ -36,16 +36,16 @@ Source: `src/breezeai_cog/logging.py`
 | CLI parse (`run`) | `ProcessPoolExecutor` with spawn context; `~N/jobs/4` files per batch |
 | Server parse (`run_inprocess`) | Sequential, in-process; no pool startup |
 | Server routes | FastAPI async; CPU-bound work runs in `run_in_threadpool` |
-| Backend upload | Synchronous in main thread (CLI); per-`UploadTracker` thread in batch mode |
+| CLI upload | Runs on the upload-phase thread; batch uploads use `run_batch_uploads` and its configured parallelism |
 | Log funneling | `Manager().Queue` + `QueueListener` across pool workers |
 | Index transfer to workers | Pickled to a private temp file (avoids pipe-buffer bottleneck for large indexes) |
 
 ## File handling
 
-- **Scan**: `os.walk` with per-language ignore layers; skips files > `max_file_size` (2 MB default).
+- **Scan**: recursive `os.scandir` traversal with per-language ignore layers; skips files > `max_file_size` (2 MB default).
 - **Read**: each worker reads `source = open(abs_path, "rb").read()` in `_parse_entry`. File bytes are not sent across the process boundary — only the relative `path` string is pickled in the `ScanEntry`.
-- **Output**: `FileSink` writes `projectMetaData` to a temp file first (line-1 guarantee); on `finalize`, swaps temp with header into the real `.ndjson.gz`. Uses gzip streaming.
-- **S3 streaming**: `infra/aws.py` multipart upload — `write_line(bytes)` accumulates a part; flushed automatically at part-size threshold. `close()` finalises. Stream is not replayable (S3 retry is at the SDK level via botocore config).
+- **CLI output**: `emit/sinks.py` `FileSink` writes `projectMetaData` to a temp file first; on `finalize`, swaps the temp output into the `.ndjson.gz` file.
+- **S3 streaming**: `infra/aws/s3.py` accepts text lines, gzips them into a pipe, and a background thread uploads the pipe with `upload_fileobj`. The stream is not replayable; the SDK retries at the part level.
 - **Temp dirs**: diff service (`git clone`) and executor (indexes pickle) write to `tempfile.mkdtemp()` with `0700` permissions. Both clean up in `finally` blocks.
 
 ## Auth
