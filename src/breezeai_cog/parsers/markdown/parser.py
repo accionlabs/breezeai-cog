@@ -1,6 +1,6 @@
 """MarkdownParser — one File + one whole-file Statement per Markdown document.
 
-Every ``.md`` / ``.mdx`` / ``.mdc`` file (plus ``README.rst`` and ``.cursorrules``) becomes a
+Every ``.md`` / ``.mdc`` file (plus ``README.rst`` and ``.cursorrules``) becomes a
 ``type="config"`` FileRecord — so it never counts as an analyzed language — whose ``metadata``
 holds ``{kind, category: "documentation", frontmatter, title, headings}``, and, under statement
 capture, one Statement:
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -141,7 +143,7 @@ _CODE_KEYWORDS = frozenset(
 #: A ``key:`` line in YAML front matter (optionally a list item).
 _FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
 #: Suffixes the parser owns in any case (:meth:`MarkdownParser.matches`).
-_SUFFIXES_ANY_CASE = frozenset({".md", ".mdx", ".mdc"})
+_SUFFIXES_ANY_CASE = frozenset({".md", ".mdc"})
 #: Folders whose ``plugin.json`` marks a plugin root (Claude Code, Cursor).
 _PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
 
@@ -149,7 +151,7 @@ _PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
 class MarkdownParser(BaseParser):
     name = "markdown"
     schema_version = SCHEMA_VERSION
-    extensions = (".md", ".mdx", ".mdc", "README.rst", ".cursorrules")
+    extensions = (".md", ".mdc", "README.rst", ".cursorrules")
 
     def matches(self, path: str | Path) -> bool:
         """The base suffix gate, and a Markdown suffix in any case (``README.MD``,
@@ -157,68 +159,90 @@ class MarkdownParser(BaseParser):
         return super().matches(path) or PurePosixPath(path).suffix.lower() in _SUFFIXES_ANY_CASE
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        text = _decode(ctx.source)
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        lines = text.split("\n")
         rst = ctx.path.endswith(".rst")
-
-        fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
-        front_matter, fm_ok = load_front_matter(fm_text)
-        front_matter = _masked_values(front_matter)
-        # A leading ``---`` block that is not YAML at all (a thematic break around prose) is
-        # body: its headings are outline. A broken YAML header stays skipped.
-        outline_start = body_start if fm_ok or _looks_like_yaml(lines, body_start) else 0
-        headings = _rst_headings(lines) if rst else _atx_headings(lines, outline_start)
-        title = string_field(front_matter, "title") or next(
-            (h["text"] for h in headings if h["level"] == 1), None
-        )
-        kind = classify(ctx.path, front_matter, headings, _plugin_check(ctx.repo_root))
-
-        metadata: dict[str, Any] = {
-            "kind": kind,
-            "category": "documentation",
-            "frontmatter": front_matter,
-            "title": title,
-            "headings": headings,
-        }
-        if not fm_ok:
-            log.warning("markdown.front_matter_unreadable", path=ctx.path)
-
+        doc = read_document(ctx, rst=rst)
         record = FileRecord(
             id=file_id(ctx.path),
             path=ctx.path,
             type="config",
             language="rst" if rst else "markdown",
-            loc=count_loc(text),
-            metadata=metadata,
+            loc=count_loc(doc.text),
+            metadata=doc.metadata,
         )
-
-        if not ctx.capture_statements:
-            return record
-
-        # Secret-named front-matter values are masked in the text too, not only in metadata.
-        if body_start:
-            text = "\n".join(_mask_front_matter(lines, body_start))
-        stem = PurePosixPath(ctx.path).name.split(".")[0]
-        record.statements.append(
-            Statement(
-                id=statement_id(ctx.path, 1, 0),
-                parentId=record.id,
-                nodeType="synthetic",
-                semanticType=statement_type(kind),  # type: ignore[arg-type]
-                text=_clean(text),
-                startLine=1,
-                # A final newline ends the last line; it does not start another.
-                endLine=max(len(lines) - (1 if lines[-1] == "" else 0), 1),
-                path=ctx.path,
-                name=string_field(front_matter, "name")
-                or (stem if kind == "command" else None)
-                or title
-                or PurePosixPath(ctx.path).name,
-                description=string_field(front_matter, "description"),
-            )
-        )
+        if doc.statement is not None:
+            record.statements.append(doc.statement)
         return record
+
+
+@dataclass
+class Document:
+    """What :func:`read_document` reads from a document: the File ``metadata``, the
+    whole-file Statement (None without statement capture) and the decoded text."""
+
+    metadata: dict[str, Any]
+    statement: Statement | None
+    text: str
+
+
+def read_document(
+    ctx: ParseContext, *, rst: bool = False, code_lines: AbstractSet[int] = frozenset()
+) -> Document:
+    """The document reading of a Markdown file — ``metadata`` ``{kind, category:
+    "documentation", frontmatter, title, headings}`` and, under statement capture, the
+    whole-file ``doc`` / ``readme`` / … Statement with secrets masked.
+
+    Shared with the MDX parser, whose files are Markdown documents too. ``code_lines``
+    (1-based) are lines that are code, not Markdown — an MDX file's ESM ``import`` /
+    ``export`` lines — so a ``#`` line in them is never read as a heading."""
+    text = _decode(ctx.source)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
+    front_matter, fm_ok = load_front_matter(fm_text)
+    front_matter = _masked_values(front_matter)
+    # A leading ``---`` block that is not YAML at all (a thematic break around prose) is
+    # body: its headings are outline. A broken YAML header stays skipped.
+    outline_start = body_start if fm_ok or _looks_like_yaml(lines, body_start) else 0
+    headings = _rst_headings(lines) if rst else _atx_headings(lines, outline_start, code_lines)
+    title = string_field(front_matter, "title") or next(
+        (h["text"] for h in headings if h["level"] == 1), None
+    )
+    kind = classify(ctx.path, front_matter, headings, _plugin_check(ctx.repo_root))
+
+    metadata: dict[str, Any] = {
+        "kind": kind,
+        "category": "documentation",
+        "frontmatter": front_matter,
+        "title": title,
+        "headings": headings,
+    }
+    if not fm_ok:
+        log.warning("markdown.front_matter_unreadable", path=ctx.path)
+
+    if not ctx.capture_statements:
+        return Document(metadata, None, text)
+
+    # Secret-named front-matter values are masked in the text too, not only in metadata.
+    body = "\n".join(_mask_front_matter(lines, body_start)) if body_start else text
+    stem = PurePosixPath(ctx.path).name.split(".")[0]
+    statement = Statement(
+        id=statement_id(ctx.path, 1, 0),
+        parentId=file_id(ctx.path),
+        nodeType="synthetic",
+        semanticType=statement_type(kind),  # type: ignore[arg-type]
+        text=_clean(body),
+        startLine=1,
+        # A final newline ends the last line; it does not start another.
+        endLine=max(len(lines) - (1 if lines[-1] == "" else 0), 1),
+        path=ctx.path,
+        name=string_field(front_matter, "name")
+        or (stem if kind == "command" else None)
+        or title
+        or PurePosixPath(ctx.path).name,
+        description=string_field(front_matter, "description"),
+    )
+    return Document(metadata, statement, text)
 
 
 def _decode(source: bytes) -> str:
@@ -550,10 +574,14 @@ def _collection_end(line: str, start: int) -> int:
     return len(line)
 
 
-def _atx_headings(lines: list[str], start: int) -> list[dict[str, Any]]:
+def _atx_headings(
+    lines: list[str], start: int, code_lines: AbstractSet[int] = frozenset()
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     fence: str | None = None
     for i in range(start, len(lines)):
+        if i + 1 in code_lines:
+            continue  # code, not Markdown: neither a heading nor a fence
         line = lines[i]
         m = _FENCE.match(line)
         if m:

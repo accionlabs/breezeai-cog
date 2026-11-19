@@ -377,6 +377,22 @@ def _typescript_mcp(n: int) -> str:
     )
 
 
+def _mdx(n: int) -> str:
+    """ESM blocks, JSX, ``{…}`` expressions and code fences: the block probes, the shadow parse
+    and the document reading grow with the file. One paragraph of prose that starts with
+    ``import`` (up to 21 probes) is kept fixed, so neither size reaches the per-file block
+    budget, which would flatten the cost and hide a regression."""
+    parts = []
+    for i in range(n):
+        parts.append(
+            f"import {{ C{i} }} from './c{i}'\n\n"
+            f"## Section {i}\n\n"
+            f"<C{i} value={{{{ n: {i} }}}} />\n\n"
+            f"```js\nimport x{i} from 'x'\n```\n\n"
+        )
+    return "# Guide\n\nimport the data and run it.\n\n" + "".join(parts)
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -403,6 +419,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "struts2-xml": ("struts.xml", _struts2_xml),
     "kotlin-ktor": ("Routes.kt", _kotlin_ktor),
     "markdown": ("docs/guide.md", _markdown),
+    "mdx": ("docs/guide.mdx", _mdx),
     "python-mcp": ("server.py", _python_mcp),
     "typescript-mcp": ("server.ts", _typescript_mcp),
 }

@@ -27,6 +27,8 @@ AGENT_DOCUMENT_KINDS: frozenset[str] = frozenset(
 #: Kinds that are a ``semanticType`` of their own; a README, a changelog and a decision record
 #: are ``doc`` statements, told apart by ``File.metadata.kind``.
 _STATEMENT_TYPES: frozenset[str] = frozenset({"skill", "agent", "command", "agent_instructions"})
+#: Every ``semanticType`` a document statement can have (:func:`statement_type`).
+DOCUMENT_STATEMENT_TYPES: frozenset[str] = _STATEMENT_TYPES | {"doc"}
 
 #: Matched in exact case: the tools read these names as written, and a lower-case
 #: `docs/agents.md` or `docs/providers/claude.md` is prose about an agent, not its instructions.

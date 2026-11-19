@@ -61,6 +61,7 @@ def test_inventory_in_run_order() -> None:
                "go-lambda", "go-mcpgo"],
         "java": ["quartz", "struts2", "java-springai", "java-mcp", "apache-httpclient", "vertx"],
         "kotlin": ["kotlin-springai", "kotlin-mcp"],
+        "mdx": ["nextjs-mdx-pages"],
         "python": ["celery", "flask", "drf-routers", "django-channels", "python-fastmcp", "python-mcp"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
@@ -311,6 +312,28 @@ def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:
     # The .svc reaches only the fact (no grammar → no tree); C# indexing sees only the .cs file.
     assert index_fact(index, "test.hosts") == [("Api.svc", True)]
     assert {f for fs in index.types.values() for f in fs} == {"Api.svc.cs"}
+
+
+def test_path_only_fact_never_reads_the_file(isolated, tmp_path, monkeypatch) -> None:
+    """A path-only fact gets ``b""`` and no tree, its gate is not applied, and the file is not
+    read at all."""
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    register_fact(_marked(
+        name="test.paths", gate=(b"NEVER",), sources=(".pathonly",), path_only=True,
+        collect=lambda root, source, rel, repo_root: (rel, root is None, source),
+        resolve=lambda values, index: sorted(values),
+    ))
+    (tmp_path / "a.pathonly").write_bytes(b"content")
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        assert self.suffix != ".pathonly", "a path-only fact source was read"
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    index = build_csharp_index(tmp_path, [tmp_path / "a.pathonly"], 1)
+    assert index_fact(index, "test.paths") == [("a.pathonly", True, b"")]
 
 def test_index_fact_tolerates_a_missing_index() -> None:
     assert index_fact(None, "anything") is None
