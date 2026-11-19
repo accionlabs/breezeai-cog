@@ -329,6 +329,27 @@ def test_a_failing_fact_collector_drops_only_that_fact(isolated, tmp_path, jobs)
         "test.failing": COLLECT_FAILED, "test.marked": "x.cs"}
 
 
+def test_collect_failed_stays_one_instance_across_processes() -> None:
+    import pickle
+
+    from breezeai_cog.parsers.additive import COLLECT_FAILED
+
+    assert pickle.loads(pickle.dumps(COLLECT_FAILED)) is COLLECT_FAILED
+    assert repr(COLLECT_FAILED) == "COLLECT_FAILED"
+
+
+def test_a_parse_timeout_in_a_fact_collector_is_not_swallowed(isolated) -> None:
+    from breezeai_cog.errors import ParserTimeout
+    from breezeai_cog.parsers.additive import collect_additive
+
+    def _timeout(root, source, rel, repo_root):
+        raise ParserTimeout("x.cs")
+
+    register_fact(_marked(collect=_timeout))
+    with pytest.raises(ParserTimeout):
+        collect_additive("csharp", None, b"// MARK", "x.cs", None)
+
+
 def test_a_failing_fact_source_collector_drops_its_fact(isolated, tmp_path) -> None:
     from breezeai_cog.parsers.csharp.imports import build_csharp_index
 
