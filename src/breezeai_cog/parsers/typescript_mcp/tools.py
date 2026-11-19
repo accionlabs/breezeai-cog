@@ -41,7 +41,7 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import param, tool_emit
+from ..mcp_common import guarded, param, tool_emit
 from ..treesitter import node_text
 from .lowlevel import detect_lowlevel_tools
 
@@ -447,8 +447,15 @@ def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
     functions = {f.name: f.startLine for f in dc.record.functions}
-    found: list[Emit] = detect_lowlevel_tools(
-        dc.root, source, servers, functions, _shadowed, lambda n: _json_schema(n, source)
+    found: list[Emit] = guarded(
+        dc.path,
+        detect_lowlevel_tools,
+        dc.root,
+        source,
+        servers,
+        functions,
+        _shadowed,
+        lambda n: _json_schema(n, source),
     )
     if not servers and not found:
         return None

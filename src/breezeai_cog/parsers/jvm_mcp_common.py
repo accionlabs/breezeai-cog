@@ -173,6 +173,34 @@ SHORTCUT_CALL = re.compile(rb"\.\s*tool(?:Call)?\s*\(")
 SERVER_FACTORIES = frozenset({"sync", "async"})
 #: The builder methods that register a ``Tool`` with its handler.
 SHORTCUTS = frozenset({"tool", "toolCall"})
+#: The MCP Java SDK's server class, which the shortcut chain starts from.
+MCP_SERVER = "io.modelcontextprotocol.server.McpServer"
+_IMPORT = re.compile(
+    rb"^[ \t]*import[ \t]+([\w.]*\w(?:\.\*)?)(?:[ \t]+as[ \t]+(\w+))?", re.MULTILINE
+)
+
+
+def mcp_server_names(source: bytes) -> frozenset[str]:
+    """What the SDK's ``McpServer`` is called in this Java / Kotlin file: its fully qualified
+    name; ``McpServer`` when ``io.modelcontextprotocol.server.McpServer`` (or the package's
+    ``*``) is imported and no other ``McpServer`` is; a Kotlin ``import … as`` alias of it."""
+    names = {MCP_SERVER}
+    sdk = other = False
+    for m in _IMPORT.finditer(source):
+        path = m.group(1).decode()
+        alias = m.group(2).decode() if m.group(2) is not None else None
+        if alias is not None:
+            if path == MCP_SERVER:
+                names.add(alias)
+            elif alias == "McpServer":
+                other = True
+        elif path in (MCP_SERVER, MCP_SERVER.rsplit(".", 1)[0] + ".*"):
+            sdk = True
+        elif path.endswith(".McpServer"):
+            other = True
+    if sdk and not other:
+        names.add("McpServer")
+    return frozenset(names)
 
 
 def shortcut_emit(

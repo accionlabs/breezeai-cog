@@ -34,7 +34,9 @@ MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
   reference (``::calc``, ``this::calc``) names the handler, a lambda gives only its line.
 * The server builder's shortcut ``McpServer.sync(…)….tool(tool) { … }`` / ``.toolCall(tool,
   handler)`` (also ``async``) is read the same way, only on a chain that starts at
-  ``McpServer.sync(`` / ``.async(``; ``.tools(spec…)`` is not read.
+  ``McpServer.sync(`` / ``.async(`` with ``McpServer`` imported from
+  ``io.modelcontextprotocol.server`` (by name, ``.*`` or an ``as`` alias, and no other
+  ``McpServer`` imported) or written fully qualified; ``.tools(spec…)`` is not read.
 
 Import aliases (``import io.modelcontextprotocol.kotlin.sdk.Tool as McpTool``) are followed for
 the types above when the aliased class is in an MCP package; an alias of any other class
@@ -65,10 +67,11 @@ from ..jvm_mcp_common import (
     kotlin_string,
     kotlin_suffix_name,
     kotlin_type_name,
+    mcp_server_names,
     shortcut_emit,
     walk,
 )
-from ..mcp_common import param, tool_emit
+from ..mcp_common import guarded, param, tool_emit
 from ..treesitter import node_text
 
 #: ``framework`` of a tool registered through the official Kotlin SDK.
@@ -317,11 +320,12 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
 
 
 def _rooted_at_server(
-    node: Node, source: bytes, aliases: dict[str, str], cache: dict[tuple[int, int], bool]
+    node: Node, source: bytes, servers: frozenset[str], cache: dict[tuple[int, int], bool]
 ) -> bool:
     """True when the call chain ``node`` belongs to starts with ``McpServer.sync(…)`` /
-    ``McpServer.async(…)``. ``cache`` holds the answer for every call of a chain already
-    walked, so a chain of many ``.tool(…)`` calls is walked once."""
+    ``McpServer.async(…)``, ``McpServer`` being one of ``servers`` (what the SDK's class is
+    called in the file). ``cache`` holds the answer for every call of a chain already walked,
+    so a chain of many ``.tool(…)`` calls is walked once."""
     seen: list[tuple[int, int]] = []
     cur: Node | None = node
     result = False
@@ -341,11 +345,7 @@ def _rooted_at_server(
         result = (
             receiver is not None
             and kotlin_suffix_name(callee, source) in SERVER_FACTORIES
-            and (
-                kotlin_type_name(receiver, source, aliases) == "McpServer"
-                if receiver.type == "simple_identifier"
-                else node_text(receiver, source) == "io.modelcontextprotocol.server.McpServer"
-            )
+            and node_text(receiver, source) in servers
         )
         break
     for key in seen:
@@ -366,6 +366,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
     variables = _local_variables(dc.root, source)
     methods = _methods(dc)
     aliases = kotlin_aliases(source)
+    servers = mcp_server_names(source)
     found: list[Emit] = []
     rooted: dict[tuple[int, int], bool] = {}
     for node in walk(dc.root):
@@ -378,7 +379,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
             continue
         args = kotlin_call_args(node, source)
         pos = _positional(args)
-        if len(pos) != 2 or len(args) != 2 or not _rooted_at_server(node, source, aliases, rooted):
+        if len(pos) != 2 or len(args) != 2 or not _rooted_at_server(node, source, servers, rooted):
             continue
         fields = _tool_fields(pos[0], source, variables, aliases)
         if fields is None:
@@ -777,7 +778,9 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
                 )  # addTool(Tool(name = …, …)) { … }
             emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, methods, aliases))
         elif method == "addTools":
-            for element, tool, handler in _registered_tools(node, source, aliases, names):
+            # A list read from a `val` or a function is new: its failure keeps the other tools.
+            listed = guarded(dc.path, _registered_tools, node, source, aliases, names)
+            for element, tool, handler in listed:
                 if element.start_byte in registered:
                     continue  # one list passed to `addTools` twice: one record per element
                 registered.add(element.start_byte)
@@ -797,7 +800,7 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = _sdk_tools(dc) + _shortcut_tools(dc) + _kotlin_sdk_tools(dc)
+    found = _sdk_tools(dc) + guarded(dc.path, _shortcut_tools, dc) + _kotlin_sdk_tools(dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

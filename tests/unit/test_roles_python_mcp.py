@@ -271,6 +271,65 @@ calc = StructuredTool.from_function(func=search, name="calc")
     assert _tools(analyze_files(files)) == {}
 
 
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "class Server:\n    def list_tools(self):\n        return lambda f: f\n",
+        "from socketio import Server\n",
+        "Server = make_server_class()\n",
+        "try:\n    pass\nexcept ImportError:\n    from fake import Server\n",
+        "import socketio as Server\n",
+        "with make() as Server:\n    pass\n",
+    ],
+)
+def test_lowlevel_server_class_rebound_in_the_module_is_not_proven(
+    analyze_files, rebinding
+) -> None:
+    """``Server`` imported from the SDK and bound again at module level (a local class, another
+    package's ``Server``, an assignment): which one ``Server()`` means is not read — no record.
+    The same file without the rebinding has its tool (the detector reads it)."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+{rebinding}
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src.format(rebinding="")}))) == {"maybe"}
+    assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
+
+
+def test_lowlevel_server_class_rebound_only_inside_a_function_is_still_proven(
+    analyze_files,
+) -> None:
+    """Only module-level bindings hide the imported class: a function's own ``Server`` is local
+    to it."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def helper():
+    Server = object
+    return Server
+
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="kept", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"kept"}
+
+
 def test_lowlevel_tools_are_python_mcp_only(analyze_files) -> None:
     """A file that also uses FastMCP: each low-level tool is one record, ``python-mcp``."""
     src = (

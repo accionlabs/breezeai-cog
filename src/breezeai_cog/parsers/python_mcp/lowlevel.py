@@ -23,8 +23,9 @@
   a name imported from a module that assigns one at module level (fact :data:`FACT`) and bound
   by nothing else in this module (``server = wrap(server)`` is no proof) — with
   ``Server`` imported from ``mcp.server.lowlevel``, ``mcp.server.lowlevel.server`` or
-  ``mcp.server``. A local class named ``Server`` is not one; a nearer binding of the name that
-  is not a server hides it.
+  ``mcp.server``, and not bound again at module level (``class Server``, ``from socketio
+  import Server``). A local class named ``Server`` is not one; a nearer binding of the name
+  that is not a server hides it.
 * **Tools** — each ``Tool(…)`` call (``Tool`` imported from ``mcp.types``, or ``types.Tool`` with
   ``types`` bound to ``mcp.types``; the standard library's ``types`` is not it) that is a direct
   element of a list literal returned by the ``@<server>.list_tools()`` function
@@ -116,8 +117,83 @@ def _types_names(root: Node, source: bytes, name: str) -> set[str]:
 
 
 def server_class_names(root: Node, source: bytes) -> set[str]:
-    """What the low-level ``Server`` class is called in this file."""
-    return _imported_names(root, source, SERVER_MODULES, "Server")
+    """What the low-level ``Server`` class is called in this file. A name the module also binds
+    to something else (``class Server``, ``from socketio import Server``, ``Server = …``) is
+    dropped: which one a call means is not read."""
+    names = _imported_names(root, source, SERVER_MODULES, "Server")
+    if not names:
+        return names
+    rebound = _module_rebinds(root, source, {n.split(".")[0] for n in names})
+    return {n for n in names if n.split(".")[0] not in rebound}
+
+
+def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
+    """The ``heads`` the module binds other than by importing the SDK's ``Server`` (or, for
+    ``mcp.server.lowlevel.Server``, any ``mcp`` package): a ``def`` / ``class``, an assignment, a
+    loop or ``with`` target, or an import of anything else. Function and class bodies are not
+    read (only the module scope)."""
+    out: set[str] = set()
+
+    def bind(name: str) -> None:
+        if name in heads:
+            out.add(name)
+
+    stack = list(root.named_children)
+    while stack:
+        node = stack.pop()
+        t = node.type
+        if t in ("function_definition", "class_definition"):
+            defined = node.child_by_field_name("name")
+            if defined is not None:
+                bind(node_text(defined, source))
+            continue  # its body is another scope
+        if t == "lambda":
+            continue
+        if t in ("assignment", "augmented_assignment", "for_statement"):
+            left = node.child_by_field_name("left")
+            for name in _pattern_names(left, source) if left is not None else []:
+                bind(name)
+        elif t == "as_pattern":
+            alias = node.child_by_field_name("alias")
+            target = (
+                alias.named_children[0] if alias is not None and alias.named_children else alias
+            )
+            for name in _pattern_names(target, source) if target is not None else []:
+                bind(name)
+        elif t == "import_from_statement":
+            module = node.child_by_field_name("module_name")
+            sdk = module is not None and node_text(module, source) in SERVER_MODULES
+            for child in node.named_children:
+                if child == module:
+                    continue
+                orig = (
+                    child.child_by_field_name("name") if child.type == "aliased_import" else child
+                )
+                alias = (
+                    child.child_by_field_name("alias") if child.type == "aliased_import" else child
+                )
+                if orig is None or alias is None:
+                    continue
+                if not (sdk and node_text(orig, source) == "Server"):
+                    bind(node_text(alias, source))
+            continue
+        elif t == "import_statement":
+            for child in node.named_children:
+                if child.type == "aliased_import":
+                    target, alias = (
+                        child.child_by_field_name("name"),
+                        child.child_by_field_name("alias"),
+                    )
+                    if target is not None and alias is not None:
+                        if node_text(target, source) not in SERVER_MODULES:
+                            bind(node_text(alias, source))
+                elif child.type == "dotted_name":
+                    head = node_text(child, source).split(".")[0]
+                    if head != "mcp":
+                        bind(head)
+            continue
+        stack.extend(node.named_children)
+    return out
 
 
 def _is_call_to(node: Node | None, source: bytes, names: set[str]) -> bool:

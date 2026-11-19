@@ -23,8 +23,10 @@ The server builder's shortcut registers a ``Tool`` directly::
         .tool(new McpSchema.Tool("calc", "Calculator", SCHEMA_JSON), (exchange, args) -> …)
         .toolCall(McpSchema.Tool.builder().name("echo").build(), this::echo)   (also McpServer.async)
 
-* Only on a chain that starts at ``McpServer.sync(`` / ``McpServer.async(``; the record sits on
-  the ``.tool`` / ``.toolCall`` name. The tool and handler are read as above.
+* Only on a chain that starts at ``McpServer.sync(`` / ``McpServer.async(``, with ``McpServer``
+  imported from ``io.modelcontextprotocol.server`` (by name or ``.*``, and no other
+  ``McpServer`` imported) or written fully qualified; the record sits on the ``.tool`` /
+  ``.toolCall`` name. The tool and handler are read as above.
 * ``.tools(spec…)`` is not read: each specification is recorded where it is built.
 
 Only tool specifications and the shortcut are read here. A Spring AI ``@McpTool`` / ``@Tool`` method belongs to
@@ -45,10 +47,11 @@ from ..jvm_mcp_common import (
     SHORTCUTS,
     java_string,
     json_schema_params,
+    mcp_server_names,
     shortcut_emit,
     walk,
 )
-from ..mcp_common import tool_emit
+from ..mcp_common import guarded, tool_emit
 from ..treesitter import node_text
 
 _JAVA_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "s": " "}
@@ -227,10 +230,13 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
     return found
 
 
-def _rooted_at_server(node: Node, source: bytes, cache: dict[tuple[int, int], bool]) -> bool:
+def _rooted_at_server(
+    node: Node, source: bytes, servers: frozenset[str], cache: dict[tuple[int, int], bool]
+) -> bool:
     """True when the call chain ``node`` belongs to starts with ``McpServer.sync(…)`` /
-    ``McpServer.async(…)``. ``cache`` holds the answer for every call of a chain already
-    walked, so a chain of many ``.tool(…)`` calls is walked once."""
+    ``McpServer.async(…)``, ``McpServer`` being one of ``servers`` (what the SDK's class is
+    called in the file). ``cache`` holds the answer for every call of a chain already walked,
+    so a chain of many ``.tool(…)`` calls is walked once."""
     seen: list[tuple[int, int]] = []
     cur: Node | None = node
     result = False
@@ -247,8 +253,7 @@ def _rooted_at_server(node: Node, source: bytes, cache: dict[tuple[int, int], bo
                 obj is not None
                 and name is not None
                 and node_text(name, source) in SERVER_FACTORIES
-                and node_text(obj, source)
-                in ("McpServer", "io.modelcontextprotocol.server.McpServer")
+                and node_text(obj, source) in servers
             )
             break
         cur = obj
@@ -263,6 +268,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
     source = dc.source
     if b"McpServer" not in source or not SHORTCUT_CALL.search(source):
         return []
+    servers = mcp_server_names(source)
     variables = _local_variables(dc.root, source)
     lines: dict[str, list[int]] = {}
     for f in dc.record.functions:
@@ -277,7 +283,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
         if name_node is None or node_text(name_node, source) not in SHORTCUTS:
             continue
         args = _args(node)
-        if len(args) != 2 or not _rooted_at_server(node, source, rooted):
+        if len(args) != 2 or not _rooted_at_server(node, source, servers, rooted):
             continue
         fields = _tool_fields(args[0], source, variables)
         if fields is None:
@@ -291,7 +297,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
 def _detect(dc: DetectContext) -> Detection | None:
     if b"io.modelcontextprotocol" not in dc.source:
         return None
-    found = _sdk_tools(dc) + _shortcut_tools(dc)
+    found = _sdk_tools(dc) + guarded(dc.path, _shortcut_tools, dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

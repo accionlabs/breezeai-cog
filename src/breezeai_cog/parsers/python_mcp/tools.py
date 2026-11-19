@@ -19,13 +19,14 @@ its ``@<server>.list_tools()`` function returns (:mod:`.lowlevel`, where the rul
 from __future__ import annotations
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..mcp_common import guarded
 from ..python_mcp_common import PYTHON_MCP, detect_tools
 from .lowlevel import detect_lowlevel_tools
 
 
 def _detect(dc: DetectContext) -> Detection | None:
     found = detect_tools(dc, PYTHON_MCP)
-    lowlevel = detect_lowlevel_tools(dc)
+    lowlevel = guarded(dc.path, detect_lowlevel_tools, dc)
     if not lowlevel:
         return found
     emits = (found.emits if found is not None else []) + lowlevel
