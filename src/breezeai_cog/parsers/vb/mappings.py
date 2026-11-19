@@ -34,6 +34,7 @@ DECLARATIONS = {
     "call_statement",
     "field_declaration",
     "const_declaration",
+    "property_declaration",  # `Public Property Ok As Boolean`, as C# records a property
     "local_declaration_statement",
     "assignment_statement",
 }
@@ -50,8 +51,8 @@ NESTED_SCOPES = {
     "method_declaration",
     "constructor_declaration",
     # Members with their own bodies — barrier them during class-body statement capture so
-    # their accessor/handler statements aren't pulled up and mis-parented to the class.
-    "property_declaration",
+    # their handler statements aren't pulled up and mis-parented to the class. A property is
+    # not one: like C#, the property is a statement of its class and so are its accessors'.
     "event_declaration",
     "operator_declaration",
     "lambda_expression",

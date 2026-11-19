@@ -159,9 +159,9 @@ def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
     assert "counter" in members
     # Heritage misparses must not appear as statements.
     assert "IConfig" not in members and "BaseConfig" not in members
-    # Property accessor bodies must NOT be pulled up and mis-parented to the class.
-    class_texts = [t for _, t in members.values()]
-    assert not any("Return 42" in t for t in class_texts), "property body leaked into class"
+    # A property is a statement of the class, as in C#, and so is its accessors' code.
+    assert members["Size"][0] == "property_declaration"
+    assert any(s.nodeType == "return_statement" and s.parentId == cls.id for s in rec.statements)
     # Nothing captured without the flag.
     ctx2 = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
@@ -390,6 +390,31 @@ def test_a_nested_structure_and_enum_with_a_same_line_attribute_are_found(tmp_pa
     assert {c.id: c.type for c in rec.classes} == {
         "N.vb#M": "module", "N.vb#M.Point": "struct", "N.vb#M.Kind": "enum"}
     assert [f.id for f in rec.functions] == ["N.vb#M#Run@8"]
+
+
+def test_a_property_is_a_statement_of_its_type_and_so_are_its_accessors(tmp_path) -> None:
+    # As C# records `public bool Ok { get; set; }`: the property is a statement named after it,
+    # and the statements of its Get / Set bodies belong to the type.
+    src = (b"Public Class OrderService\n    Public Class Result\n"
+           b"        Public Property Ok As Boolean\n"
+           b"        Public Property Count As Integer = 3\n"
+           b"        Public ReadOnly Property Total As Decimal\n            Get\n"
+           b"                Return Compute()\n            End Get\n        End Property\n"
+           b"    End Class\nEnd Class\n"
+           b"Public Interface IThing\n    Property Id As Integer\nEnd Interface\n")
+    p = tmp_path / "P.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="P.vb", abs_path=p, source=src,
+                                             repo_root=tmp_path, capture_statements=True))
+    got = [(s.parentId.split("#", 1)[1], s.nodeType, s.name, s.startLine, s.endLine)
+           for s in rec.statements]
+    assert sorted(got) == sorted([
+        ("OrderService.Result", "property_declaration", "Ok", 3, 3),
+        ("OrderService.Result", "property_declaration", "Count", 4, 4),
+        ("OrderService.Result", "property_declaration", "Total", 5, 9),
+        ("OrderService.Result", "return_statement", None, 7, 7),
+        ("IThing", "property_declaration", "Id", 13, 13),
+    ])
 
 
 def test_an_xml_literal_line_is_not_a_type_opener() -> None:
