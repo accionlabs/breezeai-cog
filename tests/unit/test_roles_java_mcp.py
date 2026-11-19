@@ -361,3 +361,40 @@ public class Tools {
     assert tools["plain"].params == [] and tools["plain"].description == "Plain"
     assert tools["mapped"].params is None
     assert _params(tools["json"]) == [("q", "string", False, None, None)]
+
+
+def test_java_entry_forms(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.server.McpStatelessServerFeatures;
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.Arrays;
+
+public class Forms {
+    Object a = new McpServerFeatures.SyncResourceTemplateSpecification(
+        new McpSchema.ResourceTemplate("files://{path}", "Files", "A file", "text/plain", null), this::h);
+    Object b = new McpStatelessServerFeatures.SyncPromptSpecification(
+        new McpSchema.Prompt("titled", "Title", "Described", Arrays.asList(
+            McpSchema.PromptArgument.builder("q").description("Query").required(true).build())), this::h);
+    Object c = new McpServerFeatures.SyncPromptSpecification(new McpSchema.Prompt("nulls", "N", null), this::h);
+    Object d = new McpServerFeatures.SyncPromptSpecification(
+        new McpSchema.Prompt("odd", "d", List.of(new McpSchema.PromptArgument("a", "t", "d", true))), this::h);
+    Object e = new McpServerFeatures.SyncPromptSpecification(
+        McpSchema.Prompt.builder("built").arguments(List.of(helper())).build(), this::h);
+
+    Object h(Object x, Object y) { return null; }
+}
+"""
+    statements = analyze_files({"Forms.java": src})
+    tpl = _of(statements, "mcp_resource")["files://{path}"]
+    assert tpl.description == "A file" and tpl.handler == "h"
+    prompts = _of(statements, "mcp_prompt")
+    assert prompts["titled"].description == "Described"
+    assert _params(prompts["titled"]) == [("q", None, True, None, "Query")]
+    assert prompts["nulls"].params == []
+    assert _params(prompts["odd"]) == [
+        ("a", None, True, None, "d")
+    ]  # (name, title, description, required)
+    assert prompts["built"].params is None  # not a literal argument

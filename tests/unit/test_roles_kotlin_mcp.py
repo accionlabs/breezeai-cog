@@ -397,3 +397,53 @@ fun configure(registry: Registry) {
 """
     statements = analyze_files({"Other.kt": src})
     assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+def test_kotlin_entry_forms(analyze_files) -> None:
+    """Java SDK constructors and builders in Kotlin, and the Kotlin SDK's typed entries."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.types.*
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+val tpl = McpServerFeatures.SyncResourceTemplateSpecification(
+    McpSchema.ResourceTemplate("files://{path}", "Files", "A file", "text/plain", null)) { ex, req -> TODO() }
+val res = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Resource("memo://a", "A", null, "Memo A", "text/plain", null, null, null)) { ex, req -> TODO() }
+val titled = McpServerFeatures.AsyncPromptSpecification(
+    McpSchema.Prompt("titled", "Title", "Described", listOf(
+        McpSchema.PromptArgument.builder("q").description("Query").required(true).build()))) { ex, req -> TODO() }
+val bad = McpServerFeatures.SyncPromptSpecification(
+    McpSchema.Prompt("bad", "d", listOf(McpSchema.PromptArgument("a", description = "x", required = true)))) { ex, req -> TODO() }
+val built = McpServerFeatures.SyncPromptSpecification(
+    McpSchema.Prompt.builder("built").description("B").arguments(null).build()) { ex, req -> TODO() }
+
+fun configure(server: Server) {
+    server.addResourceTemplate(ResourceTemplate("users://{id}", "User", "A user", null)) { r, v -> TODO() }
+    server.addPrompt(Prompt(name = "typed", description = "T", arguments = null)) { TODO() }
+    server.addPrompt("positional", "P", listOf(PromptArgument("a", "d", false))) { TODO() }
+}
+"""
+    statements = analyze_files({"Entries.kt": src})
+    resources = _of(statements, "mcp_resource")
+    assert (resources["files://{path}"].description, resources["files://{path}"].framework) == (
+        "A file",
+        "java-mcp",
+    )
+    assert _params(resources["files://{path}"]) == [("path", "string", True, None, None)]
+    assert resources["memo://a"].description == "Memo A" and resources["memo://a"].params == []
+    assert resources["users://{id}"].framework == "kotlin-mcp"
+    prompts = _of(statements, "mcp_prompt")
+    assert prompts["titled"].description == "Described"
+    assert _params(prompts["titled"]) == [("q", None, True, None, "Query")]
+    assert prompts["bad"].params is None  # named arguments: positions differ between the SDKs
+    assert prompts["built"].params == [] and prompts["built"].description == "B"
+    assert (prompts["typed"].framework, prompts["typed"].description, prompts["typed"].params) == (
+        "kotlin-mcp",
+        "T",
+        [],
+    )
+    assert _params(prompts["positional"]) == [("a", None, False, None, "d")]
