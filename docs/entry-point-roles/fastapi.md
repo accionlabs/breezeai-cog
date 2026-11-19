@@ -4,7 +4,9 @@ Parser: `src/breezeai_cog/parsers/python_fastapi/` · Rules: [entry-point contra
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `@app.get(path)` / `@router.post(path)` / … on a function | Binding | `route`, HTTP verb, `routeKind: route`, full path, `handler` = function | One handler, inbound API |
+| `@app.get(path)` / `@router.post(path)` / … on a function | Binding | `route`, HTTP verb, `routeKind: route`, full path, `handler` = function, at the decorator (`nodeType: decorator`) | One handler, inbound API |
+| `@router.get(path)` on a router imported from the file that makes it (`from app.api.routing import router`, `routing.router`, aliases followed) — also in a file that never mentions `fastapi` | Binding | as above; `endpoint` = the path it is served at, from that router's wiring (its prefix and every include above it); empty when that wiring cannot be read | One handler, inbound API |
+| `@cache.get(…)`, `@api.get(…)` on a parameter, or on any name that is not a FastAPI app or router made in this file or imported from the file that makes it (a re-export, a factory's result, a library object) | None | — | Not known to be FastAPI |
 | `@router.api_route(path, methods=[…])` | Binding, one per verb | as above, one record per verb (`GET` when `methods` is absent) | One handler per verb |
 | `@app.websocket(path)` | Binding | `route`, `method: WEBSOCKET`, `routeKind: ws` | One handler, inbound socket |
 | `APIRouter(prefix=…)` | Wiring | statement stays plain; prefix joined into its routes' `endpoint` | Applies to many handlers, no handler of its own |

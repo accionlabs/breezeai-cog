@@ -214,3 +214,92 @@ def test_sub_application_mounted_in_the_same_file_has_no_address(analyze_files) 
         "from fastapi import FastAPI\napp = FastAPI()\nsub = FastAPI()\n"
         "@sub.get('/items')\ndef items():\n    return []\napp.mount('/v1', sub)\n")})
     assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", None)]
+
+
+def test_route_sits_at_its_decorator(analyze_files) -> None:
+    # nodeType is the tree-sitter type of the node the record sits at: the decorator.
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI\napp = FastAPI()\n\n"
+        "@app.get('/x')\ndef x():\n    pass\n")})
+    assert _one(st, "GET", "/x").nodeType == "decorator"
+
+
+def test_verb_on_a_non_fastapi_object_is_none(analyze_files) -> None:
+    # `.get` on a cache in a FastAPI file is not a route — nor is one on a parameter.
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI\nfrom cachelib import Cache\napp = FastAPI()\n"
+        "cache = Cache()\n\n"
+        "@cache.get('user-profile')\ndef profile():\n    pass\n\n"
+        "def register(api):\n    @api.get('/z')\n    def z():\n        pass\n\n"
+        "@app.get('/ok')\ndef ok():\n    pass\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "/ok")]
+
+
+_ROUTING = {
+    "app/__init__.py": "",
+    "app/api/__init__.py": "",
+    "app/api/routing.py": "from fastapi import APIRouter\nrouter = APIRouter(prefix='/orders')\n",
+    "app/main.py": (
+        "from fastapi import FastAPI\nfrom app.api.routing import router\napp = FastAPI()\n"
+        "app.include_router(router, prefix='/api')\n"),
+}
+
+
+def test_imported_router_keeps_its_served_prefix(analyze_files) -> None:
+    st = analyze_files({**_ROUTING, "app/api/orders.py": (
+        "from fastapi import Depends\nfrom app.api.routing import router\n\n"
+        "@router.get('/{id}')\ndef get_order(id: str):\n    pass\n")})
+    r = _one(st, "GET", "/api/orders/{id}")
+    assert (r.path, r.handler, r.nodeType) == ("app/api/orders.py", "get_order", "decorator")
+
+
+def test_imported_router_in_a_file_without_fastapi(analyze_files) -> None:
+    # The decorating file never mentions fastapi: the additive detector reads it.
+    st = analyze_files({**_ROUTING, "app/api/orders.py": (
+        "from app.api.routing import router as r\nfrom app.api import routing\n\n"
+        "@r.get('/{id}')\ndef get_order(id: str):\n    pass\n\n"
+        "@routing.router.post('')\ndef create_order():\n    pass\n")})
+    assert sorted((s.method, s.endpoint, s.path) for s in _eps(st)) == [
+        ("GET", "/api/orders/{id}", "app/api/orders.py"),
+        ("POST", "/api/orders", "app/api/orders.py")]
+    assert {s.framework for s in _eps(st)} == {"fastapi"}
+
+
+def test_imported_router_with_runtime_prefix_keeps_the_marker(analyze_files) -> None:
+    # A settings prefix is a value read at runtime: the route carries it as a marker, as a router
+    # of its own file does.
+    st = analyze_files({
+        "app/__init__.py": "",
+        "app/routing.py": (
+            "from fastapi import APIRouter\nfrom app.settings import settings\n"
+            "router = APIRouter(prefix=settings.PREFIX)\n"),
+        "app/orders.py": (
+            "from app.routing import router\n\n@router.get('/x')\ndef x():\n    pass\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "${settings.PREFIX}/x")]
+
+
+def test_imported_router_included_twice_has_no_address(analyze_files) -> None:
+    st = analyze_files({
+        "app/__init__.py": "",
+        "app/routing.py": "from fastapi import APIRouter\nrouter = APIRouter(prefix='/o')\n",
+        "app/orders.py": (
+            "from app.routing import router\n\n@router.get('/x')\ndef x():\n    pass\n"),
+        "app/main.py": (
+            "from fastapi import FastAPI\nfrom app.routing import router\nimport app.orders\n"
+            "app = FastAPI()\napp.include_router(router, prefix='/a')\n"
+            "app.include_router(router, prefix='/b')\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", None)]
+
+
+def test_imported_non_router_is_none(analyze_files) -> None:
+    # Imported from a repo file, but not a router there — or from a library: no record.
+    st = analyze_files({
+        "app/__init__.py": "",
+        "app/routing.py": "from fastapi import APIRouter\nrouter = APIRouter()\n",
+        "app/cache.py": "from cachelib import Cache\ncache = Cache()\n",
+        "app/orders.py": (
+            "from fastapi import FastAPI\nfrom app.cache import cache\nfrom lib import router\n\n"
+            "@cache.get('k')\ndef a():\n    pass\n\n@router.get('/b')\ndef b():\n    pass\n"),
+        "app/other.py": (
+            "from app.cache import cache\n\n@cache.get('k')\ndef c():\n    pass\n")})
+    assert _eps(st) == []

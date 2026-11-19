@@ -2,9 +2,17 @@
 decorators and emits ``semanticType="route"`` statements parented to their handler
 function (via the shared id convention, so the parentId matches the function id the
 Python extraction assigned).
+
+A decorator is a route only when its receiver is a FastAPI app or router: one this file makes
+(``router = APIRouter(…)``), or one imported from the file that makes it (``from app.api.routing
+import router``, ``orders.router``), found in the ``fastapi.wiring`` fact. Any other receiver —
+``@cache.get("key")``, a parameter, a name this analysis cannot follow — gives no record.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
 
 from tree_sitter import Node
 
@@ -14,7 +22,9 @@ from ..treesitter import node_text
 from .file_facts import UNKNOWN as _UNKNOWN
 from .file_facts import app_middleware as _app_middleware
 from .file_facts import constructor as _constructor
+from ..python_common import ImportRefs as _ImportRefs
 from ..python_common import Origins as _Origins
+from ..python_common import attribute_owner as _attribute_owner
 from ..python_common import calls as _calls
 from .file_facts import dependencies as _dependencies
 from ..python_common import literal as _literal
@@ -24,7 +34,7 @@ from .auth import certain_auth
 from .wiring import fastapi_wiring
 
 # HTTP verbs (+ websocket) exposed as decorator methods on FastAPI app/router objects.
-_VERBS = {"get", "post", "put", "patch", "delete", "options", "head", "trace", "websocket"}
+VERBS = frozenset({"get", "post", "put", "patch", "delete", "options", "head", "trace", "websocket"})
 
 def _name(node: Node, source: bytes) -> str:
     n = node.child_by_field_name("name")
@@ -136,7 +146,7 @@ def _router_bases(
 
 
 def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
-            bases: dict[str, str | object],
+            receiver_key: Callable[[Node], str | None], bases: dict[str, str | object],
             router_guards: dict[str, list[str]], roots: dict[str, str],
             middleware: dict[str, list[str]], auth: frozenset[str] = frozenset()) -> list[Emit]:
     call = dec.named_children[0] if dec.named_children else None
@@ -149,7 +159,7 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     if verb_node is None:
         return []
     verb = node_text(verb_node, source).lower()
-    if verb in _VERBS:
+    if verb in VERBS:
         methods = [verb.upper()]
     elif verb == "api_route":
         # generic `@router.api_route("/x", methods=[...])` -> one route per verb (GET default)
@@ -161,7 +171,9 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     handler_line = fdef.start_point[0] + 1
     endpoint = _endpoint(call, source)
     receiver = func.child_by_field_name("object")
-    receiver_name = node_text(receiver, source) if receiver is not None else ""
+    receiver_name = receiver_key(receiver) if receiver is not None else None
+    if receiver_name is None:  # not a FastAPI app or router: `@cache.get("key")`
+        return []
     served = bases.get(receiver_name, "")
     # Guards: the app's middleware (decision Q9: a global guard on every binding it covers),
     # then the router's / app's inherited dependencies, then the route's own (outer first).
@@ -188,7 +200,7 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
             # (:mod:`.auth`); any other is listed, its effect unknown.
             authRequired=True if auth.intersection(scoped) else None,
             routeKind="ws" if m == "WEBSOCKET" else "route",
-        ), parent=parent, node_type="synthetic")
+        ), parent=parent)
         for m in methods
     ]
 
@@ -219,12 +231,14 @@ def _from_index(
 
 
 def detect_routes(
-    root: Node, source: bytes, path: str, *, index: object | None = None
+    root: Node, source: bytes, path: str, *, index: object | None = None,
+    repo_root: Path | None = None,
 ) -> list[Emit]:
     """Walk the tree (tracking the enclosing class) and return its routes, for
     :func:`~..emits.apply`. ``index`` is the Python repo index: when given, router wiring comes
-    from its ``fastapi.wiring`` fact (which also follows ``include_router`` across files);
-    without it, only this file's wiring is seen."""
+    from its ``fastapi.wiring`` fact (which also follows ``include_router`` across files), and a
+    router imported from another file (``repo_root`` given) is served where that file's wiring
+    says; without it, only this file's own routers are seen."""
     routes: list[Emit] = []
     from_index = _from_index(index, path)
     if from_index is not None:
@@ -235,6 +249,38 @@ def detect_routes(
             else ({}, {}, {})
         )
         middleware = _app_middleware(root, source) if b"middleware" in source else {}
+
+    wiring = fastapi_wiring(index)
+    imports = _ImportRefs(root, source, repo_root, path, anywhere=True, plain=True) \
+        if wiring is not None and repo_root is not None else None
+
+    def receiver_key(receiver: Node) -> str | None:
+        """The key of the app or router a decorator is called on: its variable when this file
+        makes it, ``file::var`` when it is imported from the file that makes it; else None."""
+        name = node_text(receiver, source)
+        if receiver.type == "identifier" and name in bases:
+            return name
+        if wiring is None or imports is None:
+            return None
+        target: tuple[str, str] | None = None
+        if receiver.type == "identifier":
+            ref = imports.get(name)
+            if ref is not None and ref[0] == "symbol":
+                target = (ref[1], ref[2])
+        elif receiver.type == "attribute":
+            target = _attribute_owner(receiver, source, imports, repo_root)
+        made = wiring.routers.get(target[0], {}).get(target[1]) if target is not None else None
+        if target is None or made is None:
+            return None  # not a router of this repository this analysis can name
+        key = f"{target[0]}::{target[1]}"
+        if key not in bases:
+            served, deps, (top_file, top_var) = made
+            top = top_var if top_file == path else f"{top_file}::{top_var}"
+            bases[key] = _UNKNOWN if served is None else served
+            router_guards[key] = list(deps)
+            roots[key] = top
+            middleware.setdefault(top, list(wiring.middleware.get(top_file, {}).get(top_var, [])))
+        return key
 
     auth = certain_auth(root, source)
 
@@ -253,7 +299,7 @@ def detect_routes(
                         walk(body, _name(cdef, source))
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
-                        routes.extend(_routes(dec, fdef, source, path, class_name,
+                        routes.extend(_routes(dec, fdef, source, path, class_name, receiver_key,
                                               bases, router_guards, roots, middleware, auth))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
