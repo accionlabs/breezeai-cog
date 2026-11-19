@@ -7,7 +7,8 @@ The index (:func:`build_vb_index`) holds class heritage — a controller can inh
 ``<Route>``/``<Authorize>`` from a base declared in another file, and the shared
 :func:`~breezeai_cog.parsers.aspnet_common.detect_controller_routes` walks that chain via
 ``index.class_heritage`` — and the facts registered for ``vb`` (``register_fact``), collected
-in the same parse."""
+in the same parse, and from the files another parser owns that a fact reads
+(``FactSpec.sources``, e.g. the ``.svc`` / ``.asmx`` hosts of ``dotnet.host-files``)."""
 
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ from typing import Any
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..additive import collect_additive, resolve_additive
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..index_common import ClassHeritage, parallel_map, record_heritage
 from ..treesitter import node_text
 from .source import parse_nested, parse_vb
@@ -98,7 +101,9 @@ def build_vb_index(repo_root: Path, files, jobs: int = 1) -> VbIndex:
     namespaces (no namespace→file map), so heritage is indexed — enough for ASP.NET
     cross-file base-controller resolution — plus the facts registered for ``vb``."""
     index = VbIndex()
-    collected: dict[str, list[Any]] = {}
+    files, fact_files = split_fact_sources("vb", list(files))
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("vb", fact_files, repo_root, jobs)
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _vb_index_one, jobs):
         if not frag:

@@ -20,9 +20,9 @@ from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
-from .functions import defined_names, type_map
+from .functions import build_method, defined_names, type_map
 from .imports import VbIndex, build_vb_index, extract_imports
-from .source import parse_nested, parse_vb
+from .source import parse_declares, parse_nested, parse_vb
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -89,8 +89,12 @@ class VbParser(BaseParser):
         # Types nested in another type, one parse per nesting level (see .source).
         nested = parse_nested(source, ctx.parse_timeout_micros)
         trees = [root, *(level.root for level in nested)]
+        # `Declare` statements, one parse per type that has some (see .source).
+        declares = parse_declares(source, ctx.parse_timeout_micros)
         names: set[str] = set()
         types: dict[str, str] = {}
+        for group in declares:
+            names |= defined_names(group.tree.root_node, source)
         for tree in trees:
             names |= defined_names(tree, source)
             for k, v in type_map(tree, source).items():
@@ -114,6 +118,23 @@ class VbParser(BaseParser):
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_statements)
+        for group in declares:
+            qualified = group.name
+            # By its opener line: two types may share a name (a `#2` id), never a line.
+            owner_cls = next((c for c in classes if c.startLine == group.line), None)
+            if owner_cls is None:
+                continue
+            for block, _ in iter_type_declarations(group.tree.root_node):
+                for member in block.named_children:
+                    if member.type != "method_declaration":
+                        continue
+                    fn, fn_statements = build_method(
+                        member, source, path, parent_id=owner_cls.id, class_name=owner_cls.name,
+                        id_owner=qualified if "." in qualified else None, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve, parsed=group.text,
+                    )
+                    functions.append(fn)
+                    statements.extend(fn_statements)
 
         if capture:
             for tree in trees:

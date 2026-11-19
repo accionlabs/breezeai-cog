@@ -228,3 +228,64 @@ def test_soap_host_operation_stays_rpc(analyze_files) -> None:
     })
     [r] = [s for s in _eps(st) if s.handler == "SendTest"]
     assert (r.method, r.routeKind, r.endpoint) == ("RPC", "rpc", "Rest/SendTest")
+
+
+def test_host_files_are_read_from_the_index_never_while_parsing(tmp_path, monkeypatch) -> None:
+    # The `.svc` / `.asmx` / `.ashx` beside a code-behind are read once, by the repo index: parsing
+    # the code-behind opens no other file, and the address still comes from the host.
+    from pathlib import Path
+
+    from breezeai_cog.parsers.base import ParseContext
+    from breezeai_cog.parsers.csharp_wcf.parser import WcfParser
+
+    repo = tmp_path / "repo"
+    files = {
+        "Campaigns/Rest.svc": '<%@ ServiceHost Service="Shop.Campaigns.Rest" '
+                              'Factory="System.ServiceModel.Activation.WebScriptServiceHostFactory" %>',
+        "Campaigns/Rest.svc.cs": AJAX,
+        "Orders.asmx": '<%@ WebService Class="Shop.Orders" %>',
+        "Orders.asmx.cs": ASMX_CB,
+    }
+    for rel, src in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(src)
+    parser = WcfParser()
+    index = parser.build_index(repo, [repo / rel for rel in files])
+
+    def no_reads(self, *args, **kwargs):
+        raise AssertionError(f"parsing read {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", no_reads)
+    monkeypatch.setattr(Path, "read_text", no_reads)
+    got = {}
+    for rel in ("Campaigns/Rest.svc.cs", "Orders.asmx.cs"):
+        rec = parser.parse_file(ParseContext(
+            path=rel, abs_path=repo / rel, source=files[rel].encode(), repo_root=repo,
+            capture_statements=True, resolution_index=index))
+        got.update({s.handler: (s.method, s.endpoint) for s in rec.statements if s.semanticType})
+    assert got == {"SendTest": ("POST", "/Campaigns/Rest.svc/SendTest"),
+                   "Status": ("GET", "/Campaigns/Rest.svc/status"),
+                   "GetOrder": ("RPC", "Orders.asmx/GetOrder")}
+
+
+def test_a_host_naming_another_class_gives_no_address(analyze_files) -> None:
+    st = analyze_files({
+        "Orders.asmx": '<%@ WebService Class="Shop.Billing" %>',
+        "Orders.asmx.cs": ASMX_CB,
+    })
+    [r] = _eps(st)
+    assert (r.method, r.endpoint) == ("RPC", None)
+
+
+def test_host_addresses_are_the_same_with_one_job_and_several(capture_routes) -> None:
+    files = {
+        "Campaigns/Rest.svc": '<%@ ServiceHost Service="Shop.Campaigns.Rest" '
+                              'Factory="System.ServiceModel.Activation.WebScriptServiceHostFactory" %>',
+        "Campaigns/Rest.svc.cs": AJAX,
+        "Orders.asmx": '<%@ WebService Class="Shop.Orders" %>',
+        "Orders.asmx.cs": ASMX_CB,
+    }
+    one, two = capture_routes(files, 1), capture_routes(files, 2)
+    assert one == two
+    assert {r["endpoint"] for routes in one.values() for r in routes} >= {
+        "/Campaigns/Rest.svc/SendTest", "Orders.asmx/GetOrder"}

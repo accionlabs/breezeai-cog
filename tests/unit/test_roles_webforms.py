@@ -182,6 +182,22 @@ def test_generic_handler_is_binding(analyze_files) -> None:
     assert (r.semanticType, r.endpoint, r.handler) == ("route", "/Export.ashx", "ProcessRequest")
 
 
+def test_generic_handler_host_is_a_file_with_a_plain_directive(analyze_files, tmp_path) -> None:
+    # The `.ashx` is wiring, like a `.svc` / `.asmx`: its own file record, the directive a plain
+    # statement and the code-behind in `importFiles`; the route stays on the code-behind's method.
+    from breezeai_cog import iter_file_records
+
+    analyze_files({
+        "Export.ashx": '<%@ WebHandler Language="C#" CodeBehind="Export.ashx.cs" Class="Export" %>',
+        "Export.ashx.cs": HANDLER,
+    })
+    host = {r.path: r for r in iter_file_records(tmp_path / "repo", capture_statements=True)}[
+        "Export.ashx"]
+    assert (host.language, host.framework, host.importFiles) == (
+        "ashx", "aspnet-webforms", ["Export.ashx.cs"])
+    assert [s.semanticType for s in host.statements] == [None]
+
+
 # --- handlers registered in web.config --------------------------------------------------------
 
 ADMIN_CONFIG = """<?xml version="1.0"?>
