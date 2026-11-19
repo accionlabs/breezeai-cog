@@ -24,6 +24,10 @@ _NON_JS_TYPE = re.compile(
     rb"\btype\s*=\s*(?![\"']?(?:(?:text|application)/(?:javascript|ecmascript)|module)\b)[\"']?\w",
     re.IGNORECASE,
 )
+#: ``type="module"``: a block with its own scope, read as a program of its own.
+_MODULE_TYPE = re.compile(rb"\btype\s*=\s*[\"']?module\b", re.IGNORECASE)
+#: the ``src`` value of a ``<script>`` open tag: quoted, or a bare run up to a space.
+SRC_VALUE = re.compile(rb"\bsrc\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))", re.IGNORECASE)
 _HTML_COMMENT = (b"<!--", b"-->")
 _RAZOR_COMMENT = (b"@*", b"*@")
 _SERVER_TAG_COMMENT = (b"<%--", b"--%>")  # Web Forms and JSP
@@ -97,3 +101,36 @@ def script_shadow(markup: bytes, path: str = "") -> tuple[bytes, bytes]:
         keep[body_start:body_end] = clean[body_start:body_end]
         found = True
     return (bytes(keep) if found else b""), bytes(clean)
+
+
+def script_programs(markup: bytes, path: str = "") -> list[bytes]:
+    """The page's inline scripts as the browser runs them, each a shadow at true offsets: the
+    classic blocks joined as one program (they share one global scope), then one program per
+    ``type="module"`` block (each has its own scope). Empty programs are left out."""
+    clean, scripts = sweep(markup, path)
+    blanked = _NOT_NEWLINE.sub(b" ", markup)
+    classic = bytearray(blanked)
+    programs: list[bytes] = []
+    has_classic = False
+    for body_start, body_end, attrs in scripts:
+        if SRC_ATTR.search(attrs) or _NON_JS_TYPE.search(attrs):
+            continue
+        if _MODULE_TYPE.search(attrs):
+            module = bytearray(blanked)
+            module[body_start:body_end] = clean[body_start:body_end]
+            programs.append(bytes(module))
+            continue
+        classic[body_start:body_end] = clean[body_start:body_end]
+        has_classic = True
+    return ([bytes(classic)] if has_classic else []) + programs
+
+
+def script_sources(markup: bytes, path: str = "") -> list[str]:
+    """The ``src`` of every live ``<script src=…>`` tag of the page, as written, in page order."""
+    _, scripts = sweep(markup, path)
+    found: list[str] = []
+    for _, _, attrs in scripts:
+        m = SRC_VALUE.search(attrs)
+        if m is not None:
+            found.append(next(g for g in m.groups() if g is not None).decode("utf-8", "replace"))
+    return found

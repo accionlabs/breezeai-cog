@@ -41,11 +41,13 @@ from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from ..html_htmx.calls import detect_htmx_calls
+from .angularjs import read_angularjs_events
 from .fingerprint import detect_rendering_framework
 from .index import HtmlTemplateIndex, build_html_template_index
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
 from .statements import collect_template_statements
-from ..template_common.scripts import read_page_scripts
+from ..template_common.markup import read_page_markup
+from ..template_common.scripts import link_page_scripts, read_page_scripts
 
 #: framework → the tree-sitter grammar that models its template dialect. A framework absent
 #: here is still tagged (role + framework) but its markup is not parsed into statements
@@ -87,7 +89,7 @@ class HtmlParser(BaseParser):
         if framework is None:
             # Not a recognized template — a plain html File (it may still make htmx / script calls).
             plain = self._file(fid, ctx.path, loc)
-            self._inline_scripts(plain, ctx)
+            self._page(plain, ctx)
             return plain
 
         record = self._file(
@@ -129,15 +131,20 @@ class HtmlParser(BaseParser):
                     seen_ids=seen_ids,
                 )
             )
-        self._inline_scripts(record, ctx)
+        if ctx.capture_statements and framework == "angularjs":
+            read_angularjs_events(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
+        self._page(record, ctx)
         return record
 
-    @staticmethod
-    def _inline_scripts(record: FileRecord, ctx: ParseContext) -> None:
-        # Outbound calls the markup makes: htmx request attributes, and what every script
-        # detector (jQuery, fetch, axios, client routers, …) finds inside the inline <script>
-        # blocks — the markup grammar never looks there.
+    def _page(self, record: FileRecord, ctx: ParseContext) -> None:
+        # What every page has, whatever renders it: its script files as file links; its links
+        # and form posts; htmx request attributes; and what every script detector (jQuery,
+        # fetch, axios, client routers, …) finds inside the inline <script> blocks — the markup
+        # grammar never looks there.
+        link_page_scripts(record, ctx)
         if ctx.capture_statements:
+            read_page_markup(record, ctx.source, ctx.path, ctx.parse_timeout_micros,
+                             links=not self.is_fixture_file(ctx.path))
             detect_htmx_calls(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
             read_page_scripts(record, ctx)
 

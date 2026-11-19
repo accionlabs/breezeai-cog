@@ -25,6 +25,10 @@ STATEMENT_TYPES: list[str] = [
     "defer_statement",
     # ``html`` grammar: an htmx request attribute (``hx-get="/items"``) → api_call.
     "attribute",
+    # ``html`` grammar: a link (``<a href>``) → navigation route; a form with an ``action`` →
+    # api_call; the tag that carries it.
+    "start_tag",
+    "self_closing_tag",
 ]
 
 #: Frameworks this parser emits: ``angular`` for the templates it resolves and stamps (inherited

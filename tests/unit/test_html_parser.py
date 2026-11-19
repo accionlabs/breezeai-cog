@@ -162,14 +162,41 @@ def test_resolved_template_framework_comes_from_resolver(tmp_path) -> None:
 
 def test_fallback_angularjs_framework_no_grammar(tmp_path) -> None:
     # An AngularJS view (ng-* markup) with no resolver hit → tagged framework via the in-file
-    # fingerprint, uiRole=template, but NO statements (no AngularJS grammar) — honest-null.
+    # fingerprint, uiRole=template. There is no AngularJS grammar: only its event directives are
+    # recorded (read as JavaScript); ng-repeat and the rest record nothing.
     rec = _parse(
         tmp_path, {"view.html": '<div ng-repeat="t in todos" ng-click="go()"></div>'}, "view.html"
     )
     assert rec.framework == "angularjs"
     assert rec.uiRole == "template"
     assert rec.importFiles == []  # fingerprint has no owner link
-    assert rec.statements == []  # no angularjs grammar
+    assert [(s.nodeType, s.name, s.handler) for s in rec.statements] == [
+        ("attribute", "ng-click", "go")
+    ]
+
+
+def test_angularjs_event_directives_name_the_method_they_call(tmp_path) -> None:
+    page = (
+        '<div ng-app="shop">\n'
+        '<form ng-submit="vm.save()">\n'
+        '<button data-ng-click="remove(o)">x</button>\n'
+        '<a ng-click="vm.open = true">o</a>\n'
+        '<input ng-model="vm.q" ng-change="ok && vm.search()">\n'
+        "</form></div>"
+    )
+    rec = _parse(tmp_path, {"view.html": page}, "view.html")
+    assert [(s.startLine, s.name, s.handler) for s in rec.statements] == [
+        (2, "ng-submit", "save"),
+        (3, "data-ng-click", "remove"),
+        (4, "ng-click", None),
+        (5, "ng-change", "search"),
+    ]
+
+
+def test_knockout_bindings_are_not_read_as_javascript(tmp_path) -> None:
+    rec = _parse(tmp_path, {"view.html": '<button data-bind="click: save">Save</button>'}, "view.html")
+    assert rec.framework == "knockout"
+    assert rec.statements == []
 
 
 def test_fallback_angular_without_owner_still_parses(tmp_path) -> None:
@@ -227,7 +254,8 @@ def test_rendering_and_htmx_coexist(tmp_path) -> None:
 
 def _script_calls(rec) -> list[tuple[int, str | None, str | None, str | None]]:
     return sorted((s.startLine, s.framework, s.method, s.endpoint)
-                  for s in rec.statements if s.semanticType == "api_call" and s.framework != "htmx")
+                  for s in rec.statements if s.semanticType == "api_call" and s.framework != "htmx"
+                  and s.nodeType not in ("start_tag", "self_closing_tag"))
 
 
 def test_page_scripts_are_read_by_every_detector(tmp_path) -> None:
@@ -411,3 +439,65 @@ def test_output_validates(tmp_path) -> None:
             )
         )
         assert not errs, errs
+
+
+def _markup(rec) -> list[tuple[int, str | None, str | None, str | None, str | None]]:
+    return [(s.startLine, s.semanticType, s.routeKind, s.method, s.endpoint)
+            for s in rec.statements if s.nodeType in ("start_tag", "self_closing_tag")]
+
+
+def test_links_and_form_posts_of_a_plain_page(tmp_path) -> None:
+    page = (
+        '<form action="/contact/send" method="post"> … </form>\n'
+        '<a href="/about.html">About</a>\n'
+        '<script src="/js/jquery.min.js"></script>\n'
+        "<script>var API = '/api/track';</script>\n"
+        "<script>$.post(API, { page: 'contact' });</script>\n"
+    )
+    rec = _parse(tmp_path, {"contact.html": page}, "contact.html")
+    assert _markup(rec) == [
+        (1, "api_call", None, "POST", "/contact/send"),
+        (2, "route", "navigation", None, "/about.html"),
+    ]
+    assert _script_calls(rec) == [(5, "jquery", "POST", "/api/track")]
+
+
+def test_only_a_page_link_is_navigation(tmp_path) -> None:
+    page = (
+        '<a href="#top">t</a> <a href="https://example.com/x">e</a> <a href="//cdn/x">c</a>\n'
+        '<a href="mailto:a@b.c">m</a> <a href="javascript:void(0)">j</a> <a>no href</a>\n'
+        '<a href="about.html">relative</a>\n'
+        '<a href="{{ url }}">template</a>\n'
+        '<AREA HREF="/map#north">\n'
+        '<a href="/x" routerLink="/x">router</a>\n'
+    )
+    rec = _parse(tmp_path, {"page.html": page}, "page.html")
+    assert _markup(rec) == [
+        (3, "route", "navigation", None, None),
+        (4, "route", "navigation", None, None),
+        (5, "route", "navigation", None, "/map"),
+    ]
+
+
+def test_only_a_form_with_an_action_sends_a_request(tmp_path) -> None:
+    page = (
+        '<form action="/search">a</form>\n'
+        '<form action="https://api.example.com/x" method="POST">b</form>\n'
+        '<form method="post">no action</form>\n'
+        '<form action="/d" method="dialog">dialog</form>\n'
+        '<form action="{% url \'save\' %}" method="post">template</form>\n'
+        '<form action="/m" method="{{ m }}">templated method</form>\n'
+    )
+    rec = _parse(tmp_path, {"page.html": page}, "page.html")
+    assert _markup(rec) == [
+        (1, "api_call", None, "GET", "/search"),
+        (2, "api_call", None, "POST", "https://api.example.com/x"),
+        (5, "api_call", None, "POST", None),
+        (6, "api_call", None, None, "/m"),
+    ]
+
+
+def test_markup_records_need_statement_capture(tmp_path) -> None:
+    page = '<a href="/about.html">About</a>\n<form action="/x"></form>'
+    rec = _parse(tmp_path, {"page.html": page}, "page.html", capture=False)
+    assert rec.statements == []
