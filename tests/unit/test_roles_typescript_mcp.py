@@ -476,8 +476,9 @@ def test_typescript_handler_name_bound_by_an_enclosing_scope_is_not_the_top_leve
 ) -> None:
     """A handler name that a parameter, a local, a ``catch`` or loop variable or a nested
     declaration binds at the call is that local, not the top-level function of the name: no
-    line (``tool`` / ``registerTool``, a wrapper's argument, and the low-level dispatcher). The
-    top-level function still gives its line where nothing binds the name."""
+    line (``tool`` / ``registerTool``, a wrapper's argument, and the low-level dispatcher). A
+    ``var`` binds it in the whole function, even from a sibling block. The top-level function
+    still gives its line where nothing binds the name, or a ``let`` binds it in another block."""
     src = """
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -510,9 +511,17 @@ mcp.tool("topwrapped", {}, withErrors(lookup));
 function reg7(m: McpServer, other) {
   m.tool("unbound", {}, lookup);
 }
+function reg5(m: McpServer, ok) {
+  if (ok) { var lookup = makeHandler(); }
+  m.tool("siblingvar", {}, lookup);
+}
+function reg8(m: McpServer, ok) {
+  if (ok) { let lookup = makeHandler(); }
+  m.tool("siblinglet", {}, lookup);
+}
 """
     tools = _tools(analyze_files({"src/index.ts": src}))
-    for name in ("param", "localconst", "destructured", "forof", "caught"):
+    for name in ("param", "localconst", "destructured", "forof", "caught", "siblingvar"):
         assert (tools[name].handler, tools[name].handlerLine) == ("lookup", None), name
     assert (tools["low"].handler, tools["low"].handlerLine) == ("dispatch", None)
     # A wrapper of a local is not looked into: no handler, the wrapper's line.
@@ -520,3 +529,5 @@ function reg7(m: McpServer, other) {
     assert (tools["top"].handler, tools["top"].handlerLine) == ("lookup", 6)
     assert (tools["topwrapped"].handler, tools["topwrapped"].handlerLine) == ("lookup", 6)
     assert (tools["unbound"].handler, tools["unbound"].handlerLine) == ("lookup", 6)
+    # A `let` in a sibling block binds only that block: the top-level function's line.
+    assert (tools["siblinglet"].handler, tools["siblinglet"].handlerLine) == ("lookup", 6)

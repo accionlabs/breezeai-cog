@@ -118,6 +118,18 @@ _SCOPES = frozenset({"function_declaration", "generator_function_declaration",
                      "function_expression", "function", "generator_function", "arrow_function",
                      "method_definition", "statement_block", "for_statement", "for_in_statement",
                      "switch_body", "catch_clause"})
+#: The scopes a ``var`` belongs to: it is hoisted to its function, past any block or loop.
+_FUNCTIONS = frozenset(
+    {
+        "function_declaration",
+        "generator_function_declaration",
+        "function_expression",
+        "function",
+        "generator_function",
+        "arrow_function",
+        "method_definition",
+    }
+)
 #: Declarations that bind their name in the enclosing scope.
 _NAMED_DECLS = frozenset({"function_declaration", "generator_function_declaration",
                           "class_declaration", "abstract_class_declaration"})
@@ -146,30 +158,46 @@ def _pattern_names(node: Node | None, source: bytes) -> set[str]:
 
 def _local_scopes(root: Node, source: bytes) -> list[tuple[int, int, frozenset[str]]]:
     """Every function / block / loop / ``catch`` below the top level → (first line, last line,
-    the names declared directly in it). Top-level names are not in it: they are what a local
-    shadows. Walked with an explicit stack (a deep expression must not exhaust recursion)."""
+    the names declared directly in it). A ``var`` is its enclosing function's, wherever in the
+    body it is written. Top-level names are not in it: they are what a local shadows. Walked
+    with an explicit stack (a deep expression must not exhaust recursion)."""
     scopes: list[tuple[Node, set[str]]] = []
-    stack: list[tuple[Node, set[str] | None]] = [(root, None)]
+    stack: list[tuple[Node, set[str] | None, set[str] | None]] = [(root, None, None)]
     while stack:
-        node, names = stack.pop()
+        node, names, fn = stack.pop()
         own = names
         if node.type in _SCOPES:
             own = set()
             scopes.append((node, own))
+            if node.type in _FUNCTIONS:
+                fn = own
             for field in _SCOPE_BINDINGS:
                 bound = node.child_by_field_name(field)
                 if bound is not None and (field != "left" or node.type == "for_in_statement"):
-                    own |= _pattern_names(bound, source)
+                    hoisted = field == "left" and _is_var(node, source)
+                    (fn if fn is not None and hoisted else own).update(
+                        _pattern_names(bound, source)
+                    )
         if names is not None:  # the top level (``names is None``) is not a local scope
             if node.type == "variable_declarator":
-                names |= _pattern_names(node.child_by_field_name("name"), source)
+                parent = node.parent
+                var = parent is not None and parent.type == "variable_declaration"
+                (fn if fn is not None and var else names).update(
+                    _pattern_names(node.child_by_field_name("name"), source)
+                )
             elif node.type in _NAMED_DECLS:
                 nm = node.child_by_field_name("name")
                 if nm is not None:
                     names.add(node_text(nm, source))
-        stack.extend((c, own) for c in node.named_children)
+        stack.extend((c, own, fn) for c in node.named_children)
     return [(n.start_point[0] + 1, n.end_point[0] + 1, frozenset(names))
             for n, names in scopes if names]
+
+
+def _is_var(loop: Node, source: bytes) -> bool:
+    """Whether a ``for (… of / in …)`` declares its variable with ``var``."""
+    kind = loop.child_by_field_name("kind")
+    return kind is not None and node_text(kind, source) == "var"
 
 
 def handler_locator(root: Node, source: bytes, path: str, repo_root: Path | None,
