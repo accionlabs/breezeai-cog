@@ -985,6 +985,7 @@ function k() {
 @pytest.mark.parametrize(
     "rebind",
     [
+        "client = other;",
         "({ client } = deps);",
         "({ c: client } = deps);",
         "[client] = arr;",
