@@ -191,6 +191,13 @@ def _detect(dc: DetectContext) -> Detection | None:
                 declared = block_declarations(node, source, blocks)
                 if name in declared:
                     return built(declared[name], source)
+            elif node.type == "switch_body":
+                # A switch body is one scope: a `let` in one `case` binds the name in all.
+                for case in node.named_children:
+                    if case.type in ("switch_case", "switch_default"):
+                        declared = block_declarations(case, source, blocks)
+                        if name in declared:
+                            return built(declared[name], source)
             elif node.type in ("for_in_statement", "for_statement"):
                 left = node.child_by_field_name("left") or node.child_by_field_name("initializer")
                 if left is not None and name in _declared_by(left):

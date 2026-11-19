@@ -979,6 +979,58 @@ function k() {
     assert _calls(analyze_files({"c.ts": src})) == [("TOOL", "kept", "typescript-mcp")]
 
 
+# ── TypeScript: a switch body is one scope ───────────────────────────────────
+
+
+def test_typescript_switch_case_declaration_hides_a_module_client(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "x", version: "1" });
+async function f(x: number) {
+  switch (x) {
+    case 1:
+      let client = new Other();
+      await client.callTool({ name: "switch_let" });
+  }
+}
+async function g(x: number) {
+  switch (x) {
+    case 1:
+      const client = otherThing();
+      break;
+    default:
+      await client.callTool({ name: "other_case" });
+  }
+}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == []
+
+
+def test_typescript_switch_case_client_and_outer_client_are_kept(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "x", version: "1" });
+async function f(x: number) {
+  switch (x) {
+    case 1:
+      let client = new Client({ name: "y", version: "1" });
+      await client.callTool({ name: "switch_client" });
+  }
+}
+async function g(x: number) {
+  switch (x) {
+    case 1:
+      const other = otherThing();
+      await client.callTool({ name: "outer" });
+  }
+}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == [
+        ("TOOL", "switch_client", "typescript-mcp"),
+        ("TOOL", "outer", "typescript-mcp"),
+    ]
+
+
 # ── TypeScript: any write to the name, not only a plain `x = …`, rebinds it ──
 
 
