@@ -334,3 +334,54 @@ def test_only_a_security_scheme_dependency_asserts_auth(analyze_files) -> None:
         "/dyn": None,    # auto_error not a literal: unknown
         "/db": None,     # a DB session is not authentication
     }
+
+
+# ── Include forms, aliased constructors, unreadable includes ──────────────────────────────────
+def _router_file(prefix: str, handler: str) -> str:
+    return (f"from fastapi import APIRouter\nrouter = APIRouter(prefix='/{prefix}')\n\n"
+            f"@router.get('/')\ndef {handler}():\n    pass\n")
+
+
+_ROUTER_PACKAGE = {
+    "app/__init__.py": "", "app/routers/__init__.py": "",
+    "app/routers/users.py": _router_file("users", "get_user"),
+    "app/routers/items.py": _router_file("items", "list_items"),
+    "app/routers/orders.py": _router_file("orders", "list_orders"),
+}
+
+
+def test_include_through_function_import_dotted_path_and_literal_loop(analyze_files) -> None:
+    st = analyze_files({**_ROUTER_PACKAGE, "app/main.py": (
+        "import app.routers.items\nfrom app.routers import orders\nfrom fastapi import FastAPI\n"
+        "app = FastAPI()\n\ndef wire():\n    from app.routers import users\n"
+        "    app.include_router(users.router, prefix='/api')\n\n"
+        "app.include_router(app.routers.items.router, prefix='/api')\n"
+        "for r in [orders.router]:\n    app.include_router(r, prefix='/api')\n")})
+    assert {s.handler: s.endpoint for s in st if s.semanticType == "route"} == {
+        "get_user": "/api/users/", "list_items": "/api/items/", "list_orders": "/api/orders/"}
+
+
+def test_include_that_cannot_be_read_leaves_the_endpoint_empty(analyze_files) -> None:
+    for include in ("for r in cfg.routers():\n    app.include_router(r, prefix='/api')\n",
+                    "app.include_router(cfg.get_router(), prefix='/api')\n",
+                    "app.include_router(cfg.ROUTER, prefix='/api')\n"):
+        st = analyze_files({"cfg.py": "ROUTER = None\n", "users.py": _router_file("users", "get_user"),
+                            "main.py": f"from fastapi import FastAPI\nimport cfg\napp = FastAPI()\n{include}"})
+        assert [s.endpoint for s in st if s.semanticType == "route"] == [None], include
+
+
+def test_include_of_a_library_router_does_not_hide_the_repos_routers(analyze_files) -> None:
+    st = analyze_files({"users.py": _router_file("users", "get_user"), "main.py": (
+        "from fastapi import FastAPI\nfrom fastapi_users_lib import auth_router, routes\n"
+        "app = FastAPI()\napp.include_router(auth_router, prefix='/auth')\n"
+        "app.include_router(routes.make(), prefix='/other')\n")})
+    assert [s.endpoint for s in st if s.semanticType == "route"] == ["/users/"]
+
+
+def test_aliased_api_router_is_a_router(analyze_files) -> None:
+    for imp, ctor in (("from fastapi import APIRouter as R", "R"), ("import fastapi as f", "f.APIRouter"),
+                      ("from fastapi.routing import APIRouter", "APIRouter")):
+        st = analyze_files({"m.py": f"from fastapi import FastAPI\n{imp}\nr = {ctor}(prefix='/x')\n\n"
+                            "@r.get('/a')\ndef a():\n    pass\n\napp = FastAPI()\n"
+                            "app.include_router(r, prefix='/api')\n"})
+        assert [s.endpoint for s in st if s.semanticType == "route"] == ["/api/x/a"], imp

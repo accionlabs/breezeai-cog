@@ -10,7 +10,9 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ..python_common import calls, import_refs, keyword, literal, module_constants
+from ..python_common import (
+    ImportRefs, Origins, calls, keyword, literal, module_constants, module_file,
+)
 from ..treesitter import node_text
 
 
@@ -19,10 +21,23 @@ from ..treesitter import node_text
 UNKNOWN = object()
 
 DEPENDS = frozenset({"Depends", "Security", "fastapi.Depends", "fastapi.Security"})
-ROUTERS = frozenset({"APIRouter", "fastapi.APIRouter", "FastAPI", "fastapi.FastAPI"})
-#: The application constructors among :data:`ROUTERS`: an app is the root of its routes — never
-#: passed to ``include_router`` — unless it is mounted as a sub-application (``.mount(…)``).
-APPS = frozenset({"FastAPI", "fastapi.FastAPI"})
+_ROUTER_CLASSES = frozenset({"fastapi.APIRouter", "fastapi.routing.APIRouter"})
+#: An app is the root of its routes — never passed to ``include_router`` — unless it is mounted
+#: as a sub-application (``.mount(…)``).
+_APP_CLASSES = frozenset({"fastapi.FastAPI", "fastapi.applications.FastAPI"})
+
+
+def constructor(callee: str, origins: Origins) -> str | None:
+    """``"router"`` for ``APIRouter(…)`` and ``"app"`` for ``FastAPI(…)``, however the file names
+    the class: ``from fastapi import APIRouter as R`` (``R``), ``import fastapi as f``
+    (``f.APIRouter``), ``from fastapi.routing import APIRouter``. A name the file does not import
+    (``from fastapi import *``) is taken as written."""
+    qualified = origins.qualified(callee)
+    if qualified is None:
+        qualified = callee if callee.startswith("fastapi.") else f"fastapi.{callee}"
+    if qualified in _ROUTER_CLASSES:
+        return "router"
+    return "app" if qualified in _APP_CLASSES else None
 
 #: A prefix as recorded in the index (picklable): ``("lit", "/x")``, ``("const", file, name)``
 #: for a module-level string constant (this file or another), or ``("unknown",)``.
@@ -127,6 +142,10 @@ class FileFacts:
     apps: dict[str, str] = field(default_factory=dict)
     #: Names a ``.mount(…)`` call of this file hands a sub-application by (:func:`mounted_names`).
     mounted: set[str] = field(default_factory=set)
+    #: Include sites that mount a router of this repository this file cannot name (a function's
+    #: result, a configuration value, a list built at run time): which router they serve is not
+    #: known, so no router is known to be *un*included.
+    unreadable_includes: int = 0
 
 
 def _enclosing_function(node: Node) -> Node | None:
@@ -175,7 +194,9 @@ def _returned_names(fdef: Node, source: bytes) -> list[str]:
 def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFacts:
     """The FastAPI wiring facts of one file (see :class:`FileFacts`)."""
     facts = FileFacts(constants=module_constants(root, source))
-    imports = import_refs(root, source, repo_root, rel)
+    imports = ImportRefs(root, source, repo_root, rel, anywhere=True)  # also inside functions
+    origins = Origins(root, source)
+    plain = _plain_imports(root, source)
 
     def spec(call: Node) -> PrefixSpec:
         value = keyword(call, source, "prefix")
@@ -201,14 +222,14 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
     for node in calls(root):
         fn = node.child_by_field_name("function")
         parent = node.parent
-        if (fn is not None and node_text(fn, source) in ROUTERS
-                and parent is not None and parent.type == "assignment"):
+        kind = constructor(node_text(fn, source), origins) if fn is not None else None
+        if kind is not None and parent is not None and parent.type == "assignment":
             target = parent.child_by_field_name("left")
             if target is not None and target.type == "identifier":
                 name = node_text(target, source)
                 facts.routers[name] = (spec(node), tuple(dependencies(node, source)))
                 enclosing = _enclosing_function(node)
-                if node_text(fn, source) in APPS:
+                if kind == "app":
                     outer = _outermost_function(enclosing) if enclosing is not None else None
                     fname = outer.child_by_field_name("name") if outer is not None else None
                     facts.apps[name] = node_text(fname, source) if fname is not None else ""
@@ -220,6 +241,66 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
         routers = [r for r in returned if r in facts.local_routers]
         if fname is not None and len(set(routers)) == 1:
             facts.factories[node_text(fname, source)] = routers[0]
+
+    def module_of(node: Node | None) -> str | None:
+        """The repo file a module expression names: an imported name (``orders``) or a dotted
+        path imported as such (``import app.routers.items`` → ``app.routers.items``)."""
+        if node is None:
+            return None
+        if node.type == "identifier":
+            ref = imports.get(node_text(node, source))
+            if ref is not None:
+                return ref[1] if ref[0] == "module" else None
+        dotted = node_text(node, source)
+        if node.type in ("identifier", "attribute") and dotted in plain:
+            return module_file(repo_root, rel, dotted, 0)
+        return None
+
+    def mounted_router(expr: Node) -> RouterRef | None:
+        """The router an include argument names, or None when this file does not say."""
+        if expr.type == "identifier":
+            name = node_text(expr, source)
+            ref = imports.get(name)
+            if name in facts.routers:
+                return ("local", name)
+            if ref is not None and ref[0] == "symbol":
+                return ("ext", ref[1], ref[2])
+        elif expr.type == "attribute":
+            mod, var = expr.child_by_field_name("object"), expr.child_by_field_name("attribute")
+            target = module_of(mod)
+            if target is not None and var is not None:
+                return ("ext", target, node_text(var, source))
+        elif expr.type == "call":  # include_router(make_router(), …): the factory's router
+            callee = expr.child_by_field_name("function")
+            if callee is not None and callee.type == "identifier":
+                cname = node_text(callee, source)
+                cref = imports.get(cname)
+                if cref is not None and cref[0] == "symbol":
+                    return ("factory", cref[1], cref[2])
+                if cref is None and cname not in origins.names:
+                    return ("factory", rel, cname)
+            elif callee is not None and callee.type == "attribute":
+                target = module_of(callee.child_by_field_name("object"))
+                fn_name = callee.child_by_field_name("attribute")
+                if target is not None and fn_name is not None:
+                    return ("factory", target, node_text(fn_name, source))
+        return None
+
+    def from_library(expr: Node) -> bool:
+        """An argument that cannot be a router of this repository: one made inline
+        (``APIRouter(…)``), or whose first name is imported from a library."""
+        callee = expr.child_by_field_name("function") if expr.type == "call" else None
+        if callee is not None and constructor(node_text(callee, source), origins):
+            return True
+        head: Node | None = expr
+        while head is not None and head.type in ("attribute", "call"):
+            head = head.child_by_field_name("object" if head.type == "attribute" else "function")
+        if head is None or head.type != "identifier":
+            return False
+        name = node_text(head, source)
+        origin = origins.names.get(name)
+        return origin is not None and not origin.startswith(".") and imports.get(name) is None
+
     for node in calls(root):
         fn = node.child_by_field_name("function")
         if fn is None or fn.type != "attribute":
@@ -230,40 +311,49 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             if args is not None else None
         if attr is None or obj is None or first is None or node_text(attr, source) != "include_router":
             continue
-        child: RouterRef | None = None
-        if first.type == "identifier":
-            name = node_text(first, source)
-            ref = imports.get(name)
-            if name in facts.routers:
-                child = ("local", name)
-            elif ref is not None and ref[0] == "symbol":
-                child = ("ext", ref[1], ref[2])
-        elif first.type == "attribute":
-            mod, var = first.child_by_field_name("object"), first.child_by_field_name("attribute")
-            ref = imports.get(node_text(mod, source)) if mod is not None and mod.type == "identifier" else None
-            if ref is not None and ref[0] == "module" and var is not None:
-                child = ("ext", ref[1], node_text(var, source))
-        elif first.type == "call":  # include_router(make_router(), …): the factory's router
-            callee = first.child_by_field_name("function")
-            if callee is not None and callee.type == "identifier":
-                cname = node_text(callee, source)
-                cref = imports.get(cname)
-                if cref is not None and cref[0] == "symbol":
-                    child = ("factory", cref[1], cref[2])
-                elif cref is None:
-                    child = ("factory", rel, cname)
-            elif callee is not None and callee.type == "attribute":
-                mod, fn_name = callee.child_by_field_name("object"), callee.child_by_field_name("attribute")
-                cref = imports.get(node_text(mod, source)) \
-                    if mod is not None and mod.type == "identifier" else None
-                if cref is not None and cref[0] == "module" and fn_name is not None:
-                    child = ("factory", cref[1], node_text(fn_name, source))
-        if child is not None:
-            facts.includes.append(
-                (node_text(obj, source), child, spec(node), tuple(dependencies(node, source))))
+        # `for r in [users.router, items.router]: app.include_router(r, …)` includes each.
+        mounts = _loop_elements(first, source) or [first]
+        for mounted in mounts:
+            child = mounted_router(mounted)
+            if child is not None:
+                facts.includes.append(
+                    (node_text(obj, source), child, spec(node), tuple(dependencies(node, source))))
+            elif not from_library(mounted):
+                facts.unreadable_includes += 1
     facts.middleware = app_middleware(root, source) if b"middleware" in source else {}
     facts.mounted = mounted_names(root, source) if b".mount(" in source else set()
     return facts
+
+
+def _plain_imports(root: Node, source: bytes) -> set[str]:
+    """The dotted names of ``import a.b.c`` statements (not aliased), anywhere in the file."""
+    out: set[str] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "import_statement":
+            out.update(node_text(c, source) for c in node.named_children if c.type == "dotted_name")
+        else:
+            stack.extend(node.named_children)
+    return out
+
+
+def _loop_elements(arg: Node, source: bytes) -> list[Node]:
+    """The elements of the literal list a ``for`` loop runs ``arg`` over — ``for r in [a.router,
+    b.router]: app.include_router(r)``; empty when ``arg`` is not such a loop variable."""
+    if arg.type != "identifier":
+        return []
+    name = node_text(arg, source)
+    parent = arg.parent
+    while parent is not None and parent.type not in ("function_definition", "module"):
+        if parent.type == "for_statement":
+            left, right = parent.child_by_field_name("left"), parent.child_by_field_name("right")
+            if left is not None and left.type == "identifier" and node_text(left, source) == name:
+                if right is not None and right.type in ("list", "tuple"):
+                    return [c for c in right.named_children if c.type != "comment"]
+                return []
+        parent = parent.parent
+    return []
 
 
 def mounted_names(root: Node, source: bytes) -> set[str]:

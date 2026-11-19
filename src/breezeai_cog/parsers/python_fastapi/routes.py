@@ -11,9 +11,10 @@ from tree_sitter import Node
 from ...emit import function_id
 from ..emits import Emit
 from ..treesitter import node_text
-from .file_facts import ROUTERS as _ROUTERS
 from .file_facts import UNKNOWN as _UNKNOWN
 from .file_facts import app_middleware as _app_middleware
+from .file_facts import constructor as _constructor
+from ..python_common import Origins as _Origins
 from ..python_common import calls as _calls
 from .file_facts import dependencies as _dependencies
 from ..python_common import literal as _literal
@@ -81,10 +82,11 @@ def _router_bases(
     router the outermost app/router it is reached from in this file (itself when not included)."""
     own: dict[str, str | object] = {}
     own_deps: dict[str, list[str]] = {}
+    origins = _Origins(root, source)
     for node in _calls(root):
         fn = node.child_by_field_name("function")
         parent = node.parent
-        if (fn is not None and node_text(fn, source) in _ROUTERS
+        if (fn is not None and _constructor(node_text(fn, source), origins)
                 and parent is not None and parent.type == "assignment"):
             target = parent.child_by_field_name("left")
             if target is not None and target.type == "identifier":
@@ -228,7 +230,7 @@ def detect_routes(
         bases, router_guards, roots, middleware = from_index
     else:
         bases, router_guards, roots = (
-            _router_bases(root, source) if b"APIRouter" in source or b"FastAPI(" in source
+            _router_bases(root, source) if b"APIRouter" in source or b"FastAPI" in source
             else ({}, {}, {})
         )
         middleware = _app_middleware(root, source) if b"middleware" in source else {}
