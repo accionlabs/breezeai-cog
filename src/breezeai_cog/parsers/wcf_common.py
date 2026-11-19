@@ -22,16 +22,15 @@ Legacy ASMX (``[WebMethod]``) operations are ``framework=asmx`` RPC routes at
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
 from ..schemas import Class, Decorator, FileRecord, Function
-from .dotnet_common import code_behind_host, named_arg, response_dto, simple_attr_name
+from .dotnet_common import named_arg, response_dto, simple_attr_name
+from .dotnet_hosts import HostFiles
 from .emits import Emit
 
 SERVICE_ATTR = "ServiceContract"
@@ -42,12 +41,6 @@ _WEB_SERVICE_ATTR = "WebService"   # ASMX (System.Web.Services)
 _WEB_METHOD_ATTR = "WebMethod"     # ASMX operation
 _GENERATED_ATTR = "GeneratedCode"  # svcutil-generated client proxy — NOT a server entry point
 _HTTP_VERBS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
-#: ``Service="Ns.Type"`` inside a ``.svc`` ``<%@ ServiceHost … %>`` directive.
-SVC_SERVICE_RE = re.compile(
-    rb'<%@\s*ServiceHost\b[^%]*?\bService\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE
-)
-#: ``Class="Ns.Type"`` inside an ``.asmx`` ``<%@ WebService … %>`` directive.
-_ASMX_CLASS_RE = re.compile(rb'<%@\s*WebService\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 #: A ``UriTemplate`` that is set but cannot be read (not a literal or a known constant).
 UNKNOWN = object()
@@ -125,7 +118,7 @@ def _on_operation(fn: Function, text: str) -> dict[str, Any]:
 
 
 def detect_wcf_services(
-    record: FileRecord, root: Node, lookups: WcfLookups, repo_root: Path | None = None,
+    record: FileRecord, root: Node, lookups: WcfLookups, host_files: HostFiles | None = None,
 ) -> list[Emit]:
     """One ``route`` statement per ``[OperationContract]`` under a ``[ServiceContract]`` type
     (WCF / CoreWCF; tolerant of the full ``…Attribute`` form). A REST operation's endpoint is
@@ -143,7 +136,8 @@ def detect_wcf_services(
     services: dict[str, str] = {cls.id: _service_name(cls.decorators, cls.name) for cls in contracts}
     hosts: dict[str, str | None] = {cls.id: lookups.host(cls) for cls in contracts}
     interfaces = {cls.id: cls.name for cls in contracts if cls.type == "interface"}
-    web_hosts = {cid: _web_host(host, repo_root) for cid, host in hosts.items()}
+    known = host_files or HostFiles()
+    web_hosts = {cid: known.web(host) for cid, host in hosts.items()}
 
     routes: list[Emit] = []
     for fn in record.functions:
@@ -187,35 +181,17 @@ def detect_wcf_services(
     return routes
 
 
-def asmx_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+def asmx_host(path: str, hosts: HostFiles, cls_name: str) -> str | None:
     """The ``.asmx`` file serving class ``cls_name`` (``X.asmx.cs`` / ``X.asmx.vb`` beside
     ``X.asmx``), or None."""
-    return code_behind_host(path, repo_root, cls_name, ".asmx", _ASMX_CLASS_RE)
+    return hosts.code_behind_host(path, cls_name, ".asmx")
 
 
-def svc_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+def svc_host(path: str, hosts: HostFiles, cls_name: str) -> str | None:
     """The ``.svc`` file serving class ``cls_name`` (``X.svc.cs`` / ``X.svc.vb`` beside ``X.svc``,
     its ``ServiceHost Service=`` naming the class), or None. An interface contract, or a class
     whose ``.svc`` is elsewhere, has no known host here."""
-    return code_behind_host(path, repo_root, cls_name, ".svc", SVC_SERVICE_RE)
-
-
-#: ``Factory="…WebScriptServiceHostFactory"`` (AJAX-enabled WCF) / ``WebServiceHostFactory``
-#: (REST): the host serves every operation over HTTP — ``POST <file>.svc/<Operation>`` unless
-#: ``[WebGet]`` / ``[WebInvoke]`` says otherwise (WCF's default for these hosts).
-_WEB_FACTORY_RE = re.compile(
-    rb'<%@\s*ServiceHost\b[^%]*?\bFactory\s*=\s*["\'][\w.]*\bWeb(?:Script)?ServiceHostFactory["\']',
-    re.IGNORECASE)
-
-
-def _web_host(host: str | None, repo_root: Path | None) -> bool:
-    """Whether the ``.svc`` at ``host`` serves its operations over HTTP (:data:`_WEB_FACTORY_RE`)."""
-    if host is None or repo_root is None:
-        return False
-    try:
-        return _WEB_FACTORY_RE.search((repo_root / host).read_bytes()) is not None
-    except OSError:
-        return False
+    return hosts.code_behind_host(path, cls_name, ".svc")
 
 
 def _rest_address(host: str, template: object, operation: str) -> str:
@@ -228,7 +204,7 @@ def _rest_address(host: str, template: object, operation: str) -> str:
 
 
 def detect_asmx_services(
-    record: FileRecord, root: Node, repo_root: Path | None = None,
+    record: FileRecord, root: Node, hosts: HostFiles | None = None,
 ) -> list[Emit]:
     """Legacy ASMX SOAP web services (``System.Web.Services``): each ``[WebMethod]`` method is
     an operation. ``[WebService]`` on the class is optional in ASMX, so the ``[WebMethod]``
@@ -245,7 +221,8 @@ def detect_asmx_services(
         if cls is not None and has_attr(cls.decorators, _GENERATED_ATTR):
             continue  # generated proxy, not a real ASMX service
         svc = (_name_arg(cls.decorators, _WEB_SERVICE_ATTR) or cls.name) if cls is not None else "WebService"
-        host = asmx_host(fn.path or record.path, repo_root, cls.name) if cls is not None else None
+        host = asmx_host(fn.path or record.path, hosts or HostFiles(), cls.name) \
+            if cls is not None else None
         routes.append(
             Emit(root, dict(
                 semanticType="route",

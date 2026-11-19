@@ -188,7 +188,7 @@ def _default_export_handler(
     return None
 
 
-def _served(endpoint: str, path: str, index: object | None) -> str | None:
+def served(endpoint: str, path: str, index: object | None) -> str | None:
     """The route's address under its app's ``next.config`` ``basePath``: joined in front when it
     is a literal; unknown (None) when it is set but cannot be resolved; unchanged when the app
     sets none or no ``next.config`` was seen."""
@@ -229,7 +229,7 @@ def _pattern_covers(pattern: str, endpoint: str) -> bool:
     return len(psegs) == len(rsegs)
 
 
-def _middleware_guards(index: object | None, path: str, local: str) -> list[str]:
+def middleware_guards(index: object | None, path: str, local: str) -> list[str]:
     """``["middleware"]`` / ``["proxy"]`` when the app's ``middleware.(ts|js)`` /
     ``proxy.(ts|js)`` certainly runs before this route:
     the route's app directory (the deepest directory above it holding a ``next.config`` or a
@@ -325,14 +325,14 @@ def detect_nextjs_routes(
                 _route(
                     stmt,
                     root,
-                    _served(endpoint, path, index),
+                    served(endpoint, path, index),
                     verb,
                     verb,
                     parent,
                     handler_line,
                     end_line,
                     local=endpoint,
-                    guards=_middleware_guards(index, path, endpoint),
+                    guards=middleware_guards(index, path, endpoint),
                 )
             )
         return routes
@@ -363,14 +363,14 @@ def detect_nextjs_routes(
             _route(
                 node,
                 root,
-                _served(local, path, index),
+                served(local, path, index),
                 "ANY",
                 name,
                 parent,
                 handler_line,
                 end_line,
                 local=local,
-                guards=_middleware_guards(index, path, local),
+                guards=middleware_guards(index, path, local),
             )
         ]
 

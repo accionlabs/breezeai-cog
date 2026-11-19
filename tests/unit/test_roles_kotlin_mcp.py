@@ -713,6 +713,28 @@ class Mine {
             "import io.modelcontextprotocol.server.*",
             {"calc"},
         ),
+        # a same-package typealias in another file is a type of the package too
+        (
+            ("src/main/kotlin/demo/Aliases.kt", "package demo\n\ntypealias McpServer = Any\n"),
+            "import io.modelcontextprotocol.server.*",
+            set(),
+        ),
+        (
+            ("src/main/kotlin/other/Aliases.kt", "package other\n\ntypealias McpServer = Any\n"),
+            "import io.modelcontextprotocol.server.*",
+            {"calc"},
+        ),
+        # a Java class of the same package, likewise; of another package, not visible
+        (
+            ("src/main/java/demo/McpServer.java", "package demo;\npublic class McpServer {}\n"),
+            "import io.modelcontextprotocol.server.*",
+            set(),
+        ),
+        (
+            ("src/main/java/other/McpServer.java", "package other;\npublic class McpServer {}\n"),
+            "import io.modelcontextprotocol.server.*",
+            {"calc"},
+        ),
     ],
 )
 def test_kotlin_wildcard_mcp_server_loses_to_a_same_package_class(
@@ -720,7 +742,7 @@ def test_kotlin_wildcard_mcp_server_loses_to_a_same_package_class(
 ) -> None:
     """In Kotlin a type of the file's own package hides one imported by ``*``: with only
     ``io.modelcontextprotocol.server.*``, a ``McpServer`` declared in another file of the same
-    package is what the bare name means."""
+    package (Kotlin or Java, a ``typealias`` included) is what the bare name means."""
     src = f"""package demo
 
 {imports}

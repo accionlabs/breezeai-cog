@@ -50,6 +50,7 @@ class _HostSpec:
 DIRECTIVES: dict[str, _HostSpec] = {
     ".svc": _HostSpec("ServiceHost", "Service", "wcf", "svc"),
     ".asmx": _HostSpec("WebService", "Class", "asmx", "asmx"),
+    ".ashx": _HostSpec("WebHandler", "Class", "aspnet-webforms", "ashx"),
 }
 
 
@@ -74,7 +75,7 @@ _MOUNTED_PROTOCOLS = frozenset({"odata"})
 
 
 def spec_for(path: str) -> _HostSpec | None:
-    """The directive spec for a path's extension (``.svc``/``.asmx``), else None."""
+    """The directive spec for a path's extension (``.svc`` / ``.asmx`` / ``.ashx``), else None."""
     return DIRECTIVES.get(posixpath.splitext(path)[1].lower())
 
 
@@ -111,7 +112,7 @@ def _codebehind_import(code_behind: str, rel_path: str, repo_root: Path | None) 
 def detect_service_host(
     source: bytes, rel_path: str, repo_root: Path | None, *, seen_ids: set[str]
 ) -> tuple[Statement | None, str | None, list[str]]:
-    """Parse the ServiceHost/WebService directive of a ``.svc``/``.asmx`` file. Returns
+    """Parse the ServiceHost/WebService/WebHandler directive of a host file. Returns
     ``(directive statement or None, framework label or None, import paths)``.
 
     The directive is wiring (contract §4): it names the class that serves the address, and the

@@ -95,8 +95,8 @@ SemanticType = Literal[
     # prompt by a literal name / URI. ``endpoint`` = that name / URI, ``method`` = TOOL |
     # RESOURCE | PROMPT, ``framework`` = the client SDK. No handler, params or description.
     "mcp_call",
-    # Markdown documents — one whole-file statement per ``.md`` / ``.mdx`` /
-    # ``.mdc`` file (``nodeType="synthetic"``, the full text, unembedded; a long one is split
+    # Markdown documents — one whole-file statement per ``.md`` / ``.mdc`` file
+    # (``.mdx`` is MDX code, not a document) (``nodeType="synthetic"``, the full text, unembedded; a long one is split
     # into parts like any statement), typed by file name / location (parsers/markdown/classify.py):
     #   skill              — ``SKILL.md`` with front-matter name + description (Agent Skills)
     #   agent              — sub-agent definition (``agents/*.md`` / ``.claude/agents``, ``*.agent.md``)

@@ -489,6 +489,22 @@ public class App {{
             "import io.modelcontextprotocol.server.*;",
             {"calc"},
         ),
+        # a Kotlin class or typealias of the same package is a type of the package too
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.*;",
+            set(),
+        ),
+        (
+            ("src/main/kotlin/demo/Aliases.kt", "package demo\n\ntypealias McpServer = Any\n"),
+            "import io.modelcontextprotocol.server.*;",
+            set(),
+        ),
+        (
+            ("src/main/kotlin/other/McpServer.kt", "package other\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.*;",
+            {"calc"},
+        ),
     ],
 )
 def test_mcp_java_sdk_wildcard_mcp_server_loses_to_a_same_package_class(
@@ -496,7 +512,7 @@ def test_mcp_java_sdk_wildcard_mcp_server_loses_to_a_same_package_class(
 ) -> None:
     """In Java a type of the file's own package hides one imported by ``*``: with only
     ``io.modelcontextprotocol.server.*``, a ``McpServer`` declared in another file of the same
-    package is what the bare name means."""
+    package (Java or Kotlin, a ``typealias`` included) is what the bare name means."""
     src = f"""package demo;
 
 {imports}
@@ -511,3 +527,81 @@ public class App {{
     path, other = other_file
     tools = _tools(analyze_files({"src/main/java/demo/App.java": src, path: other}))
     assert set(tools) == expected
+
+
+def test_mcp_java_sdk_method_reference_handler_line_is_the_named_class_method(
+    analyze_files,
+) -> None:
+    """A method reference takes the line of the one method of its name in the class it names:
+    ``this::calc`` the class around it, ``Other::calc`` the class ``Other`` of this file. An
+    overloaded name, ``expr::calc`` (a variable), ``super::calc`` or a class of another file
+    give the name only. Shortcut and tool specification alike."""
+    src = """package demo;
+
+import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class App {
+    Object calc(Object e, Object a) { return null; }
+    Object over(Object e, Object a) { return null; }
+    Object over(Object e) { return null; }
+
+    void start(Object transport, Other expr) {
+        McpServer.sync(transport)
+            .tool(new McpSchema.Tool("own", "O", "{}"), this::calc)
+            .tool(new McpSchema.Tool("other", "O", "{}"), Other::calc)
+            .tool(new McpSchema.Tool("overloaded", "O", "{}"), this::over)
+            .tool(new McpSchema.Tool("expr", "O", "{}"), expr::calc)
+            .tool(new McpSchema.Tool("elsewhere", "O", "{}"), Remote::calc)
+            .build();
+    }
+
+    McpServerFeatures.SyncToolSpecification spec() {
+        return new McpServerFeatures.SyncToolSpecification(
+            new McpSchema.Tool("spec_other", "S", "{}"), Other::calc);
+    }
+
+    McpServerFeatures.SyncToolSpecification spec2(Other expr) {
+        return new McpServerFeatures.SyncToolSpecification(
+            new McpSchema.Tool("spec_expr", "S", "{}"), expr::calc);
+    }
+}
+
+class Other {
+    static Object calc(Object e, Object a) { return null; }
+}
+"""
+    tools = _tools(analyze_files({"src/main/java/demo/App.java": src}))
+    got = {name: (t.handler, t.handlerLine) for name, t in tools.items()}
+    assert got == {
+        "own": ("calc", 8),
+        "other": ("calc", 34),
+        "overloaded": ("over", None),
+        "expr": ("calc", None),
+        "elsewhere": ("calc", None),
+        "spec_other": ("calc", 34),
+        "spec_expr": ("calc", None),
+    }
+
+    # The file's only `calc` is not the method of another class, or of a variable's class.
+    single = """package demo;
+
+import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class App {
+    Object calc(Object e, Object a) { return null; }
+
+    void start(Object transport, Object expr) {
+        McpServer.sync(transport)
+            .tool(new McpSchema.Tool("remote", "R", "{}"), Remote::calc)
+            .tool(new McpSchema.Tool("expr", "E", "{}"), expr::calc)
+            .tool(new McpSchema.Tool("named", "N", "{}"), App::calc)
+            .build();
+    }
+}
+"""
+    tools = _tools(analyze_files({"src/main/java/demo/App.java": single}))
+    got = {name: (t.handler, t.handlerLine) for name, t in tools.items()}
+    assert got == {"remote": ("calc", None), "expr": ("calc", None), "named": ("calc", 7)}

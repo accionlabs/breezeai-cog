@@ -70,6 +70,12 @@ def test_a_framework_served_url_needs_no_handler() -> None:
                  "app.use('/static', express.static('public'));",
                  "->      /webjars                webjars.Routes"):
         assert _rules(_route(text=text, handler=None, handlerLine=None, method="ANY")) == []
+    # A Next.js MDX page (any suffix case): the file's content is the page.
+    for mdx in ("app/about/page.mdx", "app/about/page.MDX"):
+        page = _route(id=f"{mdx}:1:0", parentId=mdx, path=mdx, nodeType="synthetic", text="# About",
+                      framework="nextjs", method=None, routeKind="page", endpoint="/about",
+                      handler=None, handlerLine=None)
+        assert _rules(page) == []
     relay = _route(text="node(id: ID!): Node", handler=None, handlerLine=None, framework="graphql",
                    method="QUERY", routeKind="query", endpoint="node", responseDTO="Node")
     assert _rules(relay) == []
