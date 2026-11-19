@@ -249,3 +249,34 @@ public class App {
         if s.semanticType == "mcp_tool"
     ]
     assert [t.endpoint for t in tools] == ["calc"]
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "class McpServer { static Object sync(Object t) { return null; } }",
+        "public class App2 { interface McpServer {} }",
+    ],
+)
+def test_mcp_java_sdk_shortcut_with_a_wildcard_import_and_an_own_mcp_server_class(
+    analyze_files, declaration
+) -> None:
+    """With the SDK's package imported by ``*``, a ``McpServer`` the file declares itself (top
+    level or nested) is what the bare name means, not the SDK's."""
+    src = f"""
+package demo;
+
+import io.modelcontextprotocol.server.*;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class App {{
+    void start(Object transport) {{
+        McpServer.sync(transport).tool(new McpSchema.Tool("calc", "C", "{{}}"), (e, a) -> null).build();
+        io.modelcontextprotocol.server.McpServer.async(transport)
+            .tool(new McpSchema.Tool("qualified", "Q", "{{}}"), (e, a) -> null).build();
+    }}
+}}
+
+{declaration}
+"""
+    assert set(_tools(analyze_files({"src/main/java/demo/App.java": src}))) == {"qualified"}
