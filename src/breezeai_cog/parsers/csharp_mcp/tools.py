@@ -20,6 +20,21 @@
   default (a nullable type alone stays required). Injected parameters (``CancellationToken``,
   ``IMcpServer`` / ``McpServer``, ``RequestContext<…>``, ``IProgress<…>``,
   ``IServiceProvider``, ``[FromServices]``) are not inputs.
+
+Resources and prompts, the same way::
+
+    [McpServerResource(UriTemplate = "users://{id}", Name = "User"), Description("A user")]
+    public static string User(string id) => …   → mcp_resource  csharp-mcp  RESOURCE  users://{id}   params id
+    [McpServerPrompt(Name = "review"), Description("Review code")]
+    public static string Review([Description("The code")] string code) => …
+                                                → mcp_prompt  csharp-mcp  PROMPT  review   params code
+
+* ``mcp_resource`` — ``UriTemplate =`` a literal; without it the SDK derives the URI from the name
+  and the parameters, which is not read → no record. ``params`` are the template's simple
+  ``{variables}`` (``[]`` for a fixed URI; None with an RFC 6570 operator).
+* ``mcp_prompt`` — ``Name =`` when a literal, else the name derived as for a tool; ``params`` are
+  the method's parameters, read as for a tool (the SDK builds the prompt's arguments from them).
+* ``description`` — as for a tool.
 """
 
 from __future__ import annotations
@@ -31,7 +46,7 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import param, tool_emit
+from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
 from ..treesitter import node_text
 
 FRAMEWORK = "csharp-mcp"
@@ -191,6 +206,10 @@ def _walk(node: Node) -> list[Node]:
     return out
 
 
+#: The SDK's attributes → the kind of record they declare.
+_ATTRIBUTES = (("McpServerTool", TOOL), ("McpServerResource", RESOURCE), ("McpServerPrompt", PROMPT))
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     functions = {(f.name, f.startLine): f for f in dc.record.functions}
@@ -199,37 +218,47 @@ def _detect(dc: DetectContext) -> Detection | None:
         if method.type != "method_declaration":
             continue
         attrs = _attributes(method, source)
-        tool = attrs.get("McpServerTool")
         name_node = method.child_by_field_name("name")
-        if tool is None or name_node is None:
+        if name_node is None:
             continue
         method_name = node_text(name_node, source)
-        named = _named_arg(tool, "Name", source)
-        endpoint = (
-            _string(named, source)
-            if named is not None
-            else _derived_name(method, method_name, source)
-        )
-        if not endpoint:
-            continue  # a computed Name: the tool exists, but its name is unknown
-        line = method.start_point[0] + 1
-        owner = functions.get((method_name, line))
-        description = _positional_string(attrs.get("Description"), source) or _xml_summary(
-            method, source
-        )
-        found.append(
-            tool_emit(
-                tool,
-                source,
-                endpoint=endpoint,
-                framework=FRAMEWORK,
-                handler=method_name,
-                handler_line=line,
-                description=description,
-                params=_params(method, source),
-                parent=owner.id if owner is not None else None,
+        for attr_name, kind in _ATTRIBUTES:
+            attr = attrs.get(attr_name)
+            if attr is None:
+                continue
+            params: list[Parameter] | None
+            if kind == RESOURCE:
+                endpoint = _string(_named_arg(attr, "UriTemplate", source), source)
+                params = uri_template_params(endpoint) if endpoint else None
+            else:
+                named = _named_arg(attr, "Name", source)
+                endpoint = (
+                    _string(named, source)
+                    if named is not None
+                    else _derived_name(method, method_name, source)
+                )
+                params = _params(method, source)
+            if not endpoint:
+                continue  # a computed name: the record exists, but its name is unknown
+            line = method.start_point[0] + 1
+            owner = functions.get((method_name, line))
+            description = _positional_string(attrs.get("Description"), source) or _xml_summary(
+                method, source
             )
-        )
+            found.append(
+                mcp_emit(
+                    attr,
+                    source,
+                    kind=kind,
+                    endpoint=endpoint,
+                    framework=FRAMEWORK,
+                    handler=method_name,
+                    handler_line=line,
+                    description=description,
+                    params=params,
+                    parent=owner.id if owner is not None else None,
+                )
+            )
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))
@@ -240,7 +269,7 @@ def _detect(dc: DetectContext) -> Detection | None:
 register_detector(
     Detector(
         name="csharp-mcp",
-        gate=Gate("csharp", order=90, guard=b"McpServerTool", skip_fixtures=True),
+        gate=Gate("csharp", order=90, guard=b"McpServer", skip_fixtures=True),
         detect=_detect,
         frameworks=(FRAMEWORK,),
     )

@@ -33,6 +33,23 @@
   unexported, embedded) or a type from elsewhere → None (unknown).
 * ``handler`` — a function name (its line when declared in this file), a method value's text,
   or a function literal's line.
+
+Resources and prompts, registered on the same proven server::
+
+    server.AddResource(&mcp.Resource{URI: "embedded:info", Name: "info",   → mcp_resource  go-mcp  RESOURCE  embedded:info
+        Description: "Info"}, readInfo)
+    server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "users://{id}"}, readUser)
+                                                → mcp_resource  go-mcp  RESOURCE  users://{id}   params id
+    server.AddPrompt(&mcp.Prompt{Name: "review", Description: "Review code",
+        Arguments: []*mcp.PromptArgument{{Name: "code", Description: "The code", Required: true}},
+    }, reviewPrompt)                            → mcp_prompt  go-mcp  PROMPT  review
+
+* Only ``<server>.AddResource`` / ``AddResourceTemplate`` / ``AddPrompt`` on a proven server (as
+  for ``<server>.AddTool``), with the literal inline or held by a variable as for a tool.
+* ``endpoint`` — ``URI`` / ``URITemplate`` / ``Name``, a string literal; anything else → no record.
+* ``params`` — a template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a
+  ``Resource``, whose URI is fixed; a prompt's literal ``Arguments`` (``Name``, ``Description``,
+  ``Required``), ``[]`` without, None when not a literal.
 """
 
 from __future__ import annotations
@@ -46,7 +63,15 @@ from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..go_mcp_common import go_string, package_names, walk
-from ..mcp_common import param, schema_params, tool_emit
+from ..mcp_common import (
+    PROMPT,
+    RESOURCE,
+    TOOL,
+    mcp_emit,
+    param,
+    schema_params,
+    uri_template_params,
+)
 from ..treesitter import node_text
 
 FRAMEWORK = "go-mcp"
@@ -69,6 +94,14 @@ _INTEGERS = frozenset(
         "uintptr",
     }
 )
+
+#: ``<server>.Add…`` → (the SDK type it registers, kind, the field naming it).
+_ADDERS = {
+    "AddTool": ("Tool", TOOL, "Name"),
+    "AddResource": ("Resource", RESOURCE, "URI"),
+    "AddResourceTemplate": ("ResourceTemplate", RESOURCE, "URITemplate"),
+    "AddPrompt": ("Prompt", PROMPT, "Name"),
+}
 
 Span = tuple[int, int]
 
@@ -287,6 +320,43 @@ def _struct_params(struct: Node, source: bytes) -> list[Parameter] | None:
     return out
 
 
+def _prompt_arguments(node: Node | None, source: bytes, pkgs: set[str]) -> list[Parameter] | None:
+    """``[]*mcp.PromptArgument{{Name: "a", Description: "…", Required: true}, …}`` → params;
+    ``[]`` without ``Arguments``; None when it is not such a literal."""
+    if node is None:
+        return []
+    if node.type != "composite_literal":
+        return None
+    type_node = node.child_by_field_name("type")
+    element = type_node.child_by_field_name("element") if type_node is not None else None
+    if element is not None and element.type == "pointer_type" and element.named_children:
+        element = element.named_children[0]
+    if type_node is None or type_node.type != "slice_type":
+        return None
+    if not _pkg_selector(element, source, pkgs, "PromptArgument"):
+        return None
+    out: list[Parameter] = []
+    for el in _args(node.child_by_field_name("body")):
+        value = el.named_children[0] if el.type == "literal_element" and el.named_children else el
+        _, value = _unwrap_ref(value)
+        if value is not None and value.type == "composite_literal":
+            if not _pkg_selector(value.child_by_field_name("type"), source, pkgs, "PromptArgument"):
+                return None
+            value = value.child_by_field_name("body")
+        fields = _keyed(value, source)
+        if fields is None or not set(fields) <= {"Name", "Title", "Description", "Required"}:
+            return None
+        name = go_string(fields.get("Name"), source)
+        description = go_string(fields.get("Description"), source)
+        required = node_text(fields["Required"], source) if "Required" in fields else "false"
+        if not name or required not in ("true", "false"):
+            return None
+        if "Description" in fields and description is None:
+            return None
+        out.append(param(name, None, required=required == "true", description=description))
+    return out
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source, root = dc.source, dc.root
     pkgs = package_names(root, source, _PACKAGE)
@@ -360,40 +430,39 @@ def _detect(dc: DetectContext) -> Detection | None:
                 return False
             scope = _block_of(scope)
 
-    def registration(call: Node) -> tuple[Node, Node, bool] | None:
-        """``(tool argument, handler, generic)`` of an ``AddTool`` call of the SDK on a proven
+    def registration(call: Node) -> tuple[Node, Node, bool, str] | None:
+        """``(entry argument, handler, generic, adder)`` of an ``AddTool`` call of the SDK, or an
+        ``AddTool`` / ``AddResource`` / ``AddResourceTemplate`` / ``AddPrompt`` on a proven
         server; None for any other call."""
         fn = _callee(call)
         args = _args(call.child_by_field_name("arguments"))
         if _pkg_selector(fn, source, pkgs, "AddTool"):
-            return (args[1], args[2], True) if len(args) == 3 else None
-        if (
-            fn is None
-            or fn.type != "selector_expression"
-            or len(args) != 2
-            or node_text(fn.child_by_field_name("field"), source) != "AddTool"  # type: ignore[arg-type]
-        ):
+            return (args[1], args[2], True, "AddTool") if len(args) == 3 else None
+        if fn is None or fn.type != "selector_expression" or len(args) != 2:
+            return None
+        adder = node_text(fn.child_by_field_name("field"), source)  # type: ignore[arg-type]
+        if adder not in _ADDERS:
             return None
         receiver = fn.child_by_field_name("operand")
         if receiver is None or receiver.type != "identifier" or not is_server(receiver):
             return None
-        return args[0], args[1], False
+        return args[0], args[1], False, adder
 
     registrations = [
         (n, reg) for n in nodes if n.type == "call_expression" for reg in [registration(n)] if reg
     ]
-    # The identifiers passed as an ``AddTool`` tool (``t`` / ``&t``): the only use a tool
+    # The identifiers passed as an ``Add…`` entry (``t`` / ``&t``): the only use an entry
     # variable may have besides its declaration.
     tool_args = {
         target.start_byte
-        for _, (arg, _, _) in registrations
+        for _, (arg, _, _, _) in registrations
         for target in [_unwrap_ref(arg)[1]]
         if target is not None and target.type == "identifier"
     }
 
     def only_registered(name: str, decl: Node, scope: Node) -> bool:
         """True when every other use of ``name`` in the function ``scope`` (closures inside it
-        included) is an ``AddTool`` tool argument: nothing reassigns, aliases, passes on,
+        included) is an ``Add…`` entry argument: nothing reassigns, aliases, passes on,
         dereferences or changes a field of it."""
         found = uses.get(name, [])
         lo = bisect.bisect_left(found, scope.start_byte, key=lambda u: u[0])
@@ -415,8 +484,8 @@ def _detect(dc: DetectContext) -> Detection | None:
             return False
         return True
 
-    def tool_literal(arg: Node, call: Node) -> Node | None:
-        """The ``mcp.Tool{…}`` literal body the argument stands for."""
+    def tool_literal(arg: Node, call: Node, type_name: str = "Tool") -> Node | None:
+        """The ``mcp.Tool{…}`` (``mcp.<type_name>{…}``) literal body the argument stands for."""
         ref, target = _unwrap_ref(arg)
         if target is not None and target.type == "identifier":
             scope = _scope_of(call)
@@ -433,7 +502,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             return None
         if target is None or target.type != "composite_literal":
             return None
-        if not _pkg_selector(target.child_by_field_name("type"), source, pkgs, "Tool"):
+        if not _pkg_selector(target.child_by_field_name("type"), source, pkgs, type_name):
             return None
         return target.child_by_field_name("body")
 
@@ -466,15 +535,22 @@ def _detect(dc: DetectContext) -> Detection | None:
         return None
 
     found: list[Emit] = []
-    for n, (tool_arg, handler, generic) in registrations:
-        fields = _keyed(tool_literal(tool_arg, n), source)
+    for n, (tool_arg, handler, generic, adder) in registrations:
+        type_name, kind, name_field = _ADDERS[adder]
+        fields = _keyed(tool_literal(tool_arg, n, type_name), source)
         if fields is None:
             continue
-        tool_name = go_string(fields.get("Name"), source)
+        tool_name = go_string(fields.get(name_field), source)
         if not tool_name:
-            continue  # a computed name: the tool exists, but its name is unknown
+            continue  # a computed name: the entry exists, but its name is unknown
         params: list[Parameter] | None = None
-        if "InputSchema" in fields:
+        if adder == "AddResource":
+            params = []  # a fixed URI, braces and all, has no variables
+        elif adder == "AddResourceTemplate":
+            params = uri_template_params(tool_name)
+        elif adder == "AddPrompt":
+            params = _prompt_arguments(fields.get("Arguments"), source, pkgs)
+        elif "InputSchema" in fields:
             params = schema_params(_schema_dict(fields["InputSchema"], source))
         elif generic:
             struct = input_struct(n, handler)
@@ -489,9 +565,10 @@ def _detect(dc: DetectContext) -> Detection | None:
         elif handler.type == "selector_expression":
             handler_name = node_text(handler, source)
         found.append(
-            tool_emit(
+            mcp_emit(
                 n,
                 source,
+                kind=kind,
                 endpoint=tool_name,
                 framework=FRAMEWORK,
                 handler=handler_name,

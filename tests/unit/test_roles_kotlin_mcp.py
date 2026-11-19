@@ -287,3 +287,101 @@ def test_kotlin_mcp_server_shortcut(analyze_files) -> None:
         17,
         12,
     )
+
+
+# ── Resources and prompts ─────────────────────────────────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    for s in found:
+        assert s.name == s.endpoint
+    return {s.endpoint: s for s in found}
+
+
+KOTLIN_SDK_ENTRIES = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.types.PromptArgument
+
+fun configure(server: Server) {
+    server.addResource(uri = "docs://readme", name = "README",
+        description = "The README", mimeType = "text/markdown") { request -> TODO() }
+    server.addResource("file:///{literal}", "Literal", "A file") { request -> TODO() }
+    server.addResourceTemplate(uriTemplate = "users://{id}", name = "User") { request, vars -> TODO() }
+    server.addPrompt(
+        name = "review",
+        description = "Review code",
+        arguments = listOf(
+            PromptArgument(name = "code", description = "The code", required = true),
+            PromptArgument(name = "style"),
+        ),
+    ) { request -> TODO() }
+    server.addPrompt(name = "dyn", arguments = args) { request -> TODO() }
+    server.addResource(uri = computed, name = "x", description = "x") { request -> TODO() }
+}
+"""
+
+
+def test_kotlin_sdk_resources_and_prompts_with_no_tool(analyze_files) -> None:
+    statements = analyze_files({"Server.kt": KOTLIN_SDK_ENTRIES})
+    resources = _of(statements, "mcp_resource")
+    assert set(resources) == {"docs://readme", "file:///{literal}", "users://{id}"}
+    readme = resources["docs://readme"]
+    assert (readme.framework, readme.method, readme.description, readme.handlerLine, readme.params) == (
+        "kotlin-mcp", "RESOURCE", "The README", 9, [])
+    assert resources["file:///{literal}"].description == "A file"
+    assert resources["file:///{literal}"].params == []
+    assert _params(resources["users://{id}"]) == [("id", "string", True, None, None)]
+    prompts = _of(statements, "mcp_prompt")
+    assert set(prompts) == {"review", "dyn"}
+    review = prompts["review"]
+    assert (review.framework, review.description, review.handlerLine) == (
+        "kotlin-mcp", "Review code", 19)
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("style", None, False, None, None),
+    ]
+    assert prompts["dyn"].params is None
+
+
+KOTLIN_JAVA_SDK_ENTRIES = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+val memo = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Resource.builder("memo://insights", "Insights").description("Memo").build()) { ex, req -> TODO() }
+val review = McpServerFeatures.SyncPromptSpecification(
+    McpSchema.Prompt("review", "Review", listOf(McpSchema.PromptArgument("code", "The code", true)))) { ex, req -> TODO() }
+val tool = McpServerFeatures.SyncToolSpecification(McpSchema.Tool.builder("named").build()) { ex, req -> TODO() }
+"""
+
+
+def test_kotlin_java_sdk_resources_and_prompts(analyze_files) -> None:
+    statements = analyze_files({"Specs.kt": KOTLIN_JAVA_SDK_ENTRIES})
+    memo = _of(statements, "mcp_resource")["memo://insights"]
+    assert (memo.framework, memo.description, memo.params, memo.handlerLine) == (
+        "java-mcp", "Memo", [], 8)
+    review = _of(statements, "mcp_prompt")["review"]
+    assert review.framework == "java-mcp" and review.description == "Review"
+    assert _params(review) == [("code", None, True, None, "The code")]
+    assert _tools(statements)["named"].params == []  # the SDK 1.0 builder names the tool
+
+
+def test_kotlin_resource_look_alikes(analyze_files) -> None:
+    """``addResource`` / ``addPrompt`` without the SDK's server package: no record."""
+    src = """
+package demo
+
+import com.acme.Registry
+
+fun configure(registry: Registry) {
+    registry.addResource(uri = "docs://x", name = "x", description = "x") { TODO() }
+    registry.addPrompt(name = "p") { TODO() }
+}
+"""
+    statements = analyze_files({"Other.kt": src})
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]

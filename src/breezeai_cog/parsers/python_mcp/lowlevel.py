@@ -1,5 +1,5 @@
-"""Tools of a server built with the official Python SDK's **low-level** API
-(``mcp.server.lowlevel.Server``), read for the ``python-mcp`` detector (``tools.py``).
+"""Tools, resources and prompts of a server built with the official Python SDK's **low-level**
+API (``mcp.server.lowlevel.Server``), read for the ``python-mcp`` detector (``tools.py``).
 
 ::
 
@@ -36,6 +36,38 @@
   ``properties`` / ``required``); anything else → None (unknown).
 * ``handler`` — the function decorated ``@<server>.call_tool()`` on the same server in the same
   file (it dispatches every tool); none, or more than one → no handler.
+
+Resources and prompts are read the same way, from their own list functions::
+
+    @server.list_resources()                      # also: ListResourcesResult(resources=[…])
+    async def list_resources() -> list[types.Resource]:
+        return [types.Resource(uri=AnyUrl("memo://insights"), name="Insights")]
+                                                  → mcp_resource  python-mcp  RESOURCE  memo://insights
+    @server.list_resource_templates()             # also: ListResourceTemplatesResult(resourceTemplates=[…])
+    async def templates() -> list[types.ResourceTemplate]:
+        return [types.ResourceTemplate(uriTemplate="users://{id}", name="User")]
+                                                  → mcp_resource  python-mcp  RESOURCE  users://{id}
+    @server.read_resource()                       handler of both
+    async def read_resource(uri: AnyUrl): …
+
+    @server.list_prompts()                        # also: ListPromptsResult(prompts=[…])
+    async def list_prompts() -> list[types.Prompt]:
+        return [types.Prompt(name="review", description="Review code",
+                             arguments=[types.PromptArgument(name="code", required=True)])]
+                                                  → mcp_prompt  python-mcp  PROMPT  review
+    @server.get_prompt()                          handler
+    async def get_prompt(name: str, arguments: dict | None): …
+
+* ``mcp_resource`` — ``uri=`` (``ResourceTemplate``: ``uriTemplate=``) a string literal, or
+  ``AnyUrl("…")`` / ``FileUrl("…")`` of one; anything else → no record. ``params`` are a
+  template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a ``Resource``,
+  whose URI is fixed.
+* ``mcp_prompt`` — ``name=`` a string literal; ``params`` from a literal ``arguments=[…]`` of
+  ``PromptArgument(name=…, description=…, required=…)`` (``required`` defaults to false, as in
+  the SDK); no ``arguments`` → ``[]``; anything else → None (unknown).
+* ``description`` — ``description=`` when a literal. ``handler`` — the ``@<server>.read_resource()``
+  / ``@<server>.get_prompt()`` function on the same server in the same file; none, or more than
+  one → no handler.
 """
 
 from __future__ import annotations
@@ -49,7 +81,8 @@ from tree_sitter import Node
 
 from ..additive import DetectContext, FactSpec, index_fact, register_fact
 from ..emits import Emit
-from ..mcp_common import schema_params, tool_emit
+from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, schema_params, uri_template_params
+from ...schemas import Parameter
 from ..python_mcp_common import PYTHON_MCP
 from ..treesitter import node_text
 
@@ -59,8 +92,38 @@ FACT = "mcp.lowlevel-servers"
 SERVER_MODULES = ("mcp.server.lowlevel", "mcp.server.lowlevel.server", "mcp.server")
 #: The module of the SDK's ``Tool`` / ``ListToolsResult`` types.
 TYPES_MODULE = "mcp.types"
-#: ``@x.list_tools(`` — a cheap byte check before any tree walk.
-LIST_TOOLS_DECORATOR = re.compile(rb"@[ \t]*[\w.]+[ \t]*\.[ \t]*list_tools[ \t]*\(")
+#: ``@x.list_tools(`` (or a resource, template or prompt lister) — a cheap byte check before
+#: any tree walk.
+LIST_DECORATOR = re.compile(
+    rb"@[ \t]*[\w.]+[ \t]*\.[ \t]*list_(?:tools|resources|resource_templates|prompts)[ \t]*\("
+)
+
+
+class _Kind:
+    """One kind of thing a low-level server lists: its lister and dispatcher decorators, the
+    SDK type of an entry, the list result type and its keyword."""
+
+    def __init__(
+        self, lister: str, dispatcher: str, entry: str, result: str, key: str
+    ) -> None:
+        self.lister, self.dispatcher, self.entry = lister, dispatcher, entry
+        self.result, self.key = result, key
+
+
+_LISTED = (
+    _Kind("list_tools", "call_tool", "Tool", "ListToolsResult", "tools"),
+    _Kind("list_resources", "read_resource", "Resource", "ListResourcesResult", "resources"),
+    _Kind(
+        "list_resource_templates",
+        "read_resource",
+        "ResourceTemplate",
+        "ListResourceTemplatesResult",
+        "resourceTemplates",
+    ),
+    _Kind("list_prompts", "get_prompt", "Prompt", "ListPromptsResult", "prompts"),
+)
+#: Wrappers of a URL literal (``AnyUrl("memo://x")``): the URL is their only argument.
+_URL_WRAPPERS = frozenset({"AnyUrl", "FileUrl", "AnyHttpUrl", "HttpUrl"})
 
 _SCOPES = ("function_definition", "class_definition", "lambda")
 
@@ -286,8 +349,8 @@ def _import_aliases(root: Node, source: bytes) -> dict[str, str]:
     return out
 
 
-def _decorator_target(decorator: Node, source: bytes, method: str) -> Node | None:
-    """``@x.<method>()`` → the ``x`` identifier node; None for anything else."""
+def _decorator_method(decorator: Node, source: bytes) -> tuple[Node, str] | None:
+    """``@x.<method>()`` → (the ``x`` identifier node, ``method``); None for anything else."""
     call = decorator.named_children[0] if decorator.named_children else None
     if call is None or call.type != "call":
         return None
@@ -295,9 +358,9 @@ def _decorator_target(decorator: Node, source: bytes, method: str) -> Node | Non
     if fn is None or fn.type != "attribute":
         return None
     obj, attr = fn.child_by_field_name("object"), fn.child_by_field_name("attribute")
-    if obj is None or attr is None or obj.type != "identifier" or node_text(attr, source) != method:
+    if obj is None or attr is None or obj.type != "identifier":
         return None
-    return obj
+    return obj, node_text(attr, source)
 
 
 def _returns(fn: Node) -> list[Node]:
@@ -342,35 +405,97 @@ def _literal_value(node: Node, source: bytes) -> Any:
         return None
 
 
-def _tool_calls(fn: Node, source: bytes, tools: set[str], results: set[str]) -> list[Node]:
-    """The ``Tool(…)`` calls that are direct elements of a list literal ``fn`` returns:
-    ``return [Tool(…), …]`` or ``return ListToolsResult(tools=[Tool(…), …])``."""
+def _entry_calls(
+    fn: Node, source: bytes, entries: set[str], results: set[str], key: str
+) -> list[Node]:
+    """The ``Tool(…)`` (``Resource(…)``, …) calls that are direct elements of a list literal
+    ``fn`` returns: ``return [Tool(…), …]`` or ``return ListToolsResult(tools=[Tool(…), …])``."""
     out: list[Node] = []
     for ret in _returns(fn):
         value = ret.named_children[0] if ret.named_children else None
         if value is not None and _is_call_to(value, source, results):
-            value = _kwarg(value, "tools", source)
+            value = _kwarg(value, key, source)
         if value is None or value.type != "list":
             continue
-        out.extend(e for e in value.named_children if _is_call_to(e, source, tools))
+        out.extend(e for e in value.named_children if _is_call_to(e, source, entries))
     return out
 
 
-def _tool_emit(call: Node, source: bytes, handler: tuple[str, int] | None) -> Emit | None:
-    name = _string(_kwarg(call, "name", source), source)
+def _url(node: Node | None, source: bytes) -> str | None:
+    """A URL literal: a string, or ``AnyUrl("…")`` / ``FileUrl("…")`` of one."""
+    if node is not None and node.type == "call":
+        fn = node.child_by_field_name("function")
+        args = node.child_by_field_name("arguments")
+        items = [a for a in (args.named_children if args is not None else []) if a.type != "comment"]
+        if fn is None or node_text(fn, source).rsplit(".", 1)[-1] not in _URL_WRAPPERS:
+            return None
+        if len(items) != 1:
+            return None
+        node = items[0]
+    return _string(node, source)
+
+
+def _prompt_params(node: Node | None, source: bytes, arguments: set[str]) -> list[Parameter] | None:
+    """``arguments=[PromptArgument(name=…, description=…, required=…)]`` → params; ``[]`` without
+    ``arguments``; None when the list or an argument is not a literal."""
+    if node is None or node.type == "none":
+        return []
+    if node.type != "list":
+        return None
+    out: list[Parameter] = []
+    for item in node.named_children:
+        if item.type == "comment":
+            continue
+        if not _is_call_to(item, source, arguments):
+            return None
+        name = _string(_kwarg(item, "name", source), source)
+        desc_node = _kwarg(item, "description", source)
+        description = _string(desc_node, source) if desc_node is not None else None
+        req = _kwarg(item, "required", source)
+        required_text = node_text(req, source) if req is not None else "None"
+        if not name or required_text not in ("True", "False", "None") or (
+            desc_node is not None and desc_node.type != "none" and description is None
+        ):
+            return None
+        out.append(param(name, None, required=required_text == "True", description=description))
+    return out
+
+
+def _entry_emit(
+    call: Node,
+    source: bytes,
+    kind: _Kind,
+    handler: tuple[str, int] | None,
+    arguments: set[str],
+) -> Emit | None:
+    params: list[Parameter] | None
+    if kind.entry == "Resource" or kind.entry == "ResourceTemplate":
+        fixed = kind.entry == "Resource"
+        name = _url(_kwarg(call, "uri" if fixed else "uriTemplate", source), source)
+        # A fixed resource's URI is literal, braces and all: it has no variables.
+        params = [] if fixed else uri_template_params(name) if name else None
+        mcp_kind = RESOURCE
+    else:
+        name = _string(_kwarg(call, "name", source), source)
+        if kind.entry == "Tool":
+            schema = _kwarg(call, "inputSchema", source)
+            params = (
+                schema_params(_literal_value(schema, source))
+                if schema is not None and schema.type == "dictionary"
+                else None
+            )
+            mcp_kind = TOOL
+        else:
+            params = _prompt_params(_kwarg(call, "arguments", source), source, arguments)
+            mcp_kind = PROMPT
     if not name:
-        return None  # a computed name: the tool exists, but its name is unknown
+        return None  # a computed name: the entry exists, but its name is unknown
     desc_node = _kwarg(call, "description", source)
     description = _string(desc_node, source) if desc_node is not None else None
-    schema = _kwarg(call, "inputSchema", source)
-    params = (
-        schema_params(_literal_value(schema, source))
-        if schema is not None and schema.type == "dictionary"
-        else None
-    )
-    return tool_emit(
+    return mcp_emit(
         call,
         source,
+        kind=mcp_kind,
         endpoint=name,
         framework=PYTHON_MCP,
         handler=handler[0] if handler else None,
@@ -381,16 +506,16 @@ def _tool_emit(call: Node, source: bytes, handler: tuple[str, int] | None) -> Em
     )
 
 
-def detect_lowlevel_tools(dc: DetectContext) -> list[Emit]:
-    """The tools of the file's ``@<server>.list_tools()`` functions (see the module docstring)."""
+def detect_lowlevel(dc: DetectContext) -> list[Emit]:
+    """The tools, resources and prompts of the file's ``@<server>.list_tools()`` (…) functions
+    (see the module docstring)."""
     source, root = dc.source, dc.root
-    if b"mcp" not in source or not LIST_TOOLS_DECORATOR.search(source):
+    if b"mcp" not in source or not LIST_DECORATOR.search(source):
         return []
-    tools = _types_names(root, source, "Tool")
-    if not tools:
+    entries = {kind.entry: _types_names(root, source, kind.entry) for kind in _LISTED}
+    if not any(entries.values()):
         return []
     classes = server_class_names(root, source)
-    results = _types_names(root, source, "ListToolsResult")
     only_imported: set[str] = set()
     bindings = _bindings(root, source, classes, only_imported)
     imported: dict[str, frozenset[str]] = index_fact(dc.ctx.resolution_index, FACT) or {}
@@ -422,8 +547,10 @@ def detect_lowlevel_tools(dc: DetectContext) -> list[Emit]:
             return ("imported", target, aliases.get(name, name))
         return None
 
-    listers: list[tuple[tuple[Any, ...], Node]] = []
-    dispatchers: dict[tuple[Any, ...], list[Node]] = {}
+    listers: list[tuple[_Kind, tuple[Any, ...], Node]] = []
+    dispatchers: dict[tuple[str, tuple[Any, ...]], list[Node]] = {}
+    by_lister = {kind.lister: kind for kind in _LISTED}
+    dispatcher_names = {kind.dispatcher for kind in _LISTED}
     for node in _walk(root):
         if node.type != "decorated_definition":
             continue
@@ -431,25 +558,28 @@ def detect_lowlevel_tools(dc: DetectContext) -> list[Emit]:
         if fn is None or fn.type != "function_definition":
             continue
         for decorator in (c for c in node.named_children if c.type == "decorator"):
-            for method in ("list_tools", "call_tool"):
-                receiver = _decorator_target(decorator, source, method)
-                server = server_of(receiver) if receiver is not None else None
-                if server is None:
-                    continue
-                if method == "list_tools":
-                    listers.append((server, fn))
-                else:
-                    dispatchers.setdefault(server, []).append(fn)
+            hit = _decorator_method(decorator, source)
+            if hit is None or (hit[1] not in by_lister and hit[1] not in dispatcher_names):
+                continue
+            server = server_of(hit[0])
+            if server is None:
+                continue
+            if hit[1] in by_lister:
+                listers.append((by_lister[hit[1]], server, fn))
+            else:
+                dispatchers.setdefault((hit[1], server), []).append(fn)
+    arguments = _types_names(root, source, "PromptArgument")
+    results = {kind.entry: _types_names(root, source, kind.result) for kind in _LISTED}
     found: list[Emit] = []
-    for server, fn in listers:
-        handlers = dispatchers.get(server, [])
+    for kind, server, fn in listers:
+        handlers = dispatchers.get((kind.dispatcher, server), [])
         handler: tuple[str, int] | None = None
         if len(handlers) == 1:
             name_node = handlers[0].child_by_field_name("name")
             if name_node is not None:
                 handler = (node_text(name_node, source), handlers[0].start_point[0] + 1)
-        for call in _tool_calls(fn, source, tools, results):
-            emit = _tool_emit(call, source, handler)
+        for call in _entry_calls(fn, source, entries[kind.entry], results[kind.entry], kind.key):
+            emit = _entry_emit(call, source, kind, handler, arguments)
             if emit is not None:
                 found.append(emit)
     return found

@@ -36,6 +36,28 @@ MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
   handler)`` (also ``async``) is read the same way, only on a chain that starts at
   ``McpServer.sync(`` / ``.async(``; ``.tools(spec…)`` is not read.
 
+Resources and prompts, of either SDK::
+
+    server.addResource(uri = "docs://readme", name = "README",     → mcp_resource  kotlin-mcp  RESOURCE  docs://readme
+        description = "The README", mimeType = "text/markdown") { request -> … }
+    server.addResourceTemplate(uriTemplate = "users://{id}", name = "User") { request, vars -> … }
+                                                                    → mcp_resource  …  users://{id}  params id
+    server.addPrompt(name = "review", description = "Review code",  → mcp_prompt  kotlin-mcp  PROMPT  review
+        arguments = listOf(PromptArgument(name = "code", description = "The code", required = true))) { … }
+    McpServerFeatures.SyncPromptSpecification(McpSchema.Prompt("review", "Review", listOf(…))) { … }
+                                                                    → mcp_prompt  java-mcp  PROMPT  review
+
+* Official Kotlin SDK — ``addResource(uri, name, description, mimeType)``,
+  ``addResourceTemplate(uriTemplate, name, description, mimeType)`` (or a ``ResourceTemplate(…)``
+  passed first), ``addPrompt(name, description, arguments)`` (or a ``Prompt(…)`` passed first),
+  named or positional, with a trailing lambda (or ``readHandler =`` / ``promptProvider =``) as the
+  handler, only in a file importing the SDK's server package.
+* Java SDK — the ``Sync…`` / ``Async…`` ``ResourceSpecification`` /
+  ``ResourceTemplateSpecification`` / ``PromptSpecification``, read as in Java (``java_mcp``).
+* ``endpoint`` — the URI / URI template / prompt name, a literal; else no record. ``params`` —
+  a template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a fixed
+  resource; a prompt's ``listOf(PromptArgument(…))``, ``[]`` without, None when not a literal.
+
 Import aliases (``import io.modelcontextprotocol.kotlin.sdk.Tool as McpTool``) are followed for
 the types above when the aliased class is in an MCP package; an alias of any other class
 (``import com.acme.Tool as Tool``) hides the name instead.
@@ -68,7 +90,7 @@ from ..jvm_mcp_common import (
     shortcut_emit,
     walk,
 )
-from ..mcp_common import param, tool_emit
+from ..mcp_common import PROMPT, RESOURCE, mcp_emit, param, tool_emit, uri_template_params
 from ..treesitter import node_text
 
 #: ``framework`` of a tool registered through the official Kotlin SDK.
@@ -223,13 +245,24 @@ def _tool_fields(
     if root != "Tool":
         return None
     name_args = calls.get("name") or []
-    name = kotlin_string(name_args[0], source) if len(name_args) == 1 else None
+    # `Tool.builder("name"[, schema])` (SDK 1.0 and later) names the tool up front.
+    builder_args = calls.get("builder") or []
+    if name_args:
+        name = kotlin_string(name_args[0], source) if len(name_args) == 1 else None
+    else:
+        name = kotlin_string(builder_args[0], source) if 1 <= len(builder_args) <= 3 else None
     if not name:
         return None
     desc_args = calls.get("description") or []
     description = kotlin_string(desc_args[0], source) if len(desc_args) == 1 else None
     schema_args = calls.get("inputSchema")
-    params = json_schema_params(_literal_text(schema_args[-1], source)) if schema_args else []
+    params: list[Parameter] | None = []
+    if schema_args:
+        params = json_schema_params(_literal_text(schema_args[-1], source))
+    elif len(builder_args) == 3:
+        params = json_schema_params(_literal_text(builder_args[2], source))
+    elif len(builder_args) == 2:
+        params = None  # a schema map built in code: unknown
     return name, description, params
 
 
@@ -796,8 +829,249 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
     return found
 
 
+# ── Resources and prompts ────────────────────────────────────────────────────
+
+#: Java SDK ``Sync…`` / ``Async…Specification`` → the record type it registers.
+_SPECIFICATIONS = {
+    f"{mode}{entry}Specification": entry
+    for mode in ("Sync", "Async")
+    for entry in ("Resource", "ResourceTemplate", "Prompt")
+}
+#: Each entry type → (its kind, the argument / builder method naming it).
+_ENTRIES = {
+    "Resource": (RESOURCE, "uri"),
+    "ResourceTemplate": (RESOURCE, "uriTemplate"),
+    "Prompt": (PROMPT, "name"),
+}
+_KOTLIN_ADDERS = {
+    "addResource": "Resource",
+    "addResourceTemplate": "ResourceTemplate",
+    "addPrompt": "Prompt",
+}
+
+
+def _prompt_argument(node: Node, source: bytes, aliases: dict[str, str]) -> Parameter | None:
+    """``PromptArgument(name = …, description = …, required = …)`` (named, or positional in
+    the official Kotlin SDK's order ``name, description, required``), or the Java SDK's
+    ``PromptArgument.builder("name")…build()``; None when not read whole."""
+    if node.type != "call_expression":
+        return None
+    chain = _builder_chain(node, source, aliases)
+    if chain is not None:
+        root, calls = chain
+        builder_args = calls.get("builder") or []
+        if root != "PromptArgument" or len(builder_args) != 1:
+            return None
+        if set(calls) - {"builder", "title", "description", "required", "build"}:
+            return None
+        name_node: Node | None = builder_args[0]
+        desc_node = (calls.get("description") or [None])[0]
+        req_node = (calls.get("required") or [None])[0]
+    elif _type_callee(node, source, aliases) == "PromptArgument":
+        args = kotlin_call_args(node, source)
+        pos = _positional(args)
+        if any(k is None for k, _ in args) and any(k is not None for k, _ in args):
+            return None  # mixed: positions differ between the two SDKs
+        if pos and len(pos) != 3:
+            return None  # Java SDK (name, description, required); 4 = with title (ambiguous)
+        name_node = _named(args, "name") or (pos[0] if pos else None)
+        desc_node = _named(args, "description") or (pos[1] if pos else None)
+        req_node = _named(args, "required") or (pos[2] if pos else None)
+    else:
+        return None
+    name = kotlin_string(name_node, source)
+    description = kotlin_string(desc_node, source)
+    required = node_text(req_node, source) if req_node is not None else "null"
+    if not name or required not in ("true", "false", "null"):
+        return None
+    if desc_node is not None and desc_node.type != "null_literal" and description is None:
+        return None
+    return param(name, None, required=required == "true", description=description)
+
+
+def _prompt_arguments(
+    node: Node | None, source: bytes, aliases: dict[str, str]
+) -> list[Parameter] | None:
+    """``listOf(PromptArgument(…), …)`` (``List.of`` / ``arrayOf``); ``[]`` for none or
+    ``null``; None for anything else."""
+    if node is None or node.type == "null_literal":
+        return []
+    if node.type != "call_expression" or _callee_name(node, source) not in (
+        "listOf",
+        "of",
+        "arrayOf",
+        "asList",
+    ):
+        return None
+    out: list[Parameter] = []
+    for arg in _positional(kotlin_call_args(node, source)):
+        p = _prompt_argument(arg, source, aliases)
+        if p is None:
+            return None
+        out.append(p)
+    return out
+
+
+def _entry_result(
+    entry: str,
+    endpoint: str | None,
+    description: str | None,
+    arguments: Node | None,
+    source: bytes,
+    aliases: dict[str, str],
+) -> tuple[str, str | None, list[Parameter] | None] | None:
+    if not endpoint:
+        return None
+    if entry == "Prompt":
+        return endpoint, description, _prompt_arguments(arguments, source, aliases)
+    # A fixed resource's URI is literal, braces and all: it has no variables.
+    return endpoint, description, uri_template_params(endpoint) if entry != "Resource" else []
+
+
+def _named_entry(
+    args: list[tuple[str | None, Node]], entry: str, source: bytes, aliases: dict[str, str]
+) -> tuple[str, str | None, list[Parameter] | None] | None:
+    """The official Kotlin SDK's order: ``Resource(uri, name, description, mimeType)``,
+    ``ResourceTemplate(uriTemplate, name, description, mimeType)``, ``Prompt(name, description,
+    arguments)`` — named arguments, or positional when none is named."""
+    key = _ENTRIES[entry][1]
+    pos = [v for k, v in args if k is None and v.type != "lambda_literal"]
+    named = any(k is not None for k, _ in args)
+    endpoint = kotlin_string(_named(args, key) or (pos[0] if pos and not named else None), source)
+    desc_index = 1 if entry == "Prompt" else 2
+    desc_node = _named(args, "description") or (
+        pos[desc_index] if len(pos) > desc_index and not named else None
+    )
+    arguments = _named(args, "arguments") or (pos[2] if len(pos) > 2 and not named else None)
+    return _entry_result(
+        entry, endpoint, kotlin_string(desc_node, source), arguments, source, aliases
+    )
+
+
+def _java_entry_fields(
+    node: Node | None,
+    source: bytes,
+    variables: dict[str, Node | None],
+    entry: str,
+    aliases: dict[str, str],
+) -> tuple[str, str | None, list[Parameter] | None] | None:
+    """A Java SDK ``Resource`` / ``ResourceTemplate`` / ``Prompt`` built in Kotlin: a
+    constructor (positions as in Java), a builder, or a ``val`` assigned one once."""
+    if node is not None and node.type == "simple_identifier":
+        node = variables.get(node_text(node, source))
+    if node is None or node.type != "call_expression":
+        return None
+    key = _ENTRIES[entry][1]
+    chain = _builder_chain(node, source, aliases)
+    description: str | None = None
+    arguments: Node | None = None
+    if chain is not None:
+        root, calls = chain
+        if root != entry:
+            return None
+        builder_args = calls.get("builder") or []
+        key_args = calls.get(key) or builder_args[:1]
+        endpoint = kotlin_string(key_args[0], source) if len(key_args) == 1 else None
+        desc_args = calls.get("description") or []
+        description = kotlin_string(desc_args[0], source) if len(desc_args) == 1 else None
+        if entry == "Prompt" and "arguments" in calls:
+            if len(calls["arguments"]) != 1:
+                return None
+            arguments = calls["arguments"][0]
+        return _entry_result(entry, endpoint, description, arguments, source, aliases)
+    if _type_callee(node, source, aliases) != entry:
+        return None
+    args = kotlin_call_args(node, source)
+    if any(k is not None for k, _ in args):
+        return None  # Java records take no named arguments
+    pos = _positional(args)
+    endpoint = kotlin_string(pos[0], source) if pos else None
+    if entry == "Prompt":
+        if len(pos) == 3:
+            description, arguments = kotlin_string(pos[1], source), pos[2]
+        elif len(pos) in (4, 5, 6):
+            description, arguments = kotlin_string(pos[2], source), pos[3]
+        else:
+            return None
+    elif entry == "ResourceTemplate" and len(pos) == 5:
+        description = kotlin_string(pos[2], source)
+    elif len(pos) >= 7:
+        description = kotlin_string(pos[3], source)
+    return _entry_result(entry, endpoint, description, arguments, source, aliases)
+
+
+def _entries(dc: DetectContext) -> list[Emit]:
+    """Resources and prompts: the Java SDK's specifications, and the official Kotlin SDK's
+    ``addResource`` / ``addResourceTemplate`` / ``addPrompt``."""
+    source = dc.source
+    java = b"Specification" in source
+    kotlin_sdk = b"io.modelcontextprotocol.kotlin.sdk.server" in source and (
+        b"addResource" in source or b"addPrompt" in source
+    )
+    if not java and not kotlin_sdk:
+        return []
+    variables = _local_variables(dc.root, source) if java else {}
+    methods = _methods(dc)
+    aliases = kotlin_aliases(source)
+    found: list[Emit] = []
+    for node in walk(dc.root):
+        if node.type != "call_expression":
+            continue
+        fields: tuple[str, str | None, list[Parameter] | None] | None = None
+        handler: Node | None = None
+        framework = JAVA_MCP
+        entry = _SPECIFICATIONS.get(_type_callee(node, source, aliases)) if java else None
+        if entry is not None:
+            args = kotlin_call_args(node, source)
+            pos = _positional(args)
+            first = pos[0] if pos else None
+            rest = [v for v in pos[1:] if v.type != "null_literal"]
+            handler = rest[-1] if rest else None
+            fields = _java_entry_fields(first, source, variables, entry, aliases)
+        elif kotlin_sdk and _callee_name(node, source) in _KOTLIN_ADDERS:
+            entry = _KOTLIN_ADDERS[_callee_name(node, source)]
+            framework = KOTLIN_MCP
+            args = kotlin_call_args(node, source)
+            handler = next(
+                (v for k, v in reversed(args) if k is None and v.type == "lambda_literal"), None
+            ) or _named(args, "readHandler") or _named(args, "promptProvider")
+            pos = [v for k, v in args if k is None and v.type != "lambda_literal"]
+            first = pos[0] if len(pos) == 1 and len(args) <= 2 else None
+            if (
+                first is not None
+                and first.type == "call_expression"
+                and _type_callee(first, source, aliases) == entry
+            ):  # addPrompt(Prompt(…)) { … }
+                fields = _named_entry(kotlin_call_args(first, source), entry, source, aliases)
+            elif entry != "ResourceTemplate" or _named(args, "uriTemplate") is not None or (
+                len(pos) >= 2
+            ):
+                fields = _named_entry(args, entry, source, aliases)
+            if handler is None:
+                continue
+        if fields is None:
+            continue
+        endpoint, description, params = fields
+        handler_name, handler_line = _handler(handler, source, methods)
+        found.append(
+            mcp_emit(
+                node,
+                source,
+                kind=_ENTRIES[entry][0],
+                endpoint=endpoint,
+                framework=framework,
+                handler=handler_name,
+                handler_line=handler_line,
+                description=description,
+                params=params,
+                node_type=None,
+            )
+        )
+    return found
+
+
 def _detect(dc: DetectContext) -> Detection | None:
-    found = _sdk_tools(dc) + _shortcut_tools(dc) + _kotlin_sdk_tools(dc)
+    found = _sdk_tools(dc) + _shortcut_tools(dc) + _kotlin_sdk_tools(dc) + _entries(dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))
@@ -808,7 +1082,7 @@ def _detect(dc: DetectContext) -> Detection | None:
 register_detector(
     Detector(
         name="kotlin-mcp",
-        gate=Gate("kotlin", order=40, guard=b"Tool", skip_fixtures=True),
+        gate=Gate("kotlin", order=40, guard=b"io.modelcontextprotocol", skip_fixtures=True),
         detect=_detect,
         frameworks=(JAVA_MCP, KOTLIN_MCP),
     )

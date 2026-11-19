@@ -272,3 +272,93 @@ func main() {
 """
     tools = [s for s in analyze_files({"main.go": src}) if s.semanticType == "mcp_tool"]
     assert [(t.endpoint, t.framework) for t in tools] == [("hello", "mcp-go")]
+
+
+# ── Resources and prompts ─────────────────────────────────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    for s in found:
+        assert s.name == s.endpoint and s.framework == "go-mcp"
+    return {s.endpoint: s for s in found}
+
+
+GO_SDK_RESOURCES = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func main() {
+	server := mcp.NewServer(&mcp.Implementation{Name: "res"}, nil)
+	server.AddResource(&mcp.Resource{Name: "info", URI: "embedded:info", Description: "Info"}, readInfo)
+	tpl := &mcp.ResourceTemplate{Name: "user", URITemplate: "users://{id}"}
+	server.AddResourceTemplate(tpl, readUser)
+	server.AddResourceTemplate(&mcp.ResourceTemplate{URITemplate: "http://x/~{+path}"}, readUser)
+	server.AddResource(&mcp.Resource{URI: uri}, readInfo)
+}
+
+func readInfo() {}
+func readUser() {}
+"""
+
+
+def test_go_sdk_resources_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"main.go": GO_SDK_RESOURCES}), "mcp_resource")
+    assert set(resources) == {"embedded:info", "users://{id}", "http://x/~{+path}"}
+    info = resources["embedded:info"]
+    assert (info.method, info.description, info.handler, info.handlerLine, info.params) == (
+        "RESOURCE", "Info", "readInfo", 15, [])
+    user = resources["users://{id}"]
+    assert user.handler == "readUser" and _params(user) == [("id", "string", True, None, None)]
+    assert resources["http://x/~{+path}"].params is None
+
+
+GO_SDK_PROMPTS = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func run(server *mcp.Server) {
+	server.AddPrompt(&mcp.Prompt{Name: "greet"}, greet)
+	server.AddPrompt(&mcp.Prompt{
+		Name:        "review",
+		Description: "Review code",
+		Arguments: []*mcp.PromptArgument{
+			{Name: "code", Description: "The code", Required: true},
+			&mcp.PromptArgument{Name: "style"},
+		},
+	}, func() {})
+	server.AddPrompt(&mcp.Prompt{Name: "dyn", Arguments: args}, greet)
+}
+
+func greet() {}
+"""
+
+
+def test_go_sdk_prompts_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"main.go": GO_SDK_PROMPTS}), "mcp_prompt")
+    assert set(prompts) == {"greet", "review", "dyn"}
+    assert prompts["greet"].params == [] and prompts["greet"].handlerLine == 19
+    review = prompts["review"]
+    assert (review.description, review.handler, review.handlerLine) == ("Review code", None, 15)
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("style", None, False, None, None),
+    ]
+    assert prompts["dyn"].params is None
+
+
+def test_go_sdk_resource_on_a_non_server_is_not_read(analyze_files) -> None:
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func run(registry *Registry) {
+	registry.AddResource(&mcp.Resource{URI: "x://y"}, h)
+	registry.AddPrompt(&mcp.Prompt{Name: "p"}, h)
+}
+"""
+    statements = analyze_files({"main.go": src})
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]

@@ -327,3 +327,147 @@ def test_lowlevel_imported_server_rebound_in_the_module_is_not_proven(
         ),
     }
     assert capture_mcp_tools(files, jobs) == {}
+
+
+# ── Low-level resources and prompts ───────────────────────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    return {s.endpoint: s for s in statements if s.semanticType == semantic_type}
+
+
+LOWLEVEL_RESOURCES = """
+from mcp.server.lowlevel import Server
+import mcp.types as types
+from pydantic import AnyUrl
+
+server = Server("res")
+
+
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    return [
+        types.Resource(uri=AnyUrl("memo://insights"), name="Insights", description="Memo"),
+        types.Resource(uri="file:///logs/app.log", name="Log"),
+        types.Resource(uri=AnyUrl(f"file:///{name}.txt"), name="computed"),
+    ]
+
+
+@server.list_resource_templates()
+async def list_templates():
+    return types.ListResourceTemplatesResult(resourceTemplates=[
+        types.ResourceTemplate(uriTemplate="users://{id}", name="User"),
+    ])
+
+
+@server.read_resource()
+async def read_resource(uri: AnyUrl) -> str:
+    return ""
+"""
+
+
+def test_lowlevel_resources_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"srv.py": LOWLEVEL_RESOURCES}), "mcp_resource")
+    assert set(resources) == {"memo://insights", "file:///logs/app.log", "users://{id}"}
+    memo = resources["memo://insights"]
+    assert (memo.framework, memo.method, memo.description, memo.handler, memo.handlerLine) == (
+        "python-mcp", "RESOURCE", "Memo", "read_resource", 26)
+    assert memo.params == [] and memo.nodeType == "call" and memo.startLine == 12
+    template = resources["users://{id}"]
+    assert template.handler == "read_resource"  # templates are read by the same dispatcher
+    assert _params(template) == [("id", "string", True, None, None)]
+
+
+LOWLEVEL_PROMPTS = """
+from mcp.server.lowlevel import Server
+from mcp.types import Prompt, PromptArgument, ListPromptsResult
+
+app = Server("prompts")
+
+
+@app.list_prompts()
+async def list_prompts():
+    if paged:
+        return ListPromptsResult(prompts=[Prompt(name="paged")])
+    return [
+        Prompt(
+            name="review",
+            description="Review code",
+            arguments=[
+                PromptArgument(name="code", description="The code", required=True),
+                PromptArgument(name="style"),
+            ],
+        ),
+        Prompt(name="dynamic", arguments=ARGS),
+        Prompt(name=NAME),
+    ]
+
+
+@app.get_prompt()
+async def get_prompt(name: str, arguments: dict | None):
+    return None
+"""
+
+
+def test_lowlevel_prompts_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"srv.py": LOWLEVEL_PROMPTS}), "mcp_prompt")
+    assert set(prompts) == {"paged", "review", "dynamic"}
+    review = prompts["review"]
+    assert (review.method, review.description, review.handler, review.handlerLine) == (
+        "PROMPT", "Review code", "get_prompt", 27)
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("style", None, False, None, None),  # the SDK's default: not required
+    ]
+    assert prompts["paged"].params == []
+    assert prompts["dynamic"].params is None  # not a literal list: unknown
+
+
+def test_lowlevel_resource_and_prompt_look_alikes(analyze_files) -> None:
+    """A local ``Server`` class, stdlib ``types``, and entries not imported from ``mcp.types``."""
+    files = {
+        "local.py": """
+from mcp.types import Resource, Prompt
+
+
+class Server:
+    pass
+
+
+server = Server()
+
+
+@server.list_resources()
+async def r():
+    return [Resource(uri="x://local", name="x")]
+
+
+@server.list_prompts()
+async def p():
+    return [Prompt(name="local")]
+""",
+        "stdlib.py": """
+import types
+from mcp.server.lowlevel import Server
+
+server = Server("x")
+
+
+@server.list_resources()
+async def r():
+    return [types.Resource(uri="x://stdlib", name="x")]
+""",
+        "other.py": """
+from mcp.server.lowlevel import Server
+from myapp.models import Prompt
+
+server = Server("x")
+
+
+@server.list_prompts()
+async def p():
+    return [Prompt(name="other")]
+""",
+    }
+    statements = analyze_files(files)
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]

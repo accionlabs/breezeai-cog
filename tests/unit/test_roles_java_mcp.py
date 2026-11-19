@@ -212,3 +212,143 @@ public class App {
         if s.semanticType == "mcp_tool"
     ]
     assert [t.endpoint for t in tools] == ["calc"]
+
+
+# ── Resources, prompts and the SDK 1.0 Tool builder ───────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    for s in found:
+        assert s.name == s.endpoint and s.framework == "java-mcp"
+    return {s.endpoint: s for s in found}
+
+
+JAVA_RESOURCES = """
+package demo;
+
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.List;
+
+public class Resources {
+    McpServerFeatures.SyncResourceSpecification memo() {
+        return new McpServerFeatures.SyncResourceSpecification(
+            new McpSchema.Resource("memo://insights", "Insights", null, "The memo", "text/plain", null, null, null),
+            (exchange, req) -> null);
+    }
+
+    McpServerFeatures.AsyncResourceTemplateSpecification user() {
+        var tpl = McpSchema.ResourceTemplate.builder("users://{id}", "User").description("A user").build();
+        return new McpServerFeatures.AsyncResourceTemplateSpecification(tpl, this::readUser);
+    }
+
+    McpServerFeatures.SyncResourceSpecification built() {
+        return new McpServerFeatures.SyncResourceSpecification(
+            McpSchema.Resource.builder().uri("file:///{literal}").name("x").build(), this::readUser);
+    }
+
+    McpServerFeatures.SyncResourceSpecification computed(String uri) {
+        return new McpServerFeatures.SyncResourceSpecification(new McpSchema.Resource(uri, "x", null, null, null, null, null, null), this::readUser);
+    }
+
+    Object readUser(Object exchange, Object req) { return null; }
+}
+"""
+
+
+def test_java_resources_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"Resources.java": JAVA_RESOURCES}), "mcp_resource")
+    assert set(resources) == {"memo://insights", "users://{id}", "file:///{literal}"}
+    memo = resources["memo://insights"]
+    assert (memo.method, memo.description, memo.handler, memo.handlerLine, memo.params) == (
+        "RESOURCE", "The memo", None, 12, [])
+    user = resources["users://{id}"]
+    assert (user.description, user.handler, user.handlerLine) == ("A user", "readUser", 29)
+    assert _params(user) == [("id", "string", True, None, None)]
+    assert resources["file:///{literal}"].params == []  # a fixed URI has no variables
+
+
+JAVA_PROMPTS = """
+package demo;
+
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.List;
+
+public class Prompts {
+    McpServerFeatures.SyncPromptSpecification review() {
+        return new McpServerFeatures.SyncPromptSpecification(
+            new McpSchema.Prompt("review", "Review code", List.of(
+                new McpSchema.PromptArgument("code", "The code", true),
+                McpSchema.PromptArgument.builder("style").build())),
+            this::render);
+    }
+
+    McpServerFeatures.AsyncPromptSpecification greet() {
+        return new McpServerFeatures.AsyncPromptSpecification(
+            McpSchema.Prompt.builder("greet").description("Say hi").build(), (ex, req) -> null);
+    }
+
+    McpServerFeatures.SyncPromptSpecification dyn() {
+        return new McpServerFeatures.SyncPromptSpecification(new McpSchema.Prompt("dyn", "d", ARGS), this::render);
+    }
+
+    Object render(Object exchange, Object req) { return null; }
+}
+"""
+
+
+def test_java_prompts_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"Prompts.java": JAVA_PROMPTS}), "mcp_prompt")
+    assert set(prompts) == {"review", "greet", "dyn"}
+    review = prompts["review"]
+    assert (review.method, review.description, review.handler, review.handlerLine) == (
+        "PROMPT", "Review code", "render", 26)
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("style", None, False, None, None),
+    ]
+    assert prompts["greet"].params == [] and prompts["greet"].description == "Say hi"
+    assert prompts["dyn"].params is None
+
+
+def test_java_resource_look_alikes(analyze_files) -> None:
+    """A ``Resource`` / ``Prompt`` outside an MCP specification, or no MCP import: no record."""
+    src = """
+package demo;
+
+import org.springframework.core.io.Resource;
+
+public class Other {
+    Object r = new ResourceSpecification(new Resource("x://y", "n"), h);
+    Object p = new SyncPromptSpecification(new Prompt("p", "d", null), h);
+}
+"""
+    statements = analyze_files({"Other.java": src})
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+def test_java_sdk_1_tool_builder_names_the_tool(analyze_files) -> None:
+    src = '''
+package demo;
+
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class Tools {
+    Object a = new McpServerFeatures.SyncToolSpecification(
+        McpSchema.Tool.builder("plain").description("Plain").build(), this::run);
+    Object b = new McpServerFeatures.SyncToolSpecification(
+        McpSchema.Tool.builder("mapped", schemaMap).build(), this::run);
+    Object c = new McpServerFeatures.SyncToolSpecification(
+        McpSchema.Tool.builder("json", mapper, "{\\"type\\":\\"object\\",\\"properties\\":{\\"q\\":{\\"type\\":\\"string\\"}}}").build(), this::run);
+
+    Object run(Object exchange, Object req) { return null; }
+}
+'''
+    tools = _tools(analyze_files({"Tools.java": src}))
+    assert set(tools) == {"plain", "mapped", "json"}
+    assert tools["plain"].params == [] and tools["plain"].description == "Plain"
+    assert tools["mapped"].params is None
+    assert _params(tools["json"]) == [("q", "string", False, None, None)]

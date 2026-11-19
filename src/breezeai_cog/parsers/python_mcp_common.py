@@ -1,8 +1,8 @@
 """Shared by the Python MCP packages (``python_fastmcp``, ``python_mcp``): the ``mcp.servers``
-fact and the ``@<server>.tool`` reader.
+fact and the ``@<server>.tool`` / ``.resource`` / ``.prompt`` reader.
 
-Both SDKs declare a tool the same way, so one reader serves both; the SDK the server was built
-with decides which package emits it (:func:`detect_tools`).
+Both SDKs declare a tool, a resource and a prompt the same way, so one reader serves both; the
+SDK the server was built with decides which package emits it (:func:`detect_decorated`).
 
 ::
 
@@ -37,6 +37,24 @@ with decides which package emits it (:func:`detect_tools`).
   the names in a literal ``exclude_args=[…]`` are skipped (a non-literal ``exclude_args`` →
   params unknown). Required = no default.
 * ``@x.tool(enabled=False)`` (a literal) → no record: the tool is never served.
+
+Resources and prompts, on a server proven as above::
+
+    @mcp.resource("users://{user_id}/profile",    → mcp_resource  fastmcp  RESOURCE  users://{user_id}/profile
+                  description="A user's profile")               params user_id (required string)
+    def profile(user_id: str) -> str: …
+
+    @mcp.prompt(name="review")                    → mcp_prompt  fastmcp  PROMPT  review
+    def review_code(code: str, focus: str = "bugs") -> str: …    params code, focus
+
+* ``mcp_resource`` — ``endpoint`` is the URI (``uri=`` or the first positional argument), a
+  literal; anything else → no record. ``params`` are the template's simple ``{variables}``
+  (``[]`` for a fixed URI; None when the template uses an RFC 6570 operator).
+  ``description`` as for a tool.
+* ``mcp_prompt`` — ``endpoint`` is ``name=`` (or the first positional string), else the function
+  name; ``params`` are the function's parameters, read as for a tool (the SDK builds the
+  prompt's arguments from them); ``description`` as for a tool.
+* ``enabled=False`` (a literal) → no record, for each kind.
 """
 
 from __future__ import annotations
@@ -55,11 +73,15 @@ from .additive import DetectContext, Detection, FactSpec, index_fact, register_f
 from .emits import Emit
 from .mcp_common import (
     MAX_TOOL_PARAMS_JSON,
+    PROMPT,
+    RESOURCE,
+    TOOL,
     clean_doc,
+    mcp_emit,
     param,
     param_json_bytes,
     params_json_bytes,
-    tool_emit,
+    uri_template_params,
 )
 from .treesitter import node_text
 
@@ -210,8 +232,11 @@ _GOOGLE_PARAM_SECTIONS = frozenset(
         "other parameters",
     }
 )
-#: ``@x.tool`` — a cheap byte check before any tree walk (``.tools`` / ``.toolbar`` do not match).
-_TOOL_DECORATOR = re.compile(rb"@[ \t]*\w+[ \t]*\.[ \t]*tool\b")
+#: ``@x.tool`` / ``@x.resource`` / ``@x.prompt`` — a cheap byte check before any tree walk
+#: (``.tools`` / ``.toolbar`` / ``.resources`` do not match).
+_DECORATOR = re.compile(rb"@[ \t]*\w+[ \t]*\.[ \t]*(?:tool|resource|prompt)\b")
+#: The decorator method → the kind of statement it declares.
+_KINDS = {"tool": TOOL, "resource": RESOURCE, "prompt": PROMPT}
 _SKIPPED_PARAMS = frozenset({"self", "cls"})
 
 
@@ -291,8 +316,8 @@ def _import_aliases(root: Node, source: bytes) -> dict[str, str]:
     return out
 
 
-def _tool_decorator(decorator: Node, source: bytes) -> tuple[str, Node | None] | None:
-    """``@x.tool`` / ``@x.tool(…)`` → ``(x, call or None)``."""
+def _server_decorator(decorator: Node, source: bytes) -> tuple[str, str, Node | None] | None:
+    """``@x.tool`` / ``@x.resource(…)`` / ``@x.prompt(…)`` → ``(x, method, call or None)``."""
     expr = decorator.named_children[0] if decorator.named_children else None
     call = None
     if expr is not None and expr.type == "call":
@@ -300,9 +325,10 @@ def _tool_decorator(decorator: Node, source: bytes) -> tuple[str, Node | None] |
     if expr is None or expr.type != "attribute":
         return None
     obj, attr = expr.child_by_field_name("object"), expr.child_by_field_name("attribute")
-    if obj is None or attr is None or obj.type != "identifier" or node_text(attr, source) != "tool":
+    if obj is None or attr is None or obj.type != "identifier":
         return None
-    return node_text(obj, source), call
+    method = node_text(attr, source)
+    return (node_text(obj, source), method, call) if method in _KINDS else None
 
 
 def _docstring(fn: Node, source: bytes) -> str | None:
@@ -662,11 +688,22 @@ def _excluded_args(call: Node, source: bytes) -> set[str] | None:
     return None if any(n is None for n in names) else {n for n in names if n is not None}
 
 
-def detect_tools(dc: DetectContext, framework: str) -> Detection | None:
-    """The ``@<server>.tool`` functions of the file whose server was built with ``framework``
-    (:data:`FASTMCP` or :data:`PYTHON_MCP`)."""
+def _resource_uri(call: Node | None, source: bytes) -> str | None:
+    """``@x.resource("uri")`` / ``@x.resource(uri="uri")`` → the URI, when a literal."""
+    if call is None:
+        return None  # a bare ``@x.resource`` is not how either SDK declares one
+    node = _kwarg(call, "uri", source)
+    if node is None:
+        pos = _positional(call)
+        node = pos[0] if pos else None
+    return _literal(node, source)
+
+
+def detect_decorated(dc: DetectContext, framework: str) -> Detection | None:
+    """The ``@<server>.tool`` / ``.resource`` / ``.prompt`` functions of the file whose server
+    was built with ``framework`` (:data:`FASTMCP` or :data:`PYTHON_MCP`)."""
     source, record = dc.source, dc.record
-    if not _TOOL_DECORATOR.search(source):
+    if not _DECORATOR.search(source):
         return None
     classes = server_class_names(dc.root, source)
     servers = server_assignments(
@@ -694,54 +731,117 @@ def detect_tools(dc: DetectContext, framework: str) -> Detection | None:
         fn = node.child_by_field_name("definition")
         if fn is None or fn.type != "function_definition":
             continue
+        done: set[str] = set()  # one record per kind for a function
         for decorator in (c for c in node.named_children if c.type == "decorator"):
-            hit = _tool_decorator(decorator, source)
-            if hit is None or server_framework(hit[0]) != framework:
+            hit = _server_decorator(decorator, source)
+            if hit is None or hit[1] in done or server_framework(hit[0]) != framework:
                 continue  # not a server, or one the other package's detector owns
-            call = hit[1]
-            fn_name = node_text(fn.child_by_field_name("name"), source)  # type: ignore[arg-type]
-            endpoint: str | None = fn_name
-            docstring = _docstring(fn, source)
-            description: str | None = docstring
-            if call is not None:
-                name_node = _kwarg(call, "name", source)
-                pos = _positional(call)
-                if name_node is None and pos and pos[0].type in ("string", "concatenated_string"):
-                    name_node = pos[0]
-                if name_node is not None:
-                    endpoint = _literal(name_node, source)
-                desc_node = _kwarg(call, "description", source)
-                if desc_node is not None:
-                    description = _literal(desc_node, source)
-            if not endpoint:
-                continue  # a computed name: the tool exists, but its name is unknown
-            if call is not None and _disabled(call, source):
-                break  # `enabled=False`: registered but never served
-            # the docstring itself, not `description` (which `description=` replaces)
-            doc_params = _docstring_param_docs(docstring)
-            params: list[Parameter] | None = _params(fn, source, doc_params)
-            excluded = _excluded_args(call, source) if call is not None else set()
-            if excluded is None:
-                params = None  # `exclude_args=` not a literal: which params remain is unknown
-            elif excluded and params is not None:
-                params = [p for p in params if p.name not in excluded]
-            line = fn.start_point[0] + 1
-            owner = functions.get((fn_name, line))
-            found.append(
-                tool_emit(
-                    decorator,
-                    source,
-                    endpoint=endpoint,
-                    framework=framework,
-                    handler=fn_name,
-                    handler_line=line,
-                    description=description,
-                    params=params,
-                    parent=owner.id if owner is not None else None,
-                )
+            _, method, call = hit
+            emit = (
+                _resource(decorator, fn, call, source, framework, functions)
+                if method == "resource"
+                else _tool(decorator, fn, call, source, framework, functions, _KINDS[method])
             )
-            break
+            if emit is _SKIP:
+                continue  # a computed name: the record's name is unknown
+            done.add(method)
+            if emit is not None:
+                found.append(emit)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))
     return Detection(found, label=framework)
+
+
+#: :func:`_tool` / :func:`_resource` found the decorator, but its name or URI is not a literal.
+_SKIP: Any = object()
+
+
+def _tool(
+    decorator: Node,
+    fn: Node,
+    call: Node | None,
+    source: bytes,
+    framework: str,
+    functions: dict[tuple[str, int], Any],
+    kind: tuple[str, str],
+) -> Emit | None:
+    """The ``mcp_tool`` of ``@x.tool`` or the ``mcp_prompt`` of ``@x.prompt`` (``kind``): both
+    are named and described alike and take the function's parameters; None when
+    ``enabled=False``; :data:`_SKIP` for a non-literal name."""
+    fn_name = node_text(fn.child_by_field_name("name"), source)  # type: ignore[arg-type]
+    endpoint: str | None = fn_name
+    docstring = _docstring(fn, source)
+    description: str | None = docstring
+    if call is not None:
+        name_node = _kwarg(call, "name", source)
+        pos = _positional(call)
+        if name_node is None and pos and pos[0].type in ("string", "concatenated_string"):
+            name_node = pos[0]
+        if name_node is not None:
+            endpoint = _literal(name_node, source)
+        desc_node = _kwarg(call, "description", source)
+        if desc_node is not None:
+            description = _literal(desc_node, source)
+    if not endpoint:
+        return _SKIP  # type: ignore[no-any-return]
+    if call is not None and _disabled(call, source):
+        return None  # `enabled=False`: registered but never served
+    # the docstring itself, not `description` (which `description=` replaces)
+    doc_params = _docstring_param_docs(docstring)
+    params: list[Parameter] | None = _params(fn, source, doc_params)
+    excluded = _excluded_args(call, source) if call is not None else set()
+    if excluded is None:
+        params = None  # `exclude_args=` not a literal: which params remain is unknown
+    elif excluded and params is not None:
+        params = [p for p in params if p.name not in excluded]
+    line = fn.start_point[0] + 1
+    owner = functions.get((fn_name, line))
+    return mcp_emit(
+        decorator,
+        source,
+        kind=kind,
+        endpoint=endpoint,
+        framework=framework,
+        handler=fn_name,
+        handler_line=line,
+        description=description,
+        params=params,
+        parent=owner.id if owner is not None else None,
+    )
+
+
+def _resource(
+    decorator: Node,
+    fn: Node,
+    call: Node | None,
+    source: bytes,
+    framework: str,
+    functions: dict[tuple[str, int], Any],
+) -> Emit | None:
+    """The ``mcp_resource`` of ``@x.resource("uri", …)``; None when ``enabled=False``;
+    :data:`_SKIP` for a non-literal URI."""
+    uri = _resource_uri(call, source)
+    if not uri or call is None:
+        return _SKIP  # type: ignore[no-any-return]
+    if _disabled(call, source):
+        return None
+    fn_name = node_text(fn.child_by_field_name("name"), source)  # type: ignore[arg-type]
+    description = _docstring(fn, source)
+    desc_node = _kwarg(call, "description", source)
+    if desc_node is not None:
+        description = _literal(desc_node, source)
+    line = fn.start_point[0] + 1
+    owner = functions.get((fn_name, line))
+    return mcp_emit(
+        decorator,
+        source,
+        kind=RESOURCE,
+        endpoint=uri,
+        framework=framework,
+        handler=fn_name,
+        handler_line=line,
+        description=description,
+        params=uri_template_params(uri),
+        parent=owner.id if owner is not None else None,
+    )

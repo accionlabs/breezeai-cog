@@ -13,7 +13,9 @@
   the file; a non-literal name → no record. ``description`` only from a literal (the
   three-argument constructor's second argument, or ``.description("…")``).
 * ``params`` from a JSON-schema string literal (``properties`` / ``required``); a schema that is
-  not a literal, or does not parse → None (unknown).
+  not a literal, or does not parse → None (unknown). ``Tool.builder("name", …)`` (SDK 1.0 and
+  later) names the tool up front; its JSON-schema string (``builder(name, mapper, json)``) is read
+  the same way, a schema map (``builder(name, map)``) is unknown.
 * ``handler`` — a method reference (``this::calc``, ``Calc::calc``) names it; a lambda has no
   name, only its line.
 
@@ -27,7 +29,31 @@ The server builder's shortcut registers a ``Tool`` directly::
   the ``.tool`` / ``.toolCall`` name. The tool and handler are read as above.
 * ``.tools(spec…)`` is not read: each specification is recorded where it is built.
 
-Only tool specifications and the shortcut are read here. A Spring AI ``@McpTool`` / ``@Tool`` method belongs to
+Resources and prompts are read from their specifications the same way::
+
+    new McpServerFeatures.SyncResourceSpecification(                → mcp_resource  java-mcp  RESOURCE  memo://insights
+        new McpSchema.Resource("memo://insights", "Insights", …), (exchange, req) -> …)
+    new McpServerFeatures.AsyncResourceTemplateSpecification(       → mcp_resource  …  users://{id}  params id
+        McpSchema.ResourceTemplate.builder("users://{id}", "User").build(), this::readUser)
+    new McpServerFeatures.SyncPromptSpecification(                  → mcp_prompt  java-mcp  PROMPT  review
+        new McpSchema.Prompt("review", "Review code",
+            List.of(new McpSchema.PromptArgument("code", "The code", true))), this::review)
+
+* ``endpoint`` — the URI / URI template / prompt name: the first constructor argument, the
+  builder's first argument, or ``.uri(…)`` / ``.uriTemplate(…)`` / ``.name(…)``; a literal, else
+  no record. The stateless server's specifications (same names) are read alike.
+* ``description`` — ``.description(…)``, or the constructor argument whose position the SDK
+  fixes for that overload (``Prompt(name, description, arguments)``, ``Prompt(name, title,
+  description, arguments)``, ``ResourceTemplate(uriTemplate, name, description, mimeType,
+  annotations)``, ``Resource(uri, name, title, description, …)``); else none.
+* ``params`` — a template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a
+  ``Resource``, whose URI is fixed; a prompt's ``List.of(new PromptArgument(name, description,
+  required), …)`` (or ``PromptArgument.builder(name)…``), ``[]`` for none, None when not a
+  literal.
+* The builder's ``.resources(…)`` / ``.resourceTemplates(…)`` / ``.prompts(…)`` take
+  specifications only: each is recorded where it is built.
+
+Only specifications and the shortcut are read here. A Spring AI ``@McpTool`` / ``@Tool`` method belongs to
 ``java_springai``.
 """
 
@@ -48,7 +74,7 @@ from ..jvm_mcp_common import (
     shortcut_emit,
     walk,
 )
-from ..mcp_common import tool_emit
+from ..mcp_common import PROMPT, RESOURCE, mcp_emit, param, tool_emit, uri_template_params
 from ..treesitter import node_text
 
 _JAVA_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "s": " "}
@@ -131,14 +157,189 @@ def _tool_fields(
         return None
     calls = {method: args for method, args in chain[1]}
     name_args = calls.get("name") or []
-    name = java_string(name_args[0], source) if len(name_args) == 1 else None
+    # `Tool.builder("name")`, `Tool.builder("name", schemaMap)`, `Tool.builder("name", mapper,
+    # schemaJson)` (SDK 1.0 and later) name the tool up front.
+    builder_args = calls.get("builder") or []
+    if name_args:
+        name = java_string(name_args[0], source) if len(name_args) == 1 else None
+    else:
+        name = java_string(builder_args[0], source) if 1 <= len(builder_args) <= 3 else None
     if not name:
         return None
     desc_args = calls.get("description") or []
     description = java_string(desc_args[0], source) if len(desc_args) == 1 else None
     schema_args = calls.get("inputSchema")
-    params = _schema_params(schema_args[-1], source) if schema_args else []
+    params: list[Parameter] | None = []
+    if schema_args:
+        params = _schema_params(schema_args[-1], source)
+    elif len(builder_args) == 3:
+        params = _schema_params(builder_args[2], source)
+    elif len(builder_args) == 2:
+        params = None  # a schema map built in code: unknown
     return name, description, params
+
+
+#: ``Sync…`` / ``Async…Specification`` (also the stateless server's) → the record it registers.
+_SPECIFICATIONS = {
+    f"{mode}{entry}Specification": entry
+    for mode in ("Sync", "Async")
+    for entry in ("Resource", "ResourceTemplate", "Prompt")
+}
+#: Each entry type → (its kind, the constructor argument / builder method naming it).
+_ENTRIES = {
+    "Resource": (RESOURCE, "uri"),
+    "ResourceTemplate": (RESOURCE, "uriTemplate"),
+    "Prompt": (PROMPT, "name"),
+}
+_LIST_FACTORIES = frozenset({"of", "asList"})
+
+
+def _prompt_argument(node: Node, source: bytes) -> Parameter | None:
+    """``new PromptArgument("name", "desc", true)`` (also with a title second) or
+    ``PromptArgument.builder("name").description("…").required(true).build()``; None when not
+    read whole."""
+    values: dict[str, Node | None]
+    if node.type == "object_creation_expression" and _type_name(node, source) == "PromptArgument":
+        args = _args(node)
+        if len(args) == 3:
+            values = {"name": args[0], "description": args[1], "required": args[2]}
+        elif len(args) == 4:
+            values = {"name": args[0], "description": args[2], "required": args[3]}
+        else:
+            return None
+    else:
+        chain = _builder_chain(node, source) if node.type == "method_invocation" else None
+        if chain is None or chain[0] != "PromptArgument" or chain[1][-1][0] != "build":
+            return None
+        calls = {method: args for method, args in chain[1]}
+        builder_args = calls.get("builder") or []
+        if len(builder_args) != 1 or set(calls) - {"builder", "title", "description", "required", "build"}:
+            return None
+        values = {
+            "name": builder_args[0],
+            "description": (calls.get("description") or [None])[0],
+            "required": (calls.get("required") or [None])[0],
+        }
+    name = java_string(values["name"], source)
+    desc_node, req_node = values["description"], values["required"]
+    description = java_string(desc_node, source)
+    required = node_text(req_node, source) if req_node is not None else "null"
+    if not name or required not in ("true", "false", "null", "Boolean.TRUE", "Boolean.FALSE"):
+        return None
+    if desc_node is not None and desc_node.type != "null_literal" and description is None:
+        return None
+    return param(name, None, required=required in ("true", "Boolean.TRUE"), description=description)
+
+
+def _prompt_arguments(node: Node | None, source: bytes) -> list[Parameter] | None:
+    """``List.of(…)`` / ``Arrays.asList(…)`` of prompt arguments; ``[]`` for none or ``null``;
+    None for anything else."""
+    if node is None or node.type == "null_literal":
+        return []
+    name = node.child_by_field_name("name") if node.type == "method_invocation" else None
+    if name is None or node_text(name, source) not in _LIST_FACTORIES:
+        return None
+    out: list[Parameter] = []
+    for arg in _args(node):
+        p = _prompt_argument(arg, source)
+        if p is None:
+            return None
+        out.append(p)
+    return out
+
+
+def _entry_fields(
+    node: Node | None, source: bytes, variables: dict[str, Node | None], entry: str
+) -> tuple[str, str | None, list[Parameter] | None] | None:
+    """``(endpoint, description, params)`` of a ``Resource`` / ``ResourceTemplate`` / ``Prompt``
+    expression (``entry``): a constructor, a builder, or a local variable assigned one once."""
+    if node is not None and node.type == "identifier":
+        node = variables.get(node_text(node, source))
+    if node is None:
+        return None
+    kind, key = _ENTRIES[entry]
+    description: str | None = None
+    arguments: Node | None = None
+    if node.type == "object_creation_expression" and _type_name(node, source) == entry:
+        args = _args(node)
+        endpoint = java_string(args[0], source) if args else None
+        if entry == "Prompt":
+            # Prompt(name, description, arguments) / (name, title, description, arguments[, …])
+            if len(args) == 3:
+                description, arguments = java_string(args[1], source), args[2]
+            elif len(args) in (4, 5, 6):
+                description, arguments = java_string(args[2], source), args[3]
+            else:
+                return None
+        elif entry == "ResourceTemplate" and len(args) == 5:
+            description = java_string(args[2], source)  # (uriTemplate, name, description, …)
+        elif len(args) >= 7:
+            description = java_string(args[3], source)  # (uri, name, title, description, …)
+    else:
+        chain = _builder_chain(node, source) if node.type == "method_invocation" else None
+        if chain is None or chain[0] != entry or chain[1][-1][0] != "build":
+            return None
+        calls = {method: args for method, args in chain[1]}
+        builder_args = calls.get("builder") or []
+        key_args = calls.get(key) or (builder_args[:1] if builder_args else [])
+        endpoint = java_string(key_args[0], source) if len(key_args) == 1 else None
+        desc_args = calls.get("description") or []
+        description = java_string(desc_args[0], source) if len(desc_args) == 1 else None
+        arg_calls = calls.get("arguments")
+        if entry == "Prompt" and arg_calls is not None:
+            if len(arg_calls) != 1:
+                return None
+            arguments = arg_calls[0]
+    if not endpoint:
+        return None
+    if kind == PROMPT:
+        return endpoint, description, _prompt_arguments(arguments, source)
+    # A fixed resource's URI is literal, braces and all: it has no variables.
+    return endpoint, description, uri_template_params(endpoint) if entry != "Resource" else []
+
+
+def _sdk_entries(dc: DetectContext) -> list[Emit]:
+    """``Sync…`` / ``Async…`` ``ResourceSpecification`` / ``ResourceTemplateSpecification`` /
+    ``PromptSpecification`` of the MCP Java SDK."""
+    source = dc.source
+    if b"ResourceSpecification" not in source and b"ResourceTemplateSpecification" not in source and (
+        b"PromptSpecification" not in source
+    ):
+        return []
+    variables = _local_variables(dc.root, source)
+    lines: dict[str, list[int]] = {}
+    for f in dc.record.functions:
+        lines.setdefault(f.name, []).append(f.startLine)
+    methods = {name: ls[0] if len(ls) == 1 else None for name, ls in lines.items()}
+    found: list[Emit] = []
+    for node in walk(dc.root):
+        if node.type != "object_creation_expression":
+            continue
+        entry = _SPECIFICATIONS.get(_type_name(node, source))
+        args = _args(node)
+        if entry is None or len(args) < 2:
+            continue
+        fields = _entry_fields(args[0], source, variables, entry)
+        if fields is None:
+            continue
+        handler = next((a for a in reversed(args[1:]) if a.type != "null_literal"), None)
+        endpoint, description, params = fields
+        handler_name, handler_line = _sdk_handler(handler, source, methods)
+        found.append(
+            mcp_emit(
+                node,
+                source,
+                kind=_ENTRIES[entry][0],
+                endpoint=endpoint,
+                framework=JAVA_MCP,
+                handler=handler_name,
+                handler_line=handler_line,
+                description=description,
+                params=params,
+                node_type=None,
+            )
+        )
+    return found
 
 
 def _sdk_handler(
@@ -291,7 +492,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
 def _detect(dc: DetectContext) -> Detection | None:
     if b"io.modelcontextprotocol" not in dc.source:
         return None
-    found = _sdk_tools(dc) + _shortcut_tools(dc)
+    found = _sdk_tools(dc) + _shortcut_tools(dc) + _sdk_entries(dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

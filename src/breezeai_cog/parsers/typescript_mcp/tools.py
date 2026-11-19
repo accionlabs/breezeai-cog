@@ -28,8 +28,31 @@
   ``handler``, only the wrapper's line.
 * A non-literal tool name → no record.
 
-A low-level ``Server``'s ``setRequestHandler(ListToolsRequestSchema, …)`` is read by
-:mod:`.lowlevel` (where the rules are).
+Resources and prompts of the same ``McpServer``::
+
+    server.resource("config", "config://app", { description: "Config" }, cb)
+                                                    → mcp_resource  typescript-mcp  RESOURCE  config://app
+    server.registerResource("user", new ResourceTemplate("users://{id}", { list: undefined }),
+                            { description: "A user" }, cb)
+                                                    → mcp_resource  …  users://{id}   params id
+    server.prompt("review", "Review code", { code: z.string() }, cb)
+                                                    → mcp_prompt  typescript-mcp  PROMPT  review
+    server.registerPrompt("explain", { description: "Explain", argsSchema: { topic: z.string() } }, cb)
+
+* ``resource(name, uriOrTemplate, [metadata], cb)`` / ``registerResource(name, uriOrTemplate,
+  config, cb)`` — ``endpoint`` is the URI, a string literal, or the first argument of
+  ``new ResourceTemplate("…", …)`` with ``ResourceTemplate`` imported from
+  ``@modelcontextprotocol/sdk/server/mcp.js``; anything else → no record. ``description`` from
+  the metadata / config literal; ``params`` are the template's simple ``{variables}`` (None with
+  an RFC 6570 operator); ``[]`` for a fixed URI string.
+* ``prompt(name, [description], [argsShape], cb)`` / ``registerPrompt(name, { description,
+  argsSchema }, cb)`` — ``params`` are the arguments of the zod shape: required unless
+  ``.optional()`` / ``.default()``, described by ``.describe()``; no type or default (a prompt
+  argument has none). A shape that cannot be read whole → None (unknown).
+* ``handler`` — the callback, as for a tool.
+
+A low-level ``Server``'s ``setRequestHandler(ListToolsRequestSchema, …)`` (and the resource and
+prompt list handlers) is read by :mod:`.lowlevel` (where the rules are).
 """
 
 from __future__ import annotations
@@ -41,9 +64,10 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import param, tool_emit
+from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
 from ..treesitter import node_text
-from .lowlevel import detect_lowlevel_tools
+from ..typescript.declarations import import_bindings
+from .lowlevel import detect_lowlevel
 
 FRAMEWORK = "typescript-mcp"
 _CALLBACKS = (
@@ -59,6 +83,19 @@ _ANNOTATION_KEYS = frozenset(
     {"title", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
 )
 _MAX_DEFAULT = 200
+#: Modules that export ``McpServer`` and ``ResourceTemplate``.
+_MCP_MODULES = frozenset(
+    {"@modelcontextprotocol/sdk/server/mcp.js", "@modelcontextprotocol/sdk/server/mcp"}
+)
+#: The server methods read here → the kind of record they register.
+_REGISTRATIONS = {
+    "tool": TOOL,
+    "registerTool": TOOL,
+    "resource": RESOURCE,
+    "registerResource": RESOURCE,
+    "prompt": PROMPT,
+    "registerPrompt": PROMPT,
+}
 
 
 def _walk(node: Node) -> list[Node]:
@@ -443,16 +480,115 @@ def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | 
     return None, cb.start_point[0] + 1
 
 
+def _template_names(root: Node, source: bytes) -> set[str]:
+    """What the SDK's ``ResourceTemplate`` is called in this file (imported from the SDK's
+    ``server/mcp.js``; ``import * as m`` → ``m.ResourceTemplate``)."""
+    out: set[str] = set()
+    for local, (module, export) in import_bindings(root, source).items():
+        if module not in _MCP_MODULES:
+            continue
+        if export == "ResourceTemplate":
+            out.add(local)
+        elif export == "*":
+            out.add(f"{local}.ResourceTemplate")
+    return out
+
+
+def _resource_uri(
+    node: Node, source: bytes, templates: Callable[[], set[str]]
+) -> tuple[str | None, bool]:
+    """``(URI, is a template)``: a URI string literal, or the literal template of ``new
+    ResourceTemplate("…", …)``."""
+    if node.type in ("string", "template_string"):
+        return _string(node, source), False
+    if node.type != "new_expression":
+        return None, False
+    ctor = node.child_by_field_name("constructor")
+    if ctor is None or node_text(ctor, source) not in templates():
+        return None, False
+    args_node = node.child_by_field_name("arguments")
+    args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]
+    return (_string(args[0], source) if args else None), True
+
+
+def _prompt_params(shape: Node | None, source: bytes, zod: set[str]) -> list[Parameter] | None:
+    """The arguments of a prompt's zod shape: no type or default, as the SDK lists them."""
+    if shape is None:
+        return []
+    params = _zod_shape(shape, source, zod)
+    if params is None:
+        return None
+    return [param(p.name, None, required=p.required, description=p.description) for p in params]
+
+
+def _registration(
+    method: str,
+    args: list[Node],
+    source: bytes,
+    zod: set[str],
+    templates: Callable[[], set[str]],
+) -> tuple[str, str | None, list[Parameter] | None] | None:
+    """``(endpoint, description, params)`` of one ``tool`` / ``resource`` / ``prompt`` call (or
+    its ``register…`` form); None when it is not one or its name / URI is not a literal."""
+    middle = args[1:-1]
+    description: str | None = None
+    params: list[Parameter] | None = []
+    if _REGISTRATIONS[method] == RESOURCE:
+        if not middle:
+            return None
+        uri, template = _resource_uri(middle[0], source, templates)
+        meta = middle[1:]
+        if not uri or len(meta) > 1 or (method == "registerResource" and not meta):
+            return None
+        if meta and meta[0].type == "object":
+            description = _string(_pairs(meta[0], source).get("description"), source)
+        # A fixed resource's URI is literal, braces and all: it has no variables.
+        return uri, description, uri_template_params(uri) if template else []
+    name = _string(args[0], source)
+    if not name:
+        return None
+    if method in ("registerTool", "registerPrompt"):
+        if not middle or middle[0].type != "object":
+            return None
+        config = _pairs(middle[0], source)
+        description = _string(config.get("description"), source)
+        schema = config.get("inputSchema" if method == "registerTool" else "argsSchema")
+        if schema is not None:
+            params = (
+                _input_schema(schema, source, zod)
+                if method == "registerTool"
+                else _prompt_params(schema, source, zod)
+            )
+        elif not _literal_object(middle[0], source):
+            params = None  # `{ ...base }` may carry the schema
+        return name, description, params
+    if middle and middle[0].type in ("string", "template_string"):
+        description = _string(middle[0], source)
+        middle = middle[1:]
+    if method == "prompt":
+        if len(middle) > 1:
+            return None
+        return name, description, _prompt_params(middle[0] if middle else None, source, zod)
+    return name, description, _tool_params(middle, source, zod)
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
     functions = {f.name: f.startLine for f in dc.record.functions}
-    found: list[Emit] = detect_lowlevel_tools(
+    found: list[Emit] = detect_lowlevel(
         dc.root, source, servers, functions, _shadowed, lambda n: _json_schema(n, source)
     )
     if not servers and not found:
         return None
     zod = _zod_names(dc)
+    template_names: list[set[str]] = []
+
+    def templates() -> set[str]:
+        if not template_names:
+            template_names.append(_template_names(dc.root, source))
+        return template_names[0]
+
     for call in _walk(dc.root):
         if call.type != "call_expression":
             continue
@@ -462,7 +598,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         obj, prop = fn.child_by_field_name("object"), fn.child_by_field_name("property")
         method = node_text(prop, source) if prop is not None else ""
         if (
-            method not in ("tool", "registerTool")
+            method not in _REGISTRATIONS
             or obj is None
             or node_text(obj, source) not in servers
             or (obj.type == "identifier" and _shadowed(call, node_text(obj, source), source))
@@ -473,33 +609,17 @@ def _detect(dc: DetectContext) -> Detection | None:
         if len(args) < 2 or args[-1].type not in (*_CALLBACKS, "call_expression"):
             continue
         callback = _unwrap(args[-1], source, functions)
-        name = _string(args[0], source)
-        if not name:
+        read = _registration(method, args, source, zod, templates)
+        if read is None:
             continue
-        description: str | None = None
-        params: list[Parameter] | None = []
-        middle = args[1:-1]
-        if method == "registerTool":
-            if not middle or middle[0].type != "object":
-                continue
-            config = _pairs(middle[0], source)
-            description = _string(config.get("description"), source)
-            schema = config.get("inputSchema")
-            if schema is not None:
-                params = _input_schema(schema, source, zod)
-            elif not _literal_object(middle[0], source):
-                params = None  # `{ ...base }` may carry the schema
-        else:
-            if middle and middle[0].type in ("string", "template_string"):
-                description = _string(middle[0], source)
-                middle = middle[1:]
-            params = _tool_params(middle, source, zod)
+        endpoint, description, params = read
         handler, handler_line = _handler(callback, source, functions)
         found.append(
-            tool_emit(
+            mcp_emit(
                 call,
                 source,
-                endpoint=name,
+                kind=_REGISTRATIONS[method],
+                endpoint=endpoint,
                 framework=FRAMEWORK,
                 handler=handler,
                 handler_line=handler_line,

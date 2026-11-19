@@ -1,6 +1,6 @@
-"""Tools of a TypeScript / JavaScript server built with the SDK's **low-level** ``Server``
-(``@modelcontextprotocol/sdk/server/index.js``), read for the ``typescript-mcp`` detector
-(``tools.py``).
+"""Tools, resources and prompts of a TypeScript / JavaScript server built with the SDK's
+**low-level** ``Server`` (``@modelcontextprotocol/sdk/server/index.js``), read for the
+``typescript-mcp`` detector (``tools.py``).
 
 ::
 
@@ -31,6 +31,24 @@
 * ``handler`` — the callback of ``setRequestHandler(CallToolRequestSchema, …)`` on the same
   server in the same file (it dispatches every tool): a function literal gives its line, a
   function of this file its name; none, or more than one → no handler.
+
+Resources and prompts are read the same way, from their own list handlers::
+
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: [{ uri: "console://logs", name: "Logs" }] }));      → mcp_resource  console://logs
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+      resourceTemplates: [{ uriTemplate: "users://{id}", name: "User" }] }));  → mcp_resource  users://{id}
+    server.setRequestHandler(ReadResourceRequestSchema, readResource);        handler of both
+    server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+      prompts: [{ name: "review", arguments: [{ name: "code", required: true }] }] }))  → mcp_prompt  review
+    server.setRequestHandler(GetPromptRequestSchema, getPrompt);              handler
+
+* ``mcp_resource`` — ``uri`` (a template: ``uriTemplate``), a string literal; anything else → no
+  record. ``params`` are a template's simple ``{variables}`` (None with an RFC 6570 operator);
+  ``[]`` for a fixed ``uri``.
+* ``mcp_prompt`` — ``name``, a string literal; ``params`` from a literal ``arguments`` array of
+  ``{ name, description, required }`` objects (``required`` false unless ``true``); no
+  ``arguments`` → ``[]``; anything else → None (unknown).
 """
 
 from __future__ import annotations
@@ -41,7 +59,7 @@ from tree_sitter import Node
 
 from ...schemas import Parameter
 from ..emits import Emit
-from ..mcp_common import tool_emit
+from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
 from ..typescript.declarations import import_bindings
 from ..treesitter import node_text
 
@@ -63,6 +81,18 @@ SERVER_MODULES = frozenset(
     {"@modelcontextprotocol/sdk/server/index.js", "@modelcontextprotocol/sdk/server/index"}
 )
 TYPES_MODULES = frozenset({"@modelcontextprotocol/sdk/types.js", "@modelcontextprotocol/sdk/types"})
+#: ``(list schema, dispatch schema, key of the returned array, kind)`` of what a server lists.
+_LISTED = (
+    ("ListToolsRequestSchema", "CallToolRequestSchema", "tools", TOOL),
+    ("ListResourcesRequestSchema", "ReadResourceRequestSchema", "resources", RESOURCE),
+    (
+        "ListResourceTemplatesRequestSchema",
+        "ReadResourceRequestSchema",
+        "resourceTemplates",
+        RESOURCE,
+    ),
+    ("ListPromptsRequestSchema", "GetPromptRequestSchema", "prompts", PROMPT),
+)
 _FUNCTION_LITERALS = ("arrow_function", "function_expression", "function")
 _FUNCTION_SCOPES = frozenset(
     {
@@ -248,7 +278,7 @@ def _binding_scope(receiver: Node, source: bytes) -> tuple[int, int]:
     return (-1, -1)
 
 
-def detect_lowlevel_tools(
+def detect_lowlevel(
     dc_root: Node,
     source: bytes,
     mcp_servers: set[str],
@@ -256,16 +286,25 @@ def detect_lowlevel_tools(
     shadowed: Shadowed,
     input_schema: SchemaReader,
 ) -> list[Emit]:
-    """The tools of the file's ``setRequestHandler(ListToolsRequestSchema, …)`` calls (see the
-    module docstring). ``mcp_servers`` are the proven ``McpServer`` receivers, ``shadowed`` the
-    detector's scope check and ``input_schema`` its JSON-schema literal reader."""
-    if b"ListToolsRequestSchema" not in source or b"setRequestHandler" not in source:
+    """The tools, resources and prompts of the file's ``setRequestHandler(List…RequestSchema,
+    …)`` calls (see the module docstring). ``mcp_servers`` are the proven ``McpServer``
+    receivers, ``shadowed`` the detector's scope check and ``input_schema`` its JSON-schema
+    literal reader."""
+    if b"setRequestHandler" not in source or not any(
+        listed[0].encode() in source for listed in _LISTED
+    ):
         return []
     imports = import_bindings(dc_root, source)
     classes = _sdk_names(imports, SERVER_MODULES, "Server")
-    list_schema = _sdk_names(imports, TYPES_MODULES, "ListToolsRequestSchema")
-    call_schema = _sdk_names(imports, TYPES_MODULES, "CallToolRequestSchema")
-    if not list_schema:
+    # schema local name → (index in _LISTED) for list schemas; → dispatch schema name.
+    list_schemas: dict[str, int] = {}
+    dispatch_schemas: dict[str, str] = {}
+    for i, (list_name, dispatch_name, _, _) in enumerate(_LISTED):
+        for local in _sdk_names(imports, TYPES_MODULES, list_name):
+            list_schemas[local] = i
+        for local in _sdk_names(imports, TYPES_MODULES, dispatch_name):
+            dispatch_schemas[local] = dispatch_name
+    if not list_schemas:
         return []
 
     def typed(param: Node, src: bytes) -> bool:
@@ -307,8 +346,8 @@ def detect_lowlevel_tools(
     if not servers:
         return []
 
-    listers: list[tuple[tuple[str, tuple[int, int]], Node]] = []
-    dispatchers: dict[tuple[str, tuple[int, int]], list[Node]] = {}
+    listers: list[tuple[int, tuple[str, tuple[int, int]], Node]] = []
+    dispatchers: dict[tuple[str, tuple[str, tuple[int, int]]], list[Node]] = {}
     for call in _walk(dc_root):
         if call.type != "call_expression":
             continue
@@ -337,17 +376,18 @@ def detect_lowlevel_tools(
             continue
         schema = node_text(args[0], source)
         key = (receiver, _binding_scope(obj, source))
-        if schema in list_schema and args[1].type in _FUNCTION_LITERALS:
-            listers.append((key, args[1]))
-        elif schema in call_schema:
-            dispatchers.setdefault(key, []).append(args[1])
+        if schema in list_schemas and args[1].type in _FUNCTION_LITERALS:
+            listers.append((list_schemas[schema], key, args[1]))
+        elif schema in dispatch_schemas:
+            dispatchers.setdefault((dispatch_schemas[schema], key), []).append(args[1])
     consts = _const_objects(dc_root, source, imports)
     found: list[Emit] = []
     seen: set[int] = set()
-    for key, fn in listers:
+    for listed, key, fn in listers:
+        _, dispatch_name, array_key, kind = _LISTED[listed]
         handler: str | None = None
         handler_line: int | None = None
-        cbs = dispatchers.get(key, [])
+        cbs = dispatchers.get((dispatch_name, key), [])
         if len(cbs) == 1:
             cb = cbs[0]
             if cb.type in _FUNCTION_LITERALS:
@@ -356,49 +396,93 @@ def detect_lowlevel_tools(
                 handler = node_text(cb, source)
                 handler_line = functions.get(handler)
         for result in _returned_objects(fn):
-            tools = _unparen(_pairs(result, source).get("tools"))
-            if tools is None or tools.type != "array":
+            entries = _unparen(_pairs(result, source).get(array_key))
+            if entries is None or entries.type != "array":
                 continue
-            for element in tools.named_children:
+            for element in entries.named_children:
                 obj_node = _unparen(element)
                 if obj_node is not None and obj_node.type == "identifier":
                     obj_node = consts.get(node_text(obj_node, source))
                 if obj_node is None or obj_node.type != "object" or obj_node.start_byte in seen:
                     continue
-                emit = _tool(obj_node, source, handler, handler_line, input_schema)
+                emit = _entry(obj_node, source, kind, array_key, (handler, handler_line), input_schema)
                 if emit is not None:
                     seen.add(obj_node.start_byte)
                     found.append(emit)
     return found
 
 
-def _tool(
-    obj: Node,
-    source: bytes,
-    handler: str | None,
-    handler_line: int | None,
-    input_schema: SchemaReader,
-) -> Emit | None:
-    fields = _pairs(obj, source)
-    name_node = fields.get("name")
-    name = (
-        _string(name_node, source)
-        if name_node is not None and name_node.type in ("string", "template_string")
+def _literal_string(node: Node | None, source: bytes) -> str | None:
+    """A string literal (or a template literal without substitutions)."""
+    return (
+        _string(node, source)
+        if node is not None and node.type in ("string", "template_string")
         else None
     )
+
+
+def _prompt_arguments(node: Node | None, source: bytes) -> list[Parameter] | None:
+    """A literal ``arguments: [{ name, description, required }]`` → params; ``[]`` without it;
+    None when it is not an array of such object literals."""
+    node = _unparen(node)
+    if node is None:
+        return []
+    if node.type != "array":
+        return None
+    out: list[Parameter] = []
+    for element in node.named_children:
+        if element.type == "comment":
+            continue
+        obj = _unparen(element)
+        if obj is None or obj.type != "object":
+            return None
+        fields = _pairs(obj, source)
+        name = _literal_string(fields.get("name"), source)
+        desc_node = fields.get("description")
+        description = _string(desc_node, source) if desc_node is not None else None
+        req = fields.get("required")
+        req_text = node_text(req, source) if req is not None else "false"
+        if not name or req_text not in ("true", "false") or (
+            desc_node is not None and description is None
+        ):
+            return None
+        out.append(param(name, None, required=req_text == "true", description=description))
+    return out
+
+
+def _entry(
+    obj: Node,
+    source: bytes,
+    kind: tuple[str, str],
+    array_key: str,
+    handler: tuple[str | None, int | None],
+    input_schema: SchemaReader,
+) -> Emit | None:
+    """One tool / resource / prompt object of a list handler's returned array."""
+    fields = _pairs(obj, source)
+    params: list[Parameter] | None
+    if kind == RESOURCE:
+        template = array_key == "resourceTemplates"
+        name = _literal_string(fields.get("uriTemplate" if template else "uri"), source)
+        # A fixed resource's URI is literal, braces and all: it has no variables.
+        params = (uri_template_params(name) if name else None) if template else []
+    else:
+        name = _literal_string(fields.get("name"), source)
+        if kind == TOOL:
+            schema = _unparen(fields.get("inputSchema"))
+            params = input_schema(schema) if schema is not None and schema.type == "object" else None
+        else:
+            params = _prompt_arguments(fields.get("arguments"), source)
     if not name:
-        return None  # a computed name: the tool exists, but its name is unknown
-    schema = _unparen(fields.get("inputSchema"))
-    params: list[Parameter] | None = (
-        input_schema(schema) if schema is not None and schema.type == "object" else None
-    )
-    return tool_emit(
+        return None  # a computed name: the entry exists, but its name is unknown
+    return mcp_emit(
         obj,
         source,
+        kind=kind,
         endpoint=name,
         framework="typescript-mcp",
-        handler=handler,
-        handler_line=handler_line,
+        handler=handler[0],
+        handler_line=handler[1],
         description=_string(fields.get("description"), source),
         params=params,
         node_type=None,

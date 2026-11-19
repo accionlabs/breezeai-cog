@@ -374,3 +374,179 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [SEARCH, 
 function other(SHADOWED: unknown) { return SHADOWED; }
 """
     assert set(_tools(analyze_files({"src/index.ts": src}))) == {"kept"}
+
+
+# ── Resources and prompts ─────────────────────────────────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    for s in found:
+        assert s.name == s.endpoint and s.framework == "typescript-mcp"
+    return {s.endpoint: s for s in found}
+
+
+TS_RESOURCES = """
+import { McpServer, ResourceTemplate as Tpl } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({ name: "res", version: "1.0.0" });
+
+server.resource("config", "config://app", async (uri) => ({ contents: [] }));
+
+server.resource("user", new Tpl("users://{id}", { list: undefined }),
+  { description: "A user" }, readUser);
+
+server.registerResource("logs", "file:///logs/app.log",
+  { title: "Logs", description: "App log", mimeType: "text/plain" }, async () => ({ contents: [] }));
+
+server.registerResource("search", new Tpl("search://{?q}", { list: undefined }), {}, readSearch);
+
+server.registerResource("computed", `cfg://${env}`, {}, async () => ({ contents: [] }));
+
+function readUser() { return { contents: [] }; }
+function readSearch() { return { contents: [] }; }
+"""
+
+
+def test_typescript_resources_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"srv.ts": TS_RESOURCES}), "mcp_resource")
+    assert set(resources) == {"config://app", "users://{id}", "file:///logs/app.log", "search://{?q}"}
+    config = resources["config://app"]
+    assert (config.method, config.params, config.description, config.handler) == (
+        "RESOURCE", [], None, None)
+    assert config.handlerLine == 6 and config.startLine == 6
+    user = resources["users://{id}"]
+    assert (user.description, user.handler, user.handlerLine) == ("A user", "readUser", 18)
+    assert _params(user) == [("id", "string", True, None, None)]
+    assert resources["file:///logs/app.log"].description == "App log"
+    assert resources["search://{?q}"].params is None
+
+
+TS_PROMPTS = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+const server = new McpServer({ name: "prompts", version: "1.0.0" });
+
+server.prompt("greet", async () => ({ messages: [] }));
+
+server.prompt("review", "Review code",
+  { code: z.string().describe("The code"), focus: z.string().optional() },
+  async ({ code }) => ({ messages: [] }));
+
+server.registerPrompt("explain",
+  { title: "Explain", description: "Explain a topic", argsSchema: { topic: z.string() } },
+  explainHandler);
+
+server.registerPrompt("shaped", { argsSchema: shape }, async () => ({ messages: [] }));
+
+server.prompt(promptName, async () => ({ messages: [] }));
+
+function explainHandler() { return { messages: [] }; }
+"""
+
+
+def test_typescript_prompts_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"srv.ts": TS_PROMPTS}), "mcp_prompt")
+    assert set(prompts) == {"greet", "review", "explain", "shaped"}
+    assert prompts["greet"].params == [] and prompts["greet"].method == "PROMPT"
+    review = prompts["review"]
+    assert review.description == "Review code"
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("focus", None, False, None, None),
+    ]
+    explain = prompts["explain"]
+    assert (explain.description, explain.handler, explain.handlerLine) == (
+        "Explain a topic", "explainHandler", 21)
+    assert _params(explain) == [("topic", None, True, None, None)]
+    assert prompts["shaped"].params is None  # a variable shape: unknown
+
+
+def test_typescript_resource_and_prompt_look_alikes(analyze_files) -> None:
+    """Not an McpServer, or a ResourceTemplate from elsewhere: no record."""
+    files = {
+        "other.ts": """
+import { Router } from "express";
+const router = new Router();
+router.resource("users", "users://x", async () => ({}));
+router.prompt("p", async () => ({}));
+""",
+        "tpl.ts": """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ResourceTemplate } from "./my-templates";
+const server = new McpServer({ name: "x", version: "1" });
+server.resource("user", new ResourceTemplate("users://{id}", { list: undefined }), async () => ({}));
+""",
+    }
+    statements = analyze_files(files)
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+TS_LOWLEVEL_RESOURCES = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ReadResourceRequestSchema,
+  ListPromptsRequestSchema, GetPromptRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+
+const server = new Server({ name: "x", version: "1" }, { capabilities: {} });
+
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [
+    { uri: "console://logs", name: "Logs", description: "Console" },
+    ...extra.map((n) => ({ uri: `shot://${n}`, name: n })),
+    { uri: dynamicUri, name: "dyn" },
+  ],
+}));
+
+server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+  return { resourceTemplates: [{ uriTemplate: "test://static/{id}", name: "Static" }] };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, readResource);
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+  prompts: [
+    { name: "simple", description: "No arguments" },
+    { name: "complex", arguments: [
+      { name: "temperature", description: "Temperature", required: true },
+      { name: "style" },
+    ] },
+    { name: "dynamic", arguments: ARGS },
+  ],
+}));
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => ({ messages: [] }));
+
+function readResource() { return { contents: [] }; }
+"""
+
+
+def test_typescript_lowlevel_resources_and_prompts_with_no_tool(analyze_files) -> None:
+    statements = analyze_files({"srv.ts": TS_LOWLEVEL_RESOURCES})
+    resources = _of(statements, "mcp_resource")
+    assert set(resources) == {"console://logs", "test://static/{id}"}
+    logs = resources["console://logs"]
+    assert (logs.description, logs.handler, logs.handlerLine, logs.params) == (
+        "Console", "readResource", 37, [])
+    assert _params(resources["test://static/{id}"]) == [("id", "string", True, None, None)]
+    assert resources["test://static/{id}"].handler == "readResource"
+    prompts = _of(statements, "mcp_prompt")
+    assert set(prompts) == {"simple", "complex", "dynamic"}
+    assert prompts["simple"].params == [] and prompts["simple"].handlerLine == 35
+    assert _params(prompts["complex"]) == [
+        ("temperature", None, True, None, "Temperature"),
+        ("style", None, False, None, None),
+    ]
+    assert prompts["dynamic"].params is None
+
+
+def test_typescript_lowlevel_resource_schema_from_elsewhere_is_not_read(analyze_files) -> None:
+    src = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListResourcesRequestSchema } from "./schemas";
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ uri: "a://b", name: "b" }] }));
+"""
+    assert not _of(analyze_files({"srv.ts": src}), "mcp_resource")

@@ -639,3 +639,171 @@ def test_fastmcp_server_in_another_module_for_any_jobs(capture_mcp_tools, jobs) 
     tools = capture_mcp_tools(files, jobs)
     assert set(tools) == {"hello"}
     assert tools["hello"]["framework"] == "fastmcp"
+
+
+# ── Resources and prompts (`@<server>.resource` / `@<server>.prompt`) ────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    method = {"mcp_resource": "RESOURCE", "mcp_prompt": "PROMPT"}[semantic_type]
+    for s in found:
+        assert s.method == method and s.name == s.endpoint and s.routeKind is None
+    return {s.endpoint: s for s in found}
+
+
+RESOURCES_ONLY = '''
+from fastmcp import FastMCP
+
+mcp = FastMCP("docs")
+
+
+@mcp.resource("config://app", description="App configuration")
+def config() -> str:
+    return "{}"
+
+
+@mcp.resource(uri="users://{user_id}/profile")
+def profile(user_id: str) -> str:
+    """A user's profile."""
+    return user_id
+
+
+@mcp.resource("search://{?q}")
+def search(q: str) -> str:
+    return q
+
+
+@mcp.resource(URI)
+def computed() -> str:
+    return ""
+
+
+@mcp.resource("off://x", enabled=False)
+def off() -> str:
+    return ""
+'''
+
+
+def test_resources_in_a_file_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"srv.py": RESOURCES_ONLY}), "mcp_resource")
+    assert set(resources) == {"config://app", "users://{user_id}/profile", "search://{?q}"}
+    config = resources["config://app"]
+    assert (config.framework, config.description, config.handler, config.handlerLine) == (
+        "fastmcp", "App configuration", "config", 8)
+    assert config.params == [] and config.nodeType == "synthetic" and config.startLine == 7
+    profile = resources["users://{user_id}/profile"]
+    assert profile.description == "A user's profile."  # the docstring, as for a tool
+    assert _params(profile) == [("user_id", "string", True, None, None)]
+    # An RFC 6570 operator: what the template accepts is not a list of required strings.
+    assert resources["search://{?q}"].params is None
+
+
+PROMPTS_ONLY = '''
+from mcp.server.fastmcp import FastMCP
+
+server = FastMCP("prompts")
+
+
+@server.prompt()
+def review_code(code: str, focus: str = "bugs") -> str:
+    """Review a piece of code."""
+    return code
+
+
+@server.prompt(name="Explain", description="Explain a concept")
+def explain(topic: str) -> str:
+    return topic
+
+
+@server.prompt("short")
+def short_name() -> str:
+    return ""
+
+
+@server.prompt(name=PROMPT_NAME)
+def computed() -> str:
+    return ""
+'''
+
+
+def test_prompts_in_a_file_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"srv.py": PROMPTS_ONLY}), "mcp_prompt")
+    assert set(prompts) == {"review_code", "Explain", "short"}
+    review = prompts["review_code"]
+    assert (review.framework, review.description, review.handler, review.handlerLine) == (
+        "python-mcp", "Review a piece of code.", "review_code", 8)
+    assert _params(review) == [
+        ("code", "str", True, None, None),
+        ("focus", "str", False, '"bugs"', None),
+    ]
+    assert prompts["Explain"].description == "Explain a concept"
+    assert prompts["short"].params == []
+
+
+def test_tool_resource_and_prompt_of_one_server(analyze_files) -> None:
+    src = '''
+from fastmcp import FastMCP
+
+mcp = FastMCP("all")
+
+
+@mcp.tool()
+@mcp.resource("data://one")
+@mcp.prompt()
+def one() -> str:
+    return ""
+'''
+    statements = analyze_files({"srv.py": src})
+    kinds = sorted((s.semanticType, s.endpoint) for s in statements if s.semanticType)
+    assert kinds == [("mcp_prompt", "one"), ("mcp_resource", "data://one"), ("mcp_tool", "one")]
+    ids = [s.id for s in statements]
+    assert len(ids) == len(set(ids))
+
+
+def test_resource_and_prompt_look_alikes(analyze_files) -> None:
+    """Not on a proven server: an agent, a CLI's prompt, a local class named FastMCP."""
+    files = {
+        "agent.py": '''
+from pydantic_ai import Agent
+
+agent = Agent("openai:gpt-4o")
+
+
+@agent.resource("x://y")
+def r() -> str:
+    return ""
+
+
+@agent.prompt()
+def p() -> str:
+    return ""
+''',
+        "cli.py": '''
+import click
+
+
+@click.prompt("Name")
+def ask() -> str:
+    return ""
+''',
+        "shim.py": '''
+class FastMCP:
+    pass
+
+
+mcp = FastMCP()
+
+
+@mcp.resource("x://shim")
+def r() -> str:
+    return ""
+
+
+@mcp.prompt()
+def p() -> str:
+    return ""
+''',
+    }
+    statements = analyze_files(files)
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
