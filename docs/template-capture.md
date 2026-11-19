@@ -61,10 +61,11 @@ applies to the extensions above.
 | `.tsx` `.jsx` | `typescript` / `javascript` | JSX is code — the markup lives inside a code file |
 | `.svc` | `svc`, `framework=wcf` | A `<%@ ServiceHost %>` directive declares a *service*, not a view |
 | `.asmx` | `asmx`, `framework=asmx` | A `<%@ WebService %>` directive — same reasoning |
+| `.ashx` | `ashx`, `framework=aspnet-webforms` | A `<%@ WebHandler %>` directive — a handler's address, same reasoning |
 | `.xml`, `web.config`, `.csproj`, `.sln` | `config` | XML tags, but configuration rather than a view |
 
-`.svc` and `.asmx` are the surprising pair: they carry ASP.NET `<%@ %>` directives exactly
-like `.aspx` does, but they describe service endpoints, so they stay in the graph.
+`.svc`, `.asmx` and `.ashx` are the surprising ones: they carry ASP.NET `<%@ %>` directives exactly
+like `.aspx` does, but they describe service and handler endpoints, so they stay in the graph.
 
 **Never captured, flag or no flag** — these have no parser at all, so they are reported as
 `unsupported` in either mode:

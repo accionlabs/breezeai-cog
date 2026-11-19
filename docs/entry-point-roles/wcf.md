@@ -1,6 +1,6 @@
 # WCF and ASMX — entry-point roles
 
-Parsers: `src/breezeai_cog/parsers/csharp_wcf/` (C#), `vb_wcf/` (VB), `dotnet_servicehost/` (`.svc` / `.asmx` markup); shared rules in `wcf_common.py` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_wcf.py`, `tests/unit/test_vb_wcf.py`
+Parsers: `src/breezeai_cog/parsers/csharp_wcf/` (C#), `vb_wcf/` (VB), `dotnet_servicehost/` (`.svc` / `.asmx` markup); shared rules in `wcf_common.py`, host files read once by the repo index (`dotnet_hosts.py`) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_wcf.py`, `tests/unit/test_vb_wcf.py`
 
 VB services get the same records (`<ServiceContract>`, `<OperationContract>`, `<WebGet>`, `<WebInvoke>`,
 `<WebMethod>`), with three differences:

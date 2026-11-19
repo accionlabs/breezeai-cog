@@ -16,20 +16,15 @@ not reachable by a known URL, so it gets no record.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
 
 from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
-from ..dotnet_common import code_behind_host
+from ..dotnet_hosts import host_files
 from ..emits import Emit
 from .config_handlers import config_handlers
 
-_WEBHANDLER_CLASS_RE = re.compile(
-    rb'<%@\s*WebHandler\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE
-)
 #: Bases that make a class a generic handler, and the method IIS calls on each.
 _HANDLER_BASES = {
     "IHttpHandler": "ProcessRequest",
@@ -42,17 +37,17 @@ _ENTRY_METHODS = ("ProcessRequestAsync", "ProcessRequest", "BeginProcessRequest"
 
 
 def detect_generic_handlers(
-    anchor: Node, path: str, record: FileRecord, repo_root: object
+    anchor: Node, path: str, record: FileRecord, index: object
 ) -> list[Emit]:
     """One ``route`` per generic-handler class whose ``.ashx`` is found. The record is built from
     the class and method records, so ``anchor`` (the file's root) only carries the emit; every
     span field is given explicitly."""
-    root = repo_root if isinstance(repo_root, Path) else None
+    hosts = host_files(index)
     found: list[Emit] = []
     for cls in record.classes:
         bases = [b.split("<", 1)[0].rsplit(".", 1)[-1] for b in [cls.extends or "", *cls.implements]]
         entry = next((_HANDLER_BASES[b] for b in bases if b in _HANDLER_BASES), None)
-        host = code_behind_host(path, root, cls.name, ".ashx", _WEBHANDLER_CLASS_RE) \
+        host = hosts.code_behind_host(path, cls.name, ".ashx") \
             if entry is not None else None
         if entry is None or host is None:
             continue
@@ -130,7 +125,7 @@ def detect_registered_handlers(
 def _detect(dc: DetectContext) -> Detection | None:
     found: list[Emit] = []
     if dc.path.lower().endswith(".ashx.cs") and b"Handler" in dc.source:
-        found += detect_generic_handlers(dc.root, dc.path, dc.record, dc.ctx.repo_root)
+        found += detect_generic_handlers(dc.root, dc.path, dc.record, dc.ctx.resolution_index)
     found += detect_registered_handlers(dc.root, dc.path, dc.record, dc.ctx.resolution_index)
     return Detection(found, label="aspnet-webforms") if found else None
 
