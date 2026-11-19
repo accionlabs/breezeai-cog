@@ -470,6 +470,77 @@ def test_an_operator_is_a_method_named_after_its_token(tmp_path) -> None:
     assert fields == ["Public Amount As Decimal"]
 
 
+def test_a_declare_statement_is_a_shared_method_with_its_signature(tmp_path) -> None:
+    # The grammar has no `Declare`: the shadow blanks it and its `Lib … Alias …` clause, so each is a
+    # bodiless method named as declared (what callers use), Shared by definition.
+    src = (b"Public Class NativeMethods\n"
+           b"    Private Declare Function MessageBox Lib \"user32\" Alias \"MessageBoxA\" "
+           b"(ByVal h As Integer, ByVal t As String) As Integer\n"
+           b"    Private Declare Function F1 Lib \"user32\" (ByVal h As Integer) As Integer\n"
+           b"    Private Declare Sub S1 Lib \"kernel32\" Alias \"Sleep\" (ByVal ms As Integer)\n"
+           b"    Declare Unicode Sub Beep Lib \"kernel32\" (ByVal f As Integer, ByVal d As Integer)\n"
+           b"    Public Sub After()\n        Audit()\n    End Sub\nEnd Class\n")
+    rec = _vb(tmp_path, src)
+    assert [(f.name, f.isStatic, [(p.name, p.type) for p in f.params], f.returnType)
+            for f in sorted(rec.functions, key=lambda f: f.startLine)] == [
+        ("MessageBox", True, [("h", "Integer"), ("t", "String")], "Integer"),
+        ("F1", True, [("h", "Integer")], "Integer"),
+        ("S1", True, [("ms", "Integer")], None),
+        ("Beep", True, [("f", "Integer"), ("d", "Integer")], None),
+        ("After", False, [], None),
+    ]
+
+
+def test_a_declare_never_takes_the_members_after_it(tmp_path) -> None:
+    # A multi-line `Declare` followed by a nested type, constants and a method: the main parse
+    # never sees the `Declare` (its own parse reads it), so nothing after it becomes its body.
+    src = (b"Public Class Class1\n"
+           b"  Declare Function GetWindowRect Lib \"user32\" (\n"
+           b"      ByVal hwnd As Integer, ByRef lpRect As RECT) As Integer\n\n"
+           b"  Public Structure RECT\n      Public Left As Integer\n  End Structure\n\n"
+           b"  Const ERROR_INVALID As Long = 1400\n\n"
+           b"  Public Sub OnErrorDemo()\n      Dim x As Integer = 1\n  End Sub\nEnd Class\n"
+           b"Public Module M\n    <Obsolete> Private Declare Sub Sleep Lib \"kernel32\" (ByVal ms As Integer)\n"
+           b"End Module\n")
+    rec = _vb(tmp_path, src)
+    got = {f.id: (f.startLine, f.endLine, [p.name for p in f.params], f.returnType, f.isStatic,
+                  [d.name for d in f.decorators]) for f in rec.functions}
+    assert got == {
+        "N.vb#Class1#GetWindowRect@2": (2, 3, ["hwnd", "lpRect"], "Integer", True, []),
+        "N.vb#Class1#OnErrorDemo@11": (11, 13, [], None, False, []),
+        "N.vb#M#Sleep@16": (16, 16, ["ms"], None, True, ["Obsolete"]),
+    }
+    assert {c.id for c in rec.classes} == {"N.vb#Class1", "N.vb#Class1.RECT", "N.vb#M"}
+
+
+def test_a_declare_header_runs_to_its_closing_parenthesis(tmp_path) -> None:
+    # `) As Integer` alone on the last line, after a line with no trailing comma.
+    src = (b"Public Class Win32\n"
+           b"    Declare Auto Function MessageBox Lib \"user32.dll\" (\n"
+           b"        ByVal hWnd As Integer, ByVal txt As String,\n"
+           b"        ByVal caption As String, ByVal Type As Integer\n"
+           b"        ) As Integer\nEnd Class\n")
+    (fn,) = _vb(tmp_path, src).functions
+    assert (fn.startLine, fn.endLine, [p.name for p in fn.params], fn.returnType) == (
+        2, 5, ["hWnd", "txt", "caption", "Type"], "Integer")
+
+
+def test_a_declare_belongs_to_its_own_type_when_two_share_a_name(tmp_path) -> None:
+    src = (b"Module Module1\n    Sub A()\n    End Sub\nEnd Module\n"
+           b"Module Module1\n    Declare Sub DllSub Lib \"SomeLib.dll\" ()\nEnd Module\n")
+    rec = _vb(tmp_path, src)
+    second = next(c for c in rec.classes if c.startLine == 5)
+    dll = next(f for f in rec.functions if f.name == "DllSub")
+    assert dll.parentId == second.id != next(c.id for c in rec.classes if c.startLine == 1)
+
+
+def test_declare_in_a_string_or_comment_is_left_alone() -> None:
+    from breezeai_cog.parsers.vb.source import declare_spans
+
+    src = b'Dim s = "Declare Function F Lib ""x"" ()" \' Declare Sub S Lib "k" ()\n'
+    assert declare_spans(src) == []
+
+
 def test_operator_in_a_string_or_comment_is_left_alone() -> None:
     from breezeai_cog.parsers.vb.source import blank_operators
 

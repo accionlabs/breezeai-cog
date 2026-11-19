@@ -141,20 +141,23 @@ _PARAM_GAP = re.compile(rb"""(?:[ \t\r\n_]|'[^\n]*|<(?:[^<>"\n]|"(?:[^"]|"")*")*
 _RETURN_AS = re.compile(rb"(?:[ \t\r\n]|_[ \t]*\r?\n)*As(?:[ \t\r\n]|_[ \t]*\r?\n)+", re.IGNORECASE)
 
 
-def _directly_after(ret: Node, params_node: Node, source: bytes) -> bool:
+def _directly_after(ret: Node, params_node: Node, source: bytes, parsed: bytes | None = None) -> bool:
     """Whether the return type ``ret`` follows the parameter list's ``)`` with only `` As ``
-    between, as the grammar saw it."""
-    return _RETURN_AS.fullmatch(shadow(source)[params_node.end_byte:ret.start_byte]) is not None
+    between, as the grammar saw it (``parsed``: the text a separate parse read, default the
+    shadow)."""
+    text = parsed if parsed is not None else shadow(source)
+    return _RETURN_AS.fullmatch(text[params_node.end_byte:ret.start_byte]) is not None
 
 
-def params_broken(params_node: Node | None, source: bytes) -> bool:
+def params_broken(params_node: Node | None, source: bytes, parsed: bytes | None = None) -> bool:
     """Whether the grammar lost text between a parameter list's parameters — anything but the
     separators (``<FromQuery> toY As String`` reads as the keyword ``To`` and falls into an
     ``ERROR`` between them). Its parameters are then not read: none rather than some. An error
     inside one parameter (``<[In], Out> ByVal a() As T``) loses no parameter and is not counted."""
     if params_node is None:
         return False
-    source = shadow(source)  # the gaps as the grammar saw them (a blanked ``(Of …)`` is not lost)
+    # the gaps as the grammar saw them (a blanked ``(Of …)`` is not lost)
+    source = parsed if parsed is not None else shadow(source)
     params = [c for c in params_node.named_children if c.type == "parameter"]
     kids = params_node.children
     pos = kids[0].end_byte if kids and kids[0].type == "(" else params_node.start_byte
@@ -171,9 +174,11 @@ def params_broken(params_node: Node | None, source: bytes) -> bool:
     return False
 
 
-def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
+def extract_params(
+    params_node: Node | None, source: bytes, parsed: bytes | None = None,
+) -> list[Parameter]:
     out: list[Parameter] = []
-    if params_node is None or params_broken(params_node, source):
+    if params_node is None or params_broken(params_node, source, parsed):
         return out
     for p in params_node.named_children:
         if p.type != "parameter":
@@ -221,6 +226,12 @@ _HEADER_NAME = re.compile(rb"\b(?:Function|Sub)[ \t]+(?:\[([^\]\n]+)\]|([A-Za-z_
 #: ``Operator`` right before a method's name: an operator declaration the shadow reads as a
 #: function (:func:`~.source.blank_operators`), named ``Operator +``, ``Operator CType``.
 _OPERATOR_BEFORE = re.compile(rb"\bOperator[ \t]+\Z", re.IGNORECASE)
+
+
+#: ``Declare`` before a method's name: a ``Declare`` statement its own parse reads as a bodiless
+#: method (:func:`~.source.parse_declares`).
+_DECLARE_BEFORE = re.compile(
+    rb"\bDeclare(?:[ \t]+(?:Ansi|Unicode|Auto))?[ \t]+(?:Function|Sub)\b", re.IGNORECASE)
 
 
 def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
@@ -301,7 +312,10 @@ def build_method(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    parsed: bytes | None = None,
 ) -> tuple[Function, list[Statement]]:
+    """A method or constructor. ``parsed`` is the text a separate parse read (a ``Declare``,
+    :func:`~.source.parse_declares`); by default the file's shadow."""
     is_ctor = node.type == "constructor_declaration"
     declared, header_broken = method_name(node, source)
     name = declared or ("New" if is_ctor else "<anonymous>")
@@ -309,11 +323,16 @@ def build_method(
     # A nested type's methods carry its dotted owner (``Outer.Inner``) in their id.
     fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
+    name_node = node.child_by_field_name("name")
+    line_start = source.rfind(b"\n", 0, node.start_byte) + 1  # a bare `Declare` is before the node
+    if (parsed is not None and name_node is not None
+            and _DECLARE_BEFORE.search(source, line_start, name_node.start_byte)):
+        is_static = True  # a `Declare` is Shared by definition, as C#'s `static extern`
     # A broken header's parameter list and return type are read from the wrong text: empty.
     params_node = None if header_broken else node.child_by_field_name("parameters")
     ret = None if header_broken or _is_sub(node, source) else node.child_by_field_name("return_type")
-    if params_node is not None and params_broken(params_node, source):
-        if ret is not None and not _directly_after(ret, params_node, source):
+    if params_node is not None and params_broken(params_node, source, parsed):
+        if ret is not None and not _directly_after(ret, params_node, source, parsed):
             ret = None  # the list closed early: the "return type" may be one of its parameters
         params_node = None
     fn = Function(
@@ -324,7 +343,7 @@ def build_method(
         type="constructor" if is_ctor else "method",
         visibility=visibility,
         isStatic=is_static,
-        params=extract_params(params_node, source),
+        params=extract_params(params_node, source, parsed),
         decorators=extract_attributes(node, source),
         returnType=type_text(ret, source) if ret is not None else None,
         startLine=start,

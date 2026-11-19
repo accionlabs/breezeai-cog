@@ -56,6 +56,15 @@ original source. A method's own type parameters (``Function FromAsync(Of T1, T2)
 otherwise as its parameter list) are blanked too; VB records no generics of a method. A type's
 generic parameters (``Class Repo(Of K, V)``) and generic expressions (``New List(Of T)()``
 without ``As``) parse as written.
+
+Three more forms the grammar lacks are read through the shadow too: an ``Optional`` parameter
+(``Optional ByVal n`` has ``ByVal`` read as the name: :func:`blank_optional_modifiers` blanks the
+keywords), an operator (``Operator +(…)`` and its body read as fields: :func:`blank_operators`
+reads it as a ``Function``), and a ``Declare`` statement. A ``Declare`` is a bodiless header, and
+the grammar takes the lines after a bodiless header for its body, swallowing the members that
+follow. So the shadow blanks each ``Declare`` statement whole, and :func:`parse_declares` reads
+them in a parse of their own: per type, the type's opener and ``End`` lines around its headers
+with ``Declare [charset]`` and ``Lib "…" [Alias "…"]`` blanked.
 """
 
 from __future__ import annotations
@@ -260,6 +269,73 @@ def blank_operators(source: bytes) -> bytes:
     return bytes(out) if out is not None else source
 
 
+#: A string, a comment, or a ``Declare`` statement's header: ``Declare`` with its charset (group 1),
+#: then ``Function`` / ``Sub`` and the name, then ``Lib "…"`` with an optional ``Alias "…"``
+#: (group 2).
+_DECLARE_SCAN = re.compile(
+    rb'"(?:[^"]|"")*"|\'[^\n]*|\bREM\b[^\n]*'
+    rb"|\b(Declare(?:[ \t]+(?:Ansi|Unicode|Auto))?)[ \t]+(?:Function|Sub)[ \t]+[\w\[\]]+"
+    rb'([ \t]+Lib[ \t]+"[^"\n]*"(?:[ \t]+Alias[ \t]+"[^"\n]*")?)',
+    re.IGNORECASE,
+)
+
+
+class DeclareSpan(NamedTuple):
+    """One ``Declare`` statement: its lines (``start``..``end``, the attribute lines right above it
+    included) and the keyword spans its parse blanks (``Declare [charset]``, ``Lib … [Alias …]``)."""
+
+    start: int
+    end: int
+    blanks: tuple[tuple[int, int], tuple[int, int]]
+
+
+def _header_end(source: bytes, pos: int) -> int:
+    """The end of the header line that ``pos`` is in: past its parameter list's ``)`` (the list
+    may run over several lines) and any `` _`` continuation."""
+    depth = 0
+    in_string = False
+    i = pos
+    while i < len(source):
+        ch = source[i]
+        if ch == 0x22:
+            in_string = not in_string
+        elif in_string:
+            pass
+        elif ch == 0x27:  # a comment runs to the end of its line
+            nl = source.find(b"\n", i)
+            i = len(source) if nl == -1 else nl
+            continue
+        elif ch == 0x28:
+            depth += 1
+        elif ch == 0x29:
+            depth -= 1
+        elif ch == 0x0A and depth <= 0 and not _CONTINUES.search(
+                source, source.rfind(b"\n", 0, i) + 1, i):
+            return i
+        i += 1
+    return len(source)
+
+
+def declare_spans(source: bytes) -> list[DeclareSpan]:
+    """Every ``Declare`` statement outside strings and comments, with its header's continuation
+    lines (`` _``, or a line ending in ``,`` / ``(``)."""
+    if not re.search(rb"(?i)declare", source):
+        return []
+    spans: list[DeclareSpan] = []
+    for m in _DECLARE_SCAN.finditer(source):
+        if m.start(1) == -1:
+            continue
+        start = source.rfind(b"\n", 0, m.start(1)) + 1
+        while start > 0:
+            above = source.rfind(b"\n", 0, start - 1) + 1
+            if not _is_attr_line(source[above:start - 1]):
+                break
+            start = above
+        end = _header_end(source, m.end(2))
+        spans.append(DeclareSpan(start, end, ((m.start(1), m.end(1)), (m.start(2), m.end(2)))))
+    return spans
+
+
 #: One implemented member, as written: ``IOrders.Get``, ``IRepository(Of T).GetAll``.
 _OF_ARGS = rb"[ \t]*\([ \t]*Of\b(?:[^()\n]|\([^()\n]*\))*\)"  # ``(Of K, List(Of V))``: one nested level
 _MEMBER = rb"[\w\[\]]+(?:" + _OF_ARGS + rb")?(?:\.[\w\[\]]+(?:" + _OF_ARGS + rb")?)*"
@@ -443,8 +519,11 @@ def _blank(out: bytearray, start: int, end: int) -> None:
 
 
 class _Layout(NamedTuple):
-    joined: bytes  # the attribute-joined source, ``Await`` blanked
+    joined: bytes  # the attribute-joined source, ``Await`` blanked, ``Declare`` statements blanked
     nested: list[TypeBlock]  # the types inside another type (empty: nothing to do)
+    with_declares: bytes  # ``joined`` before its ``Declare`` statements were blanked
+    declares: list[DeclareSpan]
+    types: list[TypeBlock]  # every type
 
 
 @lru_cache(maxsize=8)
@@ -454,7 +533,16 @@ def _layout(source: bytes) -> _Layout:
     # Types are found on the original: a joined attribute line no longer ends in `>`, and a nested
     # type must be blanked from its first attribute line on (the shadows keep every line).
     blocks = _type_blocks(source)
-    return _Layout(joined, [b for b in blocks or [] if b.depth > 0])
+    # A `Declare` is read by its own parse (parse_declares): the grammar has no `Declare`, and the
+    # bodiless header it would see takes the lines after it for a body.
+    declares = declare_spans(source)
+    if declares:
+        out = bytearray(joined)
+        for d in declares:
+            _blank(out, d.start, d.end)
+        return _Layout(bytes(out), [b for b in blocks or [] if b.depth > 0], joined, declares,
+                       blocks or [])
+    return _Layout(joined, [b for b in blocks or [] if b.depth > 0], joined, [], blocks or [])
 
 
 def shadow(source: bytes) -> bytes:
@@ -518,3 +606,52 @@ def parse_nested(source: bytes, timeout_micros: int = 0) -> list[NestedLevel]:
         levels.append(NestedLevel(tree.root_node,
                                   [b for b in layout.nested if b.depth == depth]))
     return levels
+
+
+class DeclareGroup(NamedTuple):
+    """The parse of one type's ``Declare`` statements: the type's opener and ``End`` lines and its
+    ``Declare`` headers (keywords blanked), everything else blank, at their real offsets."""
+
+    name: str  # the type's dotted name
+    line: int  # its opener line (1-based): the one Class record it is, whatever its name
+    tree: Tree
+    text: bytes  # what the grammar parsed
+
+
+def _opener_line(source: bytes, block: TypeBlock) -> tuple[int, int]:
+    pos = block.start
+    while pos < block.end:
+        nl = source.find(b"\n", pos)
+        nl = block.end if nl == -1 or nl > block.end else nl
+        line = source[pos:nl]
+        if _TYPE_OPEN.match(line[_leading_blocks(line)[1]:]):
+            return pos, nl
+        pos = nl + 1
+    return block.start, block.start
+
+
+def parse_declares(source: bytes, timeout_micros: int = 0) -> list[DeclareGroup]:
+    """One parse per type holding ``Declare`` statements: the type's opener and ``End`` lines
+    around its headers, each read as a bodiless ``Function`` / ``Sub`` (``Declare [charset]`` and
+    ``Lib "…" [Alias "…"]`` blanked). Empty when the file has none, or a ``Declare`` is in no type."""
+    layout = _layout(source)
+    groups: dict[TypeBlock, list[DeclareSpan]] = {}
+    for d in layout.declares:
+        owner = max((b for b in layout.types if b.start <= d.start and d.end <= b.end),
+                    key=lambda b: b.start, default=None)
+        if owner is not None:
+            groups.setdefault(owner, []).append(d)
+    out: list[DeclareGroup] = []
+    for block, spans in groups.items():
+        text = bytearray(re.sub(rb"[^\r\n]", b" ", source))
+        open_start, open_end = _opener_line(source, block)
+        end_start = source.rfind(b"\n", 0, block.end) + 1
+        for a, b in ((open_start, open_end), (end_start, block.end),
+                     *((d.start, d.end) for d in spans)):
+            text[a:b] = layout.with_declares[a:b]
+        for d in spans:
+            for a, b in d.blanks:
+                _blank(text, a, b)
+        out.append(DeclareGroup(block.name, source.count(b"\n", 0, open_start) + 1,
+                                parse_source("vb", bytes(text), timeout_micros), bytes(text)))
+    return out
