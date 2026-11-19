@@ -12,7 +12,7 @@ from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, method_types, noop_resolver
 from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import extract_statements, is_anonymous_body
 
 
 def modifiers_node(node: Node) -> Node | None:
@@ -79,6 +79,7 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, scope: Mapping[str, str | None] | None = None,
+    *, through: tuple[str | None, ...] | None = None, own_anonymous: bool = False,
 ) -> list[Call]:
     """The calls in a method body, one per name in order of first appearance. ``owner`` is the
     simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
@@ -86,7 +87,11 @@ def _calls(
     variable types (``method_types``).
 
     A name's ``path`` comes from the first of its calls that resolves: in ``config.getString(k)``
-    then ``JsonUtil.getString(o, k)`` the second, in-repo call gives ``getString`` its file."""
+    then ``JsonUtil.getString(o, k)`` the second, in-repo call gives ``getString`` its file.
+
+    ``through``: the body is a method of an anonymous or local class (each enclosing such
+    class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
+    calls in an anonymous class body are that class's methods' own, so they are left out."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -116,6 +121,8 @@ def _calls(
         # first, None for a local class), `this` and a bare name may mean that class's own
         # members, so the call is not credited to the enclosing class's own methods.
         for child in node.named_children:
+            if own_anonymous and is_anonymous_body(child):
+                continue
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
@@ -137,7 +144,7 @@ def _calls(
                           *(through or ()))
             visit(child, nested)
 
-    visit(body, None)
+    visit(body, through)
     return calls
 
 
@@ -314,9 +321,17 @@ def build_method(
     limit: int,
     resolve: CallResolver = noop_resolver,
     fields: Mapping[str, str | None] | None = None,
+    through: tuple[str | None, ...] | None = None,
+    scope_node: Node | None = None,
+    own_anonymous: bool = False,
 ) -> tuple[Function, list[Statement]]:
     """``fields``: the enclosing class's fields (outer classes' included), for the method's
-    variable types; omitted, its calls use the resolver's file-wide types."""
+    variable types; omitted, its calls use the resolver's file-wide types.
+
+    ``own_anonymous``: anonymous classes in the body are captured as their own Class, so their
+    calls and statements are not this method's. ``through`` and ``scope_node`` are for a method
+    of an anonymous class: the enclosing anonymous or local classes' types (see ``_calls``) and
+    the declaration whose variables its calls see (the named method it is written in)."""
     modifiers = modifiers_node(node)
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
@@ -343,11 +358,13 @@ def build_method(
         startLine=start,
         endLine=end,
         calls=_calls(body, source, resolve, class_name,
-                     None if fields is None else method_scope(node, source, fields)),
+                     None if fields is None else method_scope(scope_node or node, source, fields),
+                     through=through, own_anonymous=own_anonymous),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline lambdas — attribute their statements here
+        skip_anonymous=own_anonymous,
     )
     return fn, statements
 

@@ -47,7 +47,9 @@ def _calls(tmp_path: Path, files: dict[str, str], target: str) -> dict[str, dict
     ctx = ParseContext(path=rel, abs_path=path, source=path.read_bytes(), repo_root=tmp_path,
                        resolution_index=index)
     record = parser.parse_file(ctx)
-    return {f.name: {c.name: c.path for c in f.calls} for f in record.functions}
+    # a method of an anonymous class is keyed by its class: `Svc$1.handle`
+    return {(f"{f.parentId.rsplit('#', 1)[-1]}.{f.name}" if "$" in f.parentId else f.name):
+            {c.name: c.path for c in f.calls} for f in record.functions}
 
 
 def _f(name: str) -> str:
@@ -121,19 +123,20 @@ public class Parent extends LibraryBase { public void fromParent() {} }
 
 def test_outer_this_is_the_named_class(tmp_path: Path) -> None:
     calls = _calls(tmp_path, {"Svc.java": _OUTER_THIS, "Parent.java": _PARENT}, "Svc.java")
-    assert calls["anon"]["own"] == _f("Svc.java")
+    assert calls["Svc$1.handle"] == {"own": _f("Svc.java")}
+    assert "own" not in calls["anon"]  # the anonymous class's call is its method's, not anon()'s
     assert calls["qualified"] == {"own": _f("Svc.java")}
     assert calls["call"] == {"own": _f("Svc.java")}  # an inner class naming its outer class
 
 
 def test_outer_this_reaches_an_in_repo_ancestor(tmp_path: Path) -> None:
     calls = _calls(tmp_path, {"Svc.java": _OUTER_THIS, "Parent.java": _PARENT}, "Svc.java")
-    assert calls["inherited"]["fromParent"] == _f("Parent.java")
+    assert calls["Svc$2.handle"]["fromParent"] == _f("Parent.java")
 
 
 def test_outer_this_with_a_method_from_a_library_base_stays_unresolved(tmp_path: Path) -> None:
     calls = _calls(tmp_path, {"Svc.java": _OUTER_THIS, "Parent.java": _PARENT}, "Svc.java")
-    assert calls["library"]["fromLibrary"] is None
+    assert calls["Svc$3.handle"]["fromLibrary"] is None
 
 
 # --- a field an in-repo base class declares ---------------------------------------------------
@@ -193,24 +196,24 @@ def test_a_local_hides_the_inherited_field(tmp_path: Path) -> None:
 
 def test_inside_an_anonymous_runnable_a_bare_name_is_the_outer_field(tmp_path: Path) -> None:
     calls = _child_calls(tmp_path)
-    assert calls["inRunnable"]["inst"] == _f("Helper.java")
+    assert calls["Child$1.run"]["inst"] == _f("Helper.java")
 
 
 def test_inside_a_framework_handler_the_inherited_field_is_not_resolved(tmp_path: Path) -> None:
     # A framework's handler interface is not known to the Java parser to declare no fields.
     calls = _child_calls(tmp_path)
-    assert calls["inHandler"]["inst"] is None
+    assert calls["Child$2.handle"]["inst"] is None
 
 
 def test_inside_an_anonymous_class_this_field_is_not_the_outer_one(tmp_path: Path) -> None:
     calls = _child_calls(tmp_path)
-    assert calls["thisInHandler"]["inst"] is None
+    assert calls["Child$3.handle"]["inst"] is None
 
 
 def test_inside_an_anonymous_class_of_unknown_type_the_field_is_not_resolved(tmp_path: Path) -> None:
     # `org.lib.Task` may declare a `helper` field of its own
     calls = _child_calls(tmp_path)
-    assert calls["inUnknownAnonymous"]["inst"] is None
+    assert calls["Child$4.go"]["inst"] is None
 
 
 def test_the_nearest_declaring_class_decides(tmp_path: Path) -> None:
@@ -301,9 +304,10 @@ def test_inherited_fields_reach_the_workers_for_any_jobs(tmp_path: Path, jobs: i
     lines = gzip.open(result.out_path, "rt", encoding="utf-8").read().splitlines()
     rec = next(json.loads(line) for line in lines if '"path": "' + _f("web/Child.java") in line
                or f'"path":"{_f("web/Child.java")}"' in line)
-    calls = {f["name"]: {c["name"]: c.get("path") for c in f["calls"]} for f in rec["functions"]}
-    assert calls["direct"] == {"inst": _f("Helper.java")}
-    assert calls["inRunnable"]["inst"] == _f("Helper.java")
+    calls = {f["id"].rsplit("#", 2)[-2] + "." + f["name"]: {c["name"]: c.get("path") for c in f["calls"]}
+             for f in rec["functions"]}
+    assert calls["Child.direct"] == {"inst": _f("Helper.java")}
+    assert calls["Child$1.run"]["inst"] == _f("Helper.java")
 
 
 def test_a_shared_field_type_name_keeps_the_answer_the_file_itself_gives(tmp_path: Path) -> None:

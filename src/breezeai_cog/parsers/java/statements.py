@@ -3,9 +3,12 @@ call detection."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
+from ..detection import text_has_query
 from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -60,17 +63,69 @@ def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
     return extract_annotations(modifiers_node(node), source)
 
 
-def _iter_in_scope(node: Node, descend_all: bool = False):
+#: What an anonymous class body is replaced with in the text of the statement that creates it:
+#: the body is captured as its own Class, so the creating statement keeps only its head.
+ELIDED_BODY = "{ … }"
+
+
+def is_anonymous_body(node: Node) -> bool:
+    """``node`` is the body of an anonymous class (``new T(…) { … }``)."""
+    parent = node.parent
+    return node.type == "class_body" and parent is not None and parent.type == "object_creation_expression"
+
+
+def anonymous_bodies(node: Node) -> list[Node]:
+    """The outermost anonymous class bodies under ``node``, in source order (one nested in
+    another is the outer one's own)."""
+    out: list[Node] = []
+
+    def walk(n: Node) -> None:
+        for child in n.named_children:
+            if is_anonymous_body(child):
+                out.append(child)
+            else:
+                walk(child)
+
+    walk(node)
+    return out
+
+
+def _iter_in_scope(node: Node, descend_all: bool = False, skip_anonymous: bool = False) -> Iterator[Node]:
     """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks
     into inline lambdas, attributing their statements to this function; ``False``
     (file-root / class-body) keeps nested scopes as barriers since they are extracted
-    as their own Function/Class."""
+    as their own Function/Class. ``skip_anonymous``: an anonymous class body is a barrier
+    too (it is extracted as its own Class)."""
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
+        if skip_anonymous and is_anonymous_body(child):
+            continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child, descend_all)
+        yield from _iter_in_scope(child, descend_all, skip_anonymous)
+
+
+def _elide_anonymous(node: Node, source: bytes, records: list[Statement]) -> list[Statement]:
+    """The records of one statement with each anonymous class body in their text replaced by
+    ``ELIDED_BODY``. A raw-SQL classification that came only from the body's text is dropped:
+    that SQL belongs to the anonymous class's own statements."""
+    bodies = [node_text(b, source) for b in anonymous_bodies(node)]
+    if not bodies:
+        return records
+    out: list[Statement] = []
+    for rec in records:
+        text = rec.text
+        for body in bodies:
+            text = text.replace(body, ELIDED_BODY)
+        if text == rec.text:
+            out.append(rec)
+            continue
+        update: dict[str, object] = {"text": text}
+        if rec.semanticType == "query_statement" and not text_has_query(text):
+            update["semanticType"] = None
+        out.append(rec.model_copy(update=update))
+    return out
 
 
 def extract_statements(
@@ -83,12 +138,15 @@ def extract_statements(
     limit: int,
     seen_ids: set[str],
     descend_all: bool = False,
+    skip_anonymous: bool = False,
 ) -> list[Statement]:
+    """``skip_anonymous``: anonymous class bodies are captured as their own Class, so their
+    statements are not walked here and their text is left out of the statement creating them."""
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all):
-        out.extend(
+    for node in _iter_in_scope(body, descend_all, skip_anonymous):
+        records = (
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
@@ -96,4 +154,5 @@ def extract_statements(
                 decorators=_field_decorators(node, source),
             )
         )
+        out.extend(_elide_anonymous(node, source, records) if skip_anonymous else records)
     return out

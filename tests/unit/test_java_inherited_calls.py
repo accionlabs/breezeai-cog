@@ -23,7 +23,9 @@ def _calls(tmp_path: Path, files: dict[str, str], target: str) -> dict[str, dict
     ctx = ParseContext(path=rel, abs_path=path, source=path.read_bytes(), repo_root=tmp_path,
                        resolution_index=index)
     record = parser.parse_file(ctx)
-    return {f.name: {c.name: c.path for c in f.calls} for f in record.functions}
+    # a method of an anonymous class is keyed by its class: `Svc$1.handle`
+    return {(f"{f.parentId.rsplit('#', 1)[-1]}.{f.name}" if "$" in f.parentId else f.name):
+            {c.name: c.path for c in f.calls} for f in record.functions}
 
 
 _BASE = """package com.acme;
@@ -215,7 +217,8 @@ def test_a_call_inside_an_anonymous_class_keeps_the_file_wide_answer(tmp_path: P
                               "Handler.java": _HANDLER}, "Data.java")
     # in the anonymous Handler, `alert` may be its own: it stays credited to this file as before,
     # and `this.log` (the anonymous instance) is not resolved through Data's base class
-    assert calls["d"] == {"alert": f"{_ROOT}/Data.java", "log": None}
+    assert calls["Data$2.run"] == {"alert": f"{_ROOT}/Data.java", "log": None}
+    assert calls["d"] == {}  # d() itself makes no call
 
 
 _MODE = """package com.acme;

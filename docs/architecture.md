@@ -860,6 +860,7 @@ Every record gets an id from the helpers in `emit/ids.py`:
 |---|---|---|
 | File | `path` | `src/com/acme/OrderVerticle.java` |
 | Class | `path#Class` (nested: `path#Outer.Inner`) | `…OrderVerticle.java#OrderVerticle` |
+| Class (Java anonymous) | `path#Outer$1` in source order within the named class (`Outer$1$1` nested); `metadata.anonymous`, `metadata.instantiates` | `…OrderVerticle.java#OrderVerticle$1` |
 | Function | `path#[Class#]name@startLine` | `…#OrderVerticle#start@9` |
 | Statement | `path:startLine:startCol` | `…OrderVerticle.java:12:4` |
 | Statement part | `…#part{i}of{n}` | `…:12:4#part1of3` |
