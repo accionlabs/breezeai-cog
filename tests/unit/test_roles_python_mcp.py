@@ -365,6 +365,43 @@ def real():
     assert set(_tools(analyze_files({"srv.py": src}))) == {"real"}
 
 
+def test_lowlevel_server_class_imported_from_the_sdk_inside_the_function_is_proven(
+    analyze_files,
+) -> None:
+    """Importing the SDK's ``Server`` inside the function is not a binding of another class: the
+    server built from it there is the SDK's. A local ``class Server`` beside such an import
+    still hides it."""
+    src = """
+import mcp.types as types
+
+
+def main():
+    from mcp.server.lowlevel import Server
+    app = Server("x")
+    @app.list_tools()
+    async def lt() -> list[types.Tool]:
+        return [types.Tool(name="t", inputSchema={"type":"object","properties":{}})]
+
+
+def aliased():
+    import mcp.server.lowlevel as ll
+    app = ll.Server("y")
+    @app.list_tools()
+    async def lt() -> list[types.Tool]:
+        return [types.Tool(name="aliased", inputSchema={"type":"object","properties":{}})]
+
+
+def own():
+    from mcp.server.lowlevel import Server
+    class Server: ...
+    app = Server("z")
+    @app.list_tools()
+    async def lt() -> list[types.Tool]:
+        return [types.Tool(name="own", inputSchema={"type":"object","properties":{}})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"t", "aliased"}
+
+
 def test_lowlevel_server_with_two_list_tools_functions_gives_no_tools(analyze_files) -> None:
     """Only the last ``@server.list_tools()`` function registered answers at runtime: with two on
     one server which list is served is not read; another server's list is kept."""
