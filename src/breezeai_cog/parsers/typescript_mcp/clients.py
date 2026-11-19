@@ -13,7 +13,8 @@
   too). A name whose nearest binding is a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``
   or a parameter typed ``Client`` (a loop or ``catch`` variable, an untyped parameter, any other
   declaration hides it — a ``var`` of the function's in a nested block or loop head too; no
-  binding in the file, or any other assignment to the name → not one).
+  binding in the file, or any other write to the name — a destructuring, augmented or logical
+  assignment, a ``for (client of …)`` loop over it — → not one).
   ``this.x`` in a class (not inside a ``function`` or an object literal's method, which rebind
   ``this``) whose one declaration of
   ``x`` — a field or a constructor parameter property — is typed ``Client`` or initialized
@@ -116,14 +117,23 @@ def _detect(dc: DetectContext) -> Detection | None:
 
     blocks: BlockDeclarations = {}
     fields: dict[tuple[int, int], dict[str, bool]] = {}
-    # Any `x = …` / `this.x = …` that is not `new Client(…)`: by text, the whole file.
-    reassigned = {
-        node_text(left, source)
-        for node in _walk(root)
-        if node.type == "assignment_expression"
-        for left in [node.child_by_field_name("left")]
-        if left is not None and not built(node.child_by_field_name("right"), source)
-    }
+    # Any `x = …` / `this.x = …` that is not `new Client(…)`, by text, the whole file; and every
+    # name another write binds: a destructuring assignment (`({ x } = …)`, `[x] = …`), an
+    # augmented or logical one (`x ??= …`), a loop over an existing name (`for (x of …)`).
+    reassigned: set[str] = set()
+    for node in _walk(root):
+        left = node.child_by_field_name("left")
+        if left is None:
+            continue
+        if node.type == "assignment_expression":
+            if left.type in ("object_pattern", "array_pattern"):
+                reassigned.update(bound_names(left, source))
+            elif not built(node.child_by_field_name("right"), source):
+                reassigned.add(node_text(left, source))
+        elif node.type == "augmented_assignment_expression":
+            reassigned.add(node_text(left, source))
+        elif node.type == "for_in_statement" and node.child_by_field_name("kind") is None:
+            reassigned.update(bound_names(left, source))
 
     hoisted: dict[tuple[int, int], dict[str, list[Node | None]]] = {}
 

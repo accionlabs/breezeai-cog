@@ -979,6 +979,49 @@ function k() {
     assert _calls(analyze_files({"c.ts": src})) == [("TOOL", "kept", "typescript-mcp")]
 
 
+# ── TypeScript: any write to the name, not only a plain `x = …`, rebinds it ──
+
+
+@pytest.mark.parametrize(
+    "rebind",
+    [
+        "({ client } = deps);",
+        "({ c: client } = deps);",
+        "[client] = arr;",
+        "[, ...client] = arr;",
+        "client &&= other;",
+        "client ||= other;",
+        "client ??= other;",
+        "for (client of others) {}",
+        "for (client in others) {}",
+    ],
+)
+@pytest.mark.parametrize("kind", ["const", "let"])
+def test_typescript_destructuring_logical_and_loop_writes_rebind_a_client(
+    analyze_files, rebind: str, kind: str
+) -> None:
+    src = f"""
+import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
+{kind} client = new Client({{ name: "x", version: "1" }});
+{rebind}
+await client.callTool({{ name: "wipe" }});
+"""
+    assert _calls(analyze_files({"c.ts": src})) == []
+
+
+def test_typescript_destructuring_another_name_keeps_a_client(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "x", version: "1" });
+({ client: other } = deps);
+[this.client] = arr;
+count ??= 0;
+for (item of items) {}
+await client.callTool({ name: "kept" });
+"""
+    assert _calls(analyze_files({"c.ts": src})) == [("TOOL", "kept", "typescript-mcp")]
+
+
 # ── Java / C# / Kotlin: a name declared more than once, every time a client ──
 
 
