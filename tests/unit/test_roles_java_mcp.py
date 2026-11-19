@@ -188,6 +188,43 @@ def test_mcp_java_sdk_shortcut_needs_the_sdk(analyze_files) -> None:
     assert _tools(analyze_files({"src/main/java/demo/App.java": src})) == {}
 
 
+@pytest.mark.parametrize(
+    ("imports", "expected"),
+    [
+        # another McpServer, in a file that uses the MCP SDK's schema types
+        ("import com.acme.McpServer;\nimport io.modelcontextprotocol.spec.McpSchema;", set()),
+        # the SDK's package by `*`, but another McpServer imported by name wins
+        (
+            "import io.modelcontextprotocol.server.*;\nimport com.acme.McpServer;\n"
+            "import io.modelcontextprotocol.spec.McpSchema;",
+            set(),
+        ),
+        # no import of McpServer at all (same-package class, or another wildcard)
+        ("import com.acme.*;\nimport io.modelcontextprotocol.spec.McpSchema;", set()),
+        (
+            "import io.modelcontextprotocol.server.*;\nimport io.modelcontextprotocol.spec.McpSchema;",
+            {"calc"},
+        ),
+    ],
+)
+def test_mcp_java_sdk_shortcut_needs_the_sdks_mcp_server(analyze_files, imports, expected) -> None:
+    src = f"""
+package demo;
+
+{imports}
+
+public class App {{
+    void start(Object transport) {{
+        McpServer.sync(transport).tool(new McpSchema.Tool("calc", "C", "{{}}"), (e, a) -> null).build();
+        io.modelcontextprotocol.server.McpServer.async(transport)
+            .tool(new McpSchema.Tool("qualified", "Q", "{{}}"), (e, a) -> null).build();
+    }}
+}}
+"""
+    tools = _tools(analyze_files({"src/main/java/demo/App.java": src}))
+    assert set(tools) == expected | {"qualified"}  # the fully qualified name is always the SDK's
+
+
 def test_a_spec_passed_to_tools_is_recorded_once(analyze_files) -> None:
     """``.tools(spec)`` is not read: the spec is recorded where it is built, once."""
     src = """

@@ -237,21 +237,115 @@ func shadow(server *mcp.Server) {
 
 
 def test_go_sdk_look_alikes_are_not_tools(analyze_files) -> None:
-    files = {
-        # another module whose package is also called `mcp`
-        "other.go": """
+    """Another module whose package is also called ``mcp``, in a file that also imports the SDK
+    (so the detector reads it): its ``NewServer`` / ``AddTool`` are not the SDK's."""
+    src = """
 package main
 
-import "github.com/acme/agents/mcp"
+import (
+	"github.com/acme/agents/mcp"
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+var impl = &gomcp.Implementation{Name: "unused"}
 
 func main() {
 	s := mcp.NewServer(nil, nil)
 	mcp.AddTool(s, &mcp.Tool{Name: "acme"}, h)
 	s.AddTool(&mcp.Tool{Name: "acme2"}, h)
+	s.AddTool(&gomcp.Tool{Name: "acme3"}, h)
 }
-""",
-    }
-    assert _tools(analyze_files(files)) == {}
+"""
+    assert b"github.com/modelcontextprotocol/go-sdk/mcp" in src.encode()  # the detector's gate
+    assert _tools(analyze_files({"other.go": src})) == {}
+
+
+def test_go_sdk_reassigned_server_is_not_proven(analyze_files) -> None:
+    """``server = wrap(server)``: the name may now hold anything, so its ``AddTool`` is not the
+    SDK's. The generic ``mcp.AddTool`` still is: the compiler makes its first argument a
+    ``*mcp.Server``."""
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func main() {
+	server := mcp.NewServer(&mcp.Implementation{Name: "x"}, nil)
+	server.AddTool(&mcp.Tool{Name: "before"}, h)
+	server = wrap(server)
+	server.AddTool(&mcp.Tool{Name: "wrapped"}, h)
+	mcp.AddTool(server, &mcp.Tool{Name: "generic"}, Typed)
+}
+"""
+    # Any assignment makes the name not only a server in its block, before the call as well.
+    assert set(_tools(analyze_files({"main.go": src}))) == {"generic"}
+
+
+def test_go_sdk_package_level_server_used_from_another_function(analyze_files) -> None:
+    """``var server = mcp.NewServer(…)`` at package level is the server in every function of
+    the file that does not bind the name itself; reassigning it anywhere unproves it."""
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+var server = mcp.NewServer(&mcp.Implementation{Name: "x"}, nil)
+
+func register() {
+	server.AddTool(&mcp.Tool{Name: "pkglevel"}, h)
+}
+
+func local() {
+	server := NewFake()
+	server.AddTool(&mcp.Tool{Name: "shadowed"}, h)
+}
+"""
+    assert set(_tools(analyze_files({"main.go": src}))) == {"pkglevel"}
+    reassigned = src + "\nfunc swap() {\n\tserver = wrap(server)\n}\n"
+    assert _tools(analyze_files({"main.go": reassigned})) == {}
+
+
+def test_go_agent_framework_tools_are_not_mcp_tools(analyze_files) -> None:
+    """Genkit, langchaingo and Eino tools in a file that also serves the SDK: only the SDK's
+    registration is a tool."""
+    src = """
+package main
+
+import (
+	"context"
+
+	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/firebase/genkit/go/genkit"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tmc/langchaingo/tools"
+)
+
+type Calculator struct{}
+
+func (Calculator) Name() string        { return "calculator" }
+func (Calculator) Description() string { return "Calculator" }
+func (Calculator) Call(ctx context.Context, input string) (string, error) {
+	return "", nil
+}
+
+var _ tools.Tool = Calculator{}
+
+func main() {
+	g := genkit.Init(context.Background())
+	genkit.DefineTool(g, "genkitTool", "Genkit", func(ctx context.Context, in string) (string, error) {
+		return in, nil
+	})
+	einoTool, _ := utils.InferTool("einoTool", "Eino", func(ctx context.Context, in string) (string, error) {
+		return in, nil
+	})
+	agentTools := []tools.Tool{Calculator{}, einoTool}
+	_ = agentTools
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "x"}, nil)
+	server.AddTool(&mcp.Tool{Name: "real"}, h)
+}
+"""
+    assert set(_tools(analyze_files({"main.go": src}))) == {"real"}
 
 
 def test_mark3labs_file_is_read_once_by_its_own_detector(analyze_files) -> None:

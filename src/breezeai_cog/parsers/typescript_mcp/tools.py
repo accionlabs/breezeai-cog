@@ -64,7 +64,7 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
+from ..mcp_common import PROMPT, RESOURCE, TOOL, guarded, mcp_emit, param, uri_template_params
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings
 from .lowlevel import detect_lowlevel
@@ -632,8 +632,15 @@ def _detect(dc: DetectContext) -> Detection | None:
     ) -> bool:
         return _shadowed(call, name, src, typed, built, blocks)
 
-    found: list[Emit] = detect_lowlevel(
-        dc.root, source, servers, functions, shadowed, lambda n: _json_schema(n, source)
+    found: list[Emit] = guarded(
+        dc.path,
+        detect_lowlevel,
+        dc.root,
+        source,
+        servers,
+        functions,
+        shadowed,
+        lambda n: _json_schema(n, source),
     )
     if not servers and not found:
         return None

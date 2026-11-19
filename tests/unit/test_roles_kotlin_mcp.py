@@ -7,6 +7,8 @@ contract error (``parsers/contract.py``).
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.schemas import Statement
 
 
@@ -447,3 +449,46 @@ fun configure(server: Server) {
         [],
     )
     assert _params(prompts["positional"]) == [("a", None, False, None, "d")]
+
+
+@pytest.mark.parametrize(
+    ("imports", "expected"),
+    [
+        ("import com.acme.McpServer\nimport io.modelcontextprotocol.spec.McpSchema", set()),
+        (
+            "import io.modelcontextprotocol.server.*\nimport com.acme.McpServer\n"
+            "import io.modelcontextprotocol.spec.McpSchema",
+            set(),
+        ),
+        (
+            "import io.modelcontextprotocol.server.McpServer\n"
+            "import com.acme.Other as McpServer\nimport io.modelcontextprotocol.spec.McpSchema",
+            set(),
+        ),
+        ("import com.acme.*\nimport io.modelcontextprotocol.spec.McpSchema", set()),
+        (
+            "import io.modelcontextprotocol.server.*\nimport io.modelcontextprotocol.spec.McpSchema",
+            {"calc"},
+        ),
+        (
+            "import io.modelcontextprotocol.server.McpServer as Srv\n"
+            "import io.modelcontextprotocol.spec.McpSchema",
+            {"aliased"},
+        ),
+    ],
+)
+def test_kotlin_shortcut_needs_the_sdks_mcp_server(analyze_files, imports, expected) -> None:
+    src = f"""
+package demo
+
+{imports}
+
+fun build(transport: Any) {{
+    McpServer.sync(transport).tool(McpSchema.Tool("calc", "C", "{{}}")) {{ _, _ -> null }}.build()
+    Srv.sync(transport).tool(McpSchema.Tool("aliased", "A", "{{}}")) {{ _, _ -> null }}.build()
+    io.modelcontextprotocol.server.McpServer.async(transport)
+        .tool(McpSchema.Tool("qualified", "Q", "{{}}")) {{ _, _ -> null }}.build()
+}}
+"""
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Build.kt": src}))
+    assert set(tools) == expected | {"qualified"}  # the fully qualified name is always the SDK's

@@ -22,10 +22,12 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from tree_sitter import Node
 
+from ..errors import ParserTimeout
 from ..schemas import Parameter
 from .emits import Emit
 from .treesitter import first_line, node_text
@@ -65,6 +67,9 @@ def uri_template_params(uri: str) -> list[Parameter] | None:
     if "{" in rest or "}" in rest:
         return None
     return [param(n, "string", required=True) for n in names]
+
+
+_T = TypeVar("_T")
 
 
 def param(
@@ -109,6 +114,25 @@ def schema_params(schema: object) -> list[Parameter] | None:
             )
         )
     return out
+
+
+def guarded(path: str, reader: Callable[..., list[_T]], *args: Any) -> list[_T]:
+    """``reader(*args)``, or nothing when it fails: a sub-reader added to a detector never drops
+    the records the detector's other readers found in the file (the runner would drop them all)."""
+    try:
+        return reader(*args)
+    except ParserTimeout:
+        raise  # the file's parse budget is spent: handled like any parse timeout
+    except Exception as exc:
+        from ..logging import get_logger
+
+        get_logger("breezeai_cog.additive").warning(
+            "mcp.subreader.failed",
+            path=path,
+            reader=getattr(reader, "__name__", repr(reader)),
+            error=f"{type(exc).__name__}: {exc}"[:500],
+        )
+        return []
 
 
 def clean_doc(text: str | None) -> str | None:

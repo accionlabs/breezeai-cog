@@ -255,6 +255,17 @@ A tool an MCP server exposes is an entry point an AI client calls by name. Every
   entry points. Each framework's proof is in its role table.
 - **Once.** A file can use two MCP frameworks; each tool is recorded once, by the package of
   the framework its construct belongs to.
+- **One record per site in the code, not per server.** The record sits where the tool is
+  written, so how many records a tool gets follows the construct each SDK reads:
+  - Go SDK: one per `AddTool` call — a tool variable registered twice gives two records.
+  - TypeScript low-level `Server`: one per tool object. A module-level `const` named in the
+    `tools` arrays of two servers is one record, whose `handler` is the `CallToolRequestSchema`
+    callback of the first server that lists it.
+  - Kotlin SDK `addTools`: one per `RegisteredTool` element of the list, however many
+    `addTools` calls receive it.
+  - Java / Kotlin tool specifications: one per specification built, wherever it is passed
+    (`.tools(spec…)` is not read); a builder shortcut `.tool(…)` is one per call.
+  - Python low-level `Server`: one per `Tool(…)` literal in a `list_tools` function.
 - **`params` is all or nothing.** `[]` means the tool takes no input (no schema, or an empty
   one). A schema that cannot be read whole (a variable, a spread, an unknown helper) leaves
   `params` unset, never a partial list. `required` is `true` / `false` when the schema says so
