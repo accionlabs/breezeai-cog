@@ -417,6 +417,38 @@ def test_a_property_is_a_statement_of_its_type_and_so_are_its_accessors(tmp_path
     ])
 
 
+def test_an_optional_parameter_keeps_its_name(tmp_path) -> None:
+    # `Optional ByVal n` was read with `ByVal` as the name, and an attribute before `Optional`
+    # lost the method: the shadow blanks `Optional` and the passing mode, neither recorded.
+    src = (b"Public Class P\n"
+           b"    Public Sub S1(ByVal name As String, Optional ByVal n As Integer = 5)\n    End Sub\n"
+           b"    Public Sub S2(Optional ByRef r As Integer = 0)\n    End Sub\n"
+           b"    Public Sub S3(Optional n As Integer = 5)\n    End Sub\n"
+           b"    Public Sub New(Optional ByVal size As Integer = 10)\n    End Sub\n"
+           b"    Public Sub S4(ByRef a As String, <[In]> Optional ByVal b As String = \"x\")\n"
+           b"    End Sub\n"
+           b"    Public Function S5(Optional ByVal xs As List(Of Dictionary(Of String, Integer))"
+           b" = Nothing) As Integer\n        Return 1\n    End Function\nEnd Class\n")
+    rec = _vb(tmp_path, src)
+    assert {f.name: [(p.name, p.type) for p in f.params] for f in rec.functions} == {
+        "S1": [("name", "String"), ("n", "Integer")],
+        "S2": [("r", "Integer")],
+        "S3": [("n", "Integer")],
+        "New": [("size", "Integer")],
+        "S4": [("a", "String"), ("b", "String")],
+        "S5": [("xs", "List(Of Dictionary(Of String, Integer))")],
+    }
+    s4 = next(f for f in rec.functions if f.name == "S4")
+    assert [d.name for d in s4.params[1].decorators] == ["[In]"]
+
+
+def test_optional_in_a_string_or_comment_is_left_alone() -> None:
+    from breezeai_cog.parsers.vb.source import blank_optional_modifiers
+
+    src = b'Dim s = "Optional ByVal x" \' Optional ByRef y\n'
+    assert blank_optional_modifiers(src) is src
+
+
 def test_an_xml_literal_line_is_not_a_type_opener() -> None:
     from breezeai_cog.parsers.vb.source import _type_blocks
 

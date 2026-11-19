@@ -200,6 +200,33 @@ def blank_await(source: bytes) -> bytes:
     return bytes(out) if out is not None else source
 
 
+#: A string (``""`` escapes), a comment, or an ``Optional`` parameter keyword with the ``ByVal`` /
+#: ``ByRef`` after it (group 1). The grammar reads ``Optional ByVal n`` with ``ByVal`` as the name
+#: and cannot read an attribute before ``Optional`` (``<[In]> Optional b``); it reads both forms
+#: without the keywords, a default value (``= 5``) included.
+_OPTIONAL_SCAN = re.compile(
+    rb'"(?:[^"]|"")*"|\'[^\n]*|\bREM\b[^\n]*|\b(Optional(?:[ \t]+(?:ByVal|ByRef))?)\b',
+    re.IGNORECASE,
+)
+
+
+def blank_optional_modifiers(source: bytes) -> bytes:
+    """``source`` with each ``Optional`` parameter keyword, and the ``ByVal`` / ``ByRef`` after it,
+    blanked in place (``Optional ByVal n`` → ``               n``), outside strings and comments;
+    ``source`` itself when there is none. A parameter records neither, so nothing is lost: its
+    name, type, attributes and default are read from the original source."""
+    if not re.search(rb"(?i)optional", source):
+        return source
+    out: bytearray | None = None
+    for m in _OPTIONAL_SCAN.finditer(source):
+        if m.start(1) == -1:
+            continue
+        if out is None:
+            out = bytearray(source)
+        out[m.start(1):m.end(1)] = b" " * (m.end(1) - m.start(1))
+    return bytes(out) if out is not None else source
+
+
 #: One implemented member, as written: ``IOrders.Get``, ``IRepository(Of T).GetAll``.
 _OF_ARGS = rb"[ \t]*\([ \t]*Of\b(?:[^()\n]|\([^()\n]*\))*\)"  # ``(Of K, List(Of V))``: one nested level
 _MEMBER = rb"[\w\[\]]+(?:" + _OF_ARGS + rb")?(?:\.[\w\[\]]+(?:" + _OF_ARGS + rb")?)*"
@@ -389,8 +416,8 @@ class _Layout(NamedTuple):
 
 @lru_cache(maxsize=8)
 def _layout(source: bytes) -> _Layout:
-    joined = blank_generic_arguments(
-        blank_implements(blank_await(join_attribute_blocks(source))))
+    joined = blank_generic_arguments(blank_implements(
+        blank_optional_modifiers(blank_await(join_attribute_blocks(source)))))
     # Types are found on the original: a joined attribute line no longer ends in `>`, and a nested
     # type must be blanked from its first attribute line on (the shadows keep every line).
     blocks = _type_blocks(source)
