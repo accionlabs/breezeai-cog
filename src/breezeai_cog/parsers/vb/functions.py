@@ -218,6 +218,11 @@ def _calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> 
 _HEADER_NAME = re.compile(rb"\b(?:Function|Sub)[ \t]+(?:\[([^\]\n]+)\]|([A-Za-z_]\w*))", re.IGNORECASE)
 
 
+#: ``Operator`` right before a method's name: an operator declaration the shadow reads as a
+#: function (:func:`~.source.blank_operators`), named ``Operator +``, ``Operator CType``.
+_OPERATOR_BEFORE = re.compile(rb"\bOperator[ \t]+\Z", re.IGNORECASE)
+
+
 def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
     """``(name, header_broken)`` of a method or constructor. When the grammar fails inside the
     header (an ``ERROR`` before the ``name`` field), that field points into the body — e.g. at
@@ -227,7 +232,10 @@ def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
     if name_node is None:
         return None, False
     if not any(c.type == "ERROR" and c.start_byte < name_node.start_byte for c in node.named_children):
-        return node_text(name_node, source), False
+        name = node_text(name_node, source)
+        if _OPERATOR_BEFORE.search(source, node.start_byte, name_node.start_byte):
+            name = f"Operator {name}"  # read as a function from the shadow, named as C# names it
+        return name, False
     m = _HEADER_NAME.search(source, node.start_byte, name_node.start_byte)
     return (next(g for g in m.groups() if g).decode("utf-8", "replace") if m else None), True
 

@@ -227,6 +227,39 @@ def blank_optional_modifiers(source: bytes) -> bytes:
     return bytes(out) if out is not None else source
 
 
+#: A string, a comment, an operator header's ``Operator`` keyword (group 1) and its token (group 2:
+#: ``+``, ``<>``, ``CType``, ``IsTrue``, …), or ``End Operator`` (group 3: its ``Operator``).
+_OPERATOR_SCAN = re.compile(
+    rb'"(?:[^"]|"")*"|\'[^\n]*|\bREM\b[^\n]*'
+    rb"|\b(Operator)[ \t]+(<<|>>|<>|<=|>=|[-+*/\\^&=<>]|CType|Like|Mod|And|Or|Xor|Not"
+    rb"|IsTrue|IsFalse)(?=[ \t]*\()"
+    rb"|\bEnd[ \t]+(Operator)\b",
+    re.IGNORECASE,
+)
+
+
+def blank_operators(source: bytes) -> bytes:
+    """``source`` with each operator declaration read as a function, in place: ``Operator`` →
+    ``Function`` (both eight letters), its token → as many ``x`` (``Operator <>(`` →
+    ``Function xx(``) and ``End Operator`` → ``End Function``, outside strings and comments;
+    ``source`` itself when there is none. The grammar has no operator rule: it reads the header
+    and every body line as fields. The name is read back from the original
+    (:func:`~.functions.method_name`)."""
+    if not re.search(rb"(?i)operator", source):
+        return source
+    out: bytearray | None = None
+    for m in _OPERATOR_SCAN.finditer(source):
+        keyword = 1 if m.start(1) != -1 else 3 if m.start(3) != -1 else 0
+        if not keyword:
+            continue
+        if out is None:
+            out = bytearray(source)
+        out[m.start(keyword):m.end(keyword)] = b"Function"
+        if keyword == 1:
+            out[m.start(2):m.end(2)] = b"x" * (m.end(2) - m.start(2))
+    return bytes(out) if out is not None else source
+
+
 #: One implemented member, as written: ``IOrders.Get``, ``IRepository(Of T).GetAll``.
 _OF_ARGS = rb"[ \t]*\([ \t]*Of\b(?:[^()\n]|\([^()\n]*\))*\)"  # ``(Of K, List(Of V))``: one nested level
 _MEMBER = rb"[\w\[\]]+(?:" + _OF_ARGS + rb")?(?:\.[\w\[\]]+(?:" + _OF_ARGS + rb")?)*"
@@ -416,8 +449,8 @@ class _Layout(NamedTuple):
 
 @lru_cache(maxsize=8)
 def _layout(source: bytes) -> _Layout:
-    joined = blank_generic_arguments(blank_implements(
-        blank_optional_modifiers(blank_await(join_attribute_blocks(source)))))
+    joined = blank_generic_arguments(blank_implements(blank_operators(
+        blank_optional_modifiers(blank_await(join_attribute_blocks(source))))))
     # Types are found on the original: a joined attribute line no longer ends in `>`, and a nested
     # type must be blanked from its first attribute line on (the shadows keep every line).
     blocks = _type_blocks(source)

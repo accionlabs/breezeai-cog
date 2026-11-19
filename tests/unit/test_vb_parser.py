@@ -442,6 +442,41 @@ def test_an_optional_parameter_keeps_its_name(tmp_path) -> None:
     assert [d.name for d in s4.params[1].decorators] == ["[In]"]
 
 
+def test_an_operator_is_a_method_named_after_its_token(tmp_path) -> None:
+    # The grammar has no operator rule (header and body read as fields); the shadow reads each as
+    # a function, named `Operator <token>` as C# names `operator +`.
+    src = (b"Public Class Money\n    Public Amount As Decimal\n"
+           b"    Public Shared Operator +(a As Money, b As Money) As Money\n"
+           b"        Return New Money With {.Amount = a.Amount + b.Amount}\n    End Operator\n"
+           b"    Public Shared Operator <>(a As Money, b As Money) As Boolean\n"
+           b"        Return Not a.Amount = b.Amount\n    End Operator\n"
+           b"    Public Shared Widening Operator CType(d As Decimal) As Money\n"
+           b"        Return New Money With {.Amount = d}\n    End Operator\n"
+           b"    Public Shared Operator IsTrue(m As Money) As Boolean\n"
+           b"        Return m.Amount <> 0\n    End Operator\n"
+           b"    Public Sub After()\n        Audit()\n    End Sub\nEnd Class\n")
+    p = tmp_path / "M.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="M.vb", abs_path=p, source=src,
+                                             repo_root=tmp_path, capture_statements=True))
+    assert [(f.id, [x.name for x in f.params], f.returnType) for f in rec.functions] == [
+        ("M.vb#Money#Operator +@3", ["a", "b"], "Money"),
+        ("M.vb#Money#Operator <>@6", ["a", "b"], "Boolean"),
+        ("M.vb#Money#Operator CType@9", ["d"], "Money"),
+        ("M.vb#Money#Operator IsTrue@12", ["m"], "Boolean"),
+        ("M.vb#Money#After@15", [], None),
+    ]
+    fields = [s.text.strip() for s in rec.statements if s.nodeType == "field_declaration"]
+    assert fields == ["Public Amount As Decimal"]
+
+
+def test_operator_in_a_string_or_comment_is_left_alone() -> None:
+    from breezeai_cog.parsers.vb.source import blank_operators
+
+    src = b'Dim s = "Operator +(a" \' Operator <>(b) End Operator\n'
+    assert blank_operators(src) is src
+
+
 def test_optional_in_a_string_or_comment_is_left_alone() -> None:
     from breezeai_cog.parsers.vb.source import blank_optional_modifiers
 
