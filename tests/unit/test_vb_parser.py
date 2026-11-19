@@ -534,6 +534,41 @@ def test_a_declare_belongs_to_its_own_type_when_two_share_a_name(tmp_path) -> No
     assert dll.parentId == second.id != next(c.id for c in rec.classes if c.startLine == 1)
 
 
+def test_names_with_non_english_letters_are_kept_as_written(tmp_path) -> None:
+    # The grammar's names are ASCII only: `Après` read as `Apr`, `Ünïcödé` as `d`, and a nested
+    # `内部` was never found. The grammar now reads ASCII stand-ins; names come from the original.
+    src = ("Public Class Ünïcödé\n    Public Class 内部\n        Public Sub 方法()\n"
+           "            Dim größe As Integer = 1\n        End Sub\n    End Class\n"
+           "    Public Sub Après(ByVal café As String)\n        Dim s As String = \"Ünïcödé\"\n"
+           "    End Sub\n    Public Function Calcul() As Integer\n        Return Après2()\n"
+           "    End Function\nEnd Class\n").encode()
+    p = tmp_path / "U.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="U.vb", abs_path=p, source=src,
+                                             repo_root=tmp_path, capture_statements=True))
+    assert {c.id for c in rec.classes} == {"U.vb#Ünïcödé", "U.vb#Ünïcödé.内部"}
+    assert {f.id: [(x.name, x.type) for x in f.params] for f in rec.functions} == {
+        "U.vb#Ünïcödé.内部#方法@3": [],
+        "U.vb#Ünïcödé#Après@7": [("café", "String")],
+        "U.vb#Ünïcödé#Calcul@10": [],
+    }
+    calcul = next(f for f in rec.functions if f.name == "Calcul")
+    assert [c.name for c in calcul.calls] == ["Après2"]
+    assert "größe" in {s.name for s in rec.statements}
+    assert any(s.text.strip() == 'Dim s As String = "Ünïcödé"' for s in rec.statements)
+
+
+def test_only_name_characters_outside_strings_and_comments_are_replaced() -> None:
+    from breezeai_cog.parsers.vb.source import ascii_identifiers
+
+    bom = "﻿Public Class C\nEnd Class\n".encode()
+    assert ascii_identifiers(bom) is bom  # a byte order mark is not a name
+    text = "Dim é = \"é\" ' é\n".encode()
+    out = ascii_identifiers(text)
+    assert len(out) == len(text)
+    assert out == b'Dim xx = "\xc3\xa9" \' \xc3\xa9\n'
+
+
 def test_declare_in_a_string_or_comment_is_left_alone() -> None:
     from breezeai_cog.parsers.vb.source import declare_spans
 

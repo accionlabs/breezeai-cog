@@ -70,6 +70,7 @@ with ``Declare [charset]`` and ``Lib "…" [Alias "…"]`` blanked.
 from __future__ import annotations
 
 import re
+import unicodedata
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -139,6 +140,39 @@ def _is_attr_line(line: bytes) -> bool:
     """A line of attribute blocks only, maybe continued with `` _``."""
     blocks, rest = _leading_blocks(line)
     return bool(blocks) and bool(_LINE_END.match(line, rest))
+
+
+#: A string (``""`` escapes; may span lines), a comment, or a run of non-ASCII bytes (group 1).
+_NON_ASCII_SCAN = re.compile(rb'"(?:[^"]|"")*"|\'[^\n]*|\bREM\b[^\n]*|([\x80-\xff]+)', re.IGNORECASE)
+#: Unicode categories VB allows in a name: letters, combining marks, digits, connectors.
+_NAME_CATEGORIES = ("L", "M", "Nd", "Nl", "Pc")
+
+
+def ascii_identifiers(source: bytes) -> bytes:
+    """``source`` with each non-ASCII character a name may hold (``è`` in ``Après``, ``内部``) turned
+    into as many ``x`` as it has bytes, outside strings and comments; ``source`` itself when there
+    is none. The grammar's names are ASCII only (``Après`` reads as ``Apr`` and an error), and so
+    are the patterns below; the names are read back from the original. Anything else (a byte
+    order mark, a quotation mark, a full-width space) is left as written."""
+    if source.isascii():
+        return source
+    out: bytearray | None = None
+    for m in _NON_ASCII_SCAN.finditer(source):
+        if m.start(1) == -1:
+            continue
+        pos = m.start(1)
+        try:
+            chars = m.group(1).decode("utf-8")
+        except UnicodeDecodeError:
+            continue  # not UTF-8: left as written
+        for ch in chars:
+            size = len(ch.encode("utf-8"))
+            if unicodedata.category(ch).startswith(_NAME_CATEGORIES):
+                if out is None:
+                    out = bytearray(source)
+                out[pos:pos + size] = b"x" * size
+            pos += size
+    return bytes(out) if out is not None else source
 
 
 def join_attribute_blocks(source: bytes) -> bytes:
@@ -457,10 +491,12 @@ def member_implements(source: bytes) -> dict[int, list[str]]:
     written (``["IOrderService.GetOrder"]``)."""
     if not re.search(rb"(?i)implements", source):
         return {}
+    text = ascii_identifiers(source)  # matched there, read from the original (same offsets)
     return {
         source.count(b"\n", 0, m.start()) + 1:
-            [p.strip().decode("utf-8", "replace") for p in _split_members(m.group(2))]
-        for m in _IMPLEMENTS_HEADER.finditer(source)
+            [p.strip().decode("utf-8", "replace")
+             for p in _split_members(source[m.start(2):m.end(2)])]
+        for m in _IMPLEMENTS_HEADER.finditer(text)
     }
 
 
@@ -487,8 +523,10 @@ class TypeBlock(NamedTuple):
     name: str
 
 
-def _type_blocks(source: bytes) -> list[TypeBlock] | None:
-    """Every type declaration, or None when an opener and its ``End`` do not pair up."""
+def _type_blocks(source: bytes, original: bytes | None = None) -> list[TypeBlock] | None:
+    """Every type declaration, or None when an opener and its ``End`` do not pair up. ``source``
+    is matched (names made ASCII, :func:`ascii_identifiers`); a name is read from ``original``."""
+    original = source if original is None else original
     lines = source.split(b"\n")
     offsets = [0]
     for line in lines:
@@ -496,12 +534,15 @@ def _type_blocks(source: bytes) -> list[TypeBlock] | None:
     stack: list[tuple[bytes, int, str]] = []  # (keyword, start offset, dotted name)
     blocks: list[TypeBlock] = []
     for i, line in enumerate(lines):
-        if m := _TYPE_OPEN.match(line[_leading_blocks(line)[1]:]):
+        lead = _leading_blocks(line)[1]
+        if m := _TYPE_OPEN.match(line[lead:]):
             first = i
             while first > 0 and (_is_attr_line(lines[first - 1])
                                  or _COMMENT_LINE.match(lines[first - 1])):
                 first -= 1
-            own = (m.group(2) or m.group(3)).decode("utf-8", "replace").strip()
+            group = 2 if m.group(2) is not None else 3
+            at = offsets[i] + lead
+            own = original[at + m.start(group):at + m.end(group)].decode("utf-8", "replace").strip()
             name = f"{stack[-1][2]}.{own}" if stack else own
             stack.append((m.group(1).lower(), offsets[first], name))
         elif m := _TYPE_CLOSE.match(line):
@@ -528,14 +569,15 @@ class _Layout(NamedTuple):
 
 @lru_cache(maxsize=8)
 def _layout(source: bytes) -> _Layout:
+    text = ascii_identifiers(source)
     joined = blank_generic_arguments(blank_implements(blank_operators(
-        blank_optional_modifiers(blank_await(join_attribute_blocks(source))))))
-    # Types are found on the original: a joined attribute line no longer ends in `>`, and a nested
-    # type must be blanked from its first attribute line on (the shadows keep every line).
-    blocks = _type_blocks(source)
+        blank_optional_modifiers(blank_await(join_attribute_blocks(text))))))
+    # Types are found before the shadows: a joined attribute line no longer ends in `>`, and a
+    # nested type must be blanked from its first attribute line on (the shadows keep every line).
+    blocks = _type_blocks(text, source)
     # A `Declare` is read by its own parse (parse_declares): the grammar has no `Declare`, and the
     # bodiless header it would see takes the lines after it for a body.
-    declares = declare_spans(source)
+    declares = declare_spans(text)
     if declares:
         out = bytearray(joined)
         for d in declares:
@@ -644,7 +686,7 @@ def parse_declares(source: bytes, timeout_micros: int = 0) -> list[DeclareGroup]
     out: list[DeclareGroup] = []
     for block, spans in groups.items():
         text = bytearray(re.sub(rb"[^\r\n]", b" ", source))
-        open_start, open_end = _opener_line(source, block)
+        open_start, open_end = _opener_line(ascii_identifiers(source), block)
         end_start = source.rfind(b"\n", 0, block.end) + 1
         for a, b in ((open_start, open_end), (end_start, block.end),
                      *((d.start, d.end) for d in spans)):

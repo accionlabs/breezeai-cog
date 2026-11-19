@@ -247,8 +247,12 @@ def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
         if _OPERATOR_BEFORE.search(source, node.start_byte, name_node.start_byte):
             name = f"Operator {name}"  # read as a function from the shadow, named as C# names it
         return name, False
-    m = _HEADER_NAME.search(source, node.start_byte, name_node.start_byte)
-    return (next(g for g in m.groups() if g).decode("utf-8", "replace") if m else None), True
+    # matched on the shadow (a non-ASCII name is ASCII there), read from the original
+    m = _HEADER_NAME.search(shadow(source), node.start_byte, name_node.start_byte)
+    if m is None:
+        return None, True
+    group = 1 if m.group(1) is not None else 2
+    return source[m.start(group):m.end(group)].decode("utf-8", "replace"), True
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:
