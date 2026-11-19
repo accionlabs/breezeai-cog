@@ -623,6 +623,18 @@ def _kotlin_mcp_add_tools_functions(n: int) -> str:
     )
 
 
+def _kotlin_mcp_add_tools_one_list(n: int) -> str:
+    """One ``mutableListOf`` property passed to many ``addTools`` calls."""
+    calls = "    server.addTools(tools)\n" * n
+    return (
+        "package demo\nimport io.modelcontextprotocol.kotlin.sdk.RegisteredTool\n"
+        "import io.modelcontextprotocol.kotlin.sdk.Tool\n"
+        "import io.modelcontextprotocol.kotlin.sdk.server.Server\n"
+        'val tools = mutableListOf(RegisteredTool(Tool(name = "t")) { _ -> null })\n'
+        f"fun register(server: Server) {{\n{calls}}}\n"
+    )
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -665,6 +677,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "kotlin-mcp-entries": ("Server.kt", _kotlin_mcp_entries),
     "csharp-mcp-entries": ("All.cs", _csharp_mcp_entries),
     "kotlin-mcp-add-tools-functions": ("Registry.kt", _kotlin_mcp_add_tools_functions),
+    "kotlin-mcp-add-tools-one-list": ("Registry.kt", _kotlin_mcp_add_tools_one_list),
 }
 
 

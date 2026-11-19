@@ -25,8 +25,9 @@ API (``mcp.server.lowlevel.Server``), read for the ``python-mcp`` detector (``to
   ``Server`` imported from ``mcp.server.lowlevel``, ``mcp.server.lowlevel.server`` or
   ``mcp.server``, and not bound again at module level (``class Server``, ``from socketio
   import Server``). A local class named ``Server``, or a function that binds the name
-  ``Server`` itself (``from socketio import Server`` inside it), is not one; a nearer binding of
-  the name that is not a server hides it.
+  ``Server`` itself (``from socketio import Server`` inside it), is not one — importing the
+  SDK's ``Server`` inside the function is; a nearer binding of the name that is not a server
+  hides it.
 * **Tools** — each ``Tool(…)`` call (``Tool`` imported from ``mcp.types``, or ``types.Tool`` with
   ``types`` bound to ``mcp.types``; the standard library's ``types`` is not it) that is a direct
   element of a list literal returned by the ``@<server>.list_tools()`` function
@@ -313,9 +314,22 @@ def _bindings(
     #: (``from socketio import Server``) means another class there.
     servers: list[tuple[Node | None, str, str]] = []
 
-    def bind(scope: Node | None, name: str, is_server: bool, from_import: bool = False) -> None:
+    #: Per scope, the names bound there other than by importing the SDK (its ``Server`` from
+    #: a server module, the server module itself, or the ``mcp`` package): such a binding of the
+    #: class's name means another class there; an SDK import of it does not.
+    other: dict[tuple[int, int], set[str]] = {}
+
+    def bind(
+        scope: Node | None,
+        name: str,
+        is_server: bool,
+        from_import: bool = False,
+        sdk_import: bool = False,
+    ) -> None:
         names = out.setdefault(_scope_key(scope), {})
         names[name] = names.get(name, True) and is_server
+        if not sdk_import:
+            other.setdefault(_scope_key(scope), set()).add(name)
         if scope is None:
             count = counts.setdefault(name, [0, 0])
             count[0] += 1
@@ -374,22 +388,35 @@ def _bindings(
                 servers.append((owner, node_text(name_node, source), ann_text.split(".")[0]))
         elif t in ("import_from_statement", "import_statement"):
             scope = _scope_of(node)
+            module = node.child_by_field_name("module_name")
+            from_import = t == "import_from_statement"
+            sdk_module = (
+                from_import and module is not None and node_text(module, source) in SERVER_MODULES
+            )
             for child in node.named_children:
-                if t == "import_from_statement" and child == node.child_by_field_name(
-                    "module_name"
-                ):
+                if from_import and child == module:
                     continue
-                from_import = t == "import_from_statement"
                 if child.type == "aliased_import":
                     alias = child.child_by_field_name("alias")
+                    orig = child.child_by_field_name("name")
+                    orig_text = node_text(orig, source) if orig is not None else ""
+                    sdk = (
+                        orig_text == "Server" if from_import else orig_text in SERVER_MODULES
+                    ) and (sdk_module or not from_import)
                     if alias is not None:
-                        bind(scope, node_text(alias, source), False, from_import)
+                        bind(scope, node_text(alias, source), False, from_import, sdk)
                 elif child.type == "dotted_name":
-                    bind(scope, node_text(child, source).split(".")[0], False, from_import)
+                    text = node_text(child, source)
+                    sdk = (
+                        sdk_module and text == "Server"
+                        if from_import
+                        else text.split(".")[0] == "mcp"
+                    )
+                    bind(scope, text.split(".")[0], False, from_import, sdk)
     for scope, name, head in servers:
         cur = scope
         while cur is not None:  # the module's own bindings of the class are checked already
-            if head in out.get(_scope_key(cur), {}):
+            if head in other.get(_scope_key(cur), set()):
                 out[_scope_key(scope)][name] = False
                 break
             cur = _scope_of(cur)

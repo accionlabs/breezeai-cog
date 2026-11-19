@@ -51,7 +51,7 @@ from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..go_mcp_common import go_string as _string
-from ..go_mcp_common import package_names
+from ..go_mcp_common import HandlerLines, package_names
 from ..go_mcp_common import walk as _walk
 from ..mcp_common import PROMPT, RESOURCE, TOOL, function_lines, mcp_emit, param, uri_template_params
 from ..treesitter import node_text
@@ -419,7 +419,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         candidates = [(at, h) for at, h, chain in regs if not any(sc in shadowing for sc in chain)]
         return candidates[0][1] if writes == 1 and len(candidates) == 1 else None
 
-    functions = function_lines(dc.record)
+    functions = HandlerLines(source, function_lines(dc.record))
     wrapper_pkgs = pkgs | server_pkgs
     found: list[Emit] = []
     for n in nodes:
@@ -444,7 +444,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         handler, handler_line = None, None
         if h is not None and h.type == "identifier":
             handler = node_text(h, source)
-            handler_line = functions.get(handler)
+            handler_line = functions.line(h)
         elif h is not None and h.type == "func_literal":
             handler_line = h.start_point[0] + 1
         elif h is not None and h.type == "selector_expression":

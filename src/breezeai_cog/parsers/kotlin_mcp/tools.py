@@ -570,14 +570,27 @@ def _value_of(decl: Node) -> Node | None:
     return None
 
 
-def _declared_name(decl: Node, source: bytes) -> str | None:
-    var = next((c for c in decl.named_children if c.type == "variable_declaration"), None)
-    ident = (
-        next((c for c in var.named_children if c.type == "simple_identifier"), None)
-        if var is not None
-        else None
-    )
-    return node_text(ident, source) if ident is not None else None
+def _declared_names(decl: Node, source: bytes) -> list[str]:
+    """The names a ``property_declaration`` declares: ``val x = …`` one, a destructuring
+    ``val (a, b) = …`` each of its components."""
+    out: list[str] = []
+    for c in decl.named_children:
+        if c.type == "variable_declaration":
+            vars_ = [c]
+        elif c.type == "multi_variable_declaration":
+            vars_ = [v for v in c.named_children if v.type == "variable_declaration"]
+        else:
+            continue
+        for var in vars_:
+            ident = next((x for x in var.named_children if x.type == "simple_identifier"), None)
+            if ident is not None:
+                out.append(node_text(ident, source))
+    return out
+
+
+def _destructures(decl: Node) -> bool:
+    """True for ``val (a, b) = …``: a component is never a list literal read whole."""
+    return any(c.type == "multi_variable_declaration" for c in decl.named_children)
 
 
 def _binds_param(node: Node, name: str, source: bytes) -> bool:
@@ -671,10 +684,13 @@ class _Names:
         self.funcs: dict[str, list[Node]] = {}
         self.uses: dict[str, list[Node]] = {}
         self.use_starts: dict[str, list[int]] = {}
+        #: :func:`_only_passed_to_add_tools` per declaration (its start byte), so a list passed
+        #: to many ``addTools`` calls is judged once.
+        self.add_tools_only: dict[int, bool] = {}
         for n in walk(root):
             if n.type == "property_declaration":
-                name = _declared_name(n, source)
-                if name is not None:
+                # A destructured component is indexed too: it hides an outer list of its name.
+                for name in _declared_names(n, source):
                     self.props.setdefault((name, _owner(n)), []).append(n)
             elif n.type == "function_declaration":
                 ident = next((c for c in n.named_children if c.type == "simple_identifier"), None)
@@ -712,7 +728,12 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
     an enclosing block, a property of an enclosing class, or a top-level one. None when the
     innermost binding is anything else (a parameter, a primary-constructor parameter, a loop
     variable, a ``catch`` parameter, a ``when`` subject — :func:`_binds`), or nothing declares
-    it."""
+    it.
+
+    A class's instance property is not visible inside a nested class that is not ``inner`` (nor
+    a nested ``object`` / companion): Kotlin resolves the name further out there. Not modelled:
+    extension receivers, inherited members and ``with(x) { … }`` / ``apply`` implicit receivers
+    (a name read through one of them is taken for the lexical declaration)."""
     best: Node | None = None
     best_key: tuple[int, int] | None = None
     for decl in names.declarations(name, use):
@@ -720,6 +741,8 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
         if container is None or container.type not in ("statements", "class_body", "source_file"):
             continue
         if not _contains(container, use):
+            continue
+        if container.type == "class_body" and _behind_nested_class(use, container, source):
             continue
         if container.type == "statements" and decl.start_byte >= use.start_byte:
             continue  # a local is visible only after its declaration
@@ -737,10 +760,48 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
     return best
 
 
+def _behind_nested_class(use: Node, body: Node, source: bytes) -> bool:
+    """True when ``use`` sits in a class nested in the class owning ``body`` that cannot see its
+    instance members: a member class that is not ``inner``, an ``object`` or a companion (a
+    local class declared in a function body does see them)."""
+    owner = body.parent
+    if owner is None or owner.type != "class_declaration":
+        return False  # an object's members are visible to the classes nested in it
+    n = use.parent
+    while n is not None and n != body:
+        if n.type in ("object_declaration", "companion_object"):
+            return True
+        if (
+            n.type == "class_declaration"
+            and n.parent is not None
+            and n.parent.type == "class_body"
+            and not _is_inner(n, source)
+        ):
+            return True
+        n = n.parent
+    return False
+
+
+def _is_inner(cls: Node, source: bytes) -> bool:
+    mods = next((c for c in cls.named_children if c.type == "modifiers"), None)
+    return mods is not None and any(
+        c.type == "class_modifier" and node_text(c, source) == "inner" for c in mods.named_children
+    )
+
+
 def _only_passed_to_add_tools(name: str, decl: Node, source: bytes, names: _Names) -> bool:
     """True when every use of ``name`` where ``decl`` is visible (its block; the whole file for a
     property) is the sole argument of an ``addTools`` call (a mutable list nothing adds to,
-    removes from or clears)."""
+    removes from or clears). Memoized per declaration on ``names``."""
+    cached = names.add_tools_only.get(decl.start_byte)
+    if cached is None:
+        cached = names.add_tools_only[decl.start_byte] = _uses_only_add_tools(
+            name, decl, source, names
+        )
+    return cached
+
+
+def _uses_only_add_tools(name: str, decl: Node, source: bytes, names: _Names) -> bool:
     scope = decl.parent if decl.parent is not None and decl.parent.type == "statements" else None
     for n in names.uses_in(name, scope if scope is not None else _root(decl)):
         if _contains(decl, n):
@@ -804,7 +865,7 @@ def _tools_list(lst: Node | None, source: bytes, names: Callable[[], _Names]) ->
             if decl is not None
             else None
         )
-        if decl is None or kind is None or node_text(kind, source) != "val":
+        if decl is None or kind is None or node_text(kind, source) != "val" or _destructures(decl):
             return None
         value = _value_of(decl)
         if value is None or value.type != "call_expression":

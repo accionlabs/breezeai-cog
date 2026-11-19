@@ -62,7 +62,7 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..go_mcp_common import go_string, package_names, walk
+from ..go_mcp_common import HandlerLines, go_string, package_names, walk
 from ..mcp_common import (
     PROMPT,
     RESOURCE,
@@ -366,7 +366,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     if not pkgs:
         return None
     nodes = walk(root)
-    functions = function_lines(dc.record)
+    functions = HandlerLines(source, function_lines(dc.record))
     # Per scope (function span, or the file): name → True when every binding there is a server.
     servers: dict[Span, dict[str, bool]] = {}
     # Per function: name → the (target, value) pairs that declare or assign it there.
@@ -567,7 +567,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         handler_line: int | None = None
         if handler.type == "identifier":
             handler_name = node_text(handler, source)
-            handler_line = functions.get(handler_name)
+            handler_line = functions.line(handler)
         elif handler.type == "func_literal":
             handler_line = handler.start_point[0] + 1
         elif handler.type == "selector_expression":

@@ -186,12 +186,22 @@ _IMPORT = re.compile(
 )
 
 
+#: A type named ``McpServer`` declared in the file (Java ``class`` / ``interface`` / ``enum`` /
+#: ``record`` / ``@interface``, Kotlin ``object`` / ``typealias``), at any depth.
+_DECLARES_MCP_SERVER = re.compile(
+    rb"\b(?:class|interface|enum|record|object|typealias)[ \t\r\n]+McpServer\b"
+)
+
+
 def mcp_server_names(source: bytes) -> frozenset[str]:
     """What the SDK's ``McpServer`` is called in this Java / Kotlin file: its fully qualified
     name; ``McpServer`` when ``io.modelcontextprotocol.server.McpServer`` (or the package's
-    ``*``) is imported and no other ``McpServer`` is; a Kotlin ``import … as`` alias of it."""
+    ``*``) is imported, no other ``McpServer`` is, and the file declares no type of that name
+    itself (a class, nested or not, shadows the import); a Kotlin ``import … as`` alias of it."""
     names = {MCP_SERVER}
     sdk = other = False
+    if _DECLARES_MCP_SERVER.search(source):
+        other = True
     for m in _IMPORT.finditer(source):
         path = m.group(1).decode()
         alias = m.group(2).decode() if m.group(2) is not None else None

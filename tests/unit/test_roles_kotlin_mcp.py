@@ -255,7 +255,8 @@ def test_kotlin_add_tools_variable_without_the_mcp_sdk_is_not_a_tool(analyze_fil
 
 def test_kotlin_add_tools_name_bound_nearer_than_the_val_is_not_read(analyze_files) -> None:
     """The ``val`` of the same name further out is hidden by a primary-constructor parameter, a
-    ``for`` loop variable, a ``catch`` parameter and a ``when (val …)`` subject."""
+    ``for`` loop variable, a ``catch`` parameter, a ``when (val …)`` subject and a destructured
+    local ``val (tools, cfg) = …``."""
     src = """
 package demo
 
@@ -280,6 +281,8 @@ fun r2(s: Server, gs: List<List<RegisteredTool>>) {
         s.addTools(loopy)
     }
 }
+
+fun f(s: Server) { val (tools, cfg) = load(); s.addTools(tools) }
 """
     assert set(_tools(analyze_files({"src/main/kotlin/demo/Reg.kt": src}))) == {"in_loop"}
 
@@ -547,3 +550,39 @@ fun build(transport: Any) {{
 """
     tools = _tools(analyze_files({"src/main/kotlin/demo/Build.kt": src}))
     assert set(tools) == expected | {"qualified"}  # the fully qualified name is always the SDK's
+
+
+def test_kotlin_add_tools_nested_class_does_not_read_the_outer_instance_list(analyze_files) -> None:
+    """An outer class's instance ``val tools`` is visible in an ``inner`` class and a local class,
+    not in a nested (non-``inner``) class, an ``object`` or a companion: there the name resolves
+    further out (the top-level list), or to nothing."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+val shared = listOf(RegisteredTool(Tool(name = "top")) { _ -> null })
+
+class Outer {
+    val tools = listOf(RegisteredTool(Tool(name = "outer")) { _ -> null })
+    val shared = listOf(RegisteredTool(Tool(name = "outer_shared")) { _ -> null })
+    val forLocal = listOf(RegisteredTool(Tool(name = "local")) { _ -> null })
+
+    inner class In { fun r(s: Server) = s.addTools(tools) }
+    class Nested { fun r(s: Server) { s.addTools(tools); s.addTools(shared) } }
+    object Obj { fun r(s: Server) = s.addTools(tools) }
+    companion object { fun r(s: Server) = s.addTools(tools) }
+
+    fun local(s: Server) {
+        class L { fun r() = s.addTools(forLocal) }
+    }
+}
+"""
+    tools = [
+        s
+        for s in analyze_files({"src/main/kotlin/demo/Outer.kt": src})
+        if s.semanticType == "mcp_tool"
+    ]
+    assert sorted(t.endpoint for t in tools) == ["local", "outer", "top"]
