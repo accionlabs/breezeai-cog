@@ -36,6 +36,7 @@ from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, 
 from .forwarders import forwarder_sites
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
+from .route_chains import GroupKey, group_key, groupable, merge_chains, pathless_middleware
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
@@ -407,6 +408,7 @@ def detect_vertx(
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
                                      index, suppress, built_by)
     found.extend(sites)
+    chained: list[tuple[GroupKey, int, Node]] = []  # route registrations of a handler chain
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # a table loop's own registration
@@ -478,6 +480,8 @@ def detect_vertx(
             handler_line, first_path = site(handler)
         else:
             first_path = None
+        if semantic == "route" and groupable(call, source):
+            chained.append((group_key(call, source, method, endpoint), len(found), call))
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
                                 handler_path=first_path))
@@ -489,4 +493,6 @@ def detect_vertx(
                 "handlerLine": line, "handlerPath": extra_path,
             }))
 
+    if chained:  # one endpoint over several statements: one record, earlier handlers as guards
+        found = merge_chains(found, chained, pathless_middleware(calls, source, routers), source)
     return found

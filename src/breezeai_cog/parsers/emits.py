@@ -68,6 +68,9 @@ class Emit:
     line: int | None = None
     col: int | None = None
     end_line: int | None = None
+    #: The construct continues to this line (a route registered over several statements): an
+    #: enriched statement's ``endLine`` is widened to it, and an appended one ends there.
+    extend_to: int | None = None
 
     @property
     def start_line(self) -> int:
@@ -75,7 +78,8 @@ class Emit:
 
     @property
     def last_line(self) -> int:
-        return self.end_line if self.end_line is not None else end_line(self.node)
+        last = self.end_line if self.end_line is not None else end_line(self.node)
+        return max(last, self.extend_to) if self.extend_to is not None else last
 
 
 def _eligible(stmt: Statement, emit: Emit) -> bool:
@@ -115,6 +119,8 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
             for name, value in emit.fill.items():
                 if value:
                     setattr(stmt, name, value)
+            if emit.extend_to is not None and emit.extend_to > stmt.endLine:
+                stmt.endLine = emit.extend_to
             continue
         node = emit.node
         col = emit.col if emit.col is not None else node.start_point[1]

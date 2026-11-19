@@ -618,3 +618,23 @@ def test_vertx_records_in_a_fixture_file_are_skipped(analyze_files) -> None:
     st = analyze_files({"src/test/java/fixtures/a/Api.java": body})
     # A fixture is parsed for structure, never as a source of entry points.
     assert _eps(st) == []
+
+
+def test_pathless_registration_is_a_guard_of_later_routes(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.post().handler(BodyHandler.create());
+    router.post("/orders").handler(this::handle);""")
+    )
+    [r] = _eps(st)
+    assert (r.startLine, r.method, r.guards) == (10, "POST", ["BodyHandler"])
+
+
+def test_one_endpoint_over_several_registrations_is_one_binding(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.post("/orders").handler(this::check);
+    router.post("/orders").handler(this::handle);""")
+    )
+    [r] = _eps(st)
+    assert (r.startLine, r.endLine, r.handler, r.guards) == (9, 10, "handle", ["check"])
