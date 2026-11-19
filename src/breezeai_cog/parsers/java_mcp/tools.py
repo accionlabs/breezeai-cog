@@ -25,7 +25,8 @@ The server builder's shortcut registers a ``Tool`` directly::
 
 * Only on a chain that starts at ``McpServer.sync(`` / ``McpServer.async(``, with ``McpServer``
   imported from ``io.modelcontextprotocol.server`` (by name or ``.*``, and no other
-  ``McpServer`` imported) or written fully qualified; the record sits on the ``.tool`` /
+  ``McpServer`` imported; by ``.*`` only when the repository index shows no ``McpServer`` in
+  the file's own package) or written fully qualified; the record sits on the ``.tool`` /
   ``.toolCall`` name. The tool and handler are read as above.
 * ``.tools(spec…)`` is not read: each specification is recorded where it is built.
 
@@ -47,6 +48,7 @@ from ..jvm_mcp_common import (
     SHORTCUTS,
     java_string,
     json_schema_params,
+    index_types,
     mcp_server_names,
     shortcut_emit,
     walk,
@@ -268,7 +270,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
     source = dc.source
     if b"McpServer" not in source or not SHORTCUT_CALL.search(source):
         return []
-    servers = mcp_server_names(source)
+    servers = mcp_server_names(source, index_types(dc.ctx))
     variables = _local_variables(dc.root, source)
     lines: dict[str, list[int]] = {}
     for f in dc.record.functions:

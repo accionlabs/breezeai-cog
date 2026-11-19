@@ -40,7 +40,8 @@ MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
   handler)`` (also ``async``) is read the same way, only on a chain that starts at
   ``McpServer.sync(`` / ``.async(`` with ``McpServer`` imported from
   ``io.modelcontextprotocol.server`` (by name, ``.*`` or an ``as`` alias, and no other
-  ``McpServer`` imported) or written fully qualified; ``.tools(spec…)`` is not read.
+  ``McpServer`` imported; by ``.*`` only when the repository index shows no ``McpServer`` in
+  the file's own package) or written fully qualified; ``.tools(spec…)`` is not read.
 
 Import aliases (``import io.modelcontextprotocol.kotlin.sdk.Tool as McpTool``) are followed for
 the types above when the aliased class is in an MCP package; an alias of any other class
@@ -72,6 +73,7 @@ from ..jvm_mcp_common import (
     kotlin_string,
     kotlin_suffix_name,
     kotlin_type_name,
+    index_types,
     mcp_server_names,
     shortcut_emit,
     walk,
@@ -455,7 +457,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
     variables = _local_variables(dc.root, source)
     sites = _HandlerSites(dc.root, source)
     aliases = kotlin_aliases(source)
-    servers = mcp_server_names(source)
+    servers = mcp_server_names(source, index_types(dc.ctx))
     found: list[Emit] = []
     rooted: dict[tuple[int, int], bool] = {}
     for node in walk(dc.root):

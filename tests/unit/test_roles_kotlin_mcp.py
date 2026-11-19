@@ -525,3 +525,51 @@ class Mine {
     assert (tools["mine"].handler, tools["mine"].handlerLine) == ("echo", 20)
     assert (tools["not_mine"].handler, tools["not_mine"].handlerLine) == ("calc", None)
     assert (tools["typed"].handler, tools["typed"].handlerLine) == ("echo", None)
+
+
+@pytest.mark.parametrize(
+    ("other_file", "imports", "expected"),
+    [
+        # a same-package McpServer in another file wins over the SDK's `*`
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.*",
+            set(),
+        ),
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nobject McpServer\n"),
+            "import io.modelcontextprotocol.server.*",
+            set(),
+        ),
+        # imported by name, the SDK's class wins over the same-package one
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.McpServer",
+            {"calc"},
+        ),
+        # a McpServer of another package is not visible: the `*` import is the SDK's
+        (
+            ("src/main/kotlin/other/McpServer.kt", "package other\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.*",
+            {"calc"},
+        ),
+    ],
+)
+def test_kotlin_wildcard_mcp_server_loses_to_a_same_package_class(
+    analyze_files, other_file, imports, expected
+) -> None:
+    """In Kotlin a type of the file's own package hides one imported by ``*``: with only
+    ``io.modelcontextprotocol.server.*``, a ``McpServer`` declared in another file of the same
+    package is what the bare name means."""
+    src = f"""package demo
+
+{imports}
+import io.modelcontextprotocol.spec.McpSchema
+
+fun build(transport: Any) {{
+    McpServer.sync(transport).tool(McpSchema.Tool("calc", "C", "{{}}")) {{ _, _ -> null }}.build()
+}}
+"""
+    path, other = other_file
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Build.kt": src, path: other}))
+    assert set(tools) == expected

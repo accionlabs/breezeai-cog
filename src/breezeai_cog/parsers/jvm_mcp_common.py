@@ -187,13 +187,32 @@ _DECLARES_MCP_SERVER = re.compile(
 )
 
 
-def mcp_server_names(source: bytes) -> frozenset[str]:
+_PACKAGE = re.compile(rb"^[ \t]*package[ \t]+([\w.]*\w)", re.MULTILINE)
+
+
+def index_types(ctx: Any) -> list[Any]:
+    """The ``package.Type → path`` maps of the indexes a parse context holds (its own language's
+    and the related languages'); empty when no index was built."""
+    out: list[Any] = []
+    for idx in (ctx.resolution_index, *ctx.related_indexes.values()):
+        fqcn = idx if isinstance(idx, dict) else getattr(idx, "fqcn", None)
+        if isinstance(fqcn, dict):
+            out.append(fqcn)
+    return out
+
+
+def mcp_server_names(source: bytes, types: list[Any]) -> frozenset[str]:
     """What the SDK's ``McpServer`` is called in this Java / Kotlin file: its fully qualified
-    name; ``McpServer`` when ``io.modelcontextprotocol.server.McpServer`` (or the package's
-    ``*``) is imported, no other ``McpServer`` is, and the file declares no type of that name
-    itself (a class, nested or not, shadows the import); a Kotlin ``import … as`` alias of it."""
+    name; ``McpServer`` when ``io.modelcontextprotocol.server.McpServer`` is imported by name, no
+    other ``McpServer`` is, and the file declares no type of that name itself (a class, nested or
+    not, shadows the import); a Kotlin ``import … as`` alias of it.
+
+    With only the package's ``*`` imported, a type ``McpServer`` of the file's own package (in
+    another file) wins over the wildcard in Java and Kotlin: bare ``McpServer`` is the SDK's only
+    when ``types`` (the indexes' ``package.Type`` maps, :func:`index_types`) are there and none
+    has ``<package>.McpServer``. Without an index it is not proven."""
     names = {MCP_SERVER}
-    sdk = other = False
+    by_name = wildcard = other = False
     if _DECLARES_MCP_SERVER.search(source):
         other = True
     for m in _IMPORT.finditer(source):
@@ -204,11 +223,18 @@ def mcp_server_names(source: bytes) -> frozenset[str]:
                 names.add(alias)
             elif alias == "McpServer":
                 other = True
-        elif path in (MCP_SERVER, MCP_SERVER.rsplit(".", 1)[0] + ".*"):
-            sdk = True
+        elif path == MCP_SERVER:
+            by_name = True
+        elif path == MCP_SERVER.rsplit(".", 1)[0] + ".*":
+            wildcard = True
         elif path.endswith(".McpServer"):
             other = True
-    if sdk and not other:
+    if wildcard and not by_name and not other:
+        pkg = _PACKAGE.search(source)
+        own = f"{pkg.group(1).decode()}.McpServer" if pkg is not None else "McpServer"
+        if not types or any(own in t for t in types):
+            other = True
+    if (by_name or wildcard) and not other:
         names.add("McpServer")
     return frozenset(names)
 
