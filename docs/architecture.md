@@ -1216,5 +1216,3 @@ from another. The same holds between languages: C, C++ and CUDA share their extr
 | [Cross-file resolution](architecture/cross-file-resolution.md) | Indexes, call resolution, inheritance, constant folding |
 | [Capture-to-graph mapping](architecture/graph-mapping.md) | How each capture field becomes a Neo4j node, property or edge |
 | [Target Spec (Confluence)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The graph model the backend ingests |
-</content>
-</invoke>

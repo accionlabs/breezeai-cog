@@ -513,5 +513,3 @@ routes, calls, events, comments or enum members. Files, classes, functions, impo
 - Don't truncate text in the parser; splitting happens at output.
 
 The step-by-step is in the [Parser Reference](../parser-reference.md).
-</content>
-</invoke>

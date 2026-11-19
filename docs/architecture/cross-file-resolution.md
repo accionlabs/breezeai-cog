@@ -616,5 +616,3 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 
 The step-by-step for `build_index` is in
 [Parser Reference, Step 6](../parser-reference.md#step-6--build_index-only-if-cross-file-resolution-is-needed).
-</content>
-</invoke>

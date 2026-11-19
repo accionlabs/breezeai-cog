@@ -15,5 +15,8 @@ Spring AI's `@Tool` is also how a chat client declares a function, so it is a to
 | A tool specification of the MCP Java SDK in the same file as an annotated tool | None here | Recorded once, as [`java-mcp`](java-mcp.md) | Each tool is emitted once, by the package of its construct |
 | A computed tool name (`name = NAME`) | None | — | The tool exists, but its name is unknown |
 | Spring AI `@Tool` without an MCP server, a `@Tool` of another library | None | — | A chat-client function, not an MCP server tool |
+| `@McpResource(uri = "…", name = …, description = …)` on a method (Java or Kotlin) | Binding | `mcp_resource`, `framework: spring-ai-mcp`, at the annotation; `endpoint` = `uri` (a non-empty literal, else no record); `params` = the template's simple `{variables}` (`[]` for a fixed URI); `handler` = the method | The annotation is the MCP annotations library's own |
+| `@McpPrompt(name = …, description = …)` with `@McpArg(name, description, required)` parameters | Binding | `mcp_prompt`; `endpoint` = `name`, else the method name; `params` = the method's parameters as the library lists them: `@McpArg` `name` (else the parameter name), `description`, `required` (false by default); a parameter without `@McpArg` is an optional argument with no description; `GetPromptRequest`, a `Map` and the injected exchange / context types are skipped | |
+| `@Resource` (Jakarta / Spring injection), any other `@Prompt` | None | — | Not MCP annotations |
 
-Not covered yet (follow-up): `mcp_resource` / `mcp_prompt`, and MCP **client** calls.
+Resource / prompt fields and `params`: [entry-point contract, MCP resources and prompts](../architecture/entry-points.md#mcp-resources-and-prompts); client calls: [MCP client calls](../architecture/entry-points.md#mcp-client-calls).
