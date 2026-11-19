@@ -67,6 +67,7 @@ from ..mcp_common import (
     PROMPT,
     RESOURCE,
     TOOL,
+    function_lines,
     mcp_emit,
     param,
     schema_params,
@@ -365,7 +366,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     if not pkgs:
         return None
     nodes = walk(root)
-    functions = {f.name: f.startLine for f in dc.record.functions}
+    functions = function_lines(dc.record)
     # Per scope (function span, or the file): name → True when every binding there is a server.
     servers: dict[Span, dict[str, bool]] = {}
     # Per function: name → the (target, value) pairs that declare or assign it there.
@@ -440,9 +441,14 @@ def _detect(dc: DetectContext) -> Detection | None:
         args = _args(call.child_by_field_name("arguments"))
         if _pkg_selector(fn, source, pkgs, "AddTool"):
             return (args[1], args[2], True, "AddTool") if len(args) == 3 else None
-        if fn is None or fn.type != "selector_expression" or len(args) != 2:
+        field = (
+            fn.child_by_field_name("field")
+            if fn is not None and fn.type == "selector_expression"
+            else None
+        )
+        if fn is None or field is None or len(args) != 2:
             return None
-        adder = node_text(fn.child_by_field_name("field"), source)  # type: ignore[arg-type]
+        adder = node_text(field, source)
         if adder not in _ADDERS:
             return None
         receiver = fn.child_by_field_name("operand")

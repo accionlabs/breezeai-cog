@@ -64,7 +64,16 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import PROMPT, RESOURCE, TOOL, guarded, mcp_emit, param, uri_template_params
+from ..mcp_common import (
+    PROMPT,
+    RESOURCE,
+    TOOL,
+    function_lines,
+    guarded,
+    mcp_emit,
+    param,
+    uri_template_params,
+)
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings
 from .lowlevel import detect_lowlevel
@@ -620,7 +629,7 @@ def _registration(
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
-    functions = {f.name: f.startLine for f in dc.record.functions}
+    functions = function_lines(dc.record)
     blocks: BlockDeclarations = {}
 
     def shadowed(

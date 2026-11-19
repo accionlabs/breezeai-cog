@@ -24,7 +24,8 @@
   returns (an arrow function's expression body, or a ``return`` of the function itself), and a
   module-level ``const`` holding such an object, referenced by name in that array (only when
   nothing else in the file declares or imports that name). A list built
-  any other way (a variable, ``.map``, a spread, a condition) → no record.
+  any other way (a variable, ``.map``, a spread, a condition) → no record. A server given more
+  than one list handler (only the last set answers) → no record.
 * ``endpoint`` — ``name``, a string literal; anything else → no record. ``description`` — a
   string literal or a ``+`` of them. ``params`` — a JSON-schema ``inputSchema`` literal
   (``properties`` / ``required``); anything else → None (unknown).
@@ -348,6 +349,9 @@ def detect_lowlevel(
 
     listers: list[tuple[int, tuple[str, tuple[int, int]], Node]] = []
     dispatchers: dict[tuple[str, tuple[str, tuple[int, int]]], list[Node]] = {}
+    #: Per (list schema, server): how many list handlers it is given (each replaces the one
+    #: before at runtime).
+    list_handlers: dict[tuple[int, tuple[str, tuple[int, int]]], int] = {}
     for call in _walk(dc_root):
         if call.type != "call_expression":
             continue
@@ -376,14 +380,19 @@ def detect_lowlevel(
             continue
         schema = node_text(args[0], source)
         key = (receiver, _binding_scope(obj, source))
-        if schema in list_schemas and args[1].type in _FUNCTION_LITERALS:
-            listers.append((list_schemas[schema], key, args[1]))
+        if schema in list_schemas:
+            listed = list_schemas[schema]
+            list_handlers[(listed, key)] = list_handlers.get((listed, key), 0) + 1
+            if args[1].type in _FUNCTION_LITERALS:
+                listers.append((listed, key, args[1]))
         elif schema in dispatch_schemas:
             dispatchers.setdefault((dispatch_schemas[schema], key), []).append(args[1])
     consts = _const_objects(dc_root, source, imports)
     found: list[Emit] = []
     seen: set[int] = set()
     for listed, key, fn in listers:
+        if list_handlers[(listed, key)] > 1:
+            continue  # only the last one set answers at runtime: which one is unknown
         _, dispatch_name, array_key, kind = _LISTED[listed]
         handler: str | None = None
         handler_line: int | None = None

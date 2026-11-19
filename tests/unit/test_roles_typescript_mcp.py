@@ -566,3 +566,53 @@ const server = new Server({ name: "x", version: "1" }, {});
 server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ uri: "a://b", name: "b" }] }));
 """
     assert not _of(analyze_files({"srv.ts": src}), "mcp_resource")
+
+
+def test_typescript_handler_line_is_never_a_same_named_class_method(analyze_files) -> None:
+    """A handler passed by name is the module function, not a class method of the same name
+    declared after it; a name only a method has gives no line."""
+    src = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+async function lookup(args) { return { content: [] }; }
+async function dispatch(request) { return { content: [] }; }
+
+class Tools {
+  lookup() {}
+  dispatch() {}
+  lone() {}
+}
+
+const mcp = new McpServer({ name: "y", version: "1" });
+mcp.tool("lookup", {}, lookup);
+mcp.tool("lone", {}, lone);
+
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "low" }] }));
+server.setRequestHandler(CallToolRequestSchema, dispatch);
+"""
+    tools = _tools(analyze_files({"src/index.ts": src}))
+    assert (tools["lookup"].handler, tools["lookup"].handlerLine) == ("lookup", 6)
+    assert (tools["lone"].handler, tools["lone"].handlerLine) == ("lone", None)
+    assert (tools["low"].handler, tools["low"].handlerLine) == ("dispatch", 7)
+
+
+def test_typescript_lowlevel_server_given_two_list_handlers_gives_no_tools(analyze_files) -> None:
+    """Each ``setRequestHandler(ListToolsRequestSchema, …)`` replaces the one before: with two on
+    one server which list is served is not read; another server's list is kept."""
+    src = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "first" }] }));
+server.setRequestHandler(ListToolsRequestSchema, listAll);
+
+const other = new Server({ name: "y", version: "1" }, {});
+other.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "only" }] }));
+
+async function listAll() { return { tools: [] }; }
+"""
+    assert set(_tools(analyze_files({"src/index.ts": src}))) == {"only"}

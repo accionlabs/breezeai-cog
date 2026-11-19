@@ -24,13 +24,15 @@ API (``mcp.server.lowlevel.Server``), read for the ``python-mcp`` detector (``to
   by nothing else in this module (``server = wrap(server)`` is no proof) — with
   ``Server`` imported from ``mcp.server.lowlevel``, ``mcp.server.lowlevel.server`` or
   ``mcp.server``, and not bound again at module level (``class Server``, ``from socketio
-  import Server``). A local class named ``Server`` is not one; a nearer binding of the name
-  that is not a server hides it.
+  import Server``). A local class named ``Server``, or a function that binds the name
+  ``Server`` itself (``from socketio import Server`` inside it), is not one; a nearer binding of
+  the name that is not a server hides it.
 * **Tools** — each ``Tool(…)`` call (``Tool`` imported from ``mcp.types``, or ``types.Tool`` with
   ``types`` bound to ``mcp.types``; the standard library's ``types`` is not it) that is a direct
   element of a list literal returned by the ``@<server>.list_tools()`` function
   (``return [...]``, or ``return ListToolsResult(tools=[...])``). A list built by a
-  comprehension, a filter, a condition or a variable → no record.
+  comprehension, a filter, a condition or a variable → no record. A server with more than one
+  ``list_tools`` function (only the last registered answers) → no record.
 * ``endpoint`` — ``name=``, a string literal; anything else → no record. ``description`` —
   ``description=`` when a literal, else none.
 * ``params`` — ``inputSchema=`` a literal dict (read as Python values, then as a JSON schema:
@@ -306,6 +308,10 @@ def _bindings(
     out: _Bindings = {}
     #: Module-level bindings per name: how many, and how many are a ``from … import``.
     counts: dict[str, list[int]] = {}
+    #: The server bindings, as ``(scope, name, class head)``: checked once every scope's names
+    #: are known, since a function that binds the class's name itself
+    #: (``from socketio import Server``) means another class there.
+    servers: list[tuple[Node | None, str, str]] = []
 
     def bind(scope: Node | None, name: str, is_server: bool, from_import: bool = False) -> None:
         names = out.setdefault(_scope_key(scope), {})
@@ -324,6 +330,10 @@ def _bindings(
             server = left.type == "identifier" and _is_call_to(right, source, classes)
             for name in _pattern_names(left, source):
                 bind(_scope_of(node), name, server)
+                if server and right is not None:
+                    fn = right.child_by_field_name("function")
+                    if fn is not None:
+                        servers.append((_scope_of(node), name, node_text(fn, source).split(".")[0]))
         elif t in ("augmented_assignment",):
             left = node.child_by_field_name("left")
             for name in _pattern_names(left, source) if left is not None else []:
@@ -357,8 +367,11 @@ def _bindings(
             if name_node is None or name_node.type != "identifier":
                 continue
             ann = node.child_by_field_name("type")
-            typed = ann is not None and node_text(ann, source).strip("\"' ") in classes
+            ann_text = node_text(ann, source).strip("\"' ") if ann is not None else ""
+            typed = ann_text in classes
             bind(owner, node_text(name_node, source), typed)
+            if typed:
+                servers.append((owner, node_text(name_node, source), ann_text.split(".")[0]))
         elif t in ("import_from_statement", "import_statement"):
             scope = _scope_of(node)
             for child in node.named_children:
@@ -373,6 +386,13 @@ def _bindings(
                         bind(scope, node_text(alias, source), False, from_import)
                 elif child.type == "dotted_name":
                     bind(scope, node_text(child, source).split(".")[0], False, from_import)
+    for scope, name, head in servers:
+        cur = scope
+        while cur is not None:  # the module's own bindings of the class are checked already
+            if head in out.get(_scope_key(cur), {}):
+                out[_scope_key(scope)][name] = False
+                break
+            cur = _scope_of(cur)
     if only_imported is not None:
         # The names bound at module level by one `from … import` and nothing else.
         only_imported.update(name for name, (total, froms) in counts.items() if total == froms == 1)
@@ -646,10 +666,15 @@ def detect_lowlevel(dc: DetectContext) -> list[Emit]:
                 listers.append((by_lister[hit[1]], server, fn))
             else:
                 dispatchers.setdefault((hit[1], server), []).append(fn)
+    per_server: dict[tuple[Any, ...], int] = {}
+    for kind, server, _fn in listers:
+        per_server[(kind.lister, server)] = per_server.get((kind.lister, server), 0) + 1
     arguments = _types_names(root, source, "PromptArgument")
     results = {kind.entry: _types_names(root, source, kind.result) for kind in _LISTED}
     found: list[Emit] = []
     for kind, server, fn in listers:
+        if per_server[(kind.lister, server)] > 1:
+            continue  # only the last registered lister answers at runtime: which one is unknown
         handlers = dispatchers.get((kind.dispatcher, server), [])
         handler: tuple[str, int] | None = None
         if len(handlers) == 1:
