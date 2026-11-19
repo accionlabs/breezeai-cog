@@ -104,12 +104,26 @@ def _enclosing_func(node: Node) -> Node | None:
 
 def _bindings_in(fn: Node, source: bytes) -> _Bound:
     """Every name ``fn`` (and the functions nested in it) binds: declared, assigned, a ``range``
-    target or a parameter (the receiver included)."""
+    target, a parameter (the receiver included), a ``select`` receive (``case h := <-ch``,
+    ``case h = <-ch``) or a type-switch alias (``switch h := x.(type)``). A receive or an alias
+    has no value: what it holds is not a literal in the file."""
     out: _Bound = {}
     for n in walk(fn):
         if n.type == "parameter_declaration":
             for c in n.children_by_field_name("name"):
                 out.setdefault(node_text(c, source), []).append((n, None))
+        elif n.type in ("receive_statement", "type_switch_statement"):
+            left = n.child_by_field_name("left" if n.type == "receive_statement" else "alias")
+            targets = (
+                left.named_children
+                if left is not None and left.type == "expression_list"
+                else [left]
+                if left is not None
+                else []
+            )
+            for target in targets:
+                if target.type == "identifier":
+                    out.setdefault(node_text(target, source), []).append((n, None))
         elif n.type in _BINDINGS:
             left = n.child_by_field_name("left") or n.child_by_field_name("name")
             right = n.child_by_field_name("right") or n.child_by_field_name("value")

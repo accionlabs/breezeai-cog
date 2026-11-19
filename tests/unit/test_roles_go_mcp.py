@@ -434,3 +434,54 @@ func main() {
     assert (tools["local"].handler, tools["local"].handlerLine) == ("h", 16)
     assert (tools["reassigned"].handler, tools["reassigned"].handlerLine) == ("r", None)
     assert (tools["shadowed"].handler, tools["shadowed"].handlerLine) == ("shadow", None)
+
+
+def test_go_sdk_select_receive_or_type_switch_alias_is_not_the_top_level_function(
+    analyze_files,
+) -> None:
+    """A name bound by a ``select`` receive (``case Handle := <-ch``) or a type-switch alias
+    (``switch Handle := x.(type)``) is that local, not the top-level function of the name: no
+    line. A literal later assigned by a receive (``case h = <-ch``) loses its line. A name no
+    function binds still gives the top-level function's line."""
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func Handle() {}
+
+func a(s *mcp.Server, ch chan func()) {
+	select {
+	case Handle := <-ch:
+		mcp.AddTool(s, &mcp.Tool{Name: "recv"}, Handle)
+	}
+}
+
+func b(s *mcp.Server, x any) {
+	switch Handle := x.(type) {
+	case func():
+		mcp.AddTool(s, &mcp.Tool{Name: "tswitch"}, Handle)
+	}
+}
+
+func c(s *mcp.Server, ch chan func()) {
+	h := func() {}
+	select {
+	case h = <-ch:
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "recvassign"}, h)
+}
+
+func d(s *mcp.Server, ch chan func()) {
+	select {
+	case other := <-ch:
+		_ = other
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "top"}, Handle)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["recv"].handler, tools["recv"].handlerLine) == ("Handle", None)
+    assert (tools["tswitch"].handler, tools["tswitch"].handlerLine) == ("Handle", None)
+    assert (tools["recvassign"].handler, tools["recvassign"].handlerLine) == ("h", None)
+    assert (tools["top"].handler, tools["top"].handlerLine) == ("Handle", 6)

@@ -295,3 +295,45 @@ func main() {
     tools = _tools(analyze_files({"main.go": src}))
     assert (tools["local"].handler, tools["local"].handlerLine) == ("h", 11)
     assert (tools["twice"].handler, tools["twice"].handlerLine) == ("g", None)
+
+
+def test_mcp_go_select_receive_or_type_switch_alias_is_not_the_top_level_function(
+    analyze_files,
+) -> None:
+    """A type-switch alias or a ``select`` receive that binds the handler's name is that local,
+    not the top-level function of the name: no line. The top-level function still gives its
+    line where nothing binds the name."""
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func Handle() {}
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    for _, x := range xs {
+        switch Handle := x.(type) {
+        case func():
+            s.AddTool(mcp.NewTool("tswitch"), Handle)
+        }
+    }
+    select {
+    case Handle2 := <-ch:
+        s.AddTool(mcp.NewTool("recv"), Handle2)
+    }
+}
+
+func Handle2() {}
+
+func other(s *server.MCPServer) {
+    s.AddTool(mcp.NewTool("top"), Handle)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["tswitch"].handler, tools["tswitch"].handlerLine) == ("Handle", None)
+    assert (tools["recv"].handler, tools["recv"].handlerLine) == ("Handle2", None)
+    assert (tools["top"].handler, tools["top"].handlerLine) == ("Handle", 9)
