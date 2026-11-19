@@ -294,8 +294,88 @@ def test_attribute_join_leaves_other_shapes_alone() -> None:
         b"<A>\n<B>\nx = 1\n",                                                # not a declaration
         b"Dim doc = <root>\n<item/>\n<item></item>\nPublic Sub M()\n",       # XML literal tags
         b"<xs:a>\n<xs:b>\nPublic Sub M()\n",                                 # namespaced XML tags
+        b"<A> _\n' note\n<B>\nPublic Sub M()\n",                            # comment inside the run
+        b"<A> <B>\nx = 1\n",                                                 # not a declaration
+        b"<a><b>Public</b></a>\n",                                           # XML literal on a line
+        b"<A> _\nPublic Sub M()\n",                                          # one block + continuation
     ):
         assert join_attribute_blocks(src) is src, src
+
+
+def test_attribute_blocks_on_a_line_or_continued_with_underscore_are_joined() -> None:
+    from breezeai_cog.parsers.vb.source import join_attribute_blocks
+
+    cases = {
+        # several on a line, above the declaration
+        b'<HttpGet("{id}")> <Authorize>\nPublic Function F() As Object\n':
+            b'<HttpGet("{id}"),  Authorize>\nPublic Function F() As Object\n',
+        # joined with ` _` (the continuations become spaces)
+        b'<HttpPost("bulk")> _\r\n<Authorize> _\r\nPublic Function F() As Object\r\n':
+            b'<HttpPost("bulk"),  \r\n Authorize>  \r\nPublic Function F() As Object\r\n',
+        # on the declaration's own line
+        b'<HttpDelete("{id}")> <Authorize> Public Function F() As Object\n':
+            b'<HttpDelete("{id}"),  Authorize> Public Function F() As Object\n',
+        # one per line, then a block on the declaration line
+        b'<A>\n<B("x > y")> Public Sub M()\n': b'<A,\n B("x > y")> Public Sub M()\n',
+        # a `>` inside parentheses or a string does not close the block
+        b'<Range(GetType(Integer), "a>b")> <C>\nPublic Sub M()\n':
+            b'<Range(GetType(Integer), "a>b"),  C>\nPublic Sub M()\n',
+    }
+    for src, want in cases.items():
+        out = join_attribute_blocks(src)
+        assert out == want, src
+        assert len(out) == len(src)
+
+
+_ATTRIBUTE_LAYOUTS = b'''Public Class OrdersController
+    <HttpGet("{id}")> <Authorize>
+    Public Function GetOne(id As Integer) As IActionResult
+        Return Ok(id)
+    End Function
+
+    <HttpPost("bulk")> _
+    <Authorize> _
+    Public Function Bulk(x As Integer) As IActionResult
+        Return Ok(x)
+    End Function
+
+    <HttpDelete("{id}")> <Authorize> Public Function Remove(id As Integer) As IActionResult
+        Return Ok(id)
+    End Function
+End Class
+'''
+
+
+def test_every_attribute_block_of_a_member_is_kept_whatever_the_layout(tmp_path) -> None:
+    p = tmp_path / "C.vb"
+    p.write_bytes(_ATTRIBUTE_LAYOUTS)
+    rec = VbParser().parse_file(ParseContext(
+        path="C.vb", abs_path=p, source=_ATTRIBUTE_LAYOUTS, repo_root=tmp_path))
+    got = [(f.name, f.startLine, [d.name for d in f.decorators]) for f in rec.functions]
+    assert got == [
+        ("GetOne", 2, ["HttpGet", "Authorize"]),
+        ("Bulk", 7, ["HttpPost", "Authorize"]),
+        ("Remove", 13, ["HttpDelete", "Authorize"]),
+    ]
+    bulk = rec.functions[1]
+    assert bulk.decorators[0].args == ["bulk"]
+
+
+def test_a_nested_type_under_several_attribute_blocks_keeps_the_members_after_it(tmp_path) -> None:
+    # The nested type is blanked from its first attribute line on: the joined run does not leave
+    # a dangling block behind that would swallow the module's members after the type.
+    for end in (b"", b" _"):
+        src = (b"Module Service\n    <ServiceContract()>" + end + b"\n"
+               b"    <ServiceKnownType(GetType(Order))>" + end + b"\n"
+               b"    Public Interface IOrders\n        Sub Submit(ByVal x As Integer)\n"
+               b"    End Interface\n\n    Sub Main()\n        Run()\n    End Sub\nEnd Module\n")
+        p = tmp_path / "S.vb"
+        p.write_bytes(src)
+        rec = VbParser().parse_file(ParseContext(path="S.vb", abs_path=p, source=src,
+                                                 repo_root=tmp_path))
+        orders = next(c for c in rec.classes if c.name == "IOrders")
+        assert [d.name for d in orders.decorators] == ["ServiceContract", "ServiceKnownType"], end
+        assert {f.name for f in rec.functions} == {"Submit", "Main"}, end
 
 
 STACKED = b'''Imports System.ServiceModel

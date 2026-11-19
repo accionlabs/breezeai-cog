@@ -14,11 +14,13 @@ for the parser only, byte for byte in place (``>`` → ``,`` and ``<`` → space
     <HttpPost,
      Route("create")>
 
-so every offset, line and text still comes from the original source. A run is joined only when
-each line holds one attribute block and nothing else and the run is directly followed by a
-declaration line; ``<Assembly:``/``<Module:`` targets, XML-literal tags (``</x>``, ``<x/>``,
-``<x:y>``) and lines with a trailing comment or ``_`` continuation are left alone, so anything
-else parses exactly as written.
+so every offset, line and text still comes from the original source. Blocks written several on a
+line (``<HttpGet("{id}")> <Authorize>``), joined with a `` _`` continuation, or in front of the
+declaration on its own line are joined the same way (the ``_`` becomes a space). A run is joined
+only when its lines hold attribute blocks and nothing else (a `` _`` at the end aside) and it is
+directly followed by a declaration; a block ends at the first ``>`` outside strings and
+parentheses. ``<Assembly:``/``<Module:`` targets, XML-literal tags (``</x>``, ``<x/>``, ``<x:y>``)
+and lines with a trailing comment are left alone, so anything else parses exactly as written.
 
 The grammar has no rule for a type inside a type either: ``Public Class Dto`` inside a class reads
 as a field, the outer class closes at the nested ``End Class``, and the outer type's members after
@@ -66,30 +68,74 @@ from tree_sitter import Node, Tree
 
 from ..treesitter import parse_source
 
-#: One attribute block alone on its line: ``<Name>``, ``<Name(…)>``, ``<A, B(…)>``. The name must
-#: not be followed by ``:`` (``<Assembly: X>``, an ``<xs:element>`` XML tag), and the line may hold
-#: no closing or self-closing tag and no comment.
-_ATTR_LINE = re.compile(rb"^[ \t]*<[ \t]*[A-Za-z_][\w.]*[ \t]*(?![\w.:])[^\n']*>[ \t]*\r?$")
+#: An attribute block's opening ``<Name``. The name must not be followed by ``:`` (``<Assembly: X>``,
+#: an ``<xs:element>`` XML tag).
+_BLOCK_OPEN = re.compile(rb"<[ \t]*[A-Za-z_][\w.]*[ \t]*(?![\w.:])")
 _XML_TAG = re.compile(rb"</|/>")
+#: What may end a line of attribute blocks: nothing, or a `` _`` line continuation.
+_LINE_END = re.compile(rb"(?:_[ \t]*)?\r?$")
 
-#: A declaration a stacked attribute run may sit on (VB keywords are case-insensitive).
-_DECLARATION = re.compile(
-    rb"^[ \t]*(?:Public|Private|Protected|Friend|Shared|Overrides|Overridable|NotOverridable|"
+_KEYWORDS = (
+    rb"(?:Public|Private|Protected|Friend|Shared|Overrides|Overridable|NotOverridable|"
     rb"MustOverride|Overloads|Shadows|ReadOnly|WriteOnly|Default|Partial|MustInherit|"
     rb"NotInheritable|Static|Async|Iterator|Widening|Narrowing|Function|Sub|Property|Class|"
     rb"Interface|Structure|Module|Enum|Event|Delegate|Declare|Const|Dim|WithEvents|Custom|"
-    rb"Operator)\b",
-    re.IGNORECASE,
+    rb"Operator)\b"
 )
+#: A declaration an attribute run may sit on (VB keywords are case-insensitive).
+_DECLARATION = re.compile(_KEYWORDS, re.IGNORECASE)
+
+
+def _block_close(line: bytes, start: int) -> int | None:
+    """Offset of the ``>`` closing the attribute block that opens at ``start`` — outside strings
+    and parentheses — or None: no close on the line, a comment, or an XML ``/>``."""
+    depth = 0
+    in_string = False
+    for k in range(start + 1, len(line)):
+        ch = line[k]
+        if ch == 0x22:  # `"`; a doubled `""` inside a string toggles twice
+            in_string = not in_string
+        elif in_string:
+            continue
+        elif ch == 0x27:  # `'` starts a comment
+            return None
+        elif ch == 0x28:
+            depth += 1
+        elif ch == 0x29:
+            depth -= 1
+        elif ch == 0x3E and depth == 0:
+            return None if line[k - 1] == 0x2F else k
+    return None
+
+
+def _leading_blocks(line: bytes) -> tuple[list[tuple[int, int]], int]:
+    """The attribute blocks ``line`` starts with, as (``<``, ``>``) offsets, and the offset of
+    what follows them (spaces skipped). No blocks on a line with an XML closing tag."""
+    blocks: list[tuple[int, int]] = []
+    k = len(line) - len(line.lstrip(b" \t"))
+    if _XML_TAG.search(line):
+        return blocks, k
+    while _BLOCK_OPEN.match(line, k):
+        close = _block_close(line, k)
+        if close is None:
+            break
+        blocks.append((k, close))
+        k = close + 1
+        while k < len(line) and line[k] in b" \t":
+            k += 1
+    return blocks, k
 
 
 def _is_attr_line(line: bytes) -> bool:
-    return bool(_ATTR_LINE.match(line)) and not _XML_TAG.search(line)
+    """A line of attribute blocks only, maybe continued with `` _``."""
+    blocks, rest = _leading_blocks(line)
+    return bool(blocks) and bool(_LINE_END.match(line, rest))
 
 
 def join_attribute_blocks(source: bytes) -> bytes:
-    """The shadow: each run of two or more attribute-only lines directly above a declaration,
-    joined into one block in place. Returns ``source`` itself when nothing is joined."""
+    """The shadow: each run of two or more attribute blocks in front of a declaration — one per
+    line, several on a line, joined with `` _``, or on the declaration's own line — joined into
+    one block in place. Returns ``source`` itself when nothing is joined."""
     if b"<" not in source:
         return source
     lines = source.split(b"\n")
@@ -99,22 +145,28 @@ def join_attribute_blocks(source: bytes) -> bytes:
         offsets.append(offsets[-1] + len(line) + 1)
     i = 0
     while i < len(lines):
-        if not _is_attr_line(lines[i]):
-            i += 1
-            continue
+        blocks: list[tuple[int, int]] = []
+        continuations: list[int] = []
         j = i
         while j < len(lines) and _is_attr_line(lines[j]):
+            found, rest = _leading_blocks(lines[j])
+            blocks += [(offsets[j] + a, offsets[j] + b) for a, b in found]
+            if lines[j][rest:rest + 1] == b"_":
+                continuations.append(offsets[j] + rest)
             j += 1
-        if j - i >= 2 and j < len(lines) and _DECLARATION.match(lines[j]):
-            if out is None:
-                out = bytearray(source)
-            for k in range(i, j):
-                line = lines[k].rstrip(b"\r")
-                if k < j - 1:  # close → comma
-                    out[offsets[k] + line.rindex(b">")] = ord(",")
-                if k > i:  # open → space
-                    out[offsets[k] + line.index(b"<")] = ord(" ")
-        i = j
+        if j < len(lines):
+            found, rest = _leading_blocks(lines[j])
+            if _DECLARATION.match(lines[j], rest):
+                blocks += [(offsets[j] + a, offsets[j] + b) for a, b in found]
+                if len(blocks) >= 2:
+                    if out is None:
+                        out = bytearray(source)
+                    for (_, close), (open_, _) in zip(blocks, blocks[1:]):
+                        out[close] = ord(",")
+                        out[open_] = ord(" ")
+                    for k in continuations:
+                        out[k] = ord(" ")
+        i = j + 1  # line j is not an attribute line: it ended the run (or there was none)
     return bytes(out) if out is not None else source
 
 
@@ -338,7 +390,9 @@ class _Layout(NamedTuple):
 def _layout(source: bytes) -> _Layout:
     joined = blank_generic_arguments(
         blank_implements(blank_await(join_attribute_blocks(source))))
-    blocks = _type_blocks(joined)
+    # Types are found on the original: a joined attribute line no longer ends in `>`, and a nested
+    # type must be blanked from its first attribute line on (the shadows keep every line).
+    blocks = _type_blocks(source)
     return _Layout(joined, [b for b in blocks or [] if b.depth > 0])
 
 
