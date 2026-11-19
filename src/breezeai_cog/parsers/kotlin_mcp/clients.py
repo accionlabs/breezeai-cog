@@ -15,7 +15,9 @@
 * **Client receiver** — a name (or ``this.name``) declared once in the file (a loop's or a
   lambda's variable of the same name counts as another declaration): typed ``Client`` (with
   the Kotlin SDK's ``Client`` imported) / ``McpSyncClient`` / ``McpAsyncClient``, or initialized by
-  ``Client(…)`` (that import) or a ``McpClient.sync(…)`` / ``.async(…)`` chain.
+  ``Client(…)`` (that import) or a ``McpClient.sync(…)`` / ``.async(…)`` chain. A star import of
+  the SDK's client package proves ``Client`` only when no other ``Client`` is imported by name
+  (``import com.acme.Client``, ``… as Client``) or declared in the file: those win over it.
 * **Request** — the Kotlin SDK's ``callTool(name, …)`` (named or first), or a
   ``CallToolRequest`` / ``ReadResourceRequest`` / ``GetPromptRequest`` built with ``name =`` /
   ``uri =`` or its ``…Params(name = …)``; the Java SDK's request constructors as in Java. A
@@ -45,7 +47,17 @@ from ..treesitter import node_text
 from .tools import KOTLIN_MCP, _builder_chain, _named, _positional, _type_callee
 
 _KOTLIN_CLIENT_IMPORT = re.compile(
-    rb"^[ \t]*import[ \t]+io\.modelcontextprotocol\.kotlin\.sdk\.client\.(?:Client\b(?![ \t]+as)|\*)",
+    rb"^[ \t]*import[ \t]+io\.modelcontextprotocol\.kotlin\.sdk\.client\.Client\b(?![ \t]+as)",
+    re.MULTILINE,
+)
+_KOTLIN_CLIENT_STAR = re.compile(
+    rb"^[ \t]*import[ \t]+io\.modelcontextprotocol\.kotlin\.sdk\.client\.\*", re.MULTILINE
+)
+#: A ``Client`` that wins over a star import: an explicit import of another class
+#: (``import com.acme.Client``, ``import com.acme.Other as Client``) or one declared in the file.
+_OTHER_CLIENT = re.compile(
+    rb"^[ \t]*import[ \t]+(?:[\w.]+\.Client\b(?![ \t]+as)|[\w.]+[ \t]+as[ \t]+Client\b)"
+    rb"|\b(?:class|interface|object|typealias)[ \t]+Client\b",
     re.MULTILINE,
 )
 _JAVA_TYPES = frozenset({"McpSyncClient", "McpAsyncClient"})
@@ -55,6 +67,14 @@ _CALLS = {
     "readResource": ("RESOURCE", "ReadResourceRequest", "uri"),
     "getPrompt": ("PROMPT", "GetPromptRequest", "name"),
 }
+
+
+def _kotlin_client(source: bytes) -> bool:
+    """``Client`` is the Kotlin SDK's: imported by name, or by the package's star import when no
+    other ``Client`` (explicitly imported or declared in the file) shadows it."""
+    if _KOTLIN_CLIENT_IMPORT.search(source):
+        return True
+    return bool(_KOTLIN_CLIENT_STAR.search(source)) and not _OTHER_CLIENT.search(source)
 
 
 def _built_java_client(value: Node | None, source: bytes) -> bool:
@@ -168,7 +188,12 @@ def _request(
         and _type_callee(first, source, aliases) == params_type
     ):
         return _string_arg(kotlin_call_args(first, source), kind[2], source)
-    if kind[1] == "CallToolRequest" and len(pos) == 3 and not any(k for k, _ in args):
+    if (
+        kind[1] == "CallToolRequest"
+        and len(pos) == 3
+        and not any(k for k, _ in args)
+        and kotlin_string(pos[0], source) is None
+    ):
         return kotlin_string(pos[1], source)  # Java SDK (jsonMapper, name, jsonArguments)
     return _string_arg(args, kind[2], source)
 
@@ -177,7 +202,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     if not any(m.encode() in source for m in _CALLS):
         return None
-    kotlin_client = bool(_KOTLIN_CLIENT_IMPORT.search(source))
+    kotlin_client = _kotlin_client(source)
     clients = _clients(dc.root, source, kotlin_client)
     if not clients:
         return None

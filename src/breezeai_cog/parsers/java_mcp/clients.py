@@ -12,7 +12,8 @@
   ``McpSyncClient`` / ``McpAsyncClient`` (a field, a local or a parameter), or ``var`` initialized
   by a ``McpClient.sync(…)`` / ``McpClient.async(…)`` chain. ``clients.get(0).callTool(…)`` (a
   Spring AI list of clients) is not one: which server it reaches is not in the code.
-* **Request** — ``new CallToolRequest(name, arguments)`` (``(mapper, name, json)``),
+* **Request** — ``new CallToolRequest(name, arguments[, meta])`` (``(mapper, name, json)``
+  when the first argument is not a string literal),
   ``CallToolRequest.builder(name)`` / ``.builder().name(name)…build()``, ``new
   ReadResourceRequest(uri)``, ``new GetPromptRequest(name, arguments)`` (or their builders), with a
   string literal; anything else → no record.
@@ -102,9 +103,10 @@ def _clients(root: Node, source: bytes) -> set[str]:
 def _request_endpoint(node: Node, kind: tuple[str, str, str], source: bytes) -> str | None:
     if node.type == "object_creation_expression" and _type_name(node, source) == kind[1]:
         args = _args(node)
-        if kind[1] == "CallToolRequest" and len(args) == 3:
+        first = java_string(args[0], source) if args else None
+        if first is None and kind[1] == "CallToolRequest" and len(args) == 3:
             return java_string(args[1], source)  # (jsonMapper, name, jsonArguments)
-        return java_string(args[0], source) if args else None
+        return first  # (name, arguments) / (name, arguments, meta) / (uri)
     chain = _builder_chain(node, source) if node.type == "method_invocation" else None
     if chain is None or chain[0] != kind[1] or chain[1][-1][0] != "build":
         return None

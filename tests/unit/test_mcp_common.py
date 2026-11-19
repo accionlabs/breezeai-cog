@@ -75,7 +75,7 @@ def test_mcp_emit_kinds(kind, semantic_type, method) -> None:
 def test_call_emit_enriches_the_call_statement() -> None:
     node, source = _node()
     emit = call_emit(node, source, method="TOOL", endpoint="x", framework="typescript-mcp")
-    assert emit.enrich == "unclassified"
+    assert emit.enrich == "starts"  # the statement starting on its line
     assert emit.fields == {
         "semanticType": "mcp_call",
         "method": "TOOL",

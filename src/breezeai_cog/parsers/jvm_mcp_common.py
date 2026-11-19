@@ -41,6 +41,12 @@ JAVA_MCP = "java-mcp"
 FACT = "spring-ai.mcp-server"
 #: Spring AI's ``@Tool``: the annotation counts only when it is this class.
 SPRING_TOOL_FQN = "org.springframework.ai.tool.annotation.Tool"
+#: Packages of the MCP annotations library (``@McpResource`` / ``@McpPrompt`` / ``@McpArg``): the
+#: community project and Spring AI's own copy of it.
+MCP_ANNOTATION_PACKAGES = (
+    "org.springaicommunity.mcp.annotation",
+    "org.springframework.ai.mcp.annotation",
+)
 _SERVER_DEPENDENCIES = (
     b"spring-ai-starter-mcp-server",
     b"spring-ai-mcp-server",

@@ -23,7 +23,10 @@
 
 ``@McpResource`` / ``@McpPrompt`` (with ``@McpArg`` parameters) are read by the Java detector's
 rules (``java_springai``): ``uri =`` a literal (params: the template's simple ``{variables}``);
-``name =`` else the function name, the parameters as the prompt's arguments.
+``name =`` else the function name, the parameters as the prompt's arguments (None when an
+``@McpArg`` ``name =`` / ``required =`` is not a literal). The annotation must be the
+annotations library's: imported from its package (by name, ``*`` or an alias) or written fully
+qualified.
 
 Only annotated functions are read here. A tool registered through the MCP Java SDK or the
 official Kotlin SDK belongs to ``kotlin_mcp``, also in a Spring application.
@@ -40,6 +43,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..jvm_mcp_common import (
     INJECTED,
+    MCP_ANNOTATION_PACKAGES,
     SPRING_AI,
     SPRING_TOOL_FQN,
     in_mcp_server_module,
@@ -161,7 +165,11 @@ def _spring_tool(ann: Node, source: bytes, imported: bool, aliases: dict[str, st
 _PROMPT_SKIPPED = INJECTED | {"GetPromptRequest", "Map", "HashMap", "LinkedHashMap", "MutableMap"}
 
 
-def _prompt_params(function: Node, source: bytes, aliases: dict[str, str]) -> list[Parameter]:
+def _prompt_params(
+    function: Node, source: bytes, aliases: dict[str, str]
+) -> list[Parameter] | None:
+    """The prompt's arguments; None when an ``@McpArg`` ``name`` / ``required`` is not a
+    literal (a constant): the argument list is then unknown."""
     params = next(
         (c for c in function.named_children if c.type == "function_value_parameters"), None
     )
@@ -185,12 +193,48 @@ def _prompt_params(function: Node, source: bytes, aliases: dict[str, str]) -> li
         ann = _annotations(p_mods, source, aliases).get("McpArg")
         description, required = None, False
         if ann is not None:
-            name = kotlin_string(_element(ann, "name", source), source) or name
+            named = _element(ann, "name", source)
+            if named is not None:
+                literal = kotlin_string(named, source)
+                if literal is None:
+                    return None  # @McpArg(name = ARG): which name, unknown
+                name = literal or name  # name = "" → the parameter's name
             description = kotlin_string(_element(ann, "description", source), source)
             req = _element(ann, "required", source)
-            required = req is not None and node_text(req, source) == "true"
+            req_text = node_text(req, source) if req is not None else "false"
+            if req_text not in ("true", "false"):
+                return None  # required = FLAG
+            required = req_text == "true"
         out.append(param(name, None, required=required, description=description))
     return out
+
+
+def _annotation_import(simple: str) -> re.Pattern[bytes]:
+    packages = b"|".join(re.escape(p.encode()) for p in MCP_ANNOTATION_PACKAGES)
+    return re.compile(
+        rb"^[ \t]*import[ \t]+(?:"
+        + packages
+        + rb")\.(?:"
+        + simple.encode()
+        + rb"\b(?![ \t]+as\b)|\*)",
+        re.MULTILINE,
+    )
+
+
+_ENTRY_IMPORTS = {key: _annotation_import(key) for key in ("McpResource", "McpPrompt")}
+
+
+def _library_annotation(
+    ann: Node, key: str, source: bytes, imported: bool, aliases: dict[str, str]
+) -> bool:
+    """``ann`` is the annotations library's ``key``: imported from its package (by name, ``*`` or
+    an alias), or written fully qualified."""
+    type_, _ = _ann_parts(ann)
+    text = node_text(type_, source) if type_ is not None else ""
+    fqns = {f"{p}.{key}" for p in MCP_ANNOTATION_PACKAGES}
+    if text in aliases:  # import org.springaicommunity.mcp.annotation.McpPrompt as Prompt
+        return aliases[text] in fqns
+    return (imported and text == key) or text in fqns
 
 
 def _annotated_entries(dc: DetectContext) -> list[Emit]:
@@ -199,6 +243,7 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
     if b"McpResource" not in source and b"McpPrompt" not in source:
         return []
     aliases = kotlin_aliases(source)
+    imported = {key: bool(rx.search(source)) for key, rx in _ENTRY_IMPORTS.items()}
     functions = {(f.name, f.startLine): f for f in dc.record.functions}
     found: list[Emit] = []
     for function in walk(dc.root):
@@ -216,7 +261,7 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
         owner = functions.get((function_name, line))
         for key, kind in (("McpResource", RESOURCE), ("McpPrompt", PROMPT)):
             ann = anns.get(key)
-            if ann is None:
+            if ann is None or not _library_annotation(ann, key, source, imported[key], aliases):
                 continue
             if kind == RESOURCE:
                 endpoint = kotlin_string(_element(ann, "uri", source), source)

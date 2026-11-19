@@ -230,8 +230,10 @@ def call_emit(
 ) -> Emit:
     """An ``mcp_call`` (outbound): a proven client calls a tool (``TOOL``), reads a resource
     (``RESOURCE``) or gets a prompt (``PROMPT``) by the literal ``endpoint``. It enriches the
-    call's own unclassified statement (one statement per call line), which keeps its ``name``,
-    else is appended with no ``name`` (as an ``api_call``)."""
+    unclassified statement that starts on the call's line, which keeps its ``name``; a call
+    inside a statement that starts on an earlier line (an argument of a multi-line
+    ``gather(…)``, the second line of an ``if`` condition) is appended on its own line with no
+    ``name`` (as an ``api_call``)."""
     return Emit(
         node,
         {
@@ -240,7 +242,7 @@ def call_emit(
             "endpoint": endpoint,
             "framework": framework,
         },
-        enrich="unclassified",
+        enrich="starts",
         node_type=node.type,
         text=first_line(node_text(node, source)),
     )

@@ -467,3 +467,145 @@ public class Other {
 """
     statements = analyze_files({"src/Other.java": src})
     assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+def test_spring_ai_java_prompt_arg_constants_leave_params_unknown(analyze_files) -> None:
+    """``@McpArg(name = CONST)`` / ``required = FLAG``: the argument list is unknown (None),
+    never the Java parameter's name or a defaulted ``required``."""
+    src = """
+package demo;
+
+import org.springaicommunity.mcp.annotation.McpArg;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+
+public class P {
+    static final String ARG = "source_code";
+    static final boolean REQ = true;
+
+    @McpPrompt(name = "by_const")
+    public Object byConst(@McpArg(name = ARG, required = true) String code) { return null; }
+
+    @McpPrompt(name = "req_const")
+    public Object reqConst(@McpArg(name = "code", required = REQ) String code) { return null; }
+
+    @McpPrompt(name = "literal")
+    public Object literal(@McpArg(name = "src", required = false) String code,
+                          @McpArg(name = "") String other) { return null; }
+}
+"""
+    prompts = _of(analyze_files({"src/P.java": src}), "mcp_prompt")
+    assert prompts["by_const"].params is None
+    assert prompts["req_const"].params is None
+    assert _p(prompts["literal"]) == [("src", None, False, None), ("other", None, False, None)]
+
+
+def test_spring_ai_kotlin_prompt_arg_constants_leave_params_unknown(analyze_files) -> None:
+    src = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpArg
+import org.springaicommunity.mcp.annotation.McpPrompt
+
+const val ARG = "source_code"
+
+class P {
+    @McpPrompt(name = "by_const")
+    fun byConst(@McpArg(name = ARG, required = true) code: String): Any = TODO()
+
+    @McpPrompt(name = "req_const")
+    fun reqConst(@McpArg(name = "code", required = REQ) code: String): Any = TODO()
+
+    @McpPrompt(name = "literal")
+    fun literal(@McpArg(name = "src", required = true) code: String): Any = TODO()
+}
+"""
+    prompts = _of(analyze_files({"src/P.kt": src}), "mcp_prompt")
+    assert prompts["by_const"].params is None
+    assert prompts["req_const"].params is None
+    assert _p(prompts["literal"]) == [("src", None, True, None)]
+
+
+def test_spring_ai_java_entries_need_the_annotations_library(analyze_files) -> None:
+    """``@McpResource`` / ``@McpPrompt`` of another library are not read; a star import, Spring
+    AI's own package or a fully qualified annotation are."""
+    files = {
+        "src/Other.java": """
+package demo;
+
+import com.acme.annotations.McpResource;
+import com.acme.annotations.*;
+
+public class Other {
+    @McpResource(uri = "acme://x")
+    public String x() { return ""; }
+
+    @McpPrompt(name = "acme")
+    public Object acme() { return null; }
+}
+""",
+        "src/Star.java": """
+package demo;
+
+import org.springaicommunity.mcp.annotation.*;
+
+public class Star {
+    @McpResource(uri = "star://x")
+    public String x() { return ""; }
+
+    @org.springaicommunity.mcp.annotation.McpPrompt(name = "qualified")
+    public Object q() { return null; }
+}
+""",
+        "src/SpringAi.java": """
+package demo;
+
+import org.springframework.ai.mcp.annotation.McpPrompt;
+
+public class SpringAi {
+    @McpPrompt(name = "spring")
+    public Object s() { return null; }
+}
+""",
+    }
+    statements = analyze_files(files)
+    assert set(_of(statements, "mcp_resource")) == {"star://x"}
+    assert set(_of(statements, "mcp_prompt")) == {"qualified", "spring"}
+
+
+def test_spring_ai_kotlin_entries_need_the_annotations_library(analyze_files) -> None:
+    files = {
+        "src/Other.kt": """
+package demo
+
+import com.acme.annotations.McpResource
+import org.springaicommunity.mcp.annotation.McpPrompt as Prompt
+import com.acme.annotations.McpPrompt
+
+class Other {
+    @McpResource(uri = "acme://x")
+    fun x(): String = ""
+
+    @McpPrompt(name = "acme")
+    fun acme(): Any = TODO()
+
+    @Prompt(name = "aliased")
+    fun aliased(): Any = TODO()
+}
+""",
+        "src/Star.kt": """
+package demo
+
+import org.springaicommunity.mcp.annotation.*
+
+class Star {
+    @McpResource(uri = "star://x")
+    fun x(): String = ""
+
+    @org.springaicommunity.mcp.annotation.McpPrompt(name = "qualified")
+    fun q(): Any = TODO()
+}
+""",
+    }
+    statements = analyze_files(files)
+    assert set(_of(statements, "mcp_resource")) == {"star://x"}
+    assert set(_of(statements, "mcp_prompt")) == {"aliased", "qualified"}

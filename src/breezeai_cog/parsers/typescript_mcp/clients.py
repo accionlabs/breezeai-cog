@@ -13,7 +13,8 @@
   too). A name whose nearest binding is a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``
   or a parameter typed ``Client`` (a loop or ``catch`` variable, an untyped parameter, any other
   declaration hides it; no binding in the file, or any other assignment to the name → not one).
-  ``this.x`` in a class (not inside a ``function`` that rebinds ``this``) whose one declaration of
+  ``this.x`` in a class (not inside a ``function`` or an object literal's method, which rebind
+  ``this``) whose one declaration of
   ``x`` — a field or a constructor parameter property — is typed ``Client`` or initialized
   ``new Client(…)``, or that only ever assigns ``this.x = new Client(…)``; two declarations →
   not one. The ``pg`` / ``redis`` ``Client``, and the AI SDK's ``experimental_createMCPClient``
@@ -60,14 +61,20 @@ def _text(node: Node | None, source: bytes) -> str:
 
 
 def _class_of(node: Node) -> Node | None:
-    """The class whose ``this`` ``node`` sees; None outside a class or inside a ``function``
-    that rebinds ``this``."""
+    """The class whose ``this`` ``node`` sees; None outside a class, or inside a ``function`` or
+    an object literal's method, which rebind ``this``."""
     cur = node.parent
     while cur is not None:
         if cur.type in _CLASSES:
             return cur
         if cur.type in _THIS_SCOPES:
             return None
+        if (
+            cur.type == "method_definition"
+            and cur.parent is not None
+            and cur.parent.type == "object"
+        ):
+            return None  # `{ run() { this… } }`: an object literal's method, `this` is the object
         cur = cur.parent
     return None
 

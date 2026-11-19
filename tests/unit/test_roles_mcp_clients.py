@@ -595,3 +595,248 @@ public class C
 }
 """
     assert _calls(analyze_files({"C.cs": src})) == []
+
+
+# ── A call inside a multi-line statement gets a record on its own line ───────
+
+
+def _by_endpoint(statements: list[Statement]) -> dict[str | None, Statement]:
+    return {s.endpoint: s for s in statements if s.semanticType == "mcp_call"}
+
+
+def test_python_calls_in_a_multiline_statement_are_each_on_their_own_line(analyze_files) -> None:
+    src = """
+import asyncio
+from mcp import ClientSession
+
+
+async def run(session: ClientSession, flag):
+    results = await asyncio.gather(
+        session.call_tool("a", {}),
+        session.call_tool("b", {}),
+    )
+    if (flag and
+            await session.call_tool("x", {})):
+        pass
+    single = await session.call_tool(
+        "one", {})
+"""
+    statements = analyze_files({"c.py": src})
+    calls = _by_endpoint(statements)
+    assert {e: (c.startLine, c.endLine) for e, c in calls.items()} == {
+        "a": (8, 8),
+        "b": (9, 9),
+        "x": (12, 12),
+        "one": (14, 15),
+    }
+    # the gather and the `if` keep their own (unclassified) statements
+    assert not [s for s in statements if s.startLine in (7, 11) and s.semanticType]
+    assert calls["one"].name == "single"  # a call spanning lines enriches its own statement
+
+
+def test_typescript_calls_in_promise_all_are_each_on_their_own_line(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+const client = new Client({ name: "app", version: "1" });
+const [a, b] = await Promise.all([
+  client.callTool({ name: "a" }),
+  client.callTool({ name: "b" }),
+]);
+"""
+    statements = analyze_files({"c.ts": src})
+    calls = _by_endpoint(statements)
+    assert {e: c.startLine for e, c in calls.items()} == {"a": 6, "b": 7}
+    assert not [s for s in statements if s.startLine == 5 and s.semanticType]
+
+
+def test_typescript_object_literal_method_this_is_not_the_class(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+class A {
+  private client: Client = new Client({ name: "a", version: "1" });
+  handlers = { run() { return this.client.callTool({ name: "x" }); } };
+  direct() { return this.client.callTool({ name: "kept" }); }
+}
+"""
+    assert [c[1] for c in _calls(analyze_files({"c.ts": src}))] == ["kept"]
+
+
+def test_python_local_rebindings_shadow_a_module_client(analyze_files) -> None:
+    """A function's own binding of the name — walrus, ``def``, ``class``, ``import … as`` —
+    hides the module's client; ``global`` sends a rebinding to the module."""
+    src = """
+from mcp import ClientSession
+import other
+
+session = ClientSession(read, write)
+
+
+async def walrus():
+    if (session := other.make()):
+        await session.call_tool("walrus", {})
+
+
+async def defined():
+    def session(): ...
+    await session.call_tool("def", {})
+
+
+async def klass():
+    class session: ...
+    await session.call_tool("class", {})
+
+
+async def imported():
+    import other as session
+    await session.call_tool("import", {})
+
+
+async def from_imported():
+    from other import thing as session
+    await session.call_tool("from_import", {})
+"""
+    assert _calls(analyze_files({"c.py": src})) == []
+
+
+def test_python_walrus_binds_a_client(analyze_files) -> None:
+    src = """
+from mcp import ClientSession
+
+
+async def run(read, write):
+    if (session := ClientSession(read, write)):
+        await session.call_tool("walrus", {})
+"""
+    assert _calls(analyze_files({"c.py": src})) == [("TOOL", "walrus", "python-mcp")]
+
+
+def test_python_global_rebinding_reaches_the_module_client(analyze_files) -> None:
+    src = """
+from mcp import ClientSession
+
+session = ClientSession(read, write)
+
+
+def reset():
+    global session
+    session = other()
+
+
+async def run():
+    await session.call_tool("x", {})
+"""
+    # `global session` rebinds the module's name: it is no longer only a client
+    assert _calls(analyze_files({"c.py": src})) == []
+
+
+def test_python_nonlocal_rebinding_reaches_the_enclosing_client(analyze_files) -> None:
+    src = """
+from mcp import ClientSession
+
+
+async def outer(read, write):
+    session = ClientSession(read, write)
+
+    def reset():
+        nonlocal session
+        session = other()
+
+    await session.call_tool("x", {})
+
+
+async def kept(read, write):
+    session = ClientSession(read, write)
+
+    def inner():
+        global session
+        session = other()
+
+    await session.call_tool("kept", {})
+"""
+    assert _calls(analyze_files({"c.py": src})) == [("TOOL", "kept", "python-mcp")]
+
+
+def test_java_call_tool_request_with_meta_takes_the_first_literal(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.Map;
+
+public class M {
+    McpSyncClient client;
+    void f() {
+        client.callTool(new McpSchema.CallToolRequest("with_meta", Map.of("a", 1), Map.of("k", "v")));
+        client.callTool(new McpSchema.CallToolRequest(mapper, "json", "{}"));
+        client.callTool(new McpSchema.CallToolRequest(name, Map.of(), Map.of()));
+    }
+}
+"""
+    assert _calls(analyze_files({"M.java": src})) == [
+        ("TOOL", "with_meta", "java-mcp"),
+        ("TOOL", "json", "java-mcp"),
+    ]
+
+
+def test_kotlin_call_tool_request_with_meta_takes_the_first_literal(analyze_files) -> None:
+    src = """
+package demo
+
+import io.modelcontextprotocol.client.McpSyncClient
+import io.modelcontextprotocol.spec.McpSchema
+
+class M(private val client: McpSyncClient) {
+    fun f() {
+        client.callTool(McpSchema.CallToolRequest("with_meta", mapOf("a" to 1), mapOf("k" to "v")))
+        client.callTool(McpSchema.CallToolRequest(mapper, "json", "{}"))
+        client.callTool(McpSchema.CallToolRequest(name, mapOf(), mapOf()))
+    }
+}
+"""
+    assert _calls(analyze_files({"M.kt": src})) == [
+        ("TOOL", "with_meta", "java-mcp"),
+        ("TOOL", "json", "java-mcp"),
+    ]
+
+
+def test_kotlin_star_import_proves_the_sdk_client(analyze_files) -> None:
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.*
+
+val client = Client(clientInfo = info)
+suspend fun f() { client.callTool(name = "star", arguments = mapOf()) }
+"""
+    assert _calls(analyze_files({"S.kt": src})) == [("TOOL", "star", "kotlin-mcp")]
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "import com.acme.Client",
+        "import com.acme.OtherClient as Client",
+        "class Client",
+        "data class Client(val x: Int = 0)",
+        "object Client",
+        "interface Client",
+        "typealias Client = com.acme.Thing",
+    ],
+)
+def test_kotlin_star_import_is_shadowed_by_another_client(analyze_files, shadow: str) -> None:
+    """An explicit import or a declaration of ``Client`` wins over the SDK's star import."""
+    src = f"""
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.*
+{shadow if shadow.startswith("import") else ""}
+
+{"" if shadow.startswith("import") else shadow}
+
+val client = Client()
+suspend fun f() {{ client.callTool(name = "x", arguments = mapOf()) }}
+"""
+    assert _calls(analyze_files({"S.kt": src})) == []

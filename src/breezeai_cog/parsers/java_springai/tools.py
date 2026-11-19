@@ -28,13 +28,18 @@ Resources and prompts (Spring AI MCP annotations)::
     @McpPrompt(name = "review", description = "Review code")        → mcp_prompt  spring-ai-mcp  PROMPT  review
     public GetPromptResult review(@McpArg(name = "code", description = "The code", required = true) String code)
 
+* The annotation must be the annotations library's: imported from
+  ``org.springaicommunity.mcp.annotation`` (or Spring AI's ``org.springframework.ai.mcp.annotation``)
+  by name or ``*``, or written fully qualified; a same-named annotation of another library is not
+  read.
 * ``mcp_resource`` — ``uri =`` a non-empty literal, else no record. ``params`` are the URI
   template's simple ``{variables}`` (``[]`` for a fixed URI; None with an RFC 6570 operator).
 * ``mcp_prompt`` — ``name =`` when a literal, else the method name. ``params`` are the method's
   parameters, as the annotations library lists them: ``@McpArg`` ``name`` (else the parameter's
   name), ``description``, ``required`` (false by default); a parameter without ``@McpArg`` is an
   optional argument with no description; ``GetPromptRequest``, a ``Map`` and the injected exchange /
-  context types are not arguments.
+  context types are not arguments. A ``name =`` / ``required =`` that is not a literal (a
+  constant) → ``params`` None: the argument list is unknown.
 
 Only annotated methods are read here. A tool registered through the MCP Java SDK
 (``McpServerFeatures.SyncToolSpecification``) belongs to ``java_mcp``, also in a Spring
@@ -52,6 +57,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..jvm_mcp_common import (
     INJECTED,
+    MCP_ANNOTATION_PACKAGES,
     SPRING_AI,
     SPRING_TOOL_FQN,
     in_mcp_server_module,
@@ -133,7 +139,9 @@ def _spring_tool(ann: Node, source: bytes, imported: bool) -> bool:
 _PROMPT_SKIPPED = INJECTED | {"GetPromptRequest", "Map", "HashMap", "LinkedHashMap"}
 
 
-def _prompt_params(method: Node, source: bytes) -> list[Parameter]:
+def _prompt_params(method: Node, source: bytes) -> list[Parameter] | None:
+    """The prompt's arguments; None when an ``@McpArg`` ``name`` / ``required`` is not a
+    literal (a constant): the argument list is then unknown."""
     params = method.child_by_field_name("parameters")
     out: list[Parameter] = []
     for p in params.named_children if params is not None else []:
@@ -148,12 +156,36 @@ def _prompt_params(method: Node, source: bytes) -> list[Parameter]:
         ann = _annotations(p, source).get("McpArg")
         description, required = None, False
         if ann is not None:
-            name = java_string(_element(ann, "name", source), source) or name
+            named = _element(ann, "name", source)
+            if named is not None:
+                literal = java_string(named, source)
+                if literal is None:
+                    return None  # @McpArg(name = ARG): which name, unknown
+                name = literal or name  # name = "" → the parameter's name
             description = java_string(_element(ann, "description", source), source)
             req = _element(ann, "required", source)
-            required = req is not None and node_text(req, source) == "true"
+            req_text = node_text(req, source) if req is not None else "false"
+            if req_text not in ("true", "false"):
+                return None  # required = FLAG
+            required = req_text == "true"
         out.append(param(name, None, required=required, description=description))
     return out
+
+
+def _annotation_import(simple: str) -> re.Pattern[bytes]:
+    packages = b"|".join(re.escape(p.encode()) for p in MCP_ANNOTATION_PACKAGES)
+    return re.compile(rb"import\s+(?:" + packages + rb")\.(?:" + simple.encode() + rb"|\*)\s*;")
+
+
+_ENTRY_IMPORTS = {key: _annotation_import(key) for key in ("McpResource", "McpPrompt")}
+
+
+def _library_annotation(ann: Node, key: str, source: bytes, imported: bool) -> bool:
+    """``ann`` is the annotations library's ``key``: imported from its package (by name or
+    ``*``), or written fully qualified."""
+    name = ann.child_by_field_name("name")
+    text = node_text(name, source) if name is not None else ""
+    return (imported and text == key) or text in {f"{p}.{key}" for p in MCP_ANNOTATION_PACKAGES}
 
 
 def _annotated_entries(dc: DetectContext) -> list[Emit]:
@@ -161,6 +193,7 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
     source = dc.source
     if b"McpResource" not in source and b"McpPrompt" not in source:
         return []
+    imported = {key: bool(rx.search(source)) for key, rx in _ENTRY_IMPORTS.items()}
     functions = {(f.name, f.startLine): f for f in dc.record.functions}
     found: list[Emit] = []
     for method in walk(dc.root):
@@ -175,7 +208,7 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
         owner = functions.get((method_name, line))
         for key, kind in (("McpResource", RESOURCE), ("McpPrompt", PROMPT)):
             ann = anns.get(key)
-            if ann is None:
+            if ann is None or not _library_annotation(ann, key, source, imported[key]):
                 continue
             if kind == RESOURCE:
                 endpoint = java_string(_element(ann, "uri", source), source)
