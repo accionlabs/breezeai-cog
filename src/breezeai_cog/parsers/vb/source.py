@@ -328,7 +328,8 @@ def member_implements(source: bytes) -> dict[int, list[str]]:
     }
 
 
-#: A type declaration line: optional modifiers, the type keyword, the name.
+#: A type declaration line: optional modifiers, the type keyword, the name (matched after any
+#: attribute blocks the line starts with, ``<Serializable> Public Class Inner``).
 _TYPE_OPEN = re.compile(
     rb"^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Partial|NotInheritable|MustInherit|"
     rb"Shadows|Overloads)[ \t]+)*(Class|Structure|Interface|Module|Enum)[ \t]+"
@@ -359,7 +360,7 @@ def _type_blocks(source: bytes) -> list[TypeBlock] | None:
     stack: list[tuple[bytes, int, str]] = []  # (keyword, start offset, dotted name)
     blocks: list[TypeBlock] = []
     for i, line in enumerate(lines):
-        if m := _TYPE_OPEN.match(line):
+        if m := _TYPE_OPEN.match(line[_leading_blocks(line)[1]:]):
             first = i
             while first > 0 and (_is_attr_line(lines[first - 1])
                                  or _COMMENT_LINE.match(lines[first - 1])):

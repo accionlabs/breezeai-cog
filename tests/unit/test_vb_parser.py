@@ -361,6 +361,45 @@ def test_every_attribute_block_of_a_member_is_kept_whatever_the_layout(tmp_path)
     assert bulk.decorators[0].args == ["bulk"]
 
 
+def _vb(tmp_path, src: bytes):
+    p = tmp_path / "N.vb"
+    p.write_bytes(src)
+    return VbParser().parse_file(ParseContext(path="N.vb", abs_path=p, source=src,
+                                              repo_root=tmp_path))
+
+
+def test_a_nested_type_with_its_attributes_on_its_own_line_is_found(tmp_path) -> None:
+    # `<Serializable> Public Class Inner`: the type line starts with attribute blocks. The nested
+    # type is still found, so it keeps its members, its attributes, and the outer type keeps
+    # every member after it.
+    for attrs, names in ((b"<Serializable>", ["Serializable"]),
+                         (b"<Serializable> <DataContract>", ["Serializable", "DataContract"])):
+        rec = _vb(tmp_path, b"Public Class OA\n    Public Sub Before()\n    End Sub\n    " + attrs
+                  + b" Public Class Inner\n        Public Sub InSLA()\n        End Sub\n"
+                  b"    End Class\n    Public Sub AfterAll()\n    End Sub\nEnd Class\n")
+        assert {c.id: [d.name for d in c.decorators] for c in rec.classes} == {
+            "N.vb#OA": [], "N.vb#OA.Inner": names}, attrs
+        assert sorted(f.id for f in rec.functions) == [
+            "N.vb#OA#AfterAll@8", "N.vb#OA#Before@2", "N.vb#OA.Inner#InSLA@5"], attrs
+
+
+def test_a_nested_structure_and_enum_with_a_same_line_attribute_are_found(tmp_path) -> None:
+    rec = _vb(tmp_path, b"Public Module M\n    <Serializable> Public Structure Point\n"
+              b"        Public X As Integer\n    End Structure\n    <Flags> Public Enum Kind\n"
+              b"        A = 1\n    End Enum\n    Public Sub Run()\n    End Sub\nEnd Module\n")
+    assert {c.id: c.type for c in rec.classes} == {
+        "N.vb#M": "module", "N.vb#M.Point": "struct", "N.vb#M.Kind": "enum"}
+    assert [f.id for f in rec.functions] == ["N.vb#M#Run@8"]
+
+
+def test_an_xml_literal_line_is_not_a_type_opener() -> None:
+    from breezeai_cog.parsers.vb.source import _type_blocks
+
+    src = (b"Public Class C\n    Sub M()\n        Dim x = <root>Class Foo</root>\n    End Sub\n"
+           b"End Class\n")
+    assert [(b.name, b.depth) for b in _type_blocks(src) or []] == [("C", 0)]
+
+
 def test_a_nested_type_under_several_attribute_blocks_keeps_the_members_after_it(tmp_path) -> None:
     # The nested type is blanked from its first attribute line on: the joined run does not leave
     # a dangling block behind that would swallow the module's members after the type.
