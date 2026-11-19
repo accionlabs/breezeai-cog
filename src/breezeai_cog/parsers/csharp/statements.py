@@ -17,7 +17,6 @@ from ..statements_common import (
     resolve_endpoint,
     set_datastore_receivers,
     set_http_client_ids,
-    strip_leading_base,
     url_placeholder,
 )
 from ..treesitter import node_text
@@ -78,7 +77,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
             elif c.type == "interpolation":
                 expr = next((x for x in c.named_children if x.type != "interpolation_brace"), None)
                 parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-        return strip_leading_base("".join(parts))
+        return "".join(parts)
     if node.type == "binary_expression":  # "/a/" + id
         return render_concat(node, source, _render_url)
     return None

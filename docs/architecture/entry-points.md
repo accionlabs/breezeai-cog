@@ -307,7 +307,7 @@ routes and outbound calls alike:
 |---|---|---|---|
 | `router.get(pathPrefix + "/request")` (Vert.x), ``app.get(`${BASE}/users`)`` (Express) | inbound | empty | `/request`, `/users` |
 | `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath` from env (LoopBack) | inbound | empty | the route's path after the prefix |
-| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x" })` — and the same shapes in every language's HTTP calls | outbound | empty | `/orders/confirm`, `/orders/{id}`, `/x` |
+| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + id })` — and the same shapes in every language's HTTP calls | outbound | empty | `/orders/confirm`, `/orders/{id}`, `/x/{id}` |
 
 The unknown prefix is never written as `{name}`: that is the notation of a path parameter, so an
 agent or a route↔call matcher would read it as a segment the caller fills in. The suffix is not a

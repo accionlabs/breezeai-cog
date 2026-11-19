@@ -60,6 +60,7 @@ from ..vertx_common import (
     router_vars,
     service_builder_vars,
     sub_router_bases,
+    unknown_prefix_mounts,
 )
 
 
@@ -395,6 +396,7 @@ def detect_vertx(
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
     bases = sub_router_bases(mounts)
+    one_unknown_mount = unknown_prefix_mounts(mounts)
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
@@ -410,6 +412,7 @@ def detect_vertx(
                                      index, suppress, built_by)
     found.extend(sites)
     chained: list[tuple[GroupKey, int, Node]] = []  # route registrations of a handler chain
+    failures: list[tuple[GroupKey, Node]] = []  # failure-handler-only registrations
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # a table loop's own registration
@@ -422,8 +425,8 @@ def detect_vertx(
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
-        if semantic == "route" and failure_handler_only(_chained(call, source)):
-            continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
+        # `router.get(p).failureHandler(h)`: error wiring, no request lands here (no record).
+        failure_only = semantic == "route" and failure_handler_only(_chained(call, source))
         own = endpoint  # the route's own path, before any mount prefix
         unknown_base = False
         receiver = call.child_by_field_name("object")
@@ -442,11 +445,14 @@ def detect_vertx(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(str(base), endpoint)
+        if failure_only:  # it still belongs to its endpoint's registrations (their span)
+            failures.append((group_key(call, source, method, endpoint), call))
+            continue
         suffix: str | None = None
         if semantic == "route" and endpoint is None:
             # A runtime prefix (`pathPrefix + "/x"`, or a mount whose prefix is unknown): keep
             # the known tail — never the prefix, never as a `{…}` parameter.
-            suffix = own if (unknown_base and base is None and own) \
+            suffix = own if (recv in one_unknown_mount and own) \
                 else route_suffix(_parts(call, source, consts)[1])
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
@@ -502,5 +508,6 @@ def detect_vertx(
             }))
 
     if chained:  # one endpoint over several statements: one record, earlier handlers as guards
-        found = merge_chains(found, chained, pathless_middleware(calls, source, routers), source)
+        found = merge_chains(found, chained, pathless_middleware(calls, source, routers),
+                             failures, source)
     return found

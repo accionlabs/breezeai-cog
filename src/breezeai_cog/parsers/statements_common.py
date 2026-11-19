@@ -187,14 +187,6 @@ def url_placeholder(expr_text: str) -> str:
     return "{" + simple + "}" if simple and simple.replace("_", "").isalnum() else "{param}"
 
 
-def strip_leading_base(url: str) -> str:
-    """A template URL as rendered: ``{base}/users/{id}`` stays as it is. The leading runtime
-    part is not dropped here (that would present the tail as the whole address); it becomes
-    ``endpoint=None`` + ``endpointSuffix="/users/{id}"`` once the file is parsed
-    (``parsers.addresses.apply_outbound``), the same as a concatenated URL."""
-    return url
-
-
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
 #: left-associative, so ``a + b + … + z`` is a deeply *nested* tree; folding it recurses
 #: once per ``+`` (``render_concat`` ↔ the language ``_render_url``). Generated HTML/JS

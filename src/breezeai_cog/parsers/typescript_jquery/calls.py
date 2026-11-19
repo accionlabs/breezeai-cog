@@ -247,7 +247,7 @@ def _runtime_suffix(node: Node | None, source: bytes) -> str | None:
     node = _unwrap(node)
     if node is None or not _delimited(node):
         return None
-    tail = runtime_path_suffix(node, source, {})
+    tail = runtime_path_suffix(node, source, {}, params=True)
     return tail if tail is not None and not _SERVER_EXPR.search(tail) else None
 
 

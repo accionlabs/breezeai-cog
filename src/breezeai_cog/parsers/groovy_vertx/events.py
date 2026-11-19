@@ -43,6 +43,7 @@ from ..vertx_common import (
     router_vars,
     service_builder_vars,
     sub_router_bases,
+    unknown_prefix_mounts,
 )
 
 
@@ -407,6 +408,7 @@ def detect_vertx_groovy(
         else ([], set())
     )
     bases = sub_router_bases(mounts)
+    one_unknown_mount = unknown_prefix_mounts(mounts)
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
@@ -445,7 +447,7 @@ def detect_vertx_groovy(
                 endpoint = join_path(str(base), endpoint)
         suffix: str | None = None
         if semantic == "route" and endpoint is None:  # a runtime prefix: the known tail only
-            suffix = own if (unknown_base and base is None and own) \
+            suffix = own if (recv in one_unknown_mount and own) \
                 else route_suffix(endpoint_path)
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)

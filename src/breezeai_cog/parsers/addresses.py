@@ -13,7 +13,8 @@ never written as ``{name}``: that is the notation of a path parameter (``/orders
 agent or a route↔call matcher would read it as a segment the caller fills in.
 
 Inbound detectors set the suffix where they find the prefix unknown. Outbound URLs are rendered
-by shared code (``statements_common``) with each runtime part as ``{name}``;
+by shared code (``statements_common``) with each runtime part as ``{name}``, a leading base
+included (it is never dropped: that would present the tail as the whole address);
 :func:`apply_outbound` turns a URL that *starts* with such a part into the suffix form, for
 every language, once the file is parsed.
 """

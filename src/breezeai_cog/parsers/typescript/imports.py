@@ -265,9 +265,12 @@ def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]
     return None
 
 
-def _path_parts(node: Node, source: bytes, consts: dict[str, str | None]) -> list[str | None]:
-    """A path expression as parts: literal text, or None for a runtime value (one that does not
-    fold to a constant). ``a + "/x"`` and ``${a}/x`` both give ``[None, "/x"]``."""
+def _path_parts(
+    node: Node, source: bytes, consts: dict[str, str | None]
+) -> list[tuple[str | None, str]]:
+    """A path expression as parts ``(value, source text)``: the literal text, or None for a
+    runtime value (one that does not fold to a constant). ``a + "/x"`` and ``${a}/x`` both give
+    ``[(None, "a"), ("/x", …)]``."""
     if node.type == "parenthesized_expression" and node.named_children:
         return _path_parts(node.named_children[0], source, consts)
     if node.type == "binary_expression":
@@ -276,34 +279,48 @@ def _path_parts(node: Node, source: bytes, consts: dict[str, str | None]) -> lis
         if op is not None and node_text(op, source) == "+" and left is not None \
                 and right is not None:
             return _path_parts(left, source, consts) + _path_parts(right, source, consts)
-        return [None]
+        return [(None, node_text(node, source))]
     if node.type == "template_string":
-        parts: list[str | None] = []
+        parts: list[tuple[str | None, str]] = []
         for c in node.children:
             if c.type == "string_fragment":
-                parts.append(node_text(c, source))
+                parts.append((node_text(c, source), ""))
             elif c.type == "template_substitution":
                 inner = c.named_children[0] if c.named_children else None
-                parts.append(None if inner is None else resolve_const_value(inner, source, consts))
+                parts.append((
+                    None if inner is None else resolve_const_value(inner, source, consts),
+                    node_text(inner, source) if inner is not None else "",
+                ))
         return parts
-    return [resolve_const_value(node, source, consts)]
+    return [(resolve_const_value(node, source, consts), node_text(node, source))]
 
 
 def runtime_path_suffix(
-    node: Node, source: bytes, consts: dict[str, str | None]
+    node: Node, source: bytes, consts: dict[str, str | None], *, params: bool = False
 ) -> str | None:
     """The known tail of a path whose leading part is a runtime value: ``BASE + "/users"`` and
-    `` `${BASE}/users` `` give ``/users``. None when the path does not start with a runtime value,
-    when a runtime value follows the literal tail (the rest is unknown too), or when the tail is
-    not a path (no leading ``/``). See ``parsers.addresses``."""
+    `` `${BASE}/users` `` give ``/users``. None when the path does not start with a runtime value
+    or the tail is not a path (no leading ``/``). A runtime value after the literal tail makes
+    the rest unknown too (None) — unless ``params``: an outbound URL, where it is a request
+    parameter and renders as ``{name}`` (``ctx + "/orders/" + id`` → ``/orders/{id}``, as every
+    outbound URL does). See ``parsers.addresses``."""
     parts = _path_parts(node, source, consts)
-    if not parts or parts[0] is not None:
+    if not parts or parts[0][0] is not None:
         return None
-    rest = parts[next((i for i, p in enumerate(parts) if p is not None), len(parts)):]
-    if not rest or any(p is None for p in rest):
+    rest = parts[next((i for i, p in enumerate(parts) if p[0] is not None), len(parts)):]
+    if not rest or (not params and any(value is None for value, _ in rest)):
         return None
-    tail = "".join(p for p in rest if p is not None)
+    tail = "".join(
+        value if value is not None else "{" + (_simple_name(text) or "param") + "}"
+        for value, text in rest
+    )
     return tail if tail.startswith("/") and tail.strip("/") else None
+
+
+def _simple_name(text: str) -> str | None:
+    """``order.id`` → ``id``; None for anything that is not a plain name."""
+    name = text.rsplit(".", 1)[-1].strip()
+    return name if name and name.replace("_", "").isalnum() else None
 
 
 def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:

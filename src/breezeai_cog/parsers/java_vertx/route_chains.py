@@ -10,8 +10,10 @@ and path, so one endpoint is spread over several calls::
     router.post(prefix + "/return").handler(SuccessPageHandler.create(o));
 
 The contract records one binding per endpoint ("one binding, one record"): the registrations of
-one router, method and path in one scope are **one** ``route`` record, anchored on the first
-registration and spanning to the last. Its ``handler`` is the last handler; every handler that
+one router, method and path directly in one statement list (the same braces — never across the
+branches of an ``if`` or the cases of a ``switch``) are **one** ``route`` record, anchored on
+the first registration and spanning the ones that directly follow it (a trailing
+``failureHandler`` registration included; never across another endpoint's registration). Its ``handler`` is the last handler; every handler that
 runs before it — the path's earlier ones and the path-less ``router.route()`` /
 ``router.<verb>()`` registrations made before it on the same router — goes into ``guards``,
 outermost first. A handler written inline (a lambda, an anonymous class) has no name and is left
@@ -30,29 +32,44 @@ from ..emits import Emit
 from ..treesitter import end_line, node_text
 from ..vertx_common import HANDLER_CALLS, HTTP_VERBS, is_route_receiver, router_name
 
-#: The nodes that bound where a registration runs: registrations in different scopes are never
-#: grouped (their order is not known from the source).
-_SCOPES = frozenset(
+#: Statement lists: registrations directly in the same one run one after the other.
+_BLOCKS = frozenset({"block", "constructor_body", "switch_block_statement_group", "program"})
+#: A body written without braces (``if (x) router.get(…)…; else router.get(…)…;``) or an
+#: expression lambda: the registration is alone in its scope.
+_SINGLE = frozenset(
     {
-        "method_declaration",
-        "constructor_declaration",
+        "if_statement",
+        "for_statement",
+        "enhanced_for_statement",
+        "while_statement",
+        "do_statement",
+        "labeled_statement",
+        "switch_rule",
         "lambda_expression",
-        "static_initializer",
-        "class_body",
     }
 )
 #: ``router.route()`` serves every method.
 _ANY = "route"
+#: A scope: the byte span of the statement list a registration is directly in.
+Scope = tuple[int, int]
 #: (scope, router, method, ("=", endpoint) or ("~", path as written)).
-GroupKey = tuple[int, str, str | None, tuple[str, str]]
+GroupKey = tuple[Scope, str, str | None, tuple[str, str]]
+#: A path-less registration: (scope, router, method or "route", position, handler nodes).
+Middleware = tuple[Scope, str, str, int, list[Node]]
 
 
-def _scope(node: Node) -> int:
-    """Start byte of the innermost scope around ``node`` (0 at the top level)."""
-    parent = node.parent
-    while parent is not None and parent.type not in _SCOPES:
-        parent = parent.parent
-    return parent.start_byte if parent is not None else 0
+def _scope(node: Node) -> Scope:
+    """The statement list ``node`` is directly in (its braces), so registrations in different
+    branches — ``if`` / ``else``, ``switch`` cases, a loop body — are never grouped: only
+    statements of one list are known to run one after the other."""
+    child, parent = node, node.parent
+    while parent is not None:
+        if parent.type in _BLOCKS:
+            return parent.start_byte, parent.end_byte
+        if parent.type in _SINGLE:
+            return child.start_byte, child.end_byte
+        child, parent = parent, parent.parent
+    return 0, 0
 
 
 def _outermost(call: Node) -> Node:
@@ -129,12 +146,11 @@ def handler_name(node: Node, source: bytes) -> str | None:
 
 def pathless_middleware(
     calls: list[Node], source: bytes, routers: frozenset[str]
-) -> list[tuple[int, str, str, int, list[Node]]]:
+) -> list[Middleware]:
     """``router.route().handler(h)`` / ``router.post().handler(h)``: path-less registrations that
-    run before every later route they match. Each is ``(scope, router, method or "route",
-    position, handler nodes)``; a path-less call with no ``.handler`` (only a failure handler)
-    is left out."""
-    out: list[tuple[int, str, str, int, list[Node]]] = []
+    run before every later route they match; a path-less call with no ``.handler`` (only a
+    failure handler) is left out."""
+    out: list[Middleware] = []
     for call in calls:
         name = call.child_by_field_name("name")
         if name is None or _arg_count(call) != 0:
@@ -170,33 +186,50 @@ def group_key(call: Node, source: bytes, method: str | None, endpoint: str | Non
     )
 
 
+def _span_end(own: list[Node], foreign: list[int]) -> int:
+    """Last line of the endpoint's registrations that follow one another from the first, with
+    no other route registered in between (a record never spans another endpoint's)."""
+    end = _outermost(own[0])
+    for call in own[1:]:
+        if any(end.end_byte <= pos < call.start_byte for pos in foreign):
+            break
+        end = _outermost(call)
+    return end_line(end)
+
+
 def merge_chains(
     found: list[Emit],
     routes: list[tuple[GroupKey, int, Node]],
-    middleware: list[tuple[int, str, str, int, list[Node]]],
+    middleware: list[Middleware],
+    failures: list[tuple[GroupKey, Node]],
     source: bytes,
 ) -> list[Emit]:
     """``found`` with each group of chained route registrations merged into one record.
 
-    ``routes`` are ``(group key, index in found, call)`` in source order. The group's record is
-    the last registration's emit (its handler is the binding's) moved onto the first one's call,
-    widened to the last line, with ``guards`` = every named handler that runs before it."""
+    ``routes`` are ``(group key, index in found, call)`` in source order; ``failures`` the
+    failure-handler-only registrations (no record of their own). The group's record is the last
+    registration's emit (its handler is the binding's) moved onto the first one's call, with
+    ``guards`` = every named handler that runs before it, and spanning the registrations —
+    failure handlers included — that directly follow the first."""
     groups: dict[GroupKey, list[tuple[int, Node]]] = {}
     for key, idx, call in routes:
         groups.setdefault(key, []).append((idx, call))
+    positions = [(key, call.start_byte) for key, _, call in routes]
+    positions += [(key, call.start_byte) for key, call in failures]
     drop: set[int] = set()
     out = list(found)
     for key, members in groups.items():
-        scope, recv, method = key[0], key[1], key[2]
+        recv, method = key[1], key[2]
         first_idx, first_call = members[0]
         last_idx, last_call = members[-1]
         last_emit = found[last_idx]
         handlers = [h for _, call in members for h in chained_handlers(call, source)]
-        # Path-less registrations on the same router before the binding, matching its method.
+        # Path-less registrations made before the binding on the same router, matching its
+        # method, in a statement list the binding is in (or nested in).
         before = [
             (pos, h)
             for m_scope, m_recv, m_verb, pos, hs in middleware
-            if m_scope == scope
+            if m_scope[0] <= last_call.start_byte < m_scope[1]
             and m_recv == recv
             and pos < last_call.start_byte
             and (m_verb == _ANY or (method is not None and m_verb.upper() == method))
@@ -206,8 +239,21 @@ def merge_chains(
             [*before, *((h.start_byte, h) for h in handlers[:-1])], key=lambda item: item[0]
         )
         guards = [n for _, h in chain if (n := handler_name(h, source)) is not None]
-        if len(members) == 1 and not guards:
-            continue  # one registration, nothing before it: the record as it is
+        own = sorted(
+            [
+                *(call for _, call in members),
+                *(
+                    call
+                    for k, call in failures
+                    if k == key and call.start_byte > first_call.start_byte
+                ),
+            ],
+            key=lambda call: call.start_byte,
+        )
+        foreign = [pos for k, pos in positions if k != key] + [m[3] for m in middleware]
+        last_line = _span_end(own, foreign)
+        if len(members) == 1 and not guards and last_line == end_line(_outermost(first_call)):
+            continue  # one registration, nothing before or after it: the record as it is
         fill = dict(last_emit.fill)
         if guards:
             fill["guards"] = list(dict.fromkeys(guards))
@@ -216,7 +262,7 @@ def merge_chains(
             dict(last_emit.fields),
             fill=fill,
             enrich=last_emit.enrich,
-            extend_to=end_line(_outermost(last_call)),
+            extend_to=last_line,
         )
         drop.update(idx for idx, _ in members[1:])
     return [e for i, e in enumerate(out) if i not in drop]

@@ -356,3 +356,41 @@ export class App extends RestApplication {
         }
     )
     assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == (None, "/v1/ping")
+
+
+def test_vertx_sub_router_mounted_at_two_places_has_no_suffix(analyze_files) -> None:
+    st = analyze_files(
+        {
+            VERTX: """package a;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.ext.web.Router;
+public class Main extends AbstractVerticle {
+  public void start() {
+    Router router = Router.router(vertx);
+    Router api = Router.router(vertx);
+    api.get("/users").handler(this::h);
+    router.route("/v1/*").subRouter(api);
+    router.route("/v2/*").subRouter(api);
+  }
+  void h(Object c) {}
+}
+"""
+        }
+    )
+    assert _addr(_one(st, "route", VERTX, 8)) == (None, None)
+
+
+def test_jquery_prefix_plus_parameter_matches_axios(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "package.json": '{"dependencies": {"axios": "1"}}',
+            "web/page.js": """import axios from 'axios';
+function go(ctx, order) {
+  $.ajax({ url: ctx + "/orders/" + order.id, type: "POST" });
+  axios.post(ctx + "/orders/" + order.id);
+}
+""",
+        }
+    )
+    jq, ax = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
+    assert _addr(jq) == _addr(ax) == (None, "/orders/{id}")

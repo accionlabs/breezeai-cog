@@ -78,8 +78,8 @@ def test_the_ticket_example(analyze_files) -> None:
     )
     routes = _routes(st)
     assert [(r.method, r.startLine, r.endLine) for r in routes] == [
-        ("GET", 10, 11),
-        ("POST", 14, 17),
+        ("GET", 10, 12),
+        ("POST", 14, 18),
         ("POST", 19, 20),
     ]
     get, ret, back = routes
@@ -250,3 +250,59 @@ public class Main extends Verticle {
 """
     st = analyze_files({SRC: src})
     assert [(r.handler, r.guards) for r in _routes(st)] == [("a", None), ("b", None)]
+
+
+def test_branches_are_never_grouped(analyze_files) -> None:
+    st = analyze_files(
+        _main("""    Router router = Router.router(vertx);
+    if (legacy) {
+      router.get("/x").handler(this::a);
+    } else {
+      router.get("/x").handler(this::b);
+    }
+    if (legacy) router.get("/y").handler(this::a); else router.get("/y").handler(this::b);""")
+    )
+    assert [(r.endpoint, r.handler, r.guards) for r in _routes(st)] == [
+        ("/x", "a", None),
+        ("/x", "b", None),
+        ("/y", "a", None),
+        ("/y", "b", None),
+    ]
+
+
+def test_middleware_reaches_routes_in_a_nested_block(analyze_files) -> None:
+    st = analyze_files(
+        _main("""    Router router = Router.router(vertx);
+    router.route().handler(LoggerHandler.create());
+    if (admin) {
+      router.get("/x").handler(this::a);
+    }""")
+    )
+    [r] = _routes(st)
+    assert r.guards == ["LoggerHandler"]
+
+
+def test_span_stops_at_another_endpoints_registration(analyze_files) -> None:
+    st = analyze_files(
+        _main("""    Router router = Router.router(vertx);
+    router.get("/b").handler(this::a);
+    router.get("/c").handler(this::c);
+    router.get("/b").handler(this::b);""")
+    )
+    b, c = _routes(st)
+    assert (b.endpoint, b.handler, b.guards, b.startLine, b.endLine) == ("/b", "b", ["a"], 9, 9)
+    assert (c.endpoint, c.startLine, c.endLine) == ("/c", 10, 10)
+
+
+def test_span_includes_a_trailing_failure_handler(analyze_files) -> None:
+    st = analyze_files(
+        _main("""    Router router = Router.router(vertx);
+    router.get("/x").handler(this::a);
+    router.get("/x").handler(this::b);
+    router.get("/x").failureHandler(this::c);
+    router.get("/y").handler(this::a);
+    router.get("/y").failureHandler(this::c);""")
+    )
+    x, y = _routes(st)
+    assert (x.handler, x.guards, x.startLine, x.endLine) == ("b", ["a"], 9, 11)
+    assert (y.handler, y.guards, y.startLine, y.endLine) == ("a", None, 12, 13)

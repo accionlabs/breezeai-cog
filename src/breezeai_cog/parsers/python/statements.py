@@ -16,7 +16,6 @@ from ..statements_common import (
     classify_statement,
     render_concat,
     resolve_endpoint,
-    strip_leading_base,
     url_placeholder,
 )
 from ..treesitter import node_text
@@ -50,7 +49,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
             elif c.type == "interpolation":
                 expr = c.named_children[0] if c.named_children else None
                 parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-        return strip_leading_base("".join(parts))
+        return "".join(parts)
     if node.type == "binary_operator":  # string concatenation: '/a/' + str(id)
         return render_concat(node, source, _render_url)
     return None

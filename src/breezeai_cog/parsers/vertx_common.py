@@ -310,6 +310,17 @@ def _mount_prefix(path: str) -> str:
     return p.rstrip("/") or "/"
 
 
+def unknown_prefix_mounts(mounts: Iterable[SubRouterMount]) -> frozenset[str]:
+    """Sub-routers mounted at exactly one place whose prefix does not resolve: their routes are
+    served under one unknown prefix, so the route's own path is the address's known tail. A
+    sub-router mounted at two places is not one (its address stays empty, with no tail)."""
+    seen: dict[str, set[tuple[str, str | None]]] = {}
+    for sub, parent, prefix in mounts:
+        known = prefix is not None and "{" not in prefix
+        seen.setdefault(router_name(sub), set()).add((router_name(parent), prefix if known else None))
+    return frozenset(sub for sub, at in seen.items() if len(at) == 1 and next(iter(at))[1] is None)
+
+
 def sub_router_bases(mounts: Iterable[SubRouterMount]) -> dict[str, str | None]:
     """Sub-router variable → the base its routes are served under, composed through nested
     sub-routers (``api`` on ``router`` at ``/api``, ``v1`` on ``api`` at ``/v1`` → ``/api/v1``).

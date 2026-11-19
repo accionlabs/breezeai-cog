@@ -21,7 +21,9 @@ from typing import Any
 #      semantic types mcp_tool + the Markdown document types (skill, agent, command,
 #      agent_instructions, doc).
 # 2.6: additive optional `Class.isAnonymous` (a Java anonymous class).
-SCHEMA_VERSION = "2.6"
+# 2.7: additive optional `Statement.endpointSuffix` (the known tail of an address whose prefix
+#      is read at runtime; `endpoint` is then empty).
+SCHEMA_VERSION = "2.7"
 
 
 def export_json_schema() -> dict[str, Any]:
