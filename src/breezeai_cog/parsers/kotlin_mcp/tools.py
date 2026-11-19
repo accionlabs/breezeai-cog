@@ -690,7 +690,9 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
     it.
 
     A class's instance property is not visible inside a nested class that is not ``inner`` (nor
-    a nested ``object`` / companion): Kotlin resolves the name further out there. Not modelled:
+    a nested ``object`` / companion): Kotlin resolves the name further out there. A property of
+    the ``companion object`` of a class around ``use`` (and nearer than the declaration found)
+    is what the name resolves to: then None, the companion's list is not read. Not modelled:
     extension receivers, inherited members and ``with(x) { … }`` / ``apply`` implicit receivers
     (a name read through one of them is taken for the lexical declaration)."""
     best: Node | None = None
@@ -715,8 +717,27 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
     while node is not None and node != stop:
         if _binds(node, name, source):
             return None  # a nearer binding hides it
+        if node.type == "class_declaration" and _companion_declares(node, name, source):
+            return None  # the companion's member is nearer than any declaration further out
         node = node.parent
     return best
+
+
+def _companion_declares(cls: Node, name: str, source: bytes) -> bool:
+    """True when the ``companion object`` of the class ``cls`` declares a property ``name``: the
+    name resolves to it anywhere in the class (and the classes nested in it) unless the class
+    itself declares one. Which list it holds is not read: the name is then left unresolved."""
+    body = next(
+        (c for c in cls.named_children if c.type in ("class_body", "enum_class_body")), None
+    )
+    for member in body.named_children if body is not None else ():
+        if member.type != "companion_object":
+            continue
+        cbody = next((c for c in member.named_children if c.type == "class_body"), None)
+        for decl in cbody.named_children if cbody is not None else ():
+            if decl.type == "property_declaration" and name in _declared_names(decl, source):
+                return True
+    return False
 
 
 def _behind_nested_class(use: Node, body: Node, source: bytes) -> bool:

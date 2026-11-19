@@ -426,3 +426,43 @@ class Outer {
         if s.semanticType == "mcp_tool"
     ]
     assert sorted(t.endpoint for t in tools) == ["local", "outer", "top"]
+
+
+def test_kotlin_add_tools_name_a_companion_declares_is_not_the_top_level_list(
+    analyze_files,
+) -> None:
+    """In a class whose ``companion object`` declares ``tools``, the name resolves to the
+    companion's property (also from a nested class), not to a top-level ``tools``: its list is
+    not read, so no record. Inside the companion its own list is read, and a class with no such
+    companion still reads the top-level list."""
+    header = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+val tools = listOf(RegisteredTool(Tool(name = "outer")) { _ -> null })
+"""
+    companion = """
+class A {
+    companion object {
+        val tools = listOf(RegisteredTool(Tool(name = "comp")) { _ -> null })
+        fun g(s: Server) { s.addTools(tools) }
+    }
+    fun f(s: Server) { s.addTools(tools) }
+    class N { fun h(s: Server) { s.addTools(tools) } }
+}
+"""
+    plain = """
+class B {
+    fun f(s: Server) { s.addTools(tools) }
+}
+"""
+
+    def endpoints(body: str) -> list[str | None]:
+        stmts = analyze_files({"src/main/kotlin/demo/A.kt": header + body})
+        return sorted(s.endpoint for s in stmts if s.semanticType == "mcp_tool")
+
+    assert endpoints(companion) == ["comp"]
+    assert endpoints(plain) == ["outer"]
