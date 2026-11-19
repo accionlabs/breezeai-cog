@@ -1,0 +1,17 @@
+{% extends 'base.html.twig' %}
+{% block body %}
+<h1>{{ title }}</h1>
+<form action="{{ path('order_save') }}" method="post">
+    <label for="email">E-mail</label>
+    <input id="email" name="email" type="email" />
+    <button type="submit">Save</button>
+</form>
+{% if is_granted('ROLE_ADMIN') %}
+    <a href="/admin">Admin</a>
+{% endif %}
+{% for order in orders %}
+    <p>{{ order.id }}</p>
+{% endfor %}
+{% include 'footer.html.twig' %}
+<script>$.post('/api/track', { page: 'orders' });</script>
+{% endblock %}

@@ -1,0 +1,9 @@
+<%@ Master Language="C#" CodeBehind="Site.master.cs" Inherits="Shop.SiteMaster" %>
+<html>
+<body>
+    <form runat="server">
+        <asp:HyperLink ID="HomeLink" runat="server" NavigateUrl="~/Default.aspx" Text="Home" />
+        <asp:ContentPlaceHolder ID="MainContent" runat="server" />
+    </form>
+</body>
+</html>

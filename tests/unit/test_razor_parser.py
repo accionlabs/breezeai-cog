@@ -158,3 +158,104 @@ def test_blazor_page_handler_is_its_own_file(tmp_path) -> None:
     rec = _parse(tmp_path, "Orders.cshtml", _RAZOR)
     [r] = [s for s in rec.statements if s.routeKind == "page"]
     assert r.handlerLine is None
+
+
+# ── links, form posts and page scripts (shared readers) ──────────────────────────────────────
+
+
+def _markup(rec) -> list[tuple[int, str | None, str | None, str | None]]:
+    return [(s.startLine, s.semanticType, s.method, s.endpoint)
+            for s in rec.statements if s.nodeType in ("start_tag", "self_closing_tag")]
+
+
+def _calls(rec) -> list[tuple[int, str | None, str | None]]:
+    return [(s.startLine, s.method, s.endpoint) for s in rec.statements
+            if s.semanticType == "api_call" and s.nodeType not in ("start_tag", "self_closing_tag")]
+
+
+def test_tag_helper_forms_and_links_are_records(tmp_path) -> None:
+    page = (b'@page "/orders"\n'
+            b'<form method="post" asp-page-handler="Save"><input asp-for="Email" /></form>\n'
+            b'@if (Model.IsAdmin)\n{\n'
+            b'    <a asp-controller="Home" asp-action="Index">Home</a>\n'
+            b'}\n'
+            b'<form asp-action="Find" asp-route-id="@Model.Id">f</form>\n'
+            b'<a asp-page="/Orders/Edit" asp-route-id="3">Edit</a>\n')
+    rec = _parse(tmp_path, "Orders.cshtml", page)
+    assert _markup(rec) == [
+        (2, "api_call", "POST", None),
+        (5, "route", None, None),
+        (7, "api_call", None, None),
+        (8, "route", None, None),
+    ]
+    assert all(s.routeKind == "navigation" for s in rec.statements if s.nodeType == "start_tag"
+               and s.semanticType == "route")
+
+
+def test_plain_links_and_forms_in_a_razor_page(tmp_path) -> None:
+    page = (b'<a href="/help.html">Help</a>\n'
+            b'<a href="@Url.Action("Index")">Home</a>\n'
+            b'<a href="~/about">About</a>\n'
+            b'<form action="/contact/send" method="post"></form>\n'
+            b'<a asp-for="x">not a link target</a>\n')
+    assert _markup(_parse(tmp_path, "View.cshtml", page)) == [
+        (1, "route", None, "/help.html"),
+        (2, "route", None, None),
+        (3, "route", None, None),
+        (4, "api_call", "POST", "/contact/send"),
+    ]
+
+
+def test_markup_inside_csharp_is_not_read(tmp_path) -> None:
+    page = (b'@{ var link = "<a href=\'/fake\'>x</a>"; }\n'
+            b'@code { string f = "<form action=\'/fake\'></form>"; }\n'
+            b'@* <a href="/commented">c</a> *@\n'
+            b'@foreach (var o in Model.Orders) { <a href="/orders">@o.Name</a> }\n')
+    assert _markup(_parse(tmp_path, "View.cshtml", page)) == [(4, "route", None, "/orders")]
+
+
+def test_blazor_navlink_is_navigation(tmp_path) -> None:
+    page = (b'@page "/nav"\n<NavLink href="/counter" Match="NavLinkMatch.All">Counter</NavLink>\n'
+            b'<NavLink href="fetchdata">Fetch</NavLink>\n<a href="/help">Help</a>\n')
+    assert _markup(_parse(tmp_path, "Nav.razor", page)) == [
+        (2, "route", None, "/counter"),
+        (3, "route", None, None),
+        (4, "route", None, "/help"),
+    ]
+
+
+def test_page_scripts_are_read_by_every_detector(tmp_path) -> None:
+    page = (b'@model OrderModel\n<script>\n'
+            b'  var id = @Model.Id;\n'
+            b"  var API = '/api/orders';\n"
+            b"  fetch('/api/orders/' + id);\n"
+            b"  axios.post(API, {});\n"
+            b"  fetch('/api/user/@Model.UserId');\n"
+            b"  fetch('@Url.Action(\"Save\")');\n"
+            b'</script>\n')
+    rec = _parse(tmp_path, "View.cshtml", page)
+    assert _calls(rec) == [
+        (5, "GET", "/api/orders/{id}"),
+        (6, "POST", "/api/orders"),
+        (7, "GET", None),
+        (8, "GET", None),
+    ]
+    assert [s.text for s in rec.statements if s.startLine == 7 and s.semanticType == "api_call"] == [
+        "fetch('/api/user/@Model.UserId');"
+    ]
+
+
+def test_page_scripts_and_markup_need_statement_capture(tmp_path) -> None:
+    page = b'<a href="/x">x</a>\n<script>fetch("/api/x");</script>\n'
+    assert _parse(tmp_path, "View.cshtml", page, capture=False).statements == []
+
+
+def test_a_razor_page_links_its_script_files(tmp_path) -> None:
+    (tmp_path / "wwwroot" / "js").mkdir(parents=True)
+    (tmp_path / "wwwroot" / "js" / "site.js").write_text("x();")
+    (tmp_path / "Pages").mkdir()
+    page = b'<script src="~/js/site.js"></script>\n<script src="/js/site.js"></script>\n'
+    rec = _parse(tmp_path, "Pages/Index.cshtml", page)
+    assert rec.importFiles == []  # ~/ and a rooted path from Pages/ match no file there
+    rec = _parse(tmp_path, "wwwroot/index.cshtml", page)
+    assert rec.importFiles == ["wwwroot/js/site.js"]
