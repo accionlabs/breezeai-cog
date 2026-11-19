@@ -6,7 +6,7 @@ In Java the detection is the additive `vertx` detector (`java_vertx/detector.py`
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `router.get("/x").handler(h)` / `router.post(...)` / … on a `Router` | Binding | `route`, HTTP verb, `routeKind: route`, path, `handler` = `h` (anonymous lambda: `handlerLine` only) | One handler, inbound API |
+| `router.get("/x").handler(h)` / `router.post(...)` / … on a `Router` | Binding | `route`, HTTP verb, `routeKind: route`, path, `handler` = `h` (anonymous lambda: `handlerLine` only; Java anonymous class `new Handler<…>() { … }`: `handle`, with the line of that class's `handle` Function — the same for consumers, forwarders and registration-table values) | One handler, inbound API |
 | `router.route("/x").handler(h)` (no verb) | Binding | `route`, `method` empty, path | One handler for every verb |
 | `router.get("/x").failureHandler(h)`, with no `handler` / `blockingHandler` on the same chain | None | statement stays plain, no `route`; a chain that also attaches a `handler` keeps its route with that handler | `h` runs only when a handler of the path fails; no request lands on it |
 | Vert.x 2.x `RouteMatcher`: `rm.get("/x", h)`, bare `get(...)` inside `rm.with { }` | Binding | as above; the receiver is a router by name (`router`, `routeMatcher`, `rm`, `route`) or by its declared type (`RouteMatcher routes = …`, `def m = new RouteMatcher()`, a `Router` field or parameter); a receiver known only by its declared type (outside comments) is a router only for a path containing `/`, since one name may be a `Map` in another method (`r.get("customerId")` is no route) | Same construct, older API |

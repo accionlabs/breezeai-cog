@@ -81,6 +81,24 @@ def handler_class(arg: Node | None, source: bytes) -> str | None:
     return node_text(typ, source).split("<", 1)[0] if typ is not None else None
 
 
+def anonymous_handle(arg: Node | None, source: bytes) -> int | None:
+    """The declaration line of ``handle`` in a handler given as an anonymous class
+    (``new Handler<Message>() { public void handle(Message m) { … } }``): every Vert.x handler
+    type (``Handler``, ``AsyncResultHandler``, ``VoidHandler``) has one method, ``handle``, so
+    that method is the code that runs. It is the start line of the anonymous class's ``handle``
+    Function (annotations included). None when ``arg`` is no anonymous class, or its body
+    declares no ``handle`` or more than one."""
+    if arg is None or arg.type != "object_creation_expression":
+        return None
+    body = next((c for c in arg.named_children if c.type == "class_body"), None)
+    if body is None:
+        return None
+    handles = [m for m in body.named_children if m.type == "method_declaration"
+               and (nm := m.child_by_field_name("name")) is not None
+               and node_text(nm, source) == "handle"]
+    return handles[0].start_point[0] + 1 if len(handles) == 1 else None
+
+
 def imports_and_package(root: Node, source: bytes) -> tuple[list[str], list[str], str]:
     """This file's single-type imports, on-demand (``.*``) import packages and its package."""
     singles: list[str] = []
