@@ -81,7 +81,6 @@ def test_call_emit_enriches_the_call_statement() -> None:
         "method": "TOOL",
         "endpoint": "x",
         "framework": "typescript-mcp",
-        "name": "x",
     }
 
 

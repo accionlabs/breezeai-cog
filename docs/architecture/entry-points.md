@@ -309,6 +309,7 @@ prompt, by a literal name or URI.
 | `method` | `TOOL` / `RESOURCE` / `PROMPT` |
 | `endpoint` | The tool name, URI or prompt name, written like the server's `mcp_tool` / `mcp_resource` / `mcp_prompt` `endpoint` it reaches; a value that is not a literal → **no record** |
 | `framework` | The client SDK: `python-mcp`, `fastmcp`, `typescript-mcp`, `mcp-go`, `go-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp` |
+| `name` | Not set by the detector: the enriched call statement keeps the name it already has (an assignment target like `result`), an appended one has none — as for an `api_call` |
 | `handler`, `description`, `params` | Never set |
 
 ```python

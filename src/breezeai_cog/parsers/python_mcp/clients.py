@@ -8,7 +8,7 @@
                                                            # or: def run(session: ClientSession)
         await session.call_tool("add", {"a": 1})           → mcp_call  python-mcp  TOOL      add
         await session.read_resource(AnyUrl("memo://x"))    → mcp_call  python-mcp  RESOURCE  memo://x
-        await session.get_prompt("review", {"code": c})    → mcp_call  python-mcp  PROPMT    review
+        await session.get_prompt("review", {"code": c})    → mcp_call  python-mcp  PROMPT    review
 
     from fastmcp import Client
     async with Client("http://localhost:8000/mcp") as client:

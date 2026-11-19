@@ -41,7 +41,7 @@ def _calls(statements: list[Statement]) -> list[tuple[str | None, str | None, st
         (s for s in statements if s.semanticType == "mcp_call"), key=lambda s: (s.path, s.startLine)
     )
     for c in calls:
-        assert c.name == c.endpoint and c.handler is None and c.params is None
+        assert c.handler is None and c.params is None
     # The call line keeps one statement: the call's own, enriched, never a second record (Kotlin
     # records each nested call of a line on its own: there the call's statement is enriched).
     lines = Counter((s.path, s.startLine) for s in statements)
@@ -473,3 +473,125 @@ public class Other
 }
 """
     assert not [s for s in analyze_files({"Other.cs": src}) if s.semanticType == "mcp_call"]
+
+
+def test_an_enriched_call_keeps_its_statements_name(analyze_files) -> None:
+    src = """
+from mcp import ClientSession
+
+
+async def run(session: ClientSession):
+    result = await session.call_tool("x", {})
+    await session.call_tool("y", {})
+"""
+    calls = {s.endpoint: s for s in analyze_files({"c.py": src}) if s.semanticType == "mcp_call"}
+    assert calls["x"].name == "result"  # the base parser's name, not the endpoint
+    assert calls["y"].name != "y"
+
+
+def test_typescript_this_client_is_proven_per_class(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+class A {
+  private client = new Client({ name: "a", version: "1" });
+  run() { return this.client.callTool({ name: "from_a" }); }
+}
+
+class B {
+  constructor(private client: Other) {}
+  run() { return this.client.callTool({ name: "from_b" }); }
+}
+
+class C {
+  constructor(private readonly client: Client) {}
+  run() { return this.client.callTool({ name: "from_c" }); }
+}
+
+class D {
+  private client: Client;
+  constructor() { this.client = new Client({ name: "d", version: "1" }); }
+  run() { return this.client.callTool({ name: "from_d" }); }
+}
+
+class E {
+  private client = new Client({ name: "e", version: "1" });
+  constructor(private client: Client) {}
+  run() { return this.client.callTool({ name: "from_e" }); }
+}
+
+class F {
+  private client = new Client({ name: "f", version: "1" });
+  run() { return function () { return this.client.callTool({ name: "from_f" }); }; }
+}
+"""
+    assert [c[1] for c in _calls(analyze_files({"c.ts": src}))] == ["from_a", "from_c", "from_d"]
+
+
+def test_typescript_loop_and_catch_variables_shadow_a_client(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+export const client = new Client({ name: "a", version: "1" });
+await client.callTool({ name: "kept" });
+
+for (const client of others) { await client.callTool({ name: "loop" }); }
+others.forEach((client) => client.callTool({ name: "lambda" }));
+try { } catch (client) { client.callTool({ name: "caught" }); }
+"""
+    assert [c[1] for c in _calls(analyze_files({"c.ts": src}))] == ["kept"]
+
+
+def test_java_lambda_variable_is_another_declaration(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class L {
+    McpSyncClient client;
+    void f(List<Other> others) {
+        others.forEach(client -> client.callTool(new McpSchema.CallToolRequest("lambda", null)));
+        client.callTool(new McpSchema.CallToolRequest("field", null));
+    }
+}
+"""
+    # The lambda's `client` makes the name ambiguous in the file: neither call is recorded.
+    assert _calls(analyze_files({"L.java": src})) == []
+
+
+def test_kotlin_loop_and_lambda_variables_are_other_declarations(analyze_files) -> None:
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+
+val mcp = Client(clientInfo = info)
+suspend fun f() {
+    for (mcp in others) { mcp.callTool(name = "loop", arguments = mapOf()) }
+    mcp.callTool(name = "top", arguments = mapOf())
+}
+val client = Client(clientInfo = info)
+suspend fun g() { others.forEach { client -> client.callTool(name = "lambda", arguments = mapOf()) } }
+"""
+    assert _calls(analyze_files({"K.kt": src})) == []
+
+
+def test_csharp_foreach_and_lambda_variables_are_other_declarations(analyze_files) -> None:
+    src = """
+using ModelContextProtocol.Client;
+
+public class C
+{
+    private IMcpClient client;
+    private IMcpClient other;
+    public async Task F()
+    {
+        foreach (var client in clients) { await client.CallToolAsync("loop"); }
+        others.Select(other => other.CallToolAsync("lambda"));
+        await client.CallToolAsync("field");
+    }
+}
+"""
+    assert _calls(analyze_files({"C.cs": src})) == []

@@ -7,7 +7,8 @@
     client.readResource(new ReadResourceRequest("memo://x"))     → mcp_call  java-mcp  RESOURCE  memo://x
     client.getPrompt(new GetPromptRequest("review", Map.of()))   → mcp_call  java-mcp  PROMPT    review
 
-* **Client receiver** — a name (or ``this.name``) declared once in the file, with the type
+* **Client receiver** — a name (or ``this.name``) declared once in the file (a lambda's or a
+  loop's variable of the same name counts as another declaration), with the type
   ``McpSyncClient`` / ``McpAsyncClient`` (a field, a local or a parameter), or ``var`` initialized
   by a ``McpClient.sync(…)`` / ``McpClient.async(…)`` chain. ``clients.get(0).callTool(…)`` (a
   Spring AI list of clients) is not one: which server it reaches is not in the code.
@@ -81,6 +82,20 @@ def _clients(root: Node, source: bytes) -> set[str]:
                 declared.setdefault(node_text(name, source), []).append(
                     node.type == "formal_parameter" and type_text.rsplit(".", 1)[-1] in CLIENT_TYPES
                 )
+        elif node.type == "lambda_expression":
+            # `client -> …` / `(a, client) -> …`: an inferred parameter is never proven a client
+            params = node.child_by_field_name("parameters")
+            idents = (
+                [params]
+                if params is not None and params.type == "identifier"
+                else [
+                    c
+                    for c in (params.named_children if params is not None else [])
+                    if c.type == "identifier"
+                ]
+            )
+            for ident in idents:
+                declared.setdefault(node_text(ident, source), []).append(False)
     return {name for name, proofs in declared.items() if proofs == [True]}
 
 

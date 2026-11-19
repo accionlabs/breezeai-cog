@@ -12,7 +12,8 @@
     val sync = McpClient.sync(transport).build()
     sync.callTool(McpSchema.CallToolRequest("add", mapOf()))         → mcp_call  java-mcp  TOOL  add
 
-* **Client receiver** — a name (or ``this.name``) declared once in the file: typed ``Client`` (with
+* **Client receiver** — a name (or ``this.name``) declared once in the file (a loop's or a
+  lambda's variable of the same name counts as another declaration): typed ``Client`` (with
   the Kotlin SDK's ``Client`` imported) / ``McpSyncClient`` / ``McpAsyncClient``, or initialized by
   ``Client(…)`` (that import) or a ``McpClient.sync(…)`` / ``.async(…)`` chain.
 * **Request** — the Kotlin SDK's ``callTool(name, …)`` (named or first), or a
@@ -114,6 +115,13 @@ def _clients(root: Node, source: bytes, kotlin_client: bool) -> dict[str, str]:
                     break
             if name is not None:
                 declared.setdefault(node_text(name, source), []).append(framework(type_node, value))
+        elif node.type == "variable_declaration" and (
+            node.parent is None or node.parent.type != "property_declaration"
+        ):
+            # `for (client in …)`, `{ client -> … }`, a destructuring: never proven a client
+            name = next((c for c in node.named_children if c.type == "simple_identifier"), None)
+            if name is not None:
+                declared.setdefault(node_text(name, source), []).append(None)
         elif node.type in ("parameter", "class_parameter"):
             name = next((c for c in node.named_children if c.type == "simple_identifier"), None)
             type_node = next(

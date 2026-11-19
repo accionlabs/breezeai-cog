@@ -8,7 +8,8 @@
     await client.ReadResourceAsync("memo://insights")          → mcp_call  csharp-mcp  RESOURCE  memo://insights
     await client.GetPromptAsync("review", args)                → mcp_call  csharp-mcp  PROMPT    review
 
-* **Client receiver** — a name declared once in the file: typed ``McpClient`` / ``IMcpClient``,
+* **Client receiver** — a name declared once in the file (a ``foreach`` or lambda variable of the
+  same name counts as another declaration): typed ``McpClient`` / ``IMcpClient``,
   or ``var`` initialized by ``[await] McpClient.CreateAsync(…)`` /
   ``McpClientFactory.CreateAsync(…)``; only in a file that uses the ``ModelContextProtocol``
   package.
@@ -71,6 +72,11 @@ def _clients(root: Node, source: bytes) -> set[str]:
                     and _created(value, source)
                 )
                 declared.setdefault(node_text(name, source), []).append(proven)
+        elif node.type in ("foreach_statement", "implicit_parameter"):
+            # `foreach (var client in …)`, `client => …`: never proven a client
+            bound = node.child_by_field_name("left") if node.type == "foreach_statement" else node
+            if bound is not None and bound.type in ("identifier", "implicit_parameter"):
+                declared.setdefault(node_text(bound, source), []).append(False)
         elif node.type in ("parameter", "property_declaration"):
             name = node.child_by_field_name("name")
             if name is not None:

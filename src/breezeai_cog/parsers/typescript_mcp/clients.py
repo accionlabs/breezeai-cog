@@ -9,10 +9,15 @@
     await client.readResource({ uri: "memo://insights" })           → mcp_call  typescript-mcp  RESOURCE  memo://insights
     await client.getPrompt({ name: "review", arguments: {} })       → mcp_call  typescript-mcp  PROMPT    review
 
-* **Client receiver** — a name (or ``this.x``) assigned ``new Client(…)``, or a parameter / field
-  typed ``Client``, with ``Client`` imported from the SDK's ``client/index.js`` (``import * as``
-  too); a nearer binding of the name hides it. The ``pg`` / ``redis`` ``Client``, and the AI SDK's
-  ``experimental_createMCPClient`` (not this class), are not MCP clients.
+* **Client receiver** — ``Client`` imported from the SDK's ``client/index.js`` (``import * as``
+  too). A name whose nearest binding is a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``
+  or a parameter typed ``Client`` (a loop or ``catch`` variable, an untyped parameter, any other
+  declaration hides it; no binding in the file, or any other assignment to the name → not one).
+  ``this.x`` in a class (not inside a ``function`` that rebinds ``this``) whose one declaration of
+  ``x`` — a field or a constructor parameter property — is typed ``Client`` or initialized
+  ``new Client(…)``, or that only ever assigns ``this.x = new Client(…)``; two declarations →
+  not one. The ``pg`` / ``redis`` ``Client``, and the AI SDK's ``experimental_createMCPClient``
+  (not this class), are not MCP clients.
 * ``endpoint`` — ``name`` (``uri`` for ``readResource``) of the object literal passed first, a
   string literal; anything else → no record.
 * The record is the call's own statement, with no handler. A client-only file gets no
@@ -29,7 +34,43 @@ from ..mcp_common import call_emit
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings
 from .lowlevel import _pairs, _sdk_names, _string, _unparen, _walk
-from .tools import FRAMEWORK, _shadowed
+from .tools import (
+    _FUNCTION_SCOPES,
+    _PARAMETERS,
+    FRAMEWORK,
+    BlockDeclarations,
+    _binds,
+    block_declarations,
+    bound_names,
+)
+
+_CLASSES = ("class_declaration", "class", "abstract_class_declaration")
+#: Functions that give ``this`` a value of their own (an arrow function keeps the class's).
+_THIS_SCOPES = (
+    "function_declaration",
+    "function_expression",
+    "function",
+    "generator_function_declaration",
+    "generator_function",
+)
+
+
+def _text(node: Node | None, source: bytes) -> str:
+    return node_text(node, source) if node is not None else ""
+
+
+def _class_of(node: Node) -> Node | None:
+    """The class whose ``this`` ``node`` sees; None outside a class or inside a ``function``
+    that rebinds ``this``."""
+    cur = node.parent
+    while cur is not None:
+        if cur.type in _CLASSES:
+            return cur
+        if cur.type in _THIS_SCOPES:
+            return None
+        cur = cur.parent
+    return None
+
 
 CLIENT_MODULES = frozenset(
     {
@@ -65,28 +106,9 @@ def _detect(dc: DetectContext) -> Detection | None:
         ctor = value.child_by_field_name("constructor")
         return ctor is not None and node_text(ctor, src) in classes
 
-    clients: set[str] = set()
-    for node in _walk(root):
-        if node.type == "new_expression" and built(node, source):
-            parent = node.parent
-            if parent is not None and parent.type == "variable_declarator":
-                name = parent.child_by_field_name("name")
-                if name is not None and name.type == "identifier":
-                    clients.add(node_text(name, source))
-            elif parent is not None and parent.type in (
-                "public_field_definition",
-                "field_definition",
-            ):
-                name = parent.child_by_field_name("name") or parent.child_by_field_name("property")
-                if name is not None:
-                    clients.add(f"this.{node_text(name, source)}")
-        elif node.type in ("required_parameter", "optional_parameter", "public_field_definition"):
-            name = node.child_by_field_name("pattern") or node.child_by_field_name("name")
-            if name is not None and typed(node, source):
-                text = node_text(name, source)
-                clients.add(f"this.{text}" if node.type == "public_field_definition" else text)
-    if not clients:
-        return None
+    blocks: BlockDeclarations = {}
+    fields: dict[tuple[int, int], dict[str, bool]] = {}
+    # Any `x = …` / `this.x = …` that is not `new Client(…)`: by text, the whole file.
     reassigned = {
         node_text(left, source)
         for node in _walk(root)
@@ -94,6 +116,119 @@ def _detect(dc: DetectContext) -> Detection | None:
         for left in [node.child_by_field_name("left")]
         if left is not None and not built(node.child_by_field_name("right"), source)
     }
+
+    def name_is_client(call: Node, name: str) -> bool:
+        """The nearest binding of ``name`` at ``call`` is a client: a parameter typed ``Client``
+        or a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``. A loop or ``catch``
+        variable, any other parameter or declaration, or no binding in the file → not one."""
+        node = call.parent
+        while node is not None:
+            if node.type in _FUNCTION_SCOPES:
+                single = node.child_by_field_name("parameter")  # `client => …`
+                if single is not None and _binds(single, name, source):
+                    return False
+                params = node.child_by_field_name("parameters")
+                for p in params.named_children if params is not None else ():
+                    pattern = p.child_by_field_name("pattern") if p.type in _PARAMETERS else p
+                    if _binds(pattern, name, source):
+                        return p.type in _PARAMETERS and typed(p, source)
+            elif node.type in ("statement_block", "program"):
+                declared = block_declarations(node, source, blocks)
+                if name in declared:
+                    return built(declared[name], source)
+            elif node.type in ("for_in_statement", "for_statement"):
+                left = node.child_by_field_name("left") or node.child_by_field_name("initializer")
+                if left is not None and name in _declared_by(left):
+                    return False  # `for (const client of …)`
+            elif node.type == "catch_clause":
+                if _binds(node.child_by_field_name("parameter"), name, source):
+                    return False
+            node = node.parent
+        return False
+
+    def _declared_by(left: Node) -> list[str]:
+        if left.type in ("lexical_declaration", "variable_declaration"):
+            return [
+                n
+                for decl in left.named_children
+                if decl.type == "variable_declarator"
+                for n in bound_names(decl.child_by_field_name("name"), source)
+            ]
+        return bound_names(left, source)
+
+    def class_fields(cls: Node) -> dict[str, bool]:
+        """Each field of ``cls`` → whether it is a client: declared once in the class (a field,
+        or a constructor parameter property) typed ``Client`` or initialized ``new
+        Client(…)``, or never declared and only ever assigned ``this.x = new Client(…)``."""
+        key = (cls.start_byte, cls.end_byte)
+        if key in fields:
+            return fields[key]
+        decls: dict[str, list[bool]] = {}
+        typed_decl: set[str] = set()
+        assigned: dict[str, list[bool]] = {}
+        body = cls.child_by_field_name("body")
+        for member in body.named_children if body is not None else []:
+            if member.type in ("public_field_definition", "field_definition"):
+                name = member.child_by_field_name("name") or member.child_by_field_name("property")
+                if name is None:
+                    continue
+                text = node_text(name, source)
+                is_typed = typed(member, source)
+                if is_typed:
+                    typed_decl.add(text)
+                decls.setdefault(text, []).append(
+                    is_typed or built(member.child_by_field_name("value"), source)
+                )
+            elif (
+                member.type == "method_definition"
+                and _text(member.child_by_field_name("name"), source) == "constructor"
+            ):
+                params = member.child_by_field_name("parameters")
+                for p in params.named_children if params is not None else ():
+                    modifiers = {c.type for c in p.named_children}
+                    if p.type not in _PARAMETERS or not modifiers & {
+                        "accessibility_modifier",
+                        "readonly",
+                        "override_modifier",
+                    }:
+                        continue  # not a parameter property
+                    pattern = p.child_by_field_name("pattern")
+                    if pattern is None:
+                        continue
+                    text = node_text(pattern, source)
+                    if typed(p, source):
+                        typed_decl.add(text)
+                    decls.setdefault(text, []).append(typed(p, source))
+        for node in _walk(cls):
+            if node.type != "assignment_expression":
+                continue
+            left = node.child_by_field_name("left")
+            if (
+                left is None
+                or left.type != "member_expression"
+                or _text(left.child_by_field_name("object"), source) != "this"
+                or _class_of(node) != cls
+            ):
+                continue
+            prop = left.child_by_field_name("property")
+            if prop is not None:
+                assigned.setdefault(node_text(prop, source), []).append(
+                    built(node.child_by_field_name("right"), source)
+                )
+        out: dict[str, bool] = {}
+        for field_name in set(decls) | set(assigned):
+            found, writes = decls.get(field_name, []), assigned.get(field_name, [])
+            if len(found) > 1:
+                out[field_name] = False
+            elif found:
+                # A typed field holds a client whatever is assigned; an untyped one only while
+                # every assignment is `new Client(…)`.
+                out[field_name] = found[0] and (field_name in typed_decl or all(writes))
+            else:
+                out[field_name] = bool(writes) and all(writes)
+        fields[key] = out
+        return out
+
     emits: list[Emit] = []
     for call in _walk(root):
         if call.type != "call_expression":
@@ -105,10 +240,19 @@ def _detect(dc: DetectContext) -> Detection | None:
         kind = _CALLS.get(node_text(prop, source)) if prop is not None else None
         if obj is None or kind is None:
             continue
-        receiver = node_text(obj, source)
-        if receiver not in clients or receiver in reassigned:
-            continue
-        if obj.type == "identifier" and _shadowed(call, receiver, source, typed, built):
+        if obj.type == "identifier":
+            name = node_text(obj, source)
+            if name in reassigned or not name_is_client(call, name):
+                continue
+        elif (
+            obj.type == "member_expression"
+            and _text(obj.child_by_field_name("object"), source) == "this"
+        ):
+            cls = _class_of(call)
+            field = obj.child_by_field_name("property")
+            if cls is None or field is None or not class_fields(cls).get(node_text(field, source)):
+                continue
+        else:
             continue
         args_node = call.child_by_field_name("arguments")
         args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]

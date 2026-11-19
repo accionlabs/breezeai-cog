@@ -522,7 +522,8 @@ def _typescript_mcp_entries(n: int) -> str:
         "const server = new McpServer({ name: 'demo', version: '1' });\n"
         "const low = new Server({ name: 'low', version: '1' }, {});\n"
         "const client = new Client({ name: 'c', version: '1' });\n"
-        f"{entries}"
+        # One function body: every registration and call looks up its receiver in one block.
+        f"export async function main() {{\n{entries}}}\n"
         f"low.setRequestHandler(ListResourcesRequestSchema, async () => ({{ resources: [{listed}] }}));\n"
     )
 

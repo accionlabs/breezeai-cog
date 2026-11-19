@@ -215,12 +215,62 @@ def _binds(pattern: Node | None, name: str, source: bytes) -> bool:
     return False
 
 
+def bound_names(pattern: Node | None, source: bytes) -> list[str]:
+    """The names a binding pattern (a name, a destructuring) declares (what :func:`_binds`
+    matches)."""
+    out: list[str] = []
+    stack = [pattern] if pattern is not None else []
+    while stack:
+        node = stack.pop()
+        if node.type in ("identifier", "shorthand_property_identifier_pattern"):
+            out.append(node_text(node, source))
+        elif node.type in ("assignment_pattern", "object_assignment_pattern"):
+            left = node.child_by_field_name("left")
+            if left is not None:
+                stack.append(left)
+        elif node.type == "pair_pattern":
+            value = node.child_by_field_name("value")
+            if value is not None:
+                stack.append(value)
+        elif node.type in ("object_pattern", "array_pattern", "rest_pattern"):
+            stack.extend(reversed(node.named_children))
+    return out
+
+
+#: Per file: a block's span → each name its ``let`` / ``const`` / ``var`` declarations bind →
+#: the first such declarator's value. Built once per block, so a block of many calls is read once.
+BlockDeclarations = dict[tuple[int, int], dict[str, Node | None]]
+
+
+def block_declarations(
+    block: Node, source: bytes, cache: BlockDeclarations
+) -> dict[str, Node | None]:
+    key = (block.start_byte, block.end_byte)
+    found = cache.get(key)
+    if found is None:
+        found = {}
+        for stmt in block.named_children:
+            if stmt.type == "export_statement":  # `export const x = …` (module level)
+                stmt = stmt.child_by_field_name("declaration") or stmt
+            if stmt.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for decl in stmt.named_children:
+                if decl.type != "variable_declarator":
+                    continue
+                value = decl.child_by_field_name("value")
+                for bound in bound_names(decl.child_by_field_name("name"), source):
+                    found.setdefault(bound, value)
+        cache[key] = found
+    return found
+
+
 def _shadowed(
     call: Node,
     name: str,
     source: bytes,
     typed: Callable[[Node, bytes], bool] | None = None,
     built: Callable[[Node | None, bytes], bool] | None = None,
+    blocks: BlockDeclarations | None = None,
 ) -> bool:
     """True when the receiver ``name`` of ``call`` is, at the call, a binding other than the
     ``McpServer``: a parameter of an enclosing function not typed ``McpServer``
@@ -244,14 +294,9 @@ def _shadowed(
                 elif _binds(p, name, source):
                     return True
         elif node.type == "statement_block":
-            for stmt in node.named_children:
-                if stmt.type not in ("lexical_declaration", "variable_declaration"):
-                    continue
-                for decl in stmt.named_children:
-                    if decl.type == "variable_declarator" and _binds(
-                        decl.child_by_field_name("name"), name, source
-                    ):
-                        return not built(decl.child_by_field_name("value"), source)
+            declared = block_declarations(node, source, blocks if blocks is not None else {})
+            if name in declared:
+                return not built(declared[name], source)
         node = node.parent
     return False
 
@@ -576,8 +621,19 @@ def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
     functions = {f.name: f.startLine for f in dc.record.functions}
+    blocks: BlockDeclarations = {}
+
+    def shadowed(
+        call: Node,
+        name: str,
+        src: bytes,
+        typed: Callable[[Node, bytes], bool] | None = None,
+        built: Callable[[Node | None, bytes], bool] | None = None,
+    ) -> bool:
+        return _shadowed(call, name, src, typed, built, blocks)
+
     found: list[Emit] = detect_lowlevel(
-        dc.root, source, servers, functions, _shadowed, lambda n: _json_schema(n, source)
+        dc.root, source, servers, functions, shadowed, lambda n: _json_schema(n, source)
     )
     if not servers and not found:
         return None
@@ -601,7 +657,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             method not in _REGISTRATIONS
             or obj is None
             or node_text(obj, source) not in servers
-            or (obj.type == "identifier" and _shadowed(call, node_text(obj, source), source))
+            or (obj.type == "identifier" and shadowed(call, node_text(obj, source), source))
         ):
             continue
         args_node = call.child_by_field_name("arguments")
