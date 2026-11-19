@@ -26,6 +26,12 @@ Only a Celery app's tasks count. ``@shared_task`` always does; ``@<x>.task`` doe
 a Celery app (:class:`Receivers`): a variable assigned ``Celery(…)`` at module level of this file
 or of the file it is imported from, or ``celery.current_app``. ``@scheduler.task`` is not Celery,
 whatever else the project uses. The same test decides whether ``<x>.send_task(…)`` is a send.
+
+A class task (``class Report(Task)``, its body in ``run``) counts when its base is ``Task``
+imported from celery — a base of the project's own is not followed — and it is registered on a
+Celery app: ``app.register_task(Report())`` in its file or in a file that imports it. Its name is
+the class's ``name = "…"``, or Celery's default ``<module>.<Class>`` when the code confirms it, as
+for a function.
 """
 
 from __future__ import annotations
@@ -63,6 +69,18 @@ class TaskDef:
 
 
 @dataclass(frozen=True)
+class ClassTask:
+    """A class whose base is celery's ``Task``: a task once registered on a Celery app."""
+
+    name: str
+    #: ``name = …`` in the class body: its literal, or :data:`UNKNOWN_NAME`; ``None`` = not given.
+    explicit: str | None
+    definition: Node
+    #: Its ``run`` method — the task's body — when the class defines one.
+    run: Node | None
+
+
+@dataclass(frozen=True)
 class CeleryTasks:
     #: file → {task function → its name, ``None`` when not known}.
     by_file: dict[str, dict[str, str | None]] = field(default_factory=dict)
@@ -70,6 +88,9 @@ class CeleryTasks:
     by_name: dict[str, tuple[str, str] | None] = field(default_factory=dict)
     #: file → the variables that hold a Celery app (``app = Celery(…)`` at module level).
     apps: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: file → {registered class task → its name, ``None`` when not known}. In ``by_name`` a
+    #: class task's function is ``run``.
+    classes: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 def celery_tasks(index: Any | None) -> CeleryTasks | None:
@@ -150,6 +171,51 @@ def task_defs(root: Node, source: bytes) -> list[TaskDef]:
     return out
 
 
+_TASK_CLASSES = frozenset({"celery.Task", "celery.app.task.Task", "celery.task.Task"})
+
+
+def class_tasks(root: Node, source: bytes, origins: Origins) -> list[ClassTask]:
+    """Module-level classes whose base is celery's ``Task`` (``from celery import Task``,
+    ``celery.Task``). A base of the project's own (``class Report(BaseTask)``) is not followed."""
+    out: list[ClassTask] = []
+    for node in top_statements(root):
+        if node.type == "decorated_definition":
+            node = node.child_by_field_name("definition") or node
+        if node.type != "class_definition":
+            continue
+        bases = node.child_by_field_name("superclasses")
+        if bases is None or not any(
+                b.type in ("identifier", "attribute") and _is_task_class(node_text(b, source), origins)
+                for b in bases.named_children):
+            continue
+        name, body = node.child_by_field_name("name"), node.child_by_field_name("body")
+        explicit: str | None = None
+        run: Node | None = None
+        for stmt in body.named_children if body is not None else []:
+            assign = stmt.named_children[0] if stmt.type == "expression_statement" and \
+                stmt.named_children else stmt
+            if assign.type == "assignment":
+                left = assign.child_by_field_name("left")
+                if left is not None and node_text(left, source) == "name":
+                    explicit = string(assign.child_by_field_name("right"), source) or UNKNOWN_NAME
+            fdef = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" \
+                else stmt
+            fname = fdef.child_by_field_name("name") if fdef is not None and \
+                fdef.type == "function_definition" else None
+            if fname is not None and node_text(fname, source) == "run":
+                run = fdef
+        if name is not None:
+            out.append(ClassTask(node_text(name, source), explicit, node, run))
+    return out
+
+
+def _is_task_class(written: str, origins: Origins) -> bool:
+    qualified = origins.qualified(written)
+    if qualified is None:  # not imported by name: only `from celery import *` explains `Task`
+        return written == "Task" and "celery" in origins.star
+    return qualified in _TASK_CLASSES
+
+
 # ── Celery apps ────────────────────────────────────────────────────────────────────────────
 
 _APP_CLASSES = frozenset({"celery.Celery", "celery.app.Celery", "celery.app.base.Celery"})
@@ -189,7 +255,7 @@ class Receivers:
 
     def __init__(self, root: Node, source: bytes, repo_root: Path | None, rel: str) -> None:
         self._source, self._repo_root = source, repo_root
-        self._origins = Origins(root, source)
+        self.origins = self._origins = Origins(root, source)
         self.local = local_apps(root, source, self._origins)
         # `plain`: `import proj.worker` binds `proj`, so `proj.worker.app` can be followed.
         self._imports = ImportRefs(root, source, repo_root, rel, plain=True)
@@ -210,9 +276,46 @@ class Receivers:
         owner = attribute_owner(expr, self._source, self._imports, self._repo_root)
         return ("ext", *owner) if owner is not None else None
 
+    def place(self, expr: Node | None, local: set[str], rel: str) -> tuple[str, str] | None:
+        """``(file, name)`` of a class named by ``expr``: one of ``local`` (this file's), or
+        the one it is imported from (``Report``, ``reports.Report``)."""
+        if expr is None:
+            return None
+        if expr.type == "identifier":
+            name = node_text(expr, self._source)
+            ref = self._imports.get(name)
+            if ref is None:
+                return (rel, name) if name in local else None
+            return (ref[1], ref[2]) if ref[0] == "symbol" else None
+        owner = attribute_owner(expr, self._source, self._imports, self._repo_root)
+        return (owner[0], owner[1]) if owner is not None else None
+
     def task_ref(self, task: TaskDef) -> Ref | None:
         """The app a task is registered on: ``("shared",)`` for ``@shared_task``."""
         return ("shared",) if task.receiver is None else self.ref(task.receiver)
+
+
+def registrations(root: Node, source: bytes, rel: str, receivers: "Receivers",
+                  local_classes: set[str]) -> list[tuple[tuple[str, str], Ref | None]]:
+    """``(class, app)`` per ``<app>.register_task(Report())`` (or ``(Report)``): the class as
+    ``(file, name)`` — this file's own, or the one it is imported from — and the app's
+    :class:`Ref`. A class this file cannot place is left out."""
+    out: list[tuple[tuple[str, str], Ref | None]] = []
+    for node in walk(root):
+        fn = node.child_by_field_name("function") if node.type == "call" else None
+        if fn is None or fn.type != "attribute":
+            continue
+        attr = fn.child_by_field_name("attribute")
+        if attr is None or node_text(attr, source) != "register_task":
+            continue
+        args = positional(node)
+        target = args[0] if args else None
+        if target is not None and target.type == "call":  # register_task(Report())
+            target = target.child_by_field_name("function")
+        cls = receivers.place(target, local_classes, rel)
+        if cls is not None:
+            out.append((cls, receivers.ref(fn.child_by_field_name("object"))))
+    return out
 
 
 def is_app(ref: Ref | None, apps: dict[str, frozenset[str]]) -> bool:
@@ -225,29 +328,68 @@ def is_app(ref: Ref | None, apps: dict[str, frozenset[str]]) -> bool:
     return ref[2] in apps.get(ref[1], frozenset())
 
 
+def _is_beat_schedule(node: Node | None, source: bytes) -> bool:
+    return node is not None and node_text(node, source).lower().endswith("beat_schedule")
+
+
+def _beat_entry(entry: Node | None, source: bytes) -> tuple[Node | None, Node | None] | None:
+    """``(task, schedule)`` of one entry's dict value; None when it is not a dict."""
+    if entry is None or entry.type != "dictionary":
+        return None
+    fields = {string(p.child_by_field_name("key"), source): p.child_by_field_name("value")
+              for p in entry.named_children if p.type == "pair"}
+    return fields.get("task"), fields.get("schedule")
+
+
 def beat_entries(root: Node, source: bytes) -> Iterator[tuple[Node, Node | None, Node | None]]:
-    """``(entry, task, schedule)`` per beat-schedule entry: a dict assigned to ``beat_schedule``
-    (``app.conf.beat_schedule = …``, ``CELERY_BEAT_SCHEDULE = …``) or passed as
-    ``beat_schedule=…``, each value a dict with ``"task"`` and ``"schedule"``."""
+    """``(entry, task, schedule)`` per beat-schedule entry, the entry being the node it is
+    written as:
+
+    * each ``pair`` of a dict assigned to ``beat_schedule`` (``app.conf.beat_schedule = {…}``,
+      ``CELERY_BEAT_SCHEDULE = {…}``), passed as ``beat_schedule={…}`` or to
+      ``beat_schedule.update({…})``;
+    * each ``keyword_argument`` of ``beat_schedule.update(nightly={…})``;
+    * the ``assignment`` ``beat_schedule["nightly"] = {…}``.
+
+    Each entry's value is a dict with ``"task"`` and ``"schedule"``."""
     for node in walk(root):
         value: Node | None = None
         if node.type == "assignment":
             left = node.child_by_field_name("left")
-            if left is not None and node_text(left, source).lower().endswith("beat_schedule"):
+            if left is not None and left.type == "subscript" and \
+                    _is_beat_schedule(left.child_by_field_name("value"), source):
+                found = _beat_entry(node.child_by_field_name("right"), source)
+                if found is not None:
+                    yield node, *found
+                continue
+            if _is_beat_schedule(left, source):
                 value = node.child_by_field_name("right")
         elif node.type == "keyword_argument":
             key = node.child_by_field_name("name")
             if key is not None and node_text(key, source) == "beat_schedule":
                 value = node.child_by_field_name("value")
+        elif node.type == "call":
+            fn = node.child_by_field_name("function")
+            if fn is None or fn.type != "attribute":
+                continue
+            attr = fn.child_by_field_name("attribute")
+            if attr is None or node_text(attr, source) != "update" or \
+                    not _is_beat_schedule(fn.child_by_field_name("object"), source):
+                continue
+            args = node.child_by_field_name("arguments")
+            for arg in args.named_children if args is not None else []:
+                if arg.type == "keyword_argument":
+                    found = _beat_entry(arg.child_by_field_name("value"), source)
+                    if found is not None:
+                        yield arg, *found
+            value = next(iter(positional(node)), None)
         if value is None or value.type != "dictionary":
             continue
         for pair in value.named_children:
-            entry = pair.child_by_field_name("value") if pair.type == "pair" else None
-            if entry is None or entry.type != "dictionary":
-                continue
-            fields = {string(p.child_by_field_name("key"), source): p.child_by_field_name("value")
-                      for p in entry.named_children if p.type == "pair"}
-            yield pair, fields.get("task"), fields.get("schedule")
+            found = _beat_entry(pair.child_by_field_name("value"), source) if pair.type == "pair" \
+                else None
+            if found is not None:
+                yield pair, *found
 
 
 def module_name(rel: str, repo_root: Path | None) -> str | None:
@@ -269,6 +411,9 @@ class _FileTasks:
     rel: str
     module: str | None
     tasks: tuple[tuple[str, str | None, Ref | None], ...]  # (function, explicit name, its app)
+    classes: tuple[tuple[str, str | None], ...]  # (class task, explicit name)
+    #: ((file, class), app) per ``register_task`` call
+    registered: tuple[tuple[tuple[str, str], Ref | None], ...]
     apps: frozenset[str]  # module-level Celery app variables
     used: frozenset[str]  # task names written as literals
     modules: frozenset[str]  # task modules named in Celery's configuration
@@ -283,6 +428,9 @@ def _strings(node: Node | None, source: bytes) -> list[str]:
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileTasks | None:
     receivers = Receivers(root, source, repo_root, rel)
     tasks = tuple((t.function, t.explicit, receivers.task_ref(t)) for t in task_defs(root, source))
+    classes = tuple((c.name, c.explicit) for c in class_tasks(root, source, receivers.origins))
+    registered = tuple(registrations(root, source, rel, receivers, {c[0] for c in classes})) \
+        if b"register_task" in source else ()
     used: set[str] = set()
     modules: set[str] = set()
     for _, task, _ in beat_entries(root, source):
@@ -308,10 +456,11 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _Fi
             name = node_text(left, source).rsplit(".", 1)[-1] if left is not None else ""
             if name in _CONFIG_LISTS:
                 modules.update(_strings(node.child_by_field_name("right"), source))
-    if not tasks and not used and not modules and not receivers.local:
+    if not tasks and not classes and not registered and not used and not modules and \
+            not receivers.local:
         return None
-    return _FileTasks(rel, module_name(rel, repo_root), tasks, receivers.local,
-                      frozenset(used), frozenset(modules))
+    return _FileTasks(rel, module_name(rel, repo_root), tasks, classes, registered,
+                      receivers.local, frozenset(used), frozenset(modules))
 
 
 def _resolve(values: list[_FileTasks], index: object) -> CeleryTasks | None:
@@ -320,6 +469,13 @@ def _resolve(values: list[_FileTasks], index: object) -> CeleryTasks | None:
     apps = {v.rel: v.apps for v in values if v.apps}
     by_file: dict[str, dict[str, str | None]] = {}
     by_name: dict[str, tuple[str, str] | None] = {}
+    classes: dict[str, dict[str, str | None]] = {}
+    registered = {cls for v in values for cls, app in v.registered if is_app(app, apps)}
+
+    def confirmed(module: str | None, short: str) -> str | None:
+        derived = f"{module}.{short}" if module else None
+        return derived if derived and (derived in used or module in modules) else None
+
     for v in values:
         for function, explicit, app in v.tasks:
             if not is_app(app, apps):  # `@scheduler.task`: not a Celery task
@@ -328,16 +484,25 @@ def _resolve(values: list[_FileTasks], index: object) -> CeleryTasks | None:
             if explicit is not None:
                 name = None if explicit == UNKNOWN_NAME else explicit
             else:
-                derived = f"{v.module}.{function}" if v.module else None
-                name = derived if derived and (derived in used or v.module in modules) else None
+                name = confirmed(v.module, function)
             record_distinct(by_file.setdefault(v.rel, {}), function, name)
             if name is not None:
                 record_distinct(by_name, name, (v.rel, function))
-    return CeleryTasks(by_file, by_name, apps) if by_file or apps else None
+        for cls, explicit in v.classes:
+            if (v.rel, cls) not in registered:  # never registered on a Celery app
+                continue
+            if explicit is not None:
+                name = None if explicit == UNKNOWN_NAME else explicit
+            else:
+                name = confirmed(v.module, cls)
+            record_distinct(classes.setdefault(v.rel, {}), cls, name)
+            if name is not None:
+                record_distinct(by_name, name, (v.rel, "run"))
+    return CeleryTasks(by_file, by_name, apps, classes) if by_file or apps or classes else None
 
 
 register_fact(FactSpec(
     name=FACT, language="python",
-    gate=(b"celery", b"CELERY", b"shared_task", b"beat_schedule", b"send_task"),
+    gate=(b"celery", b"CELERY", b"shared_task", b"beat_schedule", b"send_task", b"register_task"),
     collect=_collect, resolve=_resolve,
 ))
