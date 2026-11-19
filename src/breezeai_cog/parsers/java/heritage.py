@@ -41,6 +41,28 @@ class HeritageFrag:
     #: (generics dropped) and that type's candidate FQCNs, or ``None`` when the type is declared
     #: in this file. Empty candidates for a primitive or an array.
     fields: tuple[tuple[str, str, tuple[str, ...] | None], ...] = ()
+    #: The declaration's tree-sitter type (``class_declaration``, ``interface_declaration`` …).
+    kind: str = ""
+
+
+def file_imports(root: Node, source: bytes) -> tuple[dict[str, str], list[str]]:
+    """A file's type imports: simple name → FQCN for each single-type import, and the packages
+    (or types) imported on demand. Static imports are left out: they import members."""
+    imports: dict[str, str] = {}
+    wildcards: list[str] = []
+    for node in root.named_children:
+        if node.type != "import_declaration" or any(c.type == "static" for c in node.children):
+            continue
+        scoped = next((c for c in node.named_children
+                       if c.type in ("scoped_identifier", "identifier")), None)
+        if scoped is None:
+            continue
+        name = node_text(scoped, source)
+        if any(c.type == "asterisk" for c in node.children):
+            wildcards.append(name)
+        else:
+            imports[name.rsplit(".", 1)[-1]] = name
+    return imports, wildcards
 
 
 def _base_name(node: Node, source: bytes) -> str | None:
@@ -95,20 +117,7 @@ def _field_types(
 
 def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFrag]:
     """Every class declared in one file, with its base's candidate FQCNs and its own methods."""
-    imports: dict[str, str] = {}  # simple name → FQCN, from single-type imports
-    wildcards: list[str] = []
-    for node in root.named_children:
-        if node.type != "import_declaration" or any(c.type == "static" for c in node.children):
-            continue
-        scoped = next((c for c in node.named_children
-                       if c.type in ("scoped_identifier", "identifier")), None)
-        if scoped is None:
-            continue
-        name = node_text(scoped, source)
-        if any(c.type == "asterisk" for c in node.children):
-            wildcards.append(name)
-        else:
-            imports[name.rsplit(".", 1)[-1]] = name
+    imports, wildcards = file_imports(root, source)
 
     found: list[tuple[str, Node]] = []
 
@@ -163,7 +172,7 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
         fqcn = f"{package}.{qualified}" if package else qualified
         fields = _field_types(body, source, candidates_of) if node.type == "class_declaration" else ()
         out.append(HeritageFrag(fqcn, base, candidates, local, tuple(names),
-                                tuple(returns.items()), fields))
+                                tuple(returns.items()), fields, node.type))
     return out
 
 

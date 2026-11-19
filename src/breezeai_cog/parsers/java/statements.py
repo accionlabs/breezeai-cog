@@ -74,6 +74,33 @@ def is_anonymous_body(node: Node) -> bool:
     return node.type == "class_body" and parent is not None and parent.type == "object_creation_expression"
 
 
+def stored_field(body: Node) -> Node | None:
+    """The ``variable_declarator`` of the field an anonymous class body is the whole initializer
+    of (``T onError = new T() { … };`` → ``onError``), else None: an anonymous class inside a
+    larger expression, a local variable or an argument is stored in no field of its own."""
+    creation = body.parent
+    decl = creation.parent if creation is not None else None
+    if decl is None or decl.type != "variable_declarator" \
+            or decl.child_by_field_name("value") != creation:
+        return None
+    field = decl.parent
+    return decl if field is not None and field.type == "field_declaration" else None
+
+
+def stores_only_anonymous(node: Node) -> bool:
+    """A field declaration whose every declarator stores an anonymous class: each is a Class of
+    its own spanning the declaration, so the declaration is not also a statement."""
+    if node.type != "field_declaration":
+        return False
+    decls = node.children_by_field_name("declarator")
+    return bool(decls) and all(
+        (value := d.child_by_field_name("value")) is not None
+        and value.type == "object_creation_expression"
+        and any(is_anonymous_body(c) for c in value.named_children)
+        for d in decls
+    )
+
+
 def anonymous_bodies(node: Node) -> list[Node]:
     """The outermost anonymous class bodies under ``node``, in source order (one nested in
     another is the outer one's own)."""
@@ -99,7 +126,7 @@ def _iter_in_scope(node: Node, descend_all: bool = False, skip_anonymous: bool =
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
-        if skip_anonymous and is_anonymous_body(child):
+        if skip_anonymous and (is_anonymous_body(child) or stores_only_anonymous(child)):
             continue
         if child.type in EMIT_TYPES:
             yield child

@@ -17,7 +17,7 @@ from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
-from .anonymous import declared_kinds
+from .anonymous import type_kinds
 from .classes import build_class
 from .functions import class_method_names, defined_names, type_map
 from .imports import JavaIndex, build_fqcn_index, extract_imports
@@ -106,14 +106,14 @@ class JavaParser(BaseParser):
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
-        kinds = declared_kinds(root, source)
+        kind_of = type_kinds(root, source, idx.type_kinds if isinstance(idx, JavaIndex) else None)
 
         for child in root.named_children:
             if child.type in _CLASS_TYPES:
                 cls_list, methods, cls_statements = build_class(
                     child, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
-                    kinds=kinds,
+                    kind_of=kind_of,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)

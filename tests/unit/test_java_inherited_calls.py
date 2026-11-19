@@ -217,7 +217,7 @@ def test_a_call_inside_an_anonymous_class_keeps_the_file_wide_answer(tmp_path: P
                               "Handler.java": _HANDLER}, "Data.java")
     # in the anonymous Handler, `alert` may be its own: it stays credited to this file as before,
     # and `this.log` (the anonymous instance) is not resolved through Data's base class
-    assert calls["Data$2.run"] == {"alert": f"{_ROOT}/Data.java", "log": None}
+    assert calls["Data$1.run"] == {"alert": f"{_ROOT}/Data.java", "log": None}
     assert calls["d"] == {}  # d() itself makes no call
 
 
