@@ -15,6 +15,10 @@ parented to the component File — the analogue of Vue's ``<script>`` extraction
 grammar embeds the C# grammar, so the methods are the same nodes the C# parser builds; we
 reuse ``build_method`` directly (no shadow needed). This lets an ``@onclick="Remove"`` handler
 resolve to the ``Remove`` method declared in the same file.
+
+Like every template page, its links and form posts are read by the shared markup reader (over
+the markup with the C# blanked, plus Razor's tag helpers), and its inline ``<script>`` blocks by
+the shared script reader (with the ``@`` code inside them blanked) — see :mod:`.markup`.
 """
 
 from __future__ import annotations
@@ -26,9 +30,11 @@ from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, HandlerLocator, ParseContext
 from ..csharp.functions import build_method
-from ..typescript_jquery.calls import detect_inline_jquery
+from ..template_common.markup import read_page_markup
+from ..template_common.scripts import link_page_scripts, read_page_scripts
 from ..treesitter import parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .markup import markup_copy, razor_tags, script_code_spans
 from .page_models import page_model_locator
 from .statements import collect_razor_statements
 from .vbhtml import collect_vbhtml_statements
@@ -65,6 +71,7 @@ class RazorParser(BaseParser):
             uiRole=ui_role,
             loc=count_loc(ctx.source.decode("utf-8", "replace")),
         )
+        link_page_scripts(record, ctx)
         if ctx.capture_statements:
             seen_ids: set[str] = set()
             record.statements.extend(
@@ -81,24 +88,32 @@ class RazorParser(BaseParser):
             # @code { } methods → Functions (Blazor component logic), parented to the component
             # File, so an @onclick="Remove" handler resolves to the Remove method in this file.
             self._extract_code_methods(root, ctx, fid, seen_ids, record)
-            # inline <script> jQuery AJAX calls → api_call (the markup grammar skips script bodies)
-            detect_inline_jquery(
-                record, ctx.source, ctx.path, ctx.parse_timeout_micros, ctx.repo_root)
+            # links and form posts (the razor grammar has no HTML attribute nodes), then what
+            # every script detector finds in the inline <script> blocks
+            read_page_markup(record, markup_copy(root, ctx.source), ctx.path,
+                             ctx.parse_timeout_micros, links=not self.is_fixture_file(ctx.path),
+                             tags=razor_tags)
+            read_page_scripts(record, ctx, server_code=script_code_spans(root),
+                              repo_root=ctx.repo_root)
         return record
 
     def _parse_vbhtml(self, ctx: ParseContext) -> FileRecord:
         """A VB Razor view: the template statements from a text scan (:mod:`.vbhtml`), and its
-        inline ``<script>`` jQuery calls, as for ``.cshtml``."""
+        links, form posts and inline ``<script>`` calls, as for ``.cshtml``. There is no VB
+        Razor grammar: the markup is read as written, and an ``@`` left in a script URL empties
+        its endpoint."""
         fid = file_id(ctx.path)
         record = FileRecord(
             id=fid, path=ctx.path, type="code", language="html", framework="razor",
             uiRole="template", loc=count_loc(ctx.source.decode("utf-8", "replace")),
         )
+        link_page_scripts(record, ctx)
         if ctx.capture_statements:
             record.statements.extend(collect_vbhtml_statements(
                 ctx.source, ctx.path, fid, set(), ctx.statement_text_limit))
-            detect_inline_jquery(
-                record, ctx.source, ctx.path, ctx.parse_timeout_micros, ctx.repo_root)
+            read_page_markup(record, ctx.source, ctx.path, ctx.parse_timeout_micros,
+                             links=not self.is_fixture_file(ctx.path), tags=razor_tags)
+            read_page_scripts(record, ctx, repo_root=ctx.repo_root)
         return record
 
     def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:

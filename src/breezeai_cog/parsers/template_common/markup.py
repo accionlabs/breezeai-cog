@@ -19,9 +19,16 @@ Angular, AngularJS or Vue form is handled in script and a plain form posts back 
 ``method`` is ``GET`` when absent (the HTML default); ``dialog`` sends nothing and is skipped; a
 value that is not ``get`` / ``post`` leaves ``method`` empty. The address follows the htmx rule: a
 literal path from the site root or an ``http(s)://`` URL, else empty.
+
+**Framework tags.** A parser passes ``tags``: its own rules for the tags its framework renders
+into links or forms (Razor's ``<a asp-action>``, Blazor's ``<NavLink href>``). They are asked
+first, with the tag name (lower case) and its attributes; ``None`` falls back to the rules above.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
 
 from tree_sitter import Node
 
@@ -35,6 +42,10 @@ _LINK_TAGS = frozenset({"a", "area"})
 _ROUTER_LINKS = frozenset({"routerlink", "[routerlink]"})
 #: Characters that only appear in an address a template engine renders, never in a literal one.
 _TEMPLATE_MARKERS = ("{", "}", "<", ">", "$", "@", "%")
+
+#: A framework's rules for its own tags: ``(tag name, attributes)`` → the statement fields, or
+#: ``None`` when the tag is not one of them.
+TagRule = Callable[[str, dict[str, str]], dict[str, Any] | None]
 
 
 def _attributes(tag: Node, source: bytes) -> dict[str, str]:
@@ -65,7 +76,7 @@ def _templated(value: str) -> bool:
     return any(m in value for m in _TEMPLATE_MARKERS)
 
 
-def _is_page_link(href: str) -> bool:
+def is_page_link(href: str) -> bool:
     """A link to a page of the application: not an anchor, another site or another scheme."""
     href = href.strip()
     if not href or href.startswith(("#", "//")):
@@ -74,7 +85,7 @@ def _is_page_link(href: str) -> bool:
     return not (colon and scheme.isalpha() and "/" not in scheme)
 
 
-def _link_endpoint(href: str) -> str | None:
+def link_endpoint(href: str) -> str | None:
     href = href.strip().split("#", 1)[0]
     if not href.startswith("/") or _templated(href):
         return None
@@ -90,6 +101,11 @@ def _form_endpoint(action: str) -> str | None:
     return action
 
 
+def navigation(endpoint: str | None) -> dict[str, Any]:
+    """The fields of a link's record."""
+    return {"semanticType": "route", "routeKind": "navigation", "endpoint": endpoint}
+
+
 def _form_method(attrs: dict[str, str]) -> tuple[bool, str | None]:
     """``(sends, method)``: whether the form sends a request, and its verb when literal."""
     method = attrs.get("method")
@@ -101,14 +117,16 @@ def _form_method(attrs: dict[str, str]) -> tuple[bool, str | None]:
     return True, method.upper() if method in ("get", "post") else None
 
 
-def markup_emits(root: Node, source: bytes, *, links: bool = True) -> list[Emit]:
+def markup_emits(
+    root: Node, source: bytes, *, links: bool = True, tags: TagRule | None = None
+) -> list[Emit]:
     """One emit per link (when ``links``) and per form with an ``action`` under ``root``."""
     found: list[Emit] = []
     stack = [root]
     while stack:
         node = stack.pop()
         if node.type in _TAGS:
-            emit = _emit(node, source, links)
+            emit = _emit(node, source, links, tags)
             if emit is not None:
                 found.append(emit)
             continue
@@ -116,18 +134,20 @@ def markup_emits(root: Node, source: bytes, *, links: bool = True) -> list[Emit]
     return found
 
 
-def _emit(tag: Node, source: bytes, links: bool) -> Emit | None:
+def _emit(tag: Node, source: bytes, links: bool, tags: TagRule | None) -> Emit | None:
     name = next((c for c in tag.named_children if c.type == "tag_name"), None)
     if name is None:
         return None
     tag_name = node_text(name, source).lower()
     attrs = _attributes(tag, source)
+    fields = tags(tag_name, attrs) if tags is not None else None
+    if fields is not None:
+        return None if fields.get("routeKind") == "navigation" and not links else Emit(tag, fields)
     if tag_name in _LINK_TAGS:
         href = attrs.get("href")
-        if not links or href is None or not _is_page_link(href) or _ROUTER_LINKS & attrs.keys():
+        if not links or href is None or not is_page_link(href) or _ROUTER_LINKS & attrs.keys():
             return None
-        return Emit(tag, {"semanticType": "route", "routeKind": "navigation",
-                          "endpoint": _link_endpoint(href)})
+        return Emit(tag, navigation(link_endpoint(href)))
     if tag_name == "form" and "action" in attrs:
         sends, method = _form_method(attrs)
         if not sends:
@@ -138,14 +158,21 @@ def _emit(tag: Node, source: bytes, links: bool) -> Emit | None:
 
 
 def read_page_markup(
-    record: FileRecord, markup: bytes, path: str, timeout_micros: int = 0, *, links: bool = True
+    record: FileRecord,
+    markup: bytes,
+    path: str,
+    timeout_micros: int = 0,
+    *,
+    links: bool = True,
+    tags: TagRule | None = None,
 ) -> None:
     """Append the page's links (when ``links``; off for fixture files, like every route) and
-    form posts to ``record``. Only called with statement capture."""
+    form posts to ``record``. ``markup`` is the page, or a copy with its server code blanked
+    at the same offsets. Only called with statement capture."""
     lowered = markup.lower()
-    if b"href" not in lowered and b"<form" not in lowered:
+    if b"href" not in lowered and b"<form" not in lowered and b"asp-" not in lowered:
         return
     root = parse_source("html", markup, timeout_micros).root_node
-    emits = markup_emits(root, markup, links=links)
+    emits = markup_emits(root, markup, links=links, tags=tags)
     if emits:
         apply(record, emits, markup, path)
