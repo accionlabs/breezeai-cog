@@ -1022,6 +1022,116 @@ await client.callTool({ name: "kept" });
     assert _calls(analyze_files({"c.ts": src})) == [("TOOL", "kept", "typescript-mcp")]
 
 
+# ── Java / C#: every declaration kind of a name counts, never a client unless typed one ──
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "try (Other client = open()) { }",
+        "try (var client = open()) { }",
+        "if (o instanceof Other client) { }",
+        "if (o instanceof Pt(Other client, int y)) { }",
+        "switch (o) { case Other client -> { } default -> { } }",
+        "for (Other client : others) { }",
+        "try { } catch (Exception client) { }",
+        "others.forEach((Other client) -> { });",
+        "others.forEach(client -> { });",
+    ],
+)
+def test_java_other_declaration_kinds_are_not_clients(analyze_files, other: str) -> None:
+    src = f"""
+package demo;
+
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class D {{
+    McpSyncClient client;
+    void a(Object o) {{ {other} }}
+    void b() {{ client.callTool(new McpSchema.CallToolRequest("wipe", null)); }}
+}}
+"""
+    assert _calls(analyze_files({"D.java": src})) == []
+
+
+def test_java_typed_resource_and_pattern_keep_a_client(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class D {
+    McpSyncClient client;
+    void a(Object o) {
+        try (McpSyncClient client = make()) { }
+        try (var client = McpClient.sync(transport).build()) { }
+        if (o instanceof McpSyncClient client) { }
+    }
+    void b() { client.callTool(new McpSchema.CallToolRequest("kept", null)); }
+}
+"""
+    assert _calls(analyze_files({"D.java": src})) == [("TOOL", "kept", "java-mcp")]
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "if (reg.TryGet(k, out var client)) { }",
+        "reg.TryGet(k, out Other client);",
+        "if (o is Other client) { }",
+        "if (o is Other { X: 1 } client) { }",
+        "switch (o) { case Other client: break; }",
+        "var r = o switch { Other client => 1, _ => 2 };",
+        "var (client, x) = pair;",
+        "(var client, int y) = pair;",
+        "foreach (var (client, z) in pairs) { }",
+        "try { } catch (Exception client) { }",
+        "if (o is var (client, y)) { }",
+        "if (o is Pt(Other client, var y)) { }",
+        "var q = from client in xs select client;",
+        "var q = from a in xs join client in ys on a equals client select a;",
+        "var q = from a in xs join Other client in ys on a equals client select a;",
+        "var q = from a in xs let client = a select a;",
+        "var q = from a in xs group a by a into client select client;",
+        "var q = from a in xs join b in ys on a equals b into client select a;",
+        "Func<int, int> f = (int client) => 1;",
+    ],
+)
+def test_csharp_other_declaration_kinds_are_not_clients(analyze_files, other: str) -> None:
+    src = f"""
+using ModelContextProtocol.Client;
+
+public class C
+{{
+    private IMcpClient client;
+    public void A(object o) {{ {other} }}
+    public async Task B() {{ await client.CallToolAsync("wipe"); }}
+}}
+"""
+    assert _calls(analyze_files({"C.cs": src})) == []
+
+
+def test_csharp_typed_out_and_pattern_keep_a_client(analyze_files) -> None:
+    src = """
+using ModelContextProtocol.Client;
+
+public class C
+{
+    private IMcpClient client;
+    public void A(object o)
+    {
+        reg.TryGet(k, out IMcpClient client);
+        if (o is McpClient client) { }
+    }
+    public async Task B() { await client.CallToolAsync("kept"); }
+}
+"""
+    assert _calls(analyze_files({"C.cs": src})) == [("TOOL", "kept", "csharp-mcp")]
+
+
 # ── Java / C# / Kotlin: a name declared more than once, every time a client ──
 
 

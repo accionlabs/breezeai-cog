@@ -8,11 +8,12 @@
     await client.ReadResourceAsync("memo://insights")          → mcp_call  csharp-mcp  RESOURCE  memo://insights
     await client.GetPromptAsync("review", args)                → mcp_call  csharp-mcp  PROMPT    review
 
-* **Client receiver** — a name every declaration of which in the file (a ``foreach`` or lambda
-  variable of the same name counts as a declaration, never a client) is typed ``McpClient`` /
-  ``IMcpClient``, or ``var`` initialized by ``[await] McpClient.CreateAsync(…)`` /
-  ``McpClientFactory.CreateAsync(…)``; only in a file that uses the ``ModelContextProtocol``
-  package.
+* **Client receiver** — a name every declaration of which in the file (a ``foreach``, lambda,
+  ``catch``, tuple-deconstruction or query variable, ``out var`` / ``is var`` of the same name
+  counts as a declaration, never a client) is typed ``McpClient`` / ``IMcpClient`` (a field, a
+  local, a parameter, an ``out T x`` / ``is T x`` / ``case T x`` variable), or ``var``
+  initialized by ``[await] McpClient.CreateAsync(…)`` / ``McpClientFactory.CreateAsync(…)``;
+  only in a file that uses the ``ModelContextProtocol`` package.
 * ``endpoint`` — the first argument (or ``toolName:`` / ``name:`` / ``uri:`` / ``uriTemplate:``),
   a string literal, or ``new Uri("…")`` of one for a resource; anything else → no record.
 * The record is the call's own statement, with no handler; a client-only file gets no file-level
@@ -63,8 +64,8 @@ def _clients(root: Node, source: bytes) -> set[str]:
                 name = decl.child_by_field_name("name") or (
                     decl.named_children[0] if decl.named_children else None
                 )
-                if name is None:
-                    continue
+                if name is None or name.type != "identifier":
+                    continue  # `var (a, b) = …`: its names are the tuple pattern's
                 value = next((c for c in decl.named_children if c != name), None)
                 proven = _simple(type_node, source) in CLIENT_TYPES or (
                     type_node is not None
@@ -77,6 +78,48 @@ def _clients(root: Node, source: bytes) -> set[str]:
             bound = node.child_by_field_name("left") if node.type == "foreach_statement" else node
             if bound is not None and bound.type in ("identifier", "implicit_parameter"):
                 declared.setdefault(node_text(bound, source), []).append(False)
+        elif node.type in (
+            "declaration_expression",
+            "declaration_pattern",
+            "recursive_pattern",
+            "catch_declaration",
+        ):
+            # `out T client`, `is T client`, `case T { … } client`, `catch (T client)`: typed by
+            # its own type (`out var client` / `is var client` never proven)
+            name = node.child_by_field_name("name")
+            if name is not None and name.type == "identifier":
+                declared.setdefault(node_text(name, source), []).append(
+                    _simple(node.child_by_field_name("type"), source) in CLIENT_TYPES
+                )
+        elif node.type in ("tuple_pattern", "from_clause"):
+            # `var (client, x) = …`, `foreach (var (client, x) in …)`, `from client in …`
+            for name in node.children_by_field_name("name"):
+                if name.type == "identifier":
+                    declared.setdefault(node_text(name, source), []).append(False)
+        elif node.type == "query_expression":
+            # `… into client select …`: a query continuation's name follows `into`
+            kids = node.children
+            for prev, cur in zip(kids, kids[1:]):
+                if prev.type == "into" and cur.type == "identifier":
+                    declared.setdefault(node_text(cur, source), []).append(False)
+        elif node.type in ("join_clause", "let_clause", "join_into_clause"):
+            # `join client in …`, `let client = …`, `into client`: the name has no field; it is
+            # the one before `in` / `=`, or the only one
+            kids = node.children
+            stop = next((i for i, c in enumerate(kids) if c.type in ("in", "=")), len(kids))
+            names = [c for c in kids[:stop] if c.type == "identifier"]
+            if names:
+                declared.setdefault(node_text(names[-1], source), []).append(False)
+        elif node.type == "invocation_expression" and (
+            (fn := node.child_by_field_name("function")) is not None
+            and fn.type in ("is_expression", "is_pattern_expression")
+        ):
+            # `o is var (client, y)` / `o is Pt(T client, var y)`, which the grammar reads as a
+            # call: every name in its "arguments" may be one the pattern declares
+            args = node.child_by_field_name("arguments")
+            for ident in _walk(args) if args is not None else ():
+                if ident.type == "identifier":
+                    declared.setdefault(node_text(ident, source), []).append(False)
         elif node.type in ("parameter", "property_declaration"):
             name = node.child_by_field_name("name")
             if name is not None:

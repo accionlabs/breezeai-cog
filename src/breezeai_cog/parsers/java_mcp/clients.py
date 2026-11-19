@@ -8,9 +8,10 @@
     client.getPrompt(new GetPromptRequest("review", Map.of()))   → mcp_call  java-mcp  PROMPT    review
 
 * **Client receiver** — a name (or ``this.name``) every declaration of which in the file (a
-  lambda's or a loop's variable of the same name counts as a declaration, never a client) has
-  the type ``McpSyncClient`` / ``McpAsyncClient`` (a field, a local or a parameter), or is ``var``
-  initialized by a ``McpClient.sync(…)`` / ``McpClient.async(…)`` chain. ``clients.get(0).callTool(…)`` (a
+  lambda's, a loop's or a ``catch`` variable of the same name counts as a declaration, never a
+  client) has the type ``McpSyncClient`` / ``McpAsyncClient`` (a field, a local, a parameter, a
+  try-with-resources resource, an ``instanceof`` / ``case`` / record pattern variable), or is
+  ``var`` initialized by a ``McpClient.sync(…)`` / ``McpClient.async(…)`` chain. ``clients.get(0).callTool(…)`` (a
   Spring AI list of clients) is not one: which server it reaches is not in the code.
 * **Request** — ``new CallToolRequest(name, arguments[, meta])`` (``(mapper, name, json)``
   when the first argument is not a string literal),
@@ -82,6 +83,35 @@ def _clients(root: Node, source: bytes) -> set[str]:
                 type_text = node_text(type_node, source).split("<")[0] if type_node else ""
                 declared.setdefault(node_text(name, source), []).append(
                     node.type == "formal_parameter" and type_text.rsplit(".", 1)[-1] in CLIENT_TYPES
+                )
+        elif node.type == "resource":
+            # `try (McpSyncClient client = …)`, `try (var client = McpClient.sync(…)…build())`
+            name = node.child_by_field_name("name")
+            if name is not None:
+                type_node = node.child_by_field_name("type")
+                type_text = node_text(type_node, source).split("<")[0] if type_node else ""
+                declared.setdefault(node_text(name, source), []).append(
+                    type_text.rsplit(".", 1)[-1] in CLIENT_TYPES
+                    or (
+                        type_text == "var"
+                        and _built_client(node.child_by_field_name("value"), source)
+                    )
+                )
+        elif node.type in ("instanceof_expression", "type_pattern", "record_pattern_component"):
+            # `o instanceof T client`, `case T client ->`, `Pt(T client, …)`: typed by its pattern
+            if node.type == "instanceof_expression":
+                name, type_node = (
+                    node.child_by_field_name("name"),
+                    node.child_by_field_name("right"),
+                )
+            else:
+                parts = node.named_children
+                name = parts[-1] if len(parts) == 2 and parts[-1].type == "identifier" else None
+                type_node = parts[0] if name is not None else None
+            if name is not None:
+                type_text = node_text(type_node, source).split("<")[0] if type_node else ""
+                declared.setdefault(node_text(name, source), []).append(
+                    type_text.rsplit(".", 1)[-1] in CLIENT_TYPES
                 )
         elif node.type == "lambda_expression":
             # `client -> …` / `(a, client) -> …`: an inferred parameter is never proven a client
