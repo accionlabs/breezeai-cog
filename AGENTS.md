@@ -21,6 +21,24 @@ uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir>   # capture a re
 The parallel pool needs a real `__main__`: run through the CLI or a script file, not a REPL or
 `python -c` (or pass `--jobs 1`).
 
+## Deep context
+
+`context/` is an orientation map of the non-parser areas of this repository, based on the
+snapshot named in [`context/00-index.md`](context/00-index.md). Use its index to find relevant
+files and symbols; it is not an authority.
+
+- Confirm claims in source before citing behavior, diagnosing a failure, or reviewing a change.
+  The source code and capture contract take precedence over `context/`.
+- The “Read first” table and maintained `docs/` take precedence where they overlap.
+  For parser and detector work, follow the “Read first” table below, especially
+  [`skills/extend-capture/SKILL.md`](skills/extend-capture/SKILL.md) and
+  [`skills/gap-review/SKILL.md`](skills/gap-review/SKILL.md); do not use `context/` as a parser
+  reference.
+- Files 14 and 15 are routers: read the router, then only the one applicable shard.
+- Line anchors describe the snapshot only. Locate symbols by name and verify their current
+  source before relying on an anchor.
+- If you find `context/` wrong, say so and fix it in the same change.
+
 ## Read first
 
 | You are… | Read |
