@@ -172,7 +172,9 @@ class FactSpec:
     #: Extra file extensions to collect from, owned by another parser (``(".svc",)`` for a C#
     #: fact, ``(".graphql",)`` for a TypeScript one). The pipeline hands such files to this
     #: language's index too; they reach only this ``collect``, never the language's own
-    #: indexing, and the owning parser still emits their records.
+    #: indexing, and the owning parser still emits their records. On ``config``, whose files are
+    #: all its own, it limits the files the index reads to these types (when every ``config``
+    #: fact names some).
     sources: tuple[str, ...] = ()
     #: tree-sitter grammar ``collect`` gets those files parsed with; ``None`` = no tree (the
     #: fact reads the bytes, e.g. a ``<%@ ServiceHost %>`` directive).

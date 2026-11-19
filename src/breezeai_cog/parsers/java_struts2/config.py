@@ -45,7 +45,7 @@ from ..treesitter import parse_source
 from ..treesitter import node_text
 from ..xml_common import child_elements, document_root, element_attr, element_tag
 from .common import (
-    FRAMEWORK, STRUTS_ROOT, XML_LEVEL, Layered, action_endpoint, ActionTable, bare_of,
+    EXTENSION_KEY, FRAMEWORK, STRUTS_ROOT, XML_LEVEL, Layered, action_endpoint, ActionTable, bare_of,
     namespace_key, suffix_of, xml_constants,
 )
 from .facts import SETTINGS, module_settings
@@ -244,15 +244,21 @@ def _suffix(ctx: ParseContext, path: str, source: bytes) -> tuple[str | None, bo
     file of the module, overridden by ``struts.properties``, overridden by the Struts filter's
     init-param in ``web.xml``; two sources at one level that disagree leave it unknown.
 
-    With no settings on the index (no index passed, or no Struts constant anywhere in the repo)
-    only this file's own constants apply: no other file is opened while parsing."""
-    fact = index_fact(ctx.resolution_index, SETTINGS)
+    An index with no settings (no Struts constant anywhere in the repo) gives the Struts default.
+    With no index at all (none passed, or it failed to build) only this file's own constants
+    apply, and without one the extension is unknown, never the default: another file may set
+    it. No other file is opened while parsing."""
+    index = ctx.resolution_index
+    fact = index_fact(index, SETTINGS)
     if fact is not None:
         settings = module_settings(fact, path)
+    elif index is not None:
+        settings = {}
     else:
         own = Layered()
         own.add("", XML_LEVEL, xml_constants(source))
         settings = own.resolve().get("", {})
+        settings.setdefault(EXTENSION_KEY, None)  # unknown: no index to read the module from
     return suffix_of(settings), bare_of(settings)
 
 

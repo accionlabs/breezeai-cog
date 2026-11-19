@@ -80,6 +80,17 @@ def test_a_stray_file_of_a_module_is_not_the_repositorys_configuration(analyze_f
     assert eps == {f"shop/{RES}/struts.xml": ["/n/a.action"]}
 
 
+def test_a_nested_module_without_a_struts_xml_keeps_its_own_extension(analyze_files) -> None:
+    # `shop/sub` is a module of its own (its own `src/main/`), not a stray file of `shop`
+    eps = _endpoints(analyze_files, {
+        "shop/pom.xml": "<project/>",
+        f"shop/{RES}/struts.xml": _xml(""),
+        f"shop/sub/{RES}/struts-sub.xml": _xml(
+            '<package name="s" namespace="/s"><action name="b"/></package>\n', _ext("do")),
+    })
+    assert eps == {f"shop/sub/{RES}/struts-sub.xml": ["/s/b.do"]}
+
+
 def test_a_stray_file_does_not_contradict_the_configuration(analyze_files) -> None:
     eps = _endpoints(analyze_files, {
         f"{RES}/struts.xml": _xml(_ACTION, _ext("do")),
@@ -182,6 +193,32 @@ def test_without_an_index_only_the_files_own_constants_apply(tmp_path: Path) -> 
     assert [s.endpoint for s in record.statements if s.routeKind == "route"] == ["/n/a.do"]
 
 
+def _parse_alone(tmp_path: Path, rel: str, index: object | None) -> list[str | None]:
+    ctx = ParseContext(path=rel, abs_path=tmp_path / rel, source=(tmp_path / rel).read_bytes(),
+                       repo_root=tmp_path, capture_statements=True, resolution_index=index)
+    record = Struts2ConfigParser().parse_file(ctx)
+    return [s.endpoint for s in record.statements if s.routeKind == "route"]
+
+
+def test_without_an_index_the_extension_is_unknown_not_the_default(tmp_path: Path) -> None:
+    # Another file may set it (an include, struts.properties, web.xml): no index, no answer.
+    files = {f"{RES}/struts.xml": _xml(_ACTION, '<include file="struts-constants.xml"/>\n'),
+             f"{RES}/struts-constants.xml": _xml("", _ext("do"))}
+    _write(tmp_path, files)
+    rel = f"{RES}/struts.xml"
+    assert _parse_alone(tmp_path, rel, None) == [None]
+    index = build_config_index(tmp_path, [tmp_path / r for r in files])
+    assert _parse_alone(tmp_path, rel, index) == ["/n/a.do"]
+
+
+def test_an_index_with_no_constant_gives_the_struts_default(tmp_path: Path) -> None:
+    _write(tmp_path, {f"{RES}/struts.xml": _xml(_ACTION)})
+    rel = f"{RES}/struts.xml"
+    index = build_config_index(tmp_path, [tmp_path / rel])
+    assert index is not None
+    assert _parse_alone(tmp_path, rel, index) == ["/n/a.action"]
+
+
 # --- the config index -------------------------------------------------------------------------
 
 @pytest.mark.parametrize("jobs", [1, 2])
@@ -202,6 +239,38 @@ def test_the_config_index_holds_the_settings_for_any_jobs(tmp_path: Path, jobs: 
     assert settings["b"]["struts.action.extension"] == "htm"  # struts.properties beside it wins
 
 
-def test_a_repo_without_struts_builds_no_config_index(tmp_path: Path) -> None:
+def test_a_repo_without_struts_builds_an_empty_config_index(tmp_path: Path) -> None:
     _write(tmp_path, {"app.yaml": "name: x\n", "pom.xml": "<project/>"})
-    assert build_config_index(tmp_path, [tmp_path / "app.yaml", tmp_path / "pom.xml"]) is None
+    index = build_config_index(tmp_path, [tmp_path / "app.yaml", tmp_path / "pom.xml"])
+    assert index == ConfigIndex()  # built, nothing found: not the same as no index
+
+
+def test_one_failing_file_does_not_drop_the_config_index(tmp_path: Path, monkeypatch) -> None:
+    from breezeai_cog.parsers.config import index as config_index
+
+    files = {f"{RES}/struts.xml": _xml(_ACTION, '<include file="struts-constants.xml"/>\n'),
+             f"{RES}/struts-constants.xml": _xml("", _ext("do")),
+             f"{RES}/broken.xml": _xml("")}
+    _write(tmp_path, files)
+    real = config_index.collect_additive
+
+    def collect(language, root, source, rel, repo_root):
+        if rel.endswith("broken.xml"):
+            raise ValueError("bad file")
+        return real(language, root, source, rel, repo_root)
+
+    monkeypatch.setattr(config_index, "collect_additive", collect)
+    index = build_config_index(tmp_path, sorted(tmp_path / r for r in files))
+    assert index_fact(index, SETTINGS)[""]["struts.action.extension"] == "do"
+
+
+def test_the_config_index_reads_only_the_file_types_a_fact_reads(tmp_path: Path, monkeypatch) -> None:
+    files = {f"{RES}/struts.xml": _xml(_ACTION, _ext("do")), "meta/a.json": "{}",
+             "app.yaml": "name: x\n", "app.properties": "a=b\n"}
+    _write(tmp_path, files)
+    read: list[str] = []
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: read.append(self.name) or real(self))
+    build_config_index(tmp_path, sorted(tmp_path / r for r in files))
+    assert "struts.xml" in read  # and the struts.properties beside it, if any
+    assert not {"a.json", "app.yaml", "app.properties"} & set(read)

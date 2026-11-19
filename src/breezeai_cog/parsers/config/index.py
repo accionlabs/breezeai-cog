@@ -25,27 +25,38 @@ class ConfigIndex:
 
 
 def _file_facts(args: tuple[str, str]) -> dict[str, Any]:
-    """Every ``config`` fact's value for one file (picklable worker). A file that cannot be read
-    contributes nothing."""
+    """Every ``config`` fact's value for one file (picklable worker). A file that cannot be read,
+    or that a fact fails on, contributes nothing: one bad file never takes the index down."""
     repo_root_s, file_s = args
     repo_root, path = Path(repo_root_s), Path(file_s)
+    rel = path.relative_to(repo_root).as_posix()
     try:
         source = path.read_bytes()
     except OSError:
         return {}
-    return collect_additive("config", None, source, path.relative_to(repo_root).as_posix(),
-                            repo_root)
+    try:
+        return collect_additive("config", None, source, rel, repo_root)
+    except Exception as exc:
+        from ...logging import get_logger
+
+        get_logger("breezeai_cog.index").warning("index.fact.skipped", path=rel, error=str(exc))
+        return {}
 
 
 def build_config_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> ConfigIndex | None:
-    """The facts registered for ``config`` over its files; None when there are none to build
-    or none found. With no fact registered no file is read."""
-    if not facts_for("config"):
+    """The facts registered for ``config`` over its files; None only when no fact is registered
+    (then no file is read). An index that found nothing is still built, so a parser can tell
+    "no setting anywhere" from "no index". Only the file types a fact reads are read
+    (``FactSpec.sources``; a fact that names none reads every config file)."""
+    specs = facts_for("config")
+    if not specs:
         return None
+    if all(spec.sources for spec in specs):
+        exts = tuple({ext for spec in specs for ext in spec.sources})
+        files = [f for f in files if f.name.lower().endswith(exts)]
     collected: dict[str, list[Any]] = {}
     args = [(str(repo_root), str(f)) for f in files]
     for per_file in parallel_map(args, _file_facts, jobs):
         for name, value in per_file.items():
             collected.setdefault(name, []).append(value)
-    facts = resolve_additive("config", collected, None)
-    return ConfigIndex(facts) if facts else None
+    return ConfigIndex(resolve_additive("config", collected, None))

@@ -132,9 +132,10 @@ def _resolve_settings(values: list[_Found], index: Any) -> dict[str, dict[str, s
                     queue.append(target)
     for rel, (_, constants, properties) in files.items():
         module = module_key(rel)
-        # A file outside `src/main/` but inside a module that has its `struts.xml` (`shop/conf/
-        # extra.xml`) is that module's stray file, not the repository's configuration.
-        stray = any(m and rel.startswith(m + "/") for m in rooted)
+        # A file outside any `src/main/` but inside a module that has its `struts.xml` (`shop/conf/
+        # extra.xml`) is that module's stray file, not the repository's configuration. A nested
+        # module's file (`shop/sub/src/main/…`) is that module's own.
+        stray = module == "" and any(m and rel.startswith(m + "/") for m in rooted)
         if module not in rooted and not stray:  # the loaded files are not known: all count
             layered.add(module, XML_LEVEL, constants)
             layered.add(module, PROPERTIES_LEVEL, properties)
@@ -231,6 +232,7 @@ register_fact(FactSpec(
 register_fact(FactSpec(
     name=SETTINGS, language="config", gate=_SETTINGS_GATE,
     collect=_collect_settings, resolve=_resolve_settings,
+    sources=(".xml",),  # Struts files and web.xml; `struts.properties` is read beside them
 ))
 register_fact(FactSpec(
     name=PACKAGE_NAMESPACES, language="java", gate=(b"@Namespace",),
