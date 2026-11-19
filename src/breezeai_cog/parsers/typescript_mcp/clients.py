@@ -12,7 +12,8 @@
 * **Client receiver** — ``Client`` imported from the SDK's ``client/index.js`` (``import * as``
   too). A name whose nearest binding is a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``
   or a parameter typed ``Client`` (a loop or ``catch`` variable, an untyped parameter, any other
-  declaration hides it; no binding in the file, or any other assignment to the name → not one).
+  declaration hides it — a ``var`` of the function's in a nested block or loop head too; no
+  binding in the file, or any other assignment to the name → not one).
   ``this.x`` in a class (not inside a ``function`` or an object literal's method, which rebind
   ``this``) whose one declaration of
   ``x`` — a field or a constructor parameter property — is typed ``Client`` or initialized
@@ -124,6 +125,37 @@ def _detect(dc: DetectContext) -> Detection | None:
         if left is not None and not built(node.child_by_field_name("right"), source)
     }
 
+    hoisted: dict[tuple[int, int], dict[str, list[Node | None]]] = {}
+
+    def var_bindings(body: Node) -> dict[str, list[Node | None]]:
+        """Each name a ``var`` binds anywhere in a function body (or the program) → its values:
+        ``var`` reaches the whole function from a nested block or loop head. Nested functions
+        keep their own."""
+        key = (body.start_byte, body.end_byte)
+        if key in hoisted:
+            return hoisted[key]
+        found: dict[str, list[Node | None]] = {}
+        stack = list(body.named_children)
+        while stack:
+            node = stack.pop()
+            if node.type in _FUNCTION_SCOPES or node.type == "class_static_block":
+                continue
+            if node.type == "variable_declaration":
+                for decl in node.named_children:
+                    if decl.type == "variable_declarator":
+                        value = decl.child_by_field_name("value")
+                        for bound in bound_names(decl.child_by_field_name("name"), source):
+                            found.setdefault(bound, []).append(value)
+            elif (
+                node.type == "for_in_statement"
+                and _text(node.child_by_field_name("kind"), source) == "var"
+            ):
+                for bound in bound_names(node.child_by_field_name("left"), source):
+                    found.setdefault(bound, []).append(None)  # `for (var client of …)`
+            stack.extend(node.named_children)
+        hoisted[key] = found
+        return found
+
     def name_is_client(call: Node, name: str) -> bool:
         """The nearest binding of ``name`` at ``call`` is a client: a parameter typed ``Client``
         or a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``. A loop or ``catch``
@@ -140,6 +172,12 @@ def _detect(dc: DetectContext) -> Detection | None:
                     if _binds(pattern, name, source):
                         return p.type in _PARAMETERS and typed(p, source)
             elif node.type in ("statement_block", "program"):
+                if node.type == "program" or (
+                    node.parent is not None and node.parent.type in _FUNCTION_SCOPES
+                ):
+                    values = var_bindings(node).get(name)
+                    if values is not None and not all(built(v, source) for v in values):
+                        return False  # a `var` of the function's, in any nested block
                 declared = block_declarations(node, source, blocks)
                 if name in declared:
                     return built(declared[name], source)

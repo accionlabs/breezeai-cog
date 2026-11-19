@@ -12,8 +12,9 @@
     val sync = McpClient.sync(transport).build()
     sync.callTool(McpSchema.CallToolRequest("add", mapOf()))         → mcp_call  java-mcp  TOOL  add
 
-* **Client receiver** — a name (or ``this.name``) declared once in the file (a loop's or a
-  lambda's variable of the same name counts as another declaration): typed ``Client`` (with
+* **Client receiver** — a name (or ``this.name``) every declaration of which in the file (a
+  loop's or a lambda's variable of the same name counts as a declaration, never a client) proves
+  a client of one framework: typed ``Client`` (with
   the Kotlin SDK's ``Client`` imported) / ``McpSyncClient`` / ``McpAsyncClient``, or initialized by
   ``Client(…)`` (that import) or a ``McpClient.sync(…)`` / ``.async(…)`` chain. A star import of
   the SDK's client package proves ``Client`` only when no other ``Client`` is imported by name
@@ -98,7 +99,7 @@ def _built_java_client(value: Node | None, source: bytes) -> bool:
 
 
 def _clients(root: Node, source: bytes, kotlin_client: bool) -> dict[str, str]:
-    """Names declared once in the file whose declaration proves a client → its framework."""
+    """Names every declaration of which in the file proves a client of one framework → it."""
     declared: dict[str, list[str | None]] = {}
 
     def framework(type_node: Node | None, value: Node | None) -> str | None:
@@ -152,7 +153,7 @@ def _clients(root: Node, source: bytes, kotlin_client: bool) -> dict[str, str]:
     return {
         name: found[0]
         for name, found in declared.items()
-        if len(found) == 1 and found[0] is not None
+        if found[0] is not None and all(f == found[0] for f in found)
     }
 
 

@@ -840,3 +840,198 @@ val client = Client()
 suspend fun f() {{ client.callTool(name = "x", arguments = mapOf()) }}
 """
     assert _calls(analyze_files({"S.kt": src})) == []
+
+
+# ── mcp-go: a request's `Params.Name` write runs before the call on every path ──
+
+_MCPGO_IMPORTS = """
+package main
+
+import (
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
+)
+"""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # only on one branch: the call may send no name
+        'req := mcp.CallToolRequest{}\n\tif admin { req.Params.Name = "wipe" }\n\tc.CallTool(ctx, req)',
+        # after the call: the call never sends it
+        'req := mcp.CallToolRequest{}\n\tc.CallTool(ctx, req)\n\treq.Params.Name = "after"',
+        # in a loop, a switch case, a func literal
+        'req := mcp.CallToolRequest{}\n\tfor _, n := range ns { req.Params.Name = "loop" }\n\tc.CallTool(ctx, req)',
+        'req := mcp.CallToolRequest{}\n\tswitch k { case 1: req.Params.Name = "case" }\n\tc.CallTool(ctx, req)',
+        'req := mcp.CallToolRequest{}\n\tset := func() { req.Params.Name = "closure" }\n\tset()\n\tc.CallTool(ctx, req)',
+        # the call in another block than the declaration
+        'req := mcp.CallToolRequest{}\n\tif admin { req.Params.Name = "inner"; c.CallTool(ctx, req) }',
+        # the resource / prompt variants go the same way
+        'req := mcp.ReadResourceRequest{}\n\tif admin { req.Params.URI = "memo://x" }\n\tc.ReadResource(ctx, req)',
+        'req := mcp.GetPromptRequest{}\n\tc.GetPrompt(ctx, req)\n\treq.Params.Name = "late"',
+    ],
+)
+def test_mcpgo_request_name_write_must_precede_the_call_unconditionally(
+    analyze_files, body: str
+) -> None:
+    src = (
+        _MCPGO_IMPORTS
+        + '\nfunc f(admin bool, k int, ns []string) {\n\tc, _ := client.NewStdioMCPClient("s", nil)\n\t'
+        + body
+        + "\n}\n"
+    )
+    assert _calls(analyze_files({"main.go": src})) == []
+
+
+def test_mcpgo_request_name_write_in_the_same_list_is_kept(analyze_files) -> None:
+    src = (
+        _MCPGO_IMPORTS
+        + """
+func f(admin bool) {
+	c, _ := client.NewStdioMCPClient("s", nil)
+	if admin {
+		req := mcp.ReadResourceRequest{}
+		req.Params.URI = "memo://x"
+		if _, err := c.ReadResource(ctx, req); err != nil {
+			return
+		}
+	}
+	var p mcp.GetPromptRequest
+	p.Params.Name = "review"
+	return c.GetPrompt(ctx, p)
+}
+"""
+    )
+    # (an `if`'s initializer keeps its own statement on the `if`'s line: not `_calls`)
+    found = _by_endpoint(analyze_files({"main.go": src}))
+    assert {e: (s.method, s.framework, s.startLine) for e, s in found.items()} == {
+        "memo://x": ("RESOURCE", "mcp-go", 14),
+        "review": ("PROMPT", "mcp-go", 20),
+    }
+
+
+# ── Python: an attribute / subscript target binds no name ────────────────────
+
+
+def test_python_storing_the_session_keeps_it_a_client(analyze_files) -> None:
+    src = """
+from mcp import ClientSession
+
+
+class Conn:
+    async def connect(self, r, w):
+        session = ClientSession(r, w)
+        self.session = session
+        cache[session] = 1
+        self.items[session], other = session, 2
+        await session.call_tool("stored_add", {})
+
+    async def rebound(self, r, w):
+        session = ClientSession(r, w)
+        self.session = session
+        session = other()
+        await session.call_tool("rebound", {})
+
+    async def unpacked(self, r, w):
+        session = ClientSession(r, w)
+        (session, self.x), [*session] = pair, rest
+        await session.call_tool("unpacked", {})
+
+    async def with_tuple(self, r, w):
+        session = ClientSession(r, w)
+        with open_pair() as (session, x):
+            await session.call_tool("with_tuple", {})
+"""
+    assert _calls(analyze_files({"c.py": src})) == [("TOOL", "stored_add", "python-mcp")]
+
+
+# ── TypeScript: a `var` reaches the whole function ───────────────────────────
+
+
+def test_typescript_nested_var_hides_a_module_client(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "x", version: "1" });
+function f(x: boolean) {
+  if (x) { var client = otherThing(); }
+  client.callTool({ name: "nested_var" });
+}
+function g(xs: any[]) {
+  for (var client of xs) { }
+  client.callTool({ name: "loop_var" });
+}
+function h(x: boolean) {
+  var client = new Client({ name: "y", version: "1" });
+  if (x) { var client = otherThing(); }
+  client.callTool({ name: "redeclared" });
+}
+function k() {
+  const inner = () => { var client = otherThing(); };
+  client.callTool({ name: "kept" });
+}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == [("TOOL", "kept", "typescript-mcp")]
+
+
+# ── Java / C# / Kotlin: a name declared more than once, every time a client ──
+
+
+def test_java_client_parameter_in_two_methods(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class Two {
+    void a(McpSyncClient client) { client.callTool(new McpSchema.CallToolRequest("a", null)); }
+    void b(McpSyncClient client) { client.callTool(new McpSchema.CallToolRequest("b", null)); }
+    void c(Other other) { other.callTool(new McpSchema.CallToolRequest("c", null)); }
+    void d(McpSyncClient other) { other.callTool(new McpSchema.CallToolRequest("d", null)); }
+}
+"""
+    assert _calls(analyze_files({"Two.java": src})) == [
+        ("TOOL", "a", "java-mcp"),
+        ("TOOL", "b", "java-mcp"),
+    ]
+
+
+def test_csharp_client_parameter_in_two_methods(analyze_files) -> None:
+    src = """
+using ModelContextProtocol.Client;
+
+public class Two
+{
+    public async Task A(IMcpClient client) { await client.CallToolAsync("a"); }
+    public async Task B(McpClient client) { await client.CallToolAsync("b"); }
+    public async Task C(Other other) { await other.CallToolAsync("c"); }
+    public async Task D(IMcpClient other) { await other.CallToolAsync("d"); }
+}
+"""
+    assert _calls(analyze_files({"Two.cs": src})) == [
+        ("TOOL", "a", "csharp-mcp"),
+        ("TOOL", "b", "csharp-mcp"),
+    ]
+
+
+def test_kotlin_client_parameter_in_two_functions(analyze_files) -> None:
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+import io.modelcontextprotocol.client.McpSyncClient
+import io.modelcontextprotocol.spec.McpSchema
+
+suspend fun a(client: Client) { client.callTool(name = "a", arguments = mapOf()) }
+suspend fun b(client: Client) { client.callTool(name = "b", arguments = mapOf()) }
+suspend fun c(other: Other) { other.callTool(name = "c", arguments = mapOf()) }
+suspend fun d(other: Client) { other.callTool(name = "d", arguments = mapOf()) }
+suspend fun e(mixed: Client) { mixed.callTool(name = "e", arguments = mapOf()) }
+fun g(mixed: McpSyncClient) { mixed.callTool(McpSchema.CallToolRequest("g", mapOf())) }
+"""
+    # `mixed` is a client of two frameworks: which one a call reaches is not known
+    assert _calls(analyze_files({"K.kt": src})) == [
+        ("TOOL", "a", "kotlin-mcp"),
+        ("TOOL", "b", "kotlin-mcp"),
+    ]

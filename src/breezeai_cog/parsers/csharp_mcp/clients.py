@@ -8,9 +8,9 @@
     await client.ReadResourceAsync("memo://insights")          → mcp_call  csharp-mcp  RESOURCE  memo://insights
     await client.GetPromptAsync("review", args)                → mcp_call  csharp-mcp  PROMPT    review
 
-* **Client receiver** — a name declared once in the file (a ``foreach`` or lambda variable of the
-  same name counts as another declaration): typed ``McpClient`` / ``IMcpClient``,
-  or ``var`` initialized by ``[await] McpClient.CreateAsync(…)`` /
+* **Client receiver** — a name every declaration of which in the file (a ``foreach`` or lambda
+  variable of the same name counts as a declaration, never a client) is typed ``McpClient`` /
+  ``IMcpClient``, or ``var`` initialized by ``[await] McpClient.CreateAsync(…)`` /
   ``McpClientFactory.CreateAsync(…)``; only in a file that uses the ``ModelContextProtocol``
   package.
 * ``endpoint`` — the first argument (or ``toolName:`` / ``name:`` / ``uri:`` / ``uriTemplate:``),
@@ -83,7 +83,7 @@ def _clients(root: Node, source: bytes) -> set[str]:
                 declared.setdefault(node_text(name, source), []).append(
                     _simple(node.child_by_field_name("type"), source) in CLIENT_TYPES
                 )
-    return {name for name, proofs in declared.items() if proofs == [True]}
+    return {name for name, proofs in declared.items() if all(proofs)}
 
 
 def _endpoint(call: Node, keys: tuple[str, ...], resource: bool, source: bytes) -> str | None:

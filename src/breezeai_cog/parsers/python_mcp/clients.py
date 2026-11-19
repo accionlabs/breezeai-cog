@@ -67,9 +67,25 @@ def _key(scope: Node | None) -> tuple[int, int]:
     return (scope.start_byte, scope.end_byte) if scope is not None else (-1, -1)
 
 
+#: Target shapes that bind each name inside them (``a, (b, *c) = …``, ``with … as (a, b)``). An
+#: attribute or subscript target (``self.session = …``, ``cache[session] = …``) binds no name.
+_PATTERNS = (
+    "pattern_list",
+    "tuple_pattern",
+    "list_pattern",
+    "parenthesized_expression",
+    "list_splat_pattern",
+    "tuple",
+    "list",
+    "list_splat",
+)
+
+
 def _names(target: Node, source: bytes) -> list[str]:
     if target.type == "identifier":
         return [node_text(target, source)]
+    if target.type not in _PATTERNS:
+        return []
     return [n for c in target.named_children for n in _names(c, source)]
 
 

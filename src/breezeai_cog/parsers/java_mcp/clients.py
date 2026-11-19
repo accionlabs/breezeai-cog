@@ -7,10 +7,10 @@
     client.readResource(new ReadResourceRequest("memo://x"))     → mcp_call  java-mcp  RESOURCE  memo://x
     client.getPrompt(new GetPromptRequest("review", Map.of()))   → mcp_call  java-mcp  PROMPT    review
 
-* **Client receiver** — a name (or ``this.name``) declared once in the file (a lambda's or a
-  loop's variable of the same name counts as another declaration), with the type
-  ``McpSyncClient`` / ``McpAsyncClient`` (a field, a local or a parameter), or ``var`` initialized
-  by a ``McpClient.sync(…)`` / ``McpClient.async(…)`` chain. ``clients.get(0).callTool(…)`` (a
+* **Client receiver** — a name (or ``this.name``) every declaration of which in the file (a
+  lambda's or a loop's variable of the same name counts as a declaration, never a client) has
+  the type ``McpSyncClient`` / ``McpAsyncClient`` (a field, a local or a parameter), or is ``var``
+  initialized by a ``McpClient.sync(…)`` / ``McpClient.async(…)`` chain. ``clients.get(0).callTool(…)`` (a
   Spring AI list of clients) is not one: which server it reaches is not in the code.
 * **Request** — ``new CallToolRequest(name, arguments[, meta])`` (``(mapper, name, json)``
   when the first argument is not a string literal),
@@ -61,7 +61,7 @@ def _built_client(value: Node | None, source: bytes) -> bool:
 
 
 def _clients(root: Node, source: bytes) -> set[str]:
-    """Names declared once in the file whose declaration proves an MCP client."""
+    """Names every declaration of which in the file proves an MCP client."""
     declared: dict[str, list[bool]] = {}
     for node in walk(root):
         if node.type in ("local_variable_declaration", "field_declaration"):
@@ -97,7 +97,7 @@ def _clients(root: Node, source: bytes) -> set[str]:
             )
             for ident in idents:
                 declared.setdefault(node_text(ident, source), []).append(False)
-    return {name for name, proofs in declared.items() if proofs == [True]}
+    return {name for name, proofs in declared.items() if all(proofs)}
 
 
 def _request_endpoint(node: Node, kind: tuple[str, str, str], source: bytes) -> str | None:

@@ -17,8 +17,10 @@
 * **Request** — a ``mcp.CallToolRequest{…}`` (``ReadResourceRequest`` / ``GetPromptRequest``)
   literal whose ``Params`` literal sets ``Name`` (``URI``) to a string literal, inline or a
   variable of the function declared once; for a variable, its ``Params.Name`` may instead be set
-  by one ``req.Params.Name = "…"`` (the only such write), and the variable must be passed to this
-  one call only. Anything else → no record.
+  by one ``req.Params.Name = "…"`` (the only such write) that runs before the call on every path
+  — straight in the statement list that declares the request and makes the call, ahead of the
+  call, with no ``if`` / ``for`` / ``switch`` / ``select`` / func literal around it — and the
+  variable must be passed to this one call only. Anything else → no record.
 * The record is the call's own statement, with no handler; a client-only file gets no file-level
   framework.
 """
@@ -155,6 +157,41 @@ def _declares(ident: Node) -> bool:
     )
 
 
+#: Nodes whose statements may run zero or many times, or later: a node reached through one of them
+#: is not run straight through by its block.
+_BRANCHES = frozenset(
+    {
+        "if_statement",
+        "for_statement",
+        "expression_switch_statement",
+        "type_switch_statement",
+        "select_statement",
+        "expression_case",
+        "default_case",
+        "type_case",
+        "communication_case",
+        "func_literal",
+    }
+)
+
+
+def _home(node: Node) -> Node | None:
+    """The statement list ``node`` runs straight through in, or None when an ``if`` / ``for`` /
+    ``switch`` / ``select`` / func literal sits between them (an ``if``'s initializer runs once,
+    unconditionally, in the enclosing list)."""
+    cur = node
+    while cur.parent is not None:
+        parent = cur.parent
+        if parent.type in ("statement_list", "block"):
+            return parent
+        if parent.type in _BRANCHES and not (
+            parent.type == "if_statement" and parent.child_by_field_name("initializer") == cur
+        ):
+            return None
+        cur = parent
+    return None
+
+
 def _request_endpoint(
     arg: Node,
     kind: tuple[str, str, str],
@@ -183,9 +220,11 @@ def _request_endpoint(
     # one call.
     writes: list[Node] = []
     calls = 0
+    declared: Node | None = None
     for ident in uses.get(name, []):
         parent = ident.parent
         if _declares(ident):
+            declared = ident
             continue  # the declaration (its only binding)
         if parent is not None and parent.type == "argument_list":
             calls += 1
@@ -215,6 +254,17 @@ def _request_endpoint(
         return None
     if writes:
         if value is not None or len(writes) != 1:
+            return None
+        # The write runs on every path to the call, before it: it sits straight in the statement
+        # list that declares the request and makes the call, ahead of the call.
+        write, home = writes[0], _home(writes[0])
+        if (
+            write.start_byte >= arg.start_byte
+            or declared is None
+            or home is None
+            or home != _home(declared)
+            or home != _home(arg)
+        ):
             return None
         right = writes[0].child_by_field_name("right")
         rvals = (
