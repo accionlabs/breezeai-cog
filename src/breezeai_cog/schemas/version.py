@@ -20,7 +20,9 @@ from typing import Any
 # 2.5: additive optional `Statement.description` / `Statement.params` (mcp_tool, Markdown docs);
 #      semantic types mcp_tool + the Markdown document types (skill, agent, command,
 #      agent_instructions, doc).
-SCHEMA_VERSION = "2.5"
+# 2.6: semantic types mcp_resource, mcp_prompt (entry points; methods RESOURCE / PROMPT) and
+#      mcp_call (outbound); `description` / `params` also on mcp_resource / mcp_prompt.
+SCHEMA_VERSION = "2.6"
 
 
 def export_json_schema() -> dict[str, Any]:

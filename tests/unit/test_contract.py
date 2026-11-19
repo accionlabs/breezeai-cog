@@ -114,3 +114,53 @@ def test_django_views_used_directly_are_framework_served() -> None:
     assert _rules(_route(handler=None, handlerLine=None, framework="django")) == [("handler", "gap")]
     # Only for Django records.
     assert _rules(_route(handler="serve", handlerLine=None)) == [("handlerLine", "gap")]
+
+
+def _mcp(semantic_type: str, method: str, **fields) -> Statement:
+    base = dict(semanticType=semantic_type, method=method, routeKind=None, framework="fastmcp",
+                endpoint="x", handler="h", handlerLine=1)
+    base.update(fields)
+    return _route(**base)
+
+
+def test_every_entry_point_type_has_its_route_kinds() -> None:
+    from breezeai_cog.parsers.contract import ENTRY_POINT_TYPES, ROUTE_KINDS
+
+    assert set(ROUTE_KINDS) == ENTRY_POINT_TYPES
+
+
+def test_mcp_resources_and_prompts_are_entry_points() -> None:
+    assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint="users://{id}/profile")) == []
+    assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint="file:///logs/app.log")) == []
+    assert _rules(_mcp("mcp_prompt", "PROMPT", endpoint="review_code")) == []
+    # Held to the entry-point contract like a tool.
+    assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint="${BASE}/x")) == [("endpoint", "error")]
+    assert _rules(_mcp("mcp_prompt", "PROMPT", routeKind="route")) == [("routeKind", "error")]
+    assert _rules(_mcp("mcp_prompt", "PROMPT", framework=None)) == [("framework", "error")]
+    assert _rules(_mcp("mcp_prompt", "FETCH")) == [("method", "error")]
+    assert _rules(_mcp("mcp_resource", "RESOURCE", handler=None, handlerLine=None)) == [
+        ("handler", "gap")
+    ]
+
+
+def _call(**fields) -> Statement:
+    base = dict(semanticType="mcp_call", method="TOOL", routeKind=None, framework="python-mcp",
+                endpoint="add", handler=None, handlerLine=None)
+    base.update(fields)
+    return _route(**base)
+
+
+def test_an_mcp_call_names_what_it_calls() -> None:
+    for method in ("TOOL", "RESOURCE", "PROMPT"):
+        assert _rules(_call(method=method)) == []
+    assert _rules(_call(method="RESOURCE", endpoint="users://{id}")) == []
+    assert _rules(_call(method="GET")) == [("outbound", "error")]
+    assert _rules(_call(method=None)) == [("outbound", "error")]
+    assert _rules(_call(framework=None)) == [("outbound", "error")]
+    assert _rules(_call(endpoint=None)) == [("outbound", "error")]
+    assert _rules(_call(endpoint="")) == [("outbound", "error")]
+    assert _rules(_call(endpoint="${tool}")) == [("outbound", "error")]
+    assert _rules(_call(handler="h")) == [("outbound", "error")]
+    assert _rules(_call(handlerLine=3)) == [("outbound", "error")]
+    # Not an entry point: a call is never one record of a binding.
+    assert _rules(_call(), _call(id="a.ts:1:0#2")) == []

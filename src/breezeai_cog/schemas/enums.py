@@ -80,8 +80,21 @@ SemanticType = Literal[
     # MCP server tool — an entry point an AI client calls. ``endpoint`` = the
     # tool name the client calls (after any rename), ``method="TOOL"``, ``framework`` = the SDK
     # (fastmcp | python-mcp | typescript-mcp | spring-ai-mcp | java-mcp | kotlin-mcp |
-    # csharp-mcp | mcp-go), plus ``description`` and ``params``. Treated like a route by the entry-point contract.
+    # csharp-mcp | mcp-go | go-mcp), plus ``description`` and ``params``. Treated like a route by the entry-point contract.
     "mcp_tool",
+    # MCP server resource — an entry point an AI client reads. ``endpoint`` = the resource URI or
+    # URI template (``users://{id}``), ``method="RESOURCE"``, ``framework`` = the SDK, plus
+    # ``description`` and ``params`` (a template's simple ``{variables}``, required strings; ``[]``
+    # for a literal URI; None for a template using RFC 6570 operators).
+    "mcp_resource",
+    # MCP server prompt — an entry point an AI client fetches. ``endpoint`` = the prompt name,
+    # ``method="PROMPT"``, ``framework`` = the SDK, plus ``description`` and ``params`` (its
+    # arguments: name, required, description).
+    "mcp_prompt",
+    # MCP client call — outbound: a proven MCP client calls a tool, reads a resource or gets a
+    # prompt by a literal name / URI. ``endpoint`` = that name / URI, ``method`` = TOOL |
+    # RESOURCE | PROMPT, ``framework`` = the client SDK. No handler, params or description.
+    "mcp_call",
     # Markdown documents — one whole-file statement per ``.md`` / ``.mdx`` /
     # ``.mdc`` file (``nodeType="synthetic"``, the full text, unembedded; a long one is split
     # into parts like any statement), typed by file name / location (parsers/markdown/classify.py):

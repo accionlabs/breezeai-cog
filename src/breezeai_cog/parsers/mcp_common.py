@@ -1,11 +1,18 @@
-"""Shared by the MCP tool detectors (``parsers/<lang>_mcp``).
+"""Shared by the MCP detectors (``parsers/<lang>_mcp``).
 
-Each detector emits one ``mcp_tool`` statement per tool an MCP **server** declares::
+Each detector emits one statement per tool, resource or prompt an MCP **server** declares::
 
-    semanticType="mcp_tool"  method="TOOL"  endpoint=<tool name clients call>
+    semanticType="mcp_tool"      method="TOOL"      endpoint=<tool name clients call>
+    semanticType="mcp_resource"  method="RESOURCE"  endpoint=<URI or URI template>
+    semanticType="mcp_prompt"    method="PROMPT"    endpoint=<prompt name>
     framework=<SDK>  handler / handlerLine  description  params=[Parameter…]
 
-A tool is emitted only when the server it is registered on is proven (constructed, typed, or
+and one ``mcp_call`` (outbound) per literal call of a proven MCP **client**::
+
+    semanticType="mcp_call"  method=TOOL | RESOURCE | PROMPT  endpoint=<name or URI>
+    framework=<client SDK>
+
+A record is emitted only when the server (or client) is proven (constructed, typed, or
 imported from where it is constructed) and its name is a literal: an agent framework's own
 ``@agent.tool`` or a chat-client ``@Tool`` is not an MCP tool ("wrong is worse than missing").
 """
@@ -14,6 +21,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from typing import Any
 
 from tree_sitter import Node
@@ -24,9 +32,39 @@ from .treesitter import first_line, node_text
 
 SEMANTIC_TYPE = "mcp_tool"
 METHOD = "TOOL"
-#: A tool's whole ``params`` JSON (names, types, defaults, descriptions) is kept within this many
-#: UTF-8 bytes: the backend drops every param of a tool past 16 KB.
+#: ``semanticType`` / ``method`` of a resource, a prompt and a client call.
+RESOURCE = ("mcp_resource", "RESOURCE")
+PROMPT = ("mcp_prompt", "PROMPT")
+TOOL = (SEMANTIC_TYPE, METHOD)
+CALL = "mcp_call"
+#: A statement's whole ``params`` JSON (names, types, defaults, descriptions) is kept within
+#: this many UTF-8 bytes: the backend drops every param of a statement past 16 KB.
 MAX_TOOL_PARAMS_JSON = 15 * 1024
+
+#: One RFC 6570 expression of a URI template.
+_EXPRESSION = re.compile(r"\{([^{}]*)\}")
+#: A simple-expansion expression of one variable (``{id}``, ``{user.id}``): no operator, no
+#: explode, no prefix, no second variable.
+_SIMPLE_VARIABLE = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*")
+
+
+def uri_template_params(uri: str) -> list[Parameter] | None:
+    """The variables of a resource URI template as params: ``users://{id}/posts/{post}`` →
+    ``id`` and ``post``, required strings. ``[]`` for a literal URI. None (unknown) when any
+    expression is not a single simple variable — an RFC 6570 operator (``{?q}``, ``{+p}``,
+    ``{#f}``, ``{/s}``, ``{.x}``, ``{;x}``, ``{&x}``), an explode (``{x*}``), a prefix (``{x:3}``),
+    several variables (``{x,y}``) — or a brace is unmatched: what such a template accepts is not
+    a plain list of required strings."""
+    names: list[str] = []
+    for m in _EXPRESSION.finditer(uri):
+        if not _SIMPLE_VARIABLE.fullmatch(m.group(1)):
+            return None
+        if m.group(1) not in names:
+            names.append(m.group(1))
+    rest = _EXPRESSION.sub("", uri)
+    if "{" in rest or "}" in rest:
+        return None
+    return [param(n, "string", required=True) for n in names]
 
 
 def param(
@@ -125,9 +163,44 @@ def tool_emit(
     node_type: str | None = "synthetic",
     extra: dict[str, Any] | None = None,
 ) -> Emit:
+    """An ``mcp_tool`` (:func:`mcp_emit` with ``TOOL``)."""
+    return mcp_emit(
+        node,
+        source,
+        kind=TOOL,
+        endpoint=endpoint,
+        framework=framework,
+        handler=handler,
+        handler_line=handler_line,
+        description=description,
+        params=params,
+        parent=parent,
+        node_type=node_type,
+        extra=extra,
+    )
+
+
+def mcp_emit(
+    node: Node,
+    source: bytes,
+    *,
+    kind: tuple[str, str],
+    endpoint: str,
+    framework: str,
+    handler: str | None,
+    handler_line: int | None,
+    description: str | None,
+    params: list[Parameter] | None,
+    parent: str | None = None,
+    node_type: str | None = "synthetic",
+    extra: dict[str, Any] | None = None,
+) -> Emit:
+    """A server statement: ``kind`` is :data:`TOOL`, :data:`RESOURCE` or :data:`PROMPT`
+    (``(semanticType, method)``); ``name`` = ``endpoint``."""
+    semantic_type, method = kind
     fields: dict[str, Any] = {
-        "semanticType": SEMANTIC_TYPE,
-        "method": METHOD,
+        "semanticType": semantic_type,
+        "method": method,
         "endpoint": endpoint,
         "framework": framework,
         "handler": handler,
@@ -143,5 +216,31 @@ def tool_emit(
         fields,
         parent=parent,
         node_type=node_type,
+        text=first_line(node_text(node, source)),
+    )
+
+
+def call_emit(
+    node: Node,
+    source: bytes,
+    *,
+    method: str,
+    endpoint: str,
+    framework: str,
+) -> Emit:
+    """An ``mcp_call`` (outbound): a proven client calls a tool (``TOOL``), reads a resource
+    (``RESOURCE``) or gets a prompt (``PROMPT``) by the literal ``endpoint``. It enriches the
+    call's own unclassified statement (one statement per call line), else is appended."""
+    return Emit(
+        node,
+        {
+            "semanticType": CALL,
+            "method": method,
+            "endpoint": endpoint,
+            "framework": framework,
+            "name": endpoint,
+        },
+        enrich="unclassified",
+        node_type=node.type,
         text=first_line(node_text(node, source)),
     )

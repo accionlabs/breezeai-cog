@@ -40,10 +40,12 @@ Rule            Severity Violation
                          not located (no ``handlerPath``), so the record cannot lead to it —
                          except a view Django serves itself (``TemplateView``, ``serve``)
 ``outbound``    error    an outbound record (``api_call``, a ``route`` link with
-                         ``routeKind: navigation``, ``eventbus_send`` / ``_publish``)
-                         whose ``endpoint`` is an empty
+                         ``routeKind: navigation``, ``eventbus_send`` / ``_publish``,
+                         ``mcp_call``) whose ``endpoint`` is an empty
                          string or a code placeholder — it must be written like the entry
-                         point it reaches (§6)
+                         point it reaches (§6); an ``mcp_call`` also needs a ``method`` of
+                         ``TOOL`` / ``RESOURCE`` / ``PROMPT``, a ``framework`` and an
+                         ``endpoint``, and has no ``handler`` / ``handlerLine``
 =============== ======== =================================================================
 """
 
@@ -56,9 +58,13 @@ from ..schemas import FileRecord, Statement
 from .aspnet_common import FRAMEWORK_SERVED
 from .django_common import DJANGO_SERVED
 
-#: ``mcp_tool``: an MCP server tool is an entry point an AI client calls, held to
-#: the same contract as a route (``method="TOOL"``, ``endpoint`` = the tool name).
-ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer", "mcp_tool"})
+#: ``mcp_tool`` / ``mcp_resource`` / ``mcp_prompt``: what an MCP server exposes is an entry point
+#: an AI client calls, reads or fetches, held to the same contract as a route
+#: (``method`` = ``TOOL`` / ``RESOURCE`` / ``PROMPT``; ``endpoint`` = the tool name, the resource
+#: URI or URI template, the prompt name).
+ENTRY_POINT_TYPES = frozenset(
+    {"route", "eventbus_consumer", "timer", "mcp_tool", "mcp_resource", "mcp_prompt"}
+)
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
 NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation"})
@@ -70,7 +76,7 @@ METHODS = HTTP_METHODS | frozenset({
     "RPC",
     "MESSAGE", "EVENT", "CONSUMER",
     "TIMER", "PERIODIC",
-    "TOOL",
+    "TOOL", "RESOURCE", "PROMPT",
 })
 
 ROUTE_KINDS: dict[str, frozenset[str | None]] = {
@@ -78,6 +84,8 @@ ROUTE_KINDS: dict[str, frozenset[str | None]] = {
     "eventbus_consumer": frozenset({None, "message"}),
     "timer": frozenset({None}),
     "mcp_tool": frozenset({None}),
+    "mcp_resource": frozenset({None}),
+    "mcp_prompt": frozenset({None}),
 }
 
 _PLACEHOLDERS = ("${", "#{", "`")
@@ -96,7 +104,10 @@ class Violation:
 
 
 #: Outbound semantic types: their address is written like the entry point they reach (§6).
-OUTBOUND_TYPES = frozenset({"api_call", "eventbus_send", "eventbus_publish"})
+OUTBOUND_TYPES = frozenset({"api_call", "eventbus_send", "eventbus_publish", "mcp_call"})
+
+#: What an MCP client call reaches: a tool, a resource or a prompt.
+MCP_CALL_METHODS = frozenset({"TOOL", "RESOURCE", "PROMPT"})
 
 
 def _bad_address(endpoint: str | None) -> str | None:
@@ -105,6 +116,21 @@ def _bad_address(endpoint: str | None) -> str | None:
     if endpoint is not None and any(p in endpoint for p in _PLACEHOLDERS):
         return endpoint
     return None
+
+
+def _check_mcp_call(s: Statement) -> list[str]:
+    """What an ``mcp_call`` lacks or must not have: it names what it calls (a literal tool name,
+    URI or prompt name), the kind and the client SDK, and has no handler of its own."""
+    found: list[str] = []
+    if s.method not in MCP_CALL_METHODS:
+        found.append(f"method {s.method!r}")
+    if not s.framework:
+        found.append("framework missing")
+    if s.endpoint is None:
+        found.append("endpoint missing")
+    if s.handler is not None or s.handlerLine is not None:
+        found.append("a client call has no handler")
+    return found
 
 
 def is_entry_point(s: Statement) -> bool:
@@ -169,6 +195,8 @@ def validate(record: FileRecord) -> list[Violation]:
             bad = _bad_address(s.endpoint)
             if bad is not None:
                 out.append(Violation("outbound", "error", s.id, bad))
+            if s.semanticType == "mcp_call":
+                out.extend(Violation("outbound", "error", s.id, d) for d in _check_mcp_call(s))
             continue
         if not is_entry_point(s):
             continue
