@@ -24,7 +24,8 @@
   returns (an arrow function's expression body, or a ``return`` of the function itself), and a
   module-level ``const`` holding such an object, referenced by name in that array (only when
   nothing else in the file declares or imports that name). A list built
-  any other way (a variable, ``.map``, a spread, a condition) → no record.
+  any other way (a variable, ``.map``, a spread, a condition) → no record. A server given more
+  than one list handler (only the last set answers) → no record.
 * ``endpoint`` — ``name``, a string literal; anything else → no record. ``description`` — a
   string literal or a ``+`` of them. ``params`` — a JSON-schema ``inputSchema`` literal
   (``properties`` / ``required``); anything else → None (unknown).
@@ -309,6 +310,8 @@ def detect_lowlevel_tools(
 
     listers: list[tuple[tuple[str, tuple[int, int]], Node]] = []
     dispatchers: dict[tuple[str, tuple[int, int]], list[Node]] = {}
+    #: Per server: how many list handlers it is given (each replaces the one before at runtime).
+    list_handlers: dict[tuple[str, tuple[int, int]], int] = {}
     for call in _walk(dc_root):
         if call.type != "call_expression":
             continue
@@ -337,14 +340,18 @@ def detect_lowlevel_tools(
             continue
         schema = node_text(args[0], source)
         key = (receiver, _binding_scope(obj, source))
-        if schema in list_schema and args[1].type in _FUNCTION_LITERALS:
-            listers.append((key, args[1]))
+        if schema in list_schema:
+            list_handlers[key] = list_handlers.get(key, 0) + 1
+            if args[1].type in _FUNCTION_LITERALS:
+                listers.append((key, args[1]))
         elif schema in call_schema:
             dispatchers.setdefault(key, []).append(args[1])
     consts = _const_objects(dc_root, source, imports)
     found: list[Emit] = []
     seen: set[int] = set()
     for key, fn in listers:
+        if list_handlers[key] > 1:
+            continue  # only the last one set answers at runtime: which one is unknown
         handler: str | None = None
         handler_line: int | None = None
         cbs = dispatchers.get(key, [])

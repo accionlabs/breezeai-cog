@@ -46,7 +46,7 @@ from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..go_mcp_common import go_string, package_names, walk
-from ..mcp_common import param, schema_params, tool_emit
+from ..mcp_common import function_lines, param, schema_params, tool_emit
 from ..treesitter import node_text
 
 FRAMEWORK = "go-mcp"
@@ -293,7 +293,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     if not pkgs:
         return None
     nodes = walk(root)
-    functions = {f.name: f.startLine for f in dc.record.functions}
+    functions = function_lines(dc.record)
     # Per scope (function span, or the file): name → True when every binding there is a server.
     servers: dict[Span, dict[str, bool]] = {}
     # Per function: name → the (target, value) pairs that declare or assign it there.
@@ -367,12 +367,12 @@ def _detect(dc: DetectContext) -> Detection | None:
         args = _args(call.child_by_field_name("arguments"))
         if _pkg_selector(fn, source, pkgs, "AddTool"):
             return (args[1], args[2], True) if len(args) == 3 else None
-        if (
-            fn is None
-            or fn.type != "selector_expression"
-            or len(args) != 2
-            or node_text(fn.child_by_field_name("field"), source) != "AddTool"  # type: ignore[arg-type]
-        ):
+        field = (
+            fn.child_by_field_name("field")
+            if fn is not None and fn.type == "selector_expression"
+            else None
+        )
+        if fn is None or field is None or len(args) != 2 or node_text(field, source) != "AddTool":
             return None
         receiver = fn.child_by_field_name("operand")
         if receiver is None or receiver.type != "identifier" or not is_server(receiver):

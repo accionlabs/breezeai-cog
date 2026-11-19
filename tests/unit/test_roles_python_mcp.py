@@ -330,6 +330,69 @@ async def list_tools():
     assert set(_tools(analyze_files({"srv.py": src}))) == {"kept"}
 
 
+def test_lowlevel_server_class_rebound_in_the_function_of_the_call_is_not_proven(
+    analyze_files,
+) -> None:
+    """A function that binds ``Server`` itself means its own class there: a server built from
+    it (or a parameter annotated with it) inside that function, or a function nested in it, is
+    not the SDK's; a sibling function still uses the SDK's ``Server``."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def build():
+    from socketio import Server
+    server = Server("x")
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="socket", inputSchema={})]
+
+    def nested(other: Server):
+        @other.list_tools()
+        async def list_nested():
+            return [Tool(name="nested", inputSchema={})]
+
+
+def real():
+    server = Server("y")
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="real", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"real"}
+
+
+def test_lowlevel_server_with_two_list_tools_functions_gives_no_tools(analyze_files) -> None:
+    """Only the last ``@server.list_tools()`` function registered answers at runtime: with two on
+    one server which list is served is not read; another server's list is kept."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+other = Server("y")
+
+
+@server.list_tools()
+async def first():
+    return [Tool(name="first", inputSchema={})]
+
+
+@server.list_tools()
+async def second():
+    return [Tool(name="second", inputSchema={})]
+
+
+@other.list_tools()
+async def only():
+    return [Tool(name="only", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"only"}
+
+
 def test_lowlevel_tools_are_python_mcp_only(analyze_files) -> None:
     """A file that also uses FastMCP: each low-level tool is one record, ``python-mcp``."""
     src = (

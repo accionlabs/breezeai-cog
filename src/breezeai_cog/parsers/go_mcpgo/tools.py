@@ -32,7 +32,7 @@ from ..emits import Emit
 from ..go_mcp_common import go_string as _string
 from ..go_mcp_common import package_names
 from ..go_mcp_common import walk as _walk
-from ..mcp_common import param, tool_emit
+from ..mcp_common import function_lines, param, tool_emit
 from ..treesitter import node_text
 
 FRAMEWORK = "mcp-go"
@@ -335,7 +335,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         candidates = [(at, h) for at, h, chain in regs if not any(sc in shadowing for sc in chain)]
         return candidates[0][1] if writes == 1 and len(candidates) == 1 else None
 
-    functions = {f.name: f.startLine for f in dc.record.functions}
+    functions = function_lines(dc.record)
     wrapper_pkgs = pkgs | server_pkgs
     found: list[Emit] = []
     for n in nodes:

@@ -20,7 +20,7 @@ from typing import Any, TypeVar
 from tree_sitter import Node
 
 from ..errors import ParserTimeout
-from ..schemas import Parameter
+from ..schemas import FileRecord, Parameter
 from .emits import Emit
 from .treesitter import first_line, node_text
 
@@ -52,8 +52,9 @@ def param(
 
 def schema_params(schema: object) -> list[Parameter] | None:
     """Params of a JSON schema already read into Python values (``properties`` / ``required``,
-    each property's ``type`` and ``description``); None when it is not an object schema with a
-    ``properties`` object and a ``required`` list (unknown). Shared by every reader of a
+    each property's ``type`` and ``description``). A missing ``properties`` reads as no params
+    and a missing ``required`` as none required; None (unknown) when the schema is not a dict,
+    ``properties`` is not an object or ``required`` is not a list. Shared by every reader of a
     JSON-schema literal: a JSON string (Java / Kotlin), a Python dict, a Go schema literal."""
     if not isinstance(schema, dict):
         return None
@@ -75,6 +76,21 @@ def schema_params(schema: object) -> list[Parameter] | None:
             )
         )
     return out
+
+
+def function_lines(record: FileRecord) -> dict[str, int]:
+    """Name → declaration line of the file's top-level functions, for a handler passed by name.
+    A method (a Go receiver method, a class method) is not a top-level function and never lends
+    its line; a name two top-level functions share is left out (which one is meant is unknown)."""
+    lines: dict[str, int] = {}
+    shared: set[str] = set()
+    for f in record.functions:
+        if f.type == "method" or f.parentId != record.id:
+            continue
+        if f.name in lines:
+            shared.add(f.name)
+        lines[f.name] = f.startLine
+    return {name: line for name, line in lines.items() if name not in shared}
 
 
 def guarded(path: str, reader: Callable[..., list[_T]], *args: Any) -> list[_T]:

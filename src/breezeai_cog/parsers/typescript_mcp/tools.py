@@ -41,7 +41,7 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import guarded, param, tool_emit
+from ..mcp_common import function_lines, guarded, param, tool_emit
 from ..treesitter import node_text
 from .lowlevel import detect_lowlevel_tools
 
@@ -446,7 +446,7 @@ def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | 
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
-    functions = {f.name: f.startLine for f in dc.record.functions}
+    functions = function_lines(dc.record)
     found: list[Emit] = guarded(
         dc.path,
         detect_lowlevel_tools,

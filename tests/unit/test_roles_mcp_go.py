@@ -233,3 +233,31 @@ func inlineHandler(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolRes
     assert (tools["inline"].handler, tools["inline"].handlerLine) == ("inlineHandler", 20)
     assert tools["pointer"].handler == "pointerHandler"
     assert tools["listed"].handler == "listedHandler"  # element of a []ServerTool literal
+
+
+def test_go_handler_line_is_never_a_same_named_method(analyze_files) -> None:
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddTool(mcp.NewTool("hello"), helloHandler)
+    s.AddTool(mcp.NewTool("method_only"), lone)
+}
+
+func helloHandler(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+    return nil, nil
+}
+
+func (h *H) helloHandler() {}
+
+func (h *H) lone() {}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["hello"].handler, tools["hello"].handlerLine) == ("helloHandler", 15)
+    assert (tools["method_only"].handler, tools["method_only"].handlerLine) == ("lone", None)

@@ -366,3 +366,33 @@ func main() {
 """
     tools = [s for s in analyze_files({"main.go": src}) if s.semanticType == "mcp_tool"]
     assert [(t.endpoint, t.framework) for t in tools] == [("hello", "mcp-go")]
+
+
+def test_go_sdk_handler_line_is_never_a_same_named_method(analyze_files) -> None:
+    """``SayHi`` passed by name is the function, not a method ``(g *G) SayHi`` declared after it."""
+    src = """
+package main
+
+import (
+	"context"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func SayHi(ctx context.Context, req *mcp.CallToolRequest, in any) (*mcp.CallToolResult, any, error) {
+	return nil, nil, nil
+}
+
+func (g *G) SayHi() {}
+
+func main() {
+	server := mcp.NewServer(&mcp.Implementation{Name: "x"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "greet"}, SayHi)
+	server.AddTool(&mcp.Tool{Name: "only_method"}, Lone)
+}
+
+func (g *G) Lone() {}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["greet"].handler, tools["greet"].handlerLine) == ("SayHi", 10)
+    assert (tools["only_method"].handler, tools["only_method"].handlerLine) == ("Lone", None)
