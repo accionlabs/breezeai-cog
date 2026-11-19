@@ -39,6 +39,7 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    route_suffix,
     router_vars,
     service_builder_vars,
     sub_router_bases,
@@ -425,6 +426,7 @@ def detect_vertx_groovy(
         semantic, verb, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
+        own = endpoint  # the route's own path, before any mount prefix
         unknown_base = False
         recv = router_name(obj)
         base: str | None | object = _NOT_MOUNTED
@@ -441,12 +443,17 @@ def detect_vertx_groovy(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(str(base), endpoint)
+        suffix: str | None = None
+        if semantic == "route" and endpoint is None:  # a runtime prefix: the known tail only
+            suffix = own if (unknown_base and base is None and own) \
+                else route_suffix(endpoint_path)
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
         )
 
         found.append(vertx_emit(call, semantic, verb, endpoint, route_kind, handler,
-                                handler_line, unknown_base=unknown_base))
+                                handler_line, unknown_base=unknown_base,
+                                endpoint_suffix=suffix))
 
     return found

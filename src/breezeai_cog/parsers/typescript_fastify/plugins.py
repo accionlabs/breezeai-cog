@@ -38,6 +38,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
+from ..addresses import RUNTIME_MARK
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import (
@@ -466,8 +467,10 @@ class _Analyzer:
     # Registrations -------------------------------------------------------------------------
 
     def prefix_token(self, opts: Node | None, scope: Scope) -> str | None:
-        """The ``prefix`` a registration's options give: ``""`` none, a literal, ``None`` when
-        it can't be read, :data:`FROM_OPTS` for the enclosing plugin's own options."""
+        """The ``prefix`` a registration's options give: ``""`` none, a literal,
+        :data:`RUNTIME_MARK` for a ``prefix`` value that does not resolve (``config.base``),
+        ``None`` when the options can't be read, :data:`FROM_OPTS` for the enclosing plugin's own
+        options."""
         opts = _unwrap(opts)
         if opts is None:
             return ""
@@ -490,8 +493,12 @@ class _Analyzer:
             if value is None:
                 return None
             if value.type in ("string", "template_string"):
-                return resolve_const_value(value, src, self.consts)
-            return None
+                resolved = resolve_const_value(value, src, self.consts)
+                if resolved is not None:
+                    return resolved
+            # A prefix read at runtime (`prefix: config.base`): unknown, but the routes' paths
+            # after it are still known (`endpointSuffix`).
+            return RUNTIME_MARK
         spreads = _has_spread(opts)
         if not spreads:
             return ""

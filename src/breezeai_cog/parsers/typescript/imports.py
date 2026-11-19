@@ -265,6 +265,47 @@ def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]
     return None
 
 
+def _path_parts(node: Node, source: bytes, consts: dict[str, str | None]) -> list[str | None]:
+    """A path expression as parts: literal text, or None for a runtime value (one that does not
+    fold to a constant). ``a + "/x"`` and ``${a}/x`` both give ``[None, "/x"]``."""
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _path_parts(node.named_children[0], source, consts)
+    if node.type == "binary_expression":
+        op = node.child_by_field_name("operator")
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if op is not None and node_text(op, source) == "+" and left is not None \
+                and right is not None:
+            return _path_parts(left, source, consts) + _path_parts(right, source, consts)
+        return [None]
+    if node.type == "template_string":
+        parts: list[str | None] = []
+        for c in node.children:
+            if c.type == "string_fragment":
+                parts.append(node_text(c, source))
+            elif c.type == "template_substitution":
+                inner = c.named_children[0] if c.named_children else None
+                parts.append(None if inner is None else resolve_const_value(inner, source, consts))
+        return parts
+    return [resolve_const_value(node, source, consts)]
+
+
+def runtime_path_suffix(
+    node: Node, source: bytes, consts: dict[str, str | None]
+) -> str | None:
+    """The known tail of a path whose leading part is a runtime value: ``BASE + "/users"`` and
+    `` `${BASE}/users` `` give ``/users``. None when the path does not start with a runtime value,
+    when a runtime value follows the literal tail (the rest is unknown too), or when the tail is
+    not a path (no leading ``/``). See ``parsers.addresses``."""
+    parts = _path_parts(node, source, consts)
+    if not parts or parts[0] is not None:
+        return None
+    rest = parts[next((i for i, p in enumerate(parts) if p is not None), len(parts)):]
+    if not rest or any(p is None for p in rest):
+        return None
+    tail = "".join(p for p in rest if p is not None)
+    return tail if tail.startswith("/") and tail.strip("/") else None
+
+
 def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
     out: list[str] = []
     for c in node.children:

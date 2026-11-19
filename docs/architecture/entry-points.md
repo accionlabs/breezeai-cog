@@ -142,6 +142,7 @@ the route-table entry, or — for a registered container — the member.
 | `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` · `TOOL` (an `mcp_tool`, whose `endpoint` is the tool name) | When the trigger has one |
 | `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
 | `endpoint` | **The address, fully resolved** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)) | If any part can't be determined: **empty**. Never guessed, never a code name |
+| `endpointSuffix` | When the address starts with a prefix read at runtime: the known tail after it ([§6](#a-prefix-read-at-runtime-endpointsuffix)); `endpoint` is then empty | Only then |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
 | `handler` | The handler's name: method, function or component | Yes, unless the handler is anonymous ([below](#anonymous-handlers)) |
 | `handlerLine` | Line of the handler's declaration — the start line of its `Function` record, which for C# / Java includes attributes and annotations (for an anonymous handler, the line where the function starts); a line of `handlerPath` when that is set | Yes |
@@ -291,6 +292,31 @@ match.
 | Schedule | Cron or interval expression | `0 2 * * *` |
 | Page | URL path, with parent prefixes applied | `/settings/profile` |
 
+### A prefix read at runtime (`endpointSuffix`)
+
+Many apps build an HTTP address from a value read at runtime — a context root, base path or
+prefix from a config file, env var or settings object — plus a literal path. cog cannot know the
+prefix and never guesses it, but the rest of the path is written in the code. One rule, for
+routes and outbound calls alike:
+
+- `endpoint` stays **empty** (the address is not resolved);
+- `endpointSuffix` holds the **known tail**: everything after the last runtime part, starting
+  with `/`, with the binding's own path parameters as usual (`:id`, `{id}`).
+
+| Code | Direction | `endpoint` | `endpointSuffix` |
+|---|---|---|---|
+| `router.get(pathPrefix + "/request")` (Vert.x), ``app.get(`${BASE}/users`)`` (Express) | inbound | empty | `/request`, `/users` |
+| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath` from env (LoopBack) | inbound | empty | the route's path after the prefix |
+| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x" })` — and the same shapes in every language's HTTP calls | outbound | empty | `/orders/confirm`, `/orders/{id}`, `/x` |
+
+The unknown prefix is never written as `{name}`: that is the notation of a path parameter, so an
+agent or a route↔call matcher would read it as a segment the caller fills in. The suffix is not a
+wildcard either: two records whose suffixes are equal may still be served under different
+prefixes. Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS
+application path, a literal or constant), a real path parameter (`/api/orders/{id}`), an address
+that is only a variable (`router.get(path)`, `$.get(url)`), a tail followed by another unknown
+part (`p + "/a/" + q`), and a router mounted at two known prefixes (both stay empty).
+
 ## 7. Examples
 
 ```java
@@ -331,7 +357,8 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
 - **Wrong is worse than missing.** If the address can't be resolved, record the entry point with
   an empty `endpoint` — never a guess. This includes a prefix that exists but can't be resolved
   (`include_router(r, prefix=settings.X)`, `setGlobalPrefix(config.x)`): the bindings behind it
-  get an empty `endpoint`, not the part that is known. A message address that can't be resolved
+  get an empty `endpoint`, never the part that is known — that part goes in `endpointSuffix`
+  ([§6](#a-prefix-read-at-runtime-endpointsuffix)). A message address that can't be resolved
   is empty on both sides — consumer and sender — rather than the symbol it was read from.
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.

@@ -18,6 +18,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..addresses import RUNTIME_MARK
 from ..contract import HTTP_METHODS
 from ..emits import Emit
 from ..treesitter import node_text
@@ -39,6 +40,15 @@ def _join_path(prefix: str | None, path: str | None) -> str | None:
     if prefix is None or path is None:
         return None
     return join_prefix(prefix, path) or "/"
+
+
+def _address(prefix: str | None, path: str | None) -> tuple[str | None, str | None]:
+    """``(endpoint, endpointSuffix)``: a prefix holding a runtime part (:data:`RUNTIME_MARK`)
+    gives no endpoint and the address after the last runtime part as the suffix."""
+    if prefix is None or path is None or RUNTIME_MARK not in prefix:
+        return _join_path(prefix, path), None
+    tail = join_prefix(prefix.rsplit(RUNTIME_MARK, 1)[1], path)
+    return None, tail or None
 
 
 def _path(node: Node | None, source: bytes, consts: dict[str, str | None]) -> str | None:
@@ -187,11 +197,12 @@ def detect_fastify(root: Node, source: bytes, path: str, record: FileRecord,
         before = [name for off, name in scope.hooks if off < call.start_byte]
         for method, route_path, handler, line, hooks, kind in _routes(
                 call, mc[1], source, consts, lines):
+            endpoint, suffix = _address(prefix, route_path)
             found.append(Emit(
                 call,
                 {"semanticType": "route", "framework": "fastify", "routeKind": kind,
-                 "method": method, "endpoint": _join_path(prefix, route_path)},
-                fill={"handler": handler, "handlerLine": line,
+                 "method": method, "endpoint": endpoint},
+                fill={"handler": handler, "handlerLine": line, "endpointSuffix": suffix,
                       "guards": compose_guards(list(outer), list(scope.guards), before, hooks),
                       # A hook — the route's own too — may validate, log or parse as well as
                       # authenticate, and fastify.auth([...]) only combines the app's own

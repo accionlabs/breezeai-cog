@@ -18,9 +18,11 @@ from collections.abc import Callable, Mapping
 
 from tree_sitter import Node
 
+from ..addresses import RUNTIME_MARK, marked_address
 from ..emits import Emit
 from ..kotlin.constants import PATH_EXPRS, ConstantScope, resolve_expr, string_constants
 from ..treesitter import node_text
+
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
 #: ``webSocket("/ws") { … }`` / ``webSocketRaw(…)``: a WebSocket upgrade (method ``WEBSOCKET``,
@@ -146,9 +148,11 @@ def _collect_routes(
         if verb == "route":
             # Prefix block — push path segment and recurse into lambda body. An unresolved
             # segment — a path expression that does not resolve, or an argument that is not one
-            # (``route(prefixFromEnv())``) — makes every nested address unknown (prefix None).
+            # (``route(prefixFromEnv())``) — is a runtime prefix: every nested address is unknown,
+            # but the path after it is still known (``endpointSuffix``).
             sub = _first_arg(child, source, consts)
-            new_prefix = (None if prefix is None or sub is _UNKNOWN or sub is None
+            new_prefix = (None if prefix is None
+                          else prefix + RUNTIME_MARK if sub is _UNKNOWN or sub is None
                           else prefix + (sub if isinstance(sub, str) else ""))
             body = _lambda_body(child)
             if body is not None:
@@ -164,18 +168,20 @@ def _collect_routes(
         method, kind = ("WEBSOCKET", "ws") if verb in _WS_BUILDERS else (verb.upper(), "route")
         arg = _first_arg(child, source, consts)
         full_endpoint: str | None
+        suffix: str | None = None
         if arg is _SENTINEL_NO_ARGS:
             # Trailing-lambda only — e.g. `post { }` inside route("/path")
             # Endpoint is just the inherited prefix.
             if prefix == "":
                 continue
-            full_endpoint = prefix
+            full_endpoint, suffix = marked_address(prefix, "") if prefix is not None \
+                else (None, None)
         elif arg is None:
             continue
         elif arg is _UNKNOWN or prefix is None:
             full_endpoint = None  # the address exists but is not known (decision Q8)
         else:
-            full_endpoint = prefix + str(arg)
+            full_endpoint, suffix = marked_address(prefix, str(arg))
 
         # The handler is the trailing lambda: anonymous — no name, its line is where it starts.
         body = _lambda_body(child)
@@ -187,7 +193,8 @@ def _collect_routes(
             child,
             {"semanticType": "route", "framework": "ktor", "method": method,
              "endpoint": full_endpoint, "routeKind": kind, "handlerLine": handler_line},
-            fill={"guards": list(guards) or None, "authRequired": True if required else None},
+            fill={"guards": list(guards) or None, "authRequired": True if required else None,
+                  "endpointSuffix": suffix},
             enrich="same", parent=parent_id, text=text[:limit] if limit else text,
         ))
 

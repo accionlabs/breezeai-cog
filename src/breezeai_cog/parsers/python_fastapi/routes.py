@@ -12,6 +12,7 @@ from ...emit import function_id
 from ..emits import Emit
 from ..treesitter import node_text
 from .file_facts import ROUTERS as _ROUTERS
+from ..addresses import RUNTIME_MARK, marked_address
 from .file_facts import UNKNOWN as _UNKNOWN
 from .file_facts import app_middleware as _app_middleware
 from ..python_common import calls as _calls
@@ -64,6 +65,12 @@ def _methods_kwarg(call: Node, source: bytes) -> list[str]:
     return []
 
 
+def _marked(prefix: str | object) -> str | object:
+    """A ``prefix=`` value for composing: a non-literal one (``settings.API_PREFIX``) becomes
+    :data:`RUNTIME_MARK` — the prefix is unknown, the path after it is not."""
+    return RUNTIME_MARK if prefix is _UNKNOWN else prefix
+
+
 def _router_bases(
     root: Node, source: bytes
 ) -> tuple[dict[str, str | object], dict[str, list[str]], dict[str, str]]:
@@ -88,7 +95,7 @@ def _router_bases(
                 and parent is not None and parent.type == "assignment"):
             target = parent.child_by_field_name("left")
             if target is not None and target.type == "identifier":
-                own[node_text(target, source)] = _prefix_kwarg(node, source)
+                own[node_text(target, source)] = _marked(_prefix_kwarg(node, source))
                 own_deps[node_text(target, source)] = _dependencies(node, source)
     includes: dict[str, set[tuple[str, object, tuple[str, ...]]]] = {}
     for node in _calls(root):
@@ -105,7 +112,7 @@ def _router_bases(
                 or node_text(first, source) not in own):
             continue
         includes.setdefault(node_text(first, source), set()).add(
-            (node_text(obj, source), _prefix_kwarg(node, source),
+            (node_text(obj, source), _marked(_prefix_kwarg(node, source)),
              tuple(_dependencies(node, source))))
 
     def wiring(name: str, seen: frozenset[str]) -> tuple[str | object, list[str], str]:
@@ -167,16 +174,19 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     # or CORS, a dependency often a DB session or paging.
     scoped = router_guards.get(receiver_name, []) + _dependencies(call, source)
     guards = middleware.get(roots.get(receiver_name, receiver_name), []) + scoped
+    suffix: str | None = None
     if served is _UNKNOWN:
-        endpoint = None  # a prefix we cannot resolve: the address is unknown
-    elif endpoint is not None and isinstance(served, str):
-        endpoint = (served + endpoint) or None
+        endpoint = None  # served at several places, or under a sub-application: unknown
+    elif isinstance(served, str):
+        # A runtime prefix (``prefix=settings.X``): no endpoint, the path after it as the suffix.
+        endpoint, suffix = marked_address(served, endpoint)
     parent = function_id(path, name, handler_line, class_name=class_name)
     return [
         Emit(dec, dict(
             semanticType="route",
             method=m,
             endpoint=endpoint,
+            endpointSuffix=suffix,
             framework="fastapi",
             handler=name,
             handlerLine=handler_line,

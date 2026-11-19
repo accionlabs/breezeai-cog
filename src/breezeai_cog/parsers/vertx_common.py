@@ -26,6 +26,7 @@ from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
 from .index_common import record_distinct
+from .addresses import runtime_suffix
 from .statements_common import render_concat
 from .treesitter import node_text
 
@@ -196,6 +197,14 @@ def _known_path(path: str) -> str | None:
     ``{…}`` in a rendered path is a placeholder for an unresolved code value (a GString
     interpolation or a runtime concatenation): the address is unknown — never a code name."""
     return None if "{" in path else path
+
+
+def route_suffix(path: str | None) -> str | None:
+    """The known tail of a rendered route path whose leading part is a runtime value
+    (``{pathPrefix}/request`` → ``/request``); None when the path does not start with one, or
+    when the tail has another unknown part (Vert.x parameters are ``:id``, never ``{…}``)."""
+    tail = runtime_suffix(path)
+    return tail if tail is not None and "{" not in tail else None
 
 
 def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:
@@ -374,13 +383,16 @@ def vertx_emit(
     call: Node, semantic: str, method: str | None, endpoint: str | None,
     route_kind: str | None, handler: str | None, handler_line: int | None,
     *, unknown_base: bool = False, handler_path: str | None = None,
+    endpoint_suffix: str | None = None,
 ) -> Emit:
     """A Vert.x detection for :func:`~.emits.apply`: it enriches whatever statement is on the
     call's line (``any``) — the type and framework always, the rest only where known — else
     it is a new record (a call inside a lambda, which the base parser skips). An unresolvable
-    sub-router mount clears the address (unknown)."""
+    sub-router mount clears the address (unknown). ``endpoint_suffix`` is the known tail of an
+    address whose prefix is a runtime value (set only when ``endpoint`` is empty)."""
     fill: dict[str, Any] = {"method": method, "routeKind": route_kind, "handler": handler,
-                            "handlerLine": handler_line, "handlerPath": handler_path}
+                            "handlerLine": handler_line, "handlerPath": handler_path,
+                            "endpointSuffix": endpoint_suffix}
     fields: dict[str, Any] = {"semanticType": semantic, "framework": "vertx"}
     if unknown_base:
         fields["endpoint"] = None

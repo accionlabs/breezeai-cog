@@ -42,6 +42,7 @@ The other fields depend on the meaning:
 | `id`, `parentId`, `nodeType`, `text`, `startLine`, `endLine`, `path` | Every statement |
 | `name` | Declarations (`int retries = 3` → `retries`), enum members |
 | `method`, `endpoint`, `framework` | Routes, API calls, events |
+| `endpointSuffix` | Routes and API calls whose address starts with a runtime prefix (`endpoint` is then empty) — [entry-point contract §6](entry-points.md#a-prefix-read-at-runtime-endpointsuffix) |
 | `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
 | `dataAccessHint` | `db_method_call` (which ORM / database) |
 | `keyFields` | `graphql_entity` |

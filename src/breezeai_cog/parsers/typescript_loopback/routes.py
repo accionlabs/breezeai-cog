@@ -15,6 +15,7 @@ from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import extract_params, payload_type, return_dto
 from ..emits import Emit
 from ..treesitter import node_text
+from ..addresses import RUNTIME_MARK
 from ..base_paths_common import app_base_path
 from .facts import loopback_base_paths
 
@@ -35,13 +36,23 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def _served(base: str, sub: str | None, found: bool, app_base: str | None) -> str | None:
-    """Controller ``base`` + route ``sub``, under the application's ``basePath`` when one was
-    seen: a literal is joined in front; set-but-unresolved (``app_base`` None) → unknown."""
+def _served(
+    base: str, sub: str | None, found: bool, app_base: str | None
+) -> tuple[str | None, str | None]:
+    """``(endpoint, endpointSuffix)``: controller ``base`` + route ``sub``, under the
+    application's ``basePath`` when one was seen (a literal is joined in front). A base read at
+    runtime (:data:`RUNTIME_MARK`: an app ``basePath`` or an ``@api`` ``basePath`` that is not a
+    literal) gives no endpoint and the path after it as the suffix; app values that disagree
+    (``app_base`` None) give neither."""
     if sub is None or (found and app_base is None):
-        return None
+        return None, None
+    if base == RUNTIME_MARK:
+        tail = _join("", sub)
+        return None, (tail if tail != "/" else None)
     local = _join(base, sub)
-    return _join(app_base, local) if found and app_base else local
+    if found and app_base == RUNTIME_MARK:
+        return None, (local if local != "/" else None)
+    return (_join(app_base, local) if found and app_base else local), None
 
 
 def _api_base_path(decorators: list[Node], source: bytes) -> str:
@@ -65,7 +76,11 @@ def _api_base_path(decorators: list[Node], source: bytes) -> str:
                 key = pair.child_by_field_name("key")
                 value = pair.child_by_field_name("value")
                 if key is not None and value is not None and _unquote(node_text(key, source)) == "basePath":
-                    return _unquote(node_text(value, source))
+                    literal = value.type == "string" or (
+                        value.type == "template_string"
+                        and not any(c.type == "template_substitution" for c in value.children))
+                    # A constant or expression is not read: the base is unknown, never its text.
+                    return _unquote(node_text(value, source)) if literal else RUNTIME_MARK
     return ""
 
 
@@ -195,10 +210,12 @@ def detect_loopback_routes(
                     sub: str | None = (
                         _render_literal(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
                     )
+                    served, suffix = _served(base, sub, found, app_base)
                     routes.append(Emit(dec, dict(
                         semanticType="route",
                         method=verb,
-                        endpoint=_served(base, sub, found, app_base),
+                        endpoint=served,
+                        endpointSuffix=suffix,
                         framework="loopback",
                         handler=mname,
                         handlerLine=mline,

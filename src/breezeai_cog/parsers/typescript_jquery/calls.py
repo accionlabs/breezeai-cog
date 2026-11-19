@@ -42,6 +42,7 @@ from ..additive import (
 )
 from ..emits import Emit, apply
 from ..treesitter import node_text, parse_source
+from ..typescript.imports import runtime_path_suffix
 from ..typescript_sdk_common import emit_outbound, walk_calls
 
 _NAMES = frozenset({"$", "jQuery"})
@@ -240,8 +241,20 @@ def _verb(node: Node | None, source: bytes) -> str | None:
     return upper if upper in _VERBS else None
 
 
-def _ajax(call_args: list[Node], source: bytes) -> tuple[str | None, str | None, bool] | None:
-    """``(endpoint, method, options_have_url)`` for ``$.ajax(options)`` /
+def _runtime_suffix(node: Node | None, source: bytes) -> str | None:
+    """The known tail of a URL built from a runtime value and a literal path
+    (``config.contextRoot + "/orders"`` → ``/orders``); never across server-side code."""
+    node = _unwrap(node)
+    if node is None or not _delimited(node):
+        return None
+    tail = runtime_path_suffix(node, source, {})
+    return tail if tail is not None and not _SERVER_EXPR.search(tail) else None
+
+
+def _ajax(
+    call_args: list[Node], source: bytes
+) -> tuple[str | None, str | None, bool, str | None] | None:
+    """``(endpoint, method, options_have_url, endpointSuffix)`` for ``$.ajax(options)`` /
     ``$.ajax(url, options)`` / ``$.ajax(url)``, or ``None`` when the request is not statically
     visible (``$.ajax(opts)``, ``$.ajax($.extend(…))``). The flag is True only for an options
     *object literal with a ``url`` property* (literal or not) — the one shape the no-evidence
@@ -274,7 +287,7 @@ def _ajax(call_args: list[Node], source: bytes) -> tuple[str | None, str | None,
     else:
         method = "GET"
     url = _literal_url(url_node, source)
-    return url, method, has_url_option
+    return url, method, has_url_option, None if url else _runtime_suffix(url_node, source)
 
 
 def _url_like(node: Node | None, source: bytes) -> bool:
@@ -322,7 +335,8 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
             url = _literal_url(first, source)
             if url is None and not _url_like(first, source):
                 continue  # a function / handler / no argument is the event form, not a request
-            emit_outbound(call, url or "", "jquery", out, method="GET", enrich="own", reclassify_db=True)
+            emit_outbound(call, url or "", "jquery", out, method="GET", enrich="own", reclassify_db=True,
+                          endpoint_suffix=None if url else _runtime_suffix(first, source))
             continue
 
         if obj.type != "identifier" or node_text(obj, source) not in _NAMES:
@@ -334,17 +348,19 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
             shape = _ajax(args, source)
             if shape is None:
                 continue
-            endpoint, method, has_url_option = shape
+            endpoint, method, has_url_option, suffix = shape
             if not has_url_option and not scope.is_jquery(recv):
                 continue  # the no-evidence exception needs an options object with a `url` property
-            emit_outbound(call, endpoint or "", "jquery", out, method=method, enrich="own", reclassify_db=True)
+            emit_outbound(call, endpoint or "", "jquery", out, method=method, enrich="own", reclassify_db=True,
+                          endpoint_suffix=suffix)
         elif method_name in _STATIC_VERB and scope.is_jquery(recv):
             first = args[0] if args else None
-            endpoint = _literal_url(first, source)
-            if endpoint is None and first is not None and first.type == "object":
-                endpoint = _literal_url(_pairs(first, source).get("url"), source)
+            url_node = _pairs(first, source).get("url") \
+                if first is not None and first.type == "object" else first
+            endpoint = _literal_url(url_node, source)
             emit_outbound(call, endpoint or "", "jquery", out,
-                           method=_STATIC_VERB[method_name], enrich="own", reclassify_db=True)
+                           method=_STATIC_VERB[method_name], enrich="own", reclassify_db=True,
+                           endpoint_suffix=None if endpoint else _runtime_suffix(url_node, source))
     return out
 
 

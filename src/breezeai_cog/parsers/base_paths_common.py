@@ -9,8 +9,9 @@ An application can put one path in front of every route it serves::
     super({ rest: { basePath: '/api' } });      // or: this.basePath('/api')
 
 The fact maps the directory of the file that sets it (the app directory) to the base path:
-``""`` when the app sets none, ``None`` when it is set but unknown (env, a conditional, values
-that disagree within one app directory). A route belongs to the deepest app directory above it
+``""`` when the app sets none, :data:`~.addresses.RUNTIME_MARK` when it is set from a value
+that does not resolve (env, a conditional), ``None`` when values disagree within one app
+directory. A route belongs to the deepest app directory above it
 (:func:`app_base_path`). Pieces may name constants of other files, so they resolve against the
 index's constant map once it is complete.
 """
@@ -18,6 +19,8 @@ index's constant map once it is complete.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+
+from .addresses import RUNTIME_MARK
 from typing import Any, Literal
 
 from tree_sitter import Node
@@ -73,7 +76,8 @@ def resolve_base_paths(values: list[BasePathRaw], index: Any) -> dict[str, str |
     for anchor, found in values:
         bucket = by_dir.setdefault(anchor, set())
         for pieces in found:
-            bucket.add(_resolve_pieces(pieces, consts) if pieces is not None else None)
+            value = _resolve_pieces(pieces, consts) if pieces is not None else None
+            bucket.add(RUNTIME_MARK if value is None else value)
     out = {anchor: "" if not vals else next(iter(vals)) if len(vals) == 1 else None
            for anchor, vals in by_dir.items()}
     return out or None
@@ -81,8 +85,8 @@ def resolve_base_paths(values: list[BasePathRaw], index: Any) -> dict[str, str |
 
 def app_base_path(apps: dict[str, str | None], path: str) -> tuple[bool, str | None]:
     """(found, base path) of the app a ``path`` belongs to: the deepest app directory above it.
-    ``found`` False → no app config seen (address unchanged); base ``None`` → set but unknown
-    (the address is unknown)."""
+    ``found`` False → no app config seen (address unchanged); base ``None`` → values disagree,
+    ``RUNTIME_MARK`` → set from a runtime value (either way the address is unknown)."""
     anchors = [d for d in apps if d == "" or path.startswith(d + "/")]
     if not anchors:
         return False, None

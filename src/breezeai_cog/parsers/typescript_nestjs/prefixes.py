@@ -9,8 +9,9 @@ Two kinds of wiring put a prefix in front of a controller's routes, usually from
     @Module({ controllers: [UsersController] }) export class AdminModule {}
 
 * ``global_prefixes``: the directory of a bootstrap file (``NestFactory.create`` /
-  ``app.setGlobalPrefix``) → (prefix, exclude). prefix ``""`` = the app sets none, ``None`` = set
-  but unresolvable (config / env); exclude = ``((path, METHOD | None), …)``, ``None`` when it
+  ``app.setGlobalPrefix``) → (prefix, exclude). prefix ``""`` = the app sets none,
+  ``RUNTIME_PREFIX`` = set from a value that does not resolve (config / env), ``None`` = two
+  bootstraps in the directory disagree; exclude = ``((path, METHOD | None), …)``, ``None`` when it
   cannot be read. A controller belongs to the deepest bootstrap directory above it.
 * ``controller_prefixes``: controller class name → its module's composed ``RouterModule`` path
   (``None`` when ambiguous or unresolvable). Only controllers of registered modules.
@@ -36,6 +37,9 @@ from ..treesitter import node_text
 from ..typescript.imports import _join_segments, _path_pieces, _resolve_pieces, _string_literal
 
 FACT = "nest.prefixes"
+#: A global prefix that is set from a runtime value (``setGlobalPrefix(config.x)``): the
+#: routes' address is unknown, but the part after the prefix is known (``endpointSuffix``).
+RUNTIME_PREFIX = "\0runtime"
 
 #: A NestJS ``setGlobalPrefix`` exclude list: ``((path, METHOD | None), …)``.
 NestExclude = tuple[tuple[str, str | None], ...]
@@ -267,7 +271,8 @@ def _nest_prefixes(
     for d, (pieces, exclude) in boots:
         calls.setdefault(d, set())
         if pieces != []:  # a setGlobalPrefix call ([] = NestFactory.create alone)
-            calls[d].add((_resolve_pieces(pieces, const_values) if pieces else None, exclude))
+            resolved = _resolve_pieces(pieces, const_values) if pieces else None
+            calls[d].add((RUNTIME_PREFIX if resolved is None else resolved, exclude))
     by_dir: dict[str, tuple[str | None, NestExclude | None]] = {
         d: ("", ()) if not found else next(iter(found)) if len(found) == 1 else (None, None)
         for d, found in calls.items()

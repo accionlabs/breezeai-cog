@@ -179,8 +179,10 @@ def emit_outbound(
     method: str | None = None,
     enrich: Enrich = "unclassified",
     reclassify_db: bool = False,
+    endpoint_suffix: str | None = None,
 ) -> None:
-    """An ``api_call`` for ``call``: enriches the enclosing statement in place when it is
+    """An ``api_call`` for ``call`` (``endpoint_suffix``: the known tail of a URL whose leading
+    part is a runtime value, with an empty ``endpoint`` — ``parsers.addresses``): enriches the enclosing statement in place when it is
     unclassified — or, for SDKs whose calls the generic ORM classifier grabs first (ts-force →
     ``db_method_call``), when ``reclassify_db`` and the statement is that ORM mis-tag; otherwise
     appends (so a genuinely different classified span is never overwritten)."""
@@ -191,6 +193,7 @@ def emit_outbound(
             "framework": framework,
             # empty → honest-null (unresolved SObject); never a blank string
             "endpoint": endpoint or None,
+            "endpointSuffix": None if endpoint else endpoint_suffix,
             "method": method,  # None for SDK calls (no HTTP verb visible); jQuery passes its verb
             "dataAccessHint": None,  # clear the ORM hint if we reclassified a db_method_call
         },

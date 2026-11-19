@@ -188,12 +188,10 @@ def url_placeholder(expr_text: str) -> str:
 
 
 def strip_leading_base(url: str) -> str:
-    """Drop a leading interpolated base/host segment so the path matches inbound routes:
-    ``{base}/users/{id}`` -> ``/users/{id}`` (a leading ``{...}`` with no ``/`` is kept)."""
-    if url.startswith("{"):
-        slash = url.find("/")
-        if slash != -1:
-            return url[slash:]
+    """A template URL as rendered: ``{base}/users/{id}`` stays as it is. The leading runtime
+    part is not dropped here (that would present the tail as the whole address); it becomes
+    ``endpoint=None`` + ``endpointSuffix="/users/{id}"`` once the file is parsed
+    (``parsers.addresses.apply_outbound``), the same as a concatenated URL."""
     return url
 
 

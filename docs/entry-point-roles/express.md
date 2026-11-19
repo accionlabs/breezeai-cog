@@ -15,7 +15,7 @@ Parser: `src/breezeai_cog/parsers/typescript_express/` (additive detector, every
 | `app.use(fn)` / `app.use(path, fn)` where `fn` is middleware | Guard | `fn` in `guards` of the bindings registered after it | Runs before many handlers |
 | `app.use(path, mw)` where `mw` is framework middleware that serves requests: `swagger-ui-express` `serve` / `setup`, `express.static`, `serve-static`, `express-graphql` `graphqlHTTP`, `graphql-http` `createHandler` | Binding | `route`, `ANY`, `routeKind: route`, `endpoint` = the path, no handler (framework-served); `framework: graphql` for the GraphQL handlers | Requests to the path are answered there |
 | `app.use(path, expressMiddleware(server))` (Apollo) | Wiring | `route`, `POST`, `endpoint` = the path (else `/graphql`), `framework: graphql` — the Target Spec's current form | GraphQL transport; the operations are the bindings |
-| Route path with an unresolved part (`` `${BASE}/users` `` with `BASE` from config) | Binding | `endpoint` empty | Never a partial or guessed address |
+| Route path with an unresolved part (`` `${BASE}/users` ``, `BASE + "/users"`, `BASE` from config) | Binding | `endpoint` empty; when the unresolved part leads and the rest is literal, `endpointSuffix` = that rest (`/users`) | Never a partial or guessed address ([contract §6](../architecture/entry-points.md#a-prefix-read-at-runtime-endpointsuffix)) |
 | `app.get('title')` (settings getter: one string argument) | None | — | Not a route |
 | `app.listen(port)` | None | — | Start-up |
 | `fetch(...)` / `axios.get(...)` | Outbound | `api_call` | Our code calling out |

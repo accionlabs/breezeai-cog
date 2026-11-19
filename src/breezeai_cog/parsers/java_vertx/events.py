@@ -56,6 +56,7 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    route_suffix,
     router_vars,
     service_builder_vars,
     sub_router_bases,
@@ -423,6 +424,7 @@ def detect_vertx(
         semantic, method, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
+        own = endpoint  # the route's own path, before any mount prefix
         unknown_base = False
         receiver = call.child_by_field_name("object")
         recv = router_name(_root_receiver(receiver, source)) if receiver is not None else ""
@@ -440,6 +442,12 @@ def detect_vertx(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(str(base), endpoint)
+        suffix: str | None = None
+        if semantic == "route" and endpoint is None:
+            # A runtime prefix (`pathPrefix + "/x"`, or a mount whose prefix is unknown): keep
+            # the known tail — never the prefix, never as a `{…}` parameter.
+            suffix = own if (unknown_base and base is None and own) \
+                else route_suffix(_parts(call, source, consts)[1])
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
@@ -484,7 +492,7 @@ def detect_vertx(
             chained.append((group_key(call, source, method, endpoint), len(found), call))
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
-                                handler_path=first_path))
+                                handler_path=first_path, endpoint_suffix=suffix))
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {

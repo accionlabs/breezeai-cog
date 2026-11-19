@@ -97,6 +97,11 @@ class Statement(BaseModel):
     framework: str | None = None
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)
     endpoint: str | None = None  # route path (route) or outbound URL (api_call)
+    #: The known tail of an address whose leading part is a runtime value cog cannot resolve
+    #: (a prefix read from config, env or a variable): ``pathPrefix + "/request"`` gives
+    #: ``endpoint=None``, ``endpointSuffix="/request"``. Always starts with ``/``; set only when
+    #: ``endpoint`` is empty. Never a guess at the prefix, and never a path parameter.
+    endpointSuffix: str | None = None
     handler: str | None = None
     #: Line of the handler's declaration — in ``handlerPath`` when that is set, else in this file.
     handlerLine: int | None = None

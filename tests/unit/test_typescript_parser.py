@@ -564,9 +564,11 @@ def _api(tmp_path, body):
 
 
 def test_endpoint_template_string(tmp_path) -> None:
-    # #3: template literal -> path with {param}; leading base/host var dropped.
+    # #3: template literal -> path with {param}. A leading base/host var is not dropped (that
+    # would present the tail as the whole address): the parser keeps it as rendered, and the
+    # executor's address rule turns it into endpoint=None + endpointSuffix (parsers.addresses).
     assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") == [
-        ("GET", "/users/{id}")
+        ("GET", "{baseURL}/users/{id}")
     ]
     assert _api(tmp_path, "function f(id){ axios.get(`/api/${id}`); }") == [("GET", "/api/{id}")]
 

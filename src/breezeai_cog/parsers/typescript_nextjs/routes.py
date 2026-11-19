@@ -56,6 +56,7 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
+from ..addresses import RUNTIME_MARK
 from ..base_paths_common import app_base_path
 from .facts import next_base_paths, next_middlewares, page_extensions, page_stem
 
@@ -195,7 +196,7 @@ def served(endpoint: str, path: str, index: object | None) -> str | None:
     found, base = app_base_path(next_base_paths(index), path)
     if not found or base == "":
         return endpoint
-    if base is None:
+    if base is None or base == RUNTIME_MARK:
         return None
     parts = [p.strip("/") for p in (base, endpoint) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
