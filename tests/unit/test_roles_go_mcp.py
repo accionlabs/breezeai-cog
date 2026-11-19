@@ -396,3 +396,41 @@ func (g *G) Lone() {}
     tools = _tools(analyze_files({"main.go": src}))
     assert (tools["greet"].handler, tools["greet"].handlerLine) == ("SayHi", 10)
     assert (tools["only_method"].handler, tools["only_method"].handlerLine) == ("Lone", None)
+
+
+def test_go_sdk_handler_line_of_a_local_func_literal(analyze_files) -> None:
+    """``h := func(…) {…}`` bound once in the function and never reassigned gives the literal's
+    line; reassigned, bound twice, or bound to something else (shadowing a top-level function
+    of the name) gives none."""
+    src = """
+package main
+
+import (
+	"context"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func shadow(ctx context.Context, req *mcp.CallToolRequest, in any) (*mcp.CallToolResult, any, error) {
+	return nil, nil, nil
+}
+
+func main() {
+	server := mcp.NewServer(&mcp.Implementation{Name: "x"}, nil)
+	h := func(ctx context.Context, req *mcp.CallToolRequest, in any) (*mcp.CallToolResult, any, error) {
+		return nil, nil, nil
+	}
+	mcp.AddTool(server, &mcp.Tool{Name: "local"}, h)
+	r := func(ctx context.Context, req *mcp.CallToolRequest, in any) (*mcp.CallToolResult, any, error) {
+		return nil, nil, nil
+	}
+	r = pick()
+	mcp.AddTool(server, &mcp.Tool{Name: "reassigned"}, r)
+	shadow := pick()
+	mcp.AddTool(server, &mcp.Tool{Name: "shadowed"}, shadow)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["local"].handler, tools["local"].handlerLine) == ("h", 16)
+    assert (tools["reassigned"].handler, tools["reassigned"].handlerLine) == ("r", None)
+    assert (tools["shadowed"].handler, tools["shadowed"].handlerLine) == ("shadow", None)

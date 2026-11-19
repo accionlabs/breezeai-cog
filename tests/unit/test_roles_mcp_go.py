@@ -261,3 +261,37 @@ func (h *H) lone() {}
     tools = _tools(analyze_files({"main.go": src}))
     assert (tools["hello"].handler, tools["hello"].handlerLine) == ("helloHandler", 15)
     assert (tools["method_only"].handler, tools["method_only"].handlerLine) == ("lone", None)
+
+
+def test_mcp_go_handler_line_of_a_local_func_literal(analyze_files) -> None:
+    """``h := func(…) {…}`` bound once in the function gives the literal's line; a name bound
+    twice there gives none."""
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    h := func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        return nil, nil
+    }
+    s.AddTool(mcp.NewTool("local"), h)
+    if ok {
+        g := func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+            return nil, nil
+        }
+        _ = g
+    }
+    g := func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        return nil, nil
+    }
+    s.AddTool(mcp.NewTool("twice"), g)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["local"].handler, tools["local"].handlerLine) == ("h", 11)
+    assert (tools["twice"].handler, tools["twice"].handlerLine) == ("g", None)
