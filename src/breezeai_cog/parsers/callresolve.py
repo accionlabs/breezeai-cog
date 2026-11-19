@@ -303,7 +303,9 @@ def make_resolver(
             if inherited_fields and declared_only and heritage and fowner is not None \
                     and scope is not None and receiver not in scope:
                 ftype = _field_type(var, fowner)
-                if ftype is not None:
+                # A type name two repository classes share cannot be looked up by name: the
+                # receiver-type tier below decides, as it does for any such type.
+                if ftype is not None and heritage.get(ftype) is not None:
                     return _lookup(ftype, name, "methods")[1]
             typ = _base_type(_type_of(receiver, scope)[1])
             if typ:

@@ -304,3 +304,39 @@ def test_inherited_fields_reach_the_workers_for_any_jobs(tmp_path: Path, jobs: i
     calls = {f["name"]: {c["name"]: c.get("path") for c in f["calls"]} for f in rec["functions"]}
     assert calls["direct"] == {"inst": _f("Helper.java")}
     assert calls["inRunnable"]["inst"] == _f("Helper.java")
+
+
+def test_a_shared_field_type_name_keeps_the_answer_the_file_itself_gives(tmp_path: Path) -> None:
+    # Two repository classes are named Helper, so the inherited field's type cannot be looked
+    # up by name; the file's own declaration of `helper` (its import says which Helper) decides.
+    other_helper = "package com.acme.web;\npublic class Helper { public void inst() {} }\n"
+    child = """package com.acme.other;
+import com.acme.Base;
+import com.acme.Helper;
+public class Child extends Base {
+    Child(Helper helper) { this.helper = helper; }
+    void use() { helper.inst(); }
+}
+"""
+    calls = _calls(tmp_path, {"Base.java": _BASE, "Helper.java": _HELPER,
+                              "web/Helper.java": other_helper, "other/Child.java": child},
+                   "other/Child.java")
+    assert calls["use"] == {"inst": _f("Helper.java")}
+
+
+def test_an_inherited_field_is_not_typed_by_another_methods_parameter(tmp_path: Path) -> None:
+    # `svc` in `second` and `third` is Base's field (a Helper), not `first`'s parameter.
+    base = "package com.acme;\npublic class Base { protected Helper svc; }\n"
+    other = "package com.acme;\npublic class Other { public void inst() {} public void only() {} }\n"
+    child = """package com.acme;
+public class Child extends Base {
+    void first(Other svc) { svc.only(); }
+    void second() { svc.inst(); }
+    void third() { svc.only(); }
+}
+"""
+    calls = _calls(tmp_path, {"Base.java": base, "Helper.java": _HELPER, "Other.java": other,
+                              "Child.java": child}, "Child.java")
+    assert calls["first"] == {"only": _f("Other.java")}
+    assert calls["second"] == {"inst": _f("Helper.java")}
+    assert calls["third"] == {"only": None}  # Helper declares no `only`
