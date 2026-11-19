@@ -529,14 +529,27 @@ def _value_of(decl: Node) -> Node | None:
     return None
 
 
-def _declared_name(decl: Node, source: bytes) -> str | None:
-    var = next((c for c in decl.named_children if c.type == "variable_declaration"), None)
-    ident = (
-        next((c for c in var.named_children if c.type == "simple_identifier"), None)
-        if var is not None
-        else None
-    )
-    return node_text(ident, source) if ident is not None else None
+def _declared_names(decl: Node, source: bytes) -> list[str]:
+    """The names a ``property_declaration`` declares: ``val x = …`` one, a destructuring
+    ``val (a, b) = …`` each of its components."""
+    out: list[str] = []
+    for c in decl.named_children:
+        if c.type == "variable_declaration":
+            vars_ = [c]
+        elif c.type == "multi_variable_declaration":
+            vars_ = [v for v in c.named_children if v.type == "variable_declaration"]
+        else:
+            continue
+        for var in vars_:
+            ident = next((x for x in var.named_children if x.type == "simple_identifier"), None)
+            if ident is not None:
+                out.append(node_text(ident, source))
+    return out
+
+
+def _destructures(decl: Node) -> bool:
+    """True for ``val (a, b) = …``: a component is never a list literal read whole."""
+    return any(c.type == "multi_variable_declaration" for c in decl.named_children)
 
 
 def _binds_param(node: Node, name: str, source: bytes) -> bool:
@@ -632,8 +645,8 @@ class _Names:
         self.use_starts: dict[str, list[int]] = {}
         for n in walk(root):
             if n.type == "property_declaration":
-                name = _declared_name(n, source)
-                if name is not None:
+                # A destructured component is indexed too: it hides an outer list of its name.
+                for name in _declared_names(n, source):
                     self.props.setdefault((name, _owner(n)), []).append(n)
             elif n.type == "function_declaration":
                 ident = next((c for c in n.named_children if c.type == "simple_identifier"), None)
@@ -763,7 +776,12 @@ def _tools_list(lst: Node | None, source: bytes, names: Callable[[], _Names]) ->
             if decl is not None
             else None
         )
-        if decl is None or kind is None or node_text(kind, source) != "val":
+        if (
+            decl is None
+            or kind is None
+            or node_text(kind, source) != "val"
+            or _destructures(decl)
+        ):
             return None
         value = _value_of(decl)
         if value is None or value.type != "call_expression":

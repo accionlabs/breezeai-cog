@@ -255,7 +255,8 @@ def test_kotlin_add_tools_variable_without_the_mcp_sdk_is_not_a_tool(analyze_fil
 
 def test_kotlin_add_tools_name_bound_nearer_than_the_val_is_not_read(analyze_files) -> None:
     """The ``val`` of the same name further out is hidden by a primary-constructor parameter, a
-    ``for`` loop variable, a ``catch`` parameter and a ``when (val …)`` subject."""
+    ``for`` loop variable, a ``catch`` parameter, a ``when (val …)`` subject and a destructured
+    local ``val (tools, cfg) = …``."""
     src = """
 package demo
 
@@ -280,6 +281,8 @@ fun r2(s: Server, gs: List<List<RegisteredTool>>) {
         s.addTools(loopy)
     }
 }
+
+fun f(s: Server) { val (tools, cfg) = load(); s.addTools(tools) }
 """
     assert set(_tools(analyze_files({"src/main/kotlin/demo/Reg.kt": src}))) == {"in_loop"}
 
