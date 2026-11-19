@@ -690,7 +690,11 @@ def test_resources_in_a_file_with_no_tool(analyze_files) -> None:
     assert set(resources) == {"config://app", "users://{user_id}/profile", "search://{?q}"}
     config = resources["config://app"]
     assert (config.framework, config.description, config.handler, config.handlerLine) == (
-        "fastmcp", "App configuration", "config", 8)
+        "fastmcp",
+        "App configuration",
+        "config",
+        8,
+    )
     assert config.params == [] and config.nodeType == "synthetic" and config.startLine == 7
     profile = resources["users://{user_id}/profile"]
     assert profile.description == "A user's profile."  # the docstring, as for a tool
@@ -732,7 +736,11 @@ def test_prompts_in_a_file_with_no_tool(analyze_files) -> None:
     assert set(prompts) == {"review_code", "Explain", "short"}
     review = prompts["review_code"]
     assert (review.framework, review.description, review.handler, review.handlerLine) == (
-        "python-mcp", "Review a piece of code.", "review_code", 8)
+        "python-mcp",
+        "Review a piece of code.",
+        "review_code",
+        8,
+    )
     assert _params(review) == [
         ("code", "str", True, None, None),
         ("focus", "str", False, '"bugs"', None),
@@ -742,7 +750,7 @@ def test_prompts_in_a_file_with_no_tool(analyze_files) -> None:
 
 
 def test_tool_resource_and_prompt_of_one_server(analyze_files) -> None:
-    src = '''
+    src = """
 from fastmcp import FastMCP
 
 mcp = FastMCP("all")
@@ -753,7 +761,7 @@ mcp = FastMCP("all")
 @mcp.prompt()
 def one() -> str:
     return ""
-'''
+"""
     statements = analyze_files({"srv.py": src})
     kinds = sorted((s.semanticType, s.endpoint) for s in statements if s.semanticType)
     assert kinds == [("mcp_prompt", "one"), ("mcp_resource", "data://one"), ("mcp_tool", "one")]
@@ -764,7 +772,7 @@ def one() -> str:
 def test_resource_and_prompt_look_alikes(analyze_files) -> None:
     """Not on a proven server: an agent, a CLI's prompt, a local class named FastMCP."""
     files = {
-        "agent.py": '''
+        "agent.py": """
 from pydantic_ai import Agent
 
 agent = Agent("openai:gpt-4o")
@@ -778,16 +786,16 @@ def r() -> str:
 @agent.prompt()
 def p() -> str:
     return ""
-''',
-        "cli.py": '''
+""",
+        "cli.py": """
 import click
 
 
 @click.prompt("Name")
 def ask() -> str:
     return ""
-''',
-        "shim.py": '''
+""",
+        "shim.py": """
 class FastMCP:
     pass
 
@@ -803,7 +811,7 @@ def r() -> str:
 @mcp.prompt()
 def p() -> str:
     return ""
-''',
+""",
     }
     statements = analyze_files(files)
     assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]

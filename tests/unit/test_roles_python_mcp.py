@@ -371,7 +371,12 @@ def test_lowlevel_resources_with_no_tool(analyze_files) -> None:
     assert set(resources) == {"memo://insights", "file:///logs/app.log", "users://{id}"}
     memo = resources["memo://insights"]
     assert (memo.framework, memo.method, memo.description, memo.handler, memo.handlerLine) == (
-        "python-mcp", "RESOURCE", "Memo", "read_resource", 26)
+        "python-mcp",
+        "RESOURCE",
+        "Memo",
+        "read_resource",
+        26,
+    )
     assert memo.params == [] and memo.nodeType == "call" and memo.startLine == 12
     template = resources["users://{id}"]
     assert template.handler == "read_resource"  # templates are read by the same dispatcher
@@ -414,7 +419,11 @@ def test_lowlevel_prompts_with_no_tool(analyze_files) -> None:
     assert set(prompts) == {"paged", "review", "dynamic"}
     review = prompts["review"]
     assert (review.method, review.description, review.handler, review.handlerLine) == (
-        "PROMPT", "Review code", "get_prompt", 27)
+        "PROMPT",
+        "Review code",
+        "get_prompt",
+        27,
+    )
     assert _params(review) == [
         ("code", None, True, None, "The code"),
         ("style", None, False, None, None),  # the SDK's default: not required

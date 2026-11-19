@@ -405,7 +405,9 @@ def detect_lowlevel(
                     obj_node = consts.get(node_text(obj_node, source))
                 if obj_node is None or obj_node.type != "object" or obj_node.start_byte in seen:
                     continue
-                emit = _entry(obj_node, source, kind, array_key, (handler, handler_line), input_schema)
+                emit = _entry(
+                    obj_node, source, kind, array_key, (handler, handler_line), input_schema
+                )
                 if emit is not None:
                     seen.add(obj_node.start_byte)
                     found.append(emit)
@@ -442,8 +444,10 @@ def _prompt_arguments(node: Node | None, source: bytes) -> list[Parameter] | Non
         description = _string(desc_node, source) if desc_node is not None else None
         req = fields.get("required")
         req_text = node_text(req, source) if req is not None else "false"
-        if not name or req_text not in ("true", "false") or (
-            desc_node is not None and description is None
+        if (
+            not name
+            or req_text not in ("true", "false")
+            or (desc_node is not None and description is None)
         ):
             return None
         out.append(param(name, None, required=req_text == "true", description=description))
@@ -470,7 +474,9 @@ def _entry(
         name = _literal_string(fields.get("name"), source)
         if kind == TOOL:
             schema = _unparen(fields.get("inputSchema"))
-            params = input_schema(schema) if schema is not None and schema.type == "object" else None
+            params = (
+                input_schema(schema) if schema is not None and schema.type == "object" else None
+            )
         else:
             params = _prompt_arguments(fields.get("arguments"), source)
     if not name:

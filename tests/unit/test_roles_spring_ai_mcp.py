@@ -415,7 +415,10 @@ def test_spring_ai_java_resources_and_prompts_with_no_tool(analyze_files) -> Non
     assert set(resources) == {"users://{id}/profile", "config://app"}
     profile = resources["users://{id}/profile"]
     assert (profile.description, profile.handler, profile.handlerLine) == (
-        "A user's profile", "profile", 9)
+        "A user's profile",
+        "profile",
+        9,
+    )
     assert _p(profile) == [("id", "string", True, None)]
     assert resources["config://app"].params == []
     prompts = _of(statements, "mcp_prompt")

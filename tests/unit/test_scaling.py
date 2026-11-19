@@ -475,6 +475,137 @@ def _kotlin_mcp_add_tools(n: int) -> str:
     )
 
 
+def _python_mcp_entries(n: int) -> str:
+    entries = "".join(
+        f"@mcp.resource('users://{{id}}/r{i}', description='R {i}')\ndef r{i}(id: str) -> str:\n    return id\n\n\n"
+        f"@mcp.prompt(name='p{i}')\ndef p{i}(code: str, focus: str = 'x') -> str:\n    return code\n\n\n"
+        for i in range(n)
+    )
+    lowlevel = "".join(
+        f"        types.Resource(uri='memo://m{i}', name='m{i}'),\n" for i in range(n)
+    )
+    prompts = "".join(
+        f"        types.Prompt(name='lp{i}', arguments=[types.PromptArgument(name='a', required=True)]),\n"
+        for i in range(n)
+    )
+    calls = "".join(
+        f"        await session.call_tool('t{i}', {{}})\n        await session.read_resource('memo://m{i}')\n"
+        for i in range(n)
+    )
+    return (
+        "from mcp.server.fastmcp import FastMCP\nfrom mcp.server.lowlevel import Server\n"
+        "import mcp.types as types\nfrom mcp import ClientSession\n\nmcp = FastMCP('demo')\n"
+        f"server = Server('low')\n\n\n{entries}"
+        f"@server.list_resources()\nasync def lr():\n    return [\n{lowlevel}    ]\n\n\n"
+        f"@server.list_prompts()\nasync def lp():\n    return [\n{prompts}    ]\n\n\n"
+        "@server.read_resource()\nasync def rr(uri):\n    return ''\n\n\n"
+        "async def client(read, write):\n    async with ClientSession(read, write) as session:\n"
+        f"{calls}"
+    )
+
+
+def _typescript_mcp_entries(n: int) -> str:
+    entries = "".join(
+        f"server.registerResource('r{i}', new ResourceTemplate('users://{{id}}/r{i}', {{ list: undefined }}), "
+        f"{{ description: 'R {i}' }}, async () => ({{ contents: [] }}));\n"
+        f"server.prompt('p{i}', 'P {i}', {{ code: z.string().describe('c') }}, async () => ({{ messages: [] }}));\n"
+        f"await client.callTool({{ name: 't{i}' }});\n"
+        for i in range(n)
+    )
+    listed = ", ".join(f"{{ uri: 'memo://m{i}', name: 'm{i}' }}" for i in range(n))
+    return (
+        "import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';\n"
+        "import { Server } from '@modelcontextprotocol/sdk/server/index.js';\n"
+        "import { Client } from '@modelcontextprotocol/sdk/client/index.js';\n"
+        "import { ListResourcesRequestSchema } from '@modelcontextprotocol/sdk/types.js';\n"
+        "import { z } from 'zod';\n"
+        "const server = new McpServer({ name: 'demo', version: '1' });\n"
+        "const low = new Server({ name: 'low', version: '1' }, {});\n"
+        "const client = new Client({ name: 'c', version: '1' });\n"
+        f"{entries}"
+        f"low.setRequestHandler(ListResourcesRequestSchema, async () => ({{ resources: [{listed}] }}));\n"
+    )
+
+
+def _go_mcp_entries(n: int) -> str:
+    body = "".join(
+        f"\tserver.AddResourceTemplate(&mcp.ResourceTemplate{{URITemplate: \"users://{{id}}/r{i}\"}}, h)\n"
+        f"\tserver.AddPrompt(&mcp.Prompt{{Name: \"p{i}\", Arguments: []*mcp.PromptArgument{{{{Name: \"a\"}}}}}}, h)\n"
+        f"\tsession.CallTool(ctx, &mcp.CallToolParams{{Name: \"t{i}\"}})\n"
+        for i in range(n)
+    )
+    return (
+        "package main\n\nimport \"github.com/modelcontextprotocol/go-sdk/mcp\"\n\n"
+        "func main() {\n\tserver := mcp.NewServer(&mcp.Implementation{Name: \"x\"}, nil)\n"
+        "\tclient := mcp.NewClient(&mcp.Implementation{Name: \"c\"}, nil)\n"
+        f"\tsession, _ := client.Connect(ctx, t, nil)\n{body}}}\n\nfunc h() {{}}\n"
+    )
+
+
+def _go_mcpgo_entries(n: int) -> str:
+    body = "".join(
+        f"\ts.AddResource(mcp.NewResource(\"docs://d{i}\", \"d{i}\", mcp.WithResourceDescription(\"D\")), h)\n"
+        f"\ts.AddPrompt(mcp.NewPrompt(\"p{i}\", mcp.WithArgument(\"a\", mcp.RequiredArgument())), h)\n"
+        f"\treq{i} := mcp.CallToolRequest{{}}\n\treq{i}.Params.Name = \"t{i}\"\n\tc.CallTool(ctx, req{i})\n"
+        for i in range(n)
+    )
+    return (
+        "package main\n\nimport (\n\t\"github.com/mark3labs/mcp-go/client\"\n"
+        "\t\"github.com/mark3labs/mcp-go/mcp\"\n\t\"github.com/mark3labs/mcp-go/server\"\n)\n\n"
+        "func main() {\n\ts := server.NewMCPServer(\"x\", \"1\")\n"
+        f"\tc, _ := client.NewStdioMCPClient(\"s\", nil)\n{body}}}\n\nfunc h() {{}}\n"
+    )
+
+
+def _java_mcp_entries(n: int) -> str:
+    specs = "".join(
+        f"        specs.add(new McpServerFeatures.SyncResourceTemplateSpecification(\n"
+        f"            McpSchema.ResourceTemplate.builder(\"users://{{id}}/r{i}\", \"r\").build(), (a, b) -> null));\n"
+        f"        specs.add(new McpServerFeatures.SyncPromptSpecification(new McpSchema.Prompt(\"p{i}\", \"d\",\n"
+        f"            List.of(new McpSchema.PromptArgument(\"a\", \"d\", true))), (a, b) -> null));\n"
+        f"        client.callTool(new McpSchema.CallToolRequest(\"t{i}\", Map.of()));\n"
+        for i in range(n)
+    )
+    annotated = "".join(
+        f"    @McpResource(uri = \"docs://d{i}\") String d{i}() {{ return \"\"; }}\n" for i in range(n)
+    )
+    return (
+        "package demo;\nimport io.modelcontextprotocol.server.McpServerFeatures;\n"
+        "import io.modelcontextprotocol.spec.McpSchema;\nimport io.modelcontextprotocol.client.McpSyncClient;\n"
+        "import org.springaicommunity.mcp.annotation.McpResource;\n"
+        f"public class App {{\n    McpSyncClient client;\n    void register(List<Object> specs) {{\n{specs}    }}\n"
+        f"{annotated}}}\n"
+    )
+
+
+def _kotlin_mcp_entries(n: int) -> str:
+    body = "".join(
+        f"    server.addResource(uri = \"docs://d{i}\", name = \"d\", description = \"D\") {{ TODO() }}\n"
+        f"    server.addPrompt(name = \"p{i}\", arguments = listOf(PromptArgument(name = \"a\", required = true))) {{ TODO() }}\n"
+        f"    client.callTool(name = \"t{i}\", arguments = mapOf())\n"
+        for i in range(n)
+    )
+    return (
+        "package demo\nimport io.modelcontextprotocol.kotlin.sdk.server.Server\n"
+        "import io.modelcontextprotocol.kotlin.sdk.client.Client\n\n"
+        f"suspend fun configure(server: Server, client: Client) {{\n{body}}}\n"
+    )
+
+
+def _csharp_mcp_entries(n: int) -> str:
+    body = "".join(
+        f"    [McpServerResource(UriTemplate = \"users://{{id}}/r{i}\"), Description(\"R\")]\n"
+        f"    public static string R{i}(string id) => id;\n"
+        f"    [McpServerPrompt(Name = \"p{i}\")]\n    public static string P{i}([Description(\"c\")] string code) => code;\n"
+        f"    public static async Task C{i}(IMcpClient client{i}) => await client{i}.CallToolAsync(\"t{i}\");\n"
+        for i in range(n)
+    )
+    return (
+        "using System.ComponentModel;\nusing ModelContextProtocol.Server;\nusing ModelContextProtocol.Client;\n"
+        f"public static class All\n{{\n{body}}}\n"
+    )
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -509,6 +640,13 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "go-mcp-functions": ("tools.go", _go_mcp_functions),
     "java-mcp-shortcut": ("App.java", _java_mcp_shortcut),
     "kotlin-mcp-add-tools": ("Registry.kt", _kotlin_mcp_add_tools),
+    "python-mcp-entries": ("server.py", _python_mcp_entries),
+    "typescript-mcp-entries": ("server.ts", _typescript_mcp_entries),
+    "go-mcp-entries": ("main.go", _go_mcp_entries),
+    "go-mcpgo-entries": ("main.go", _go_mcpgo_entries),
+    "java-mcp-entries": ("App.java", _java_mcp_entries),
+    "kotlin-mcp-entries": ("Server.kt", _kotlin_mcp_entries),
+    "csharp-mcp-entries": ("All.cs", _csharp_mcp_entries),
 }
 
 

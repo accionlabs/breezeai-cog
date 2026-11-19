@@ -1,0 +1,475 @@
+"""MCP client calls (``mcp_call``, outbound): a proven MCP client calls a tool, reads a
+resource or gets a prompt by a literal name / URI.
+
+Every case runs the whole pipeline (``analyze_files``), which also fails on any contract error
+(``parsers/contract.py``): an ``mcp_call`` has a method of TOOL / RESOURCE / PROMPT, a framework,
+an endpoint and no handler.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from breezeai_cog.parsers.contract import validate
+from breezeai_cog.schemas import FileRecord, Statement
+
+
+@pytest.fixture
+def analyze_records(tmp_path: Path) -> Callable[[dict[str, str]], dict[str, FileRecord]]:
+    """As ``analyze_files``, returning each file's record (for its file-level framework)."""
+    from breezeai_cog import iter_file_records
+
+    def run(files: dict[str, str]) -> dict[str, FileRecord]:
+        repo = tmp_path / "records"
+        for rel, src in files.items():
+            p = repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(src)
+        records = {r.path: r for r in iter_file_records(repo)}
+        assert not [v for r in records.values() for v in validate(r) if v.severity == "error"]
+        return records
+
+    return run
+
+
+def _calls(statements: list[Statement]) -> list[tuple[str | None, str | None, str | None]]:
+    calls = sorted(
+        (s for s in statements if s.semanticType == "mcp_call"), key=lambda s: (s.path, s.startLine)
+    )
+    for c in calls:
+        assert c.name == c.endpoint and c.handler is None and c.params is None
+    # The call line keeps one statement: the call's own, enriched, never a second record (Kotlin
+    # records each nested call of a line on its own: there the call's statement is enriched).
+    lines = Counter((s.path, s.startLine) for s in statements)
+    for c in calls:
+        assert "#" not in c.id and c.nodeType != "synthetic"
+        if not c.path.endswith(".kt"):
+            assert lines[(c.path, c.startLine)] == 1, f"{c.id}: {lines[(c.path, c.startLine)]}"
+    return [(c.method, c.endpoint, c.framework) for c in calls]
+
+
+PYTHON_CLIENT = """
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client
+from pydantic import AnyUrl
+
+
+async def run(params):
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        result = await session.call_tool("add", {"a": 1, "b": 2})
+        await session.read_resource(AnyUrl("memo://insights"))
+        await session.read_resource("file:///logs/app.log")
+        prompt = await session.get_prompt(name="review", arguments={"code": "x"})
+        await session.call_tool(tool_name, {})
+
+
+async def typed(session: ClientSession) -> None:
+    await session.call_tool(name="echo", arguments={})
+"""
+
+
+def test_python_client_session_calls(analyze_files) -> None:
+    statements = analyze_files({"client.py": PYTHON_CLIENT})
+    assert _calls(statements) == [
+        ("TOOL", "add", "python-mcp"),
+        ("RESOURCE", "memo://insights", "python-mcp"),
+        ("RESOURCE", "file:///logs/app.log", "python-mcp"),
+        ("PROMPT", "review", "python-mcp"),
+        ("TOOL", "echo", "python-mcp"),
+    ]
+
+
+def test_python_fastmcp_client_calls(analyze_files) -> None:
+    src = """
+from fastmcp import Client
+
+
+async def main():
+    async with Client("http://localhost:8000/mcp") as client:
+        await client.call_tool("add", {"a": 1})
+        await client.get_prompt("greet")
+"""
+    assert _calls(analyze_files({"client.py": src})) == [
+        ("TOOL", "add", "fastmcp"),
+        ("PROMPT", "greet", "fastmcp"),
+    ]
+
+
+def test_python_client_only_file_has_no_framework(analyze_records) -> None:
+    records = analyze_records({"client.py": PYTHON_CLIENT})
+    assert records["client.py"].framework is None
+
+
+def test_python_client_look_alikes(analyze_files) -> None:
+    """aiohttp's ClientSession, agent frameworks' MCP server objects, LlamaIndex, LangChain and
+    a rebound name: no mcp_call."""
+    files = {
+        "aio.py": """
+from aiohttp import ClientSession
+
+
+async def f():
+    async with ClientSession() as session:
+        await session.call_tool("x")
+""",
+        "agents.py": """
+from agents.mcp import MCPServerStdio
+from pydantic_ai.mcp import MCPServerStdio as PydanticServer
+from llama_index.tools.mcp import BasicMCPClient
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+
+async def f():
+    async with MCPServerStdio(params={}) as server:
+        await server.call_tool("x", {})
+    pyd = PydanticServer("npx")
+    await pyd.call_tool("y", {})
+    client = BasicMCPClient("http://x")
+    await client.call_tool("z", {})
+    multi = MultiServerMCPClient({})
+    tools = await multi.get_tools()
+""",
+        "rebound.py": """
+from mcp import ClientSession
+
+
+async def f(read, write):
+    session = ClientSession(read, write)
+    session = other()
+    await session.call_tool("x", {})
+""",
+    }
+    assert not [s for s in analyze_files(files) if s.semanticType == "mcp_call"]
+
+
+TS_CLIENT = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const client = new Client({ name: "app", version: "1.0.0" });
+await client.connect(new StdioClientTransport({ command: "node", args: ["server.js"] }));
+const result = await client.callTool({ name: "add", arguments: { a: 1, b: 2 } });
+await client.readResource({ uri: "memo://insights" });
+await client.getPrompt({ name: "review", arguments: { code: "x" } });
+await client.callTool({ name: toolName, arguments: {} });
+await client.callTool(request);
+
+export async function typed(c: Client) {
+  return c.callTool({ name: "echo" });
+}
+"""
+
+
+def test_typescript_client_calls(analyze_files) -> None:
+    assert _calls(analyze_files({"client.ts": TS_CLIENT})) == [
+        ("TOOL", "add", "typescript-mcp"),
+        ("RESOURCE", "memo://insights", "typescript-mcp"),
+        ("PROMPT", "review", "typescript-mcp"),
+        ("TOOL", "echo", "typescript-mcp"),
+    ]
+
+
+def test_typescript_client_only_file_has_no_framework(analyze_records) -> None:
+    assert analyze_records({"client.ts": TS_CLIENT})["client.ts"].framework is None
+
+
+def test_typescript_client_look_alikes(analyze_files) -> None:
+    """The pg ``Client``, the AI SDK's MCP client, a ``Client`` not from the SDK: no mcp_call."""
+    files = {
+        "pg.ts": """
+import { Client } from "pg";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+const client = new Client();
+await client.callTool({ name: "x" });
+""",
+        "vercel.ts": """
+import { experimental_createMCPClient } from "ai";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+const client = await experimental_createMCPClient({ transport });
+await client.callTool({ name: "x" });
+""",
+        "shadow.ts": """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "a", version: "1" });
+function f(client: Other) { return client.callTool({ name: "y" }); }
+""",
+    }
+    assert not [s for s in analyze_files(files) if s.semanticType == "mcp_call"]
+
+
+MCPGO_CLIENT = """
+package main
+
+import (
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
+)
+
+func main() {
+	c, err := client.NewStdioMCPClient("server", nil)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "add"
+	req.Params.Arguments = map[string]any{"a": 1}
+	res, err := c.CallTool(ctx, req)
+	c.ReadResource(ctx, mcp.ReadResourceRequest{Params: mcp.ReadResourceParams{URI: "memo://insights"}})
+	c.GetPrompt(ctx, mcp.GetPromptRequest{Params: mcp.GetPromptParams{Name: "review"}})
+	var twice mcp.CallToolRequest
+	twice.Params.Name = "one"
+	twice.Params.Name = "two"
+	c.CallTool(ctx, twice)
+	shared := mcp.CallToolRequest{}
+	shared.Params.Name = "shared"
+	c.CallTool(ctx, shared)
+	c.CallTool(ctx, shared)
+}
+
+func typed(c *client.Client) {
+	c.CallTool(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "echo"}})
+}
+"""
+
+
+def test_mcpgo_client_calls(analyze_files) -> None:
+    assert _calls(analyze_files({"main.go": MCPGO_CLIENT})) == [
+        ("TOOL", "add", "mcp-go"),
+        ("RESOURCE", "memo://insights", "mcp-go"),
+        ("PROMPT", "review", "mcp-go"),
+        ("TOOL", "echo", "mcp-go"),
+    ]
+
+
+GO_SDK_CLIENT = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func main() {
+	client := mcp.NewClient(&mcp.Implementation{Name: "app"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	session.CallTool(ctx, &mcp.CallToolParams{Name: "greet", Arguments: map[string]any{}})
+	session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "embedded:info"})
+	session.GetPrompt(ctx, &mcp.GetPromptParams{Name: "review"})
+	session.CallTool(ctx, params)
+}
+
+func typed(cs *mcp.ClientSession) {
+	cs.CallTool(ctx, &mcp.CallToolParams{Name: "echo"})
+}
+"""
+
+
+def test_go_sdk_client_calls(analyze_files) -> None:
+    assert _calls(analyze_files({"main.go": GO_SDK_CLIENT})) == [
+        ("TOOL", "greet", "go-mcp"),
+        ("RESOURCE", "embedded:info", "go-mcp"),
+        ("PROMPT", "review", "go-mcp"),
+        ("TOOL", "echo", "go-mcp"),
+    ]
+
+
+def test_go_client_only_file_has_no_framework(analyze_records) -> None:
+    records = analyze_records({"a/main.go": GO_SDK_CLIENT, "b/main.go": MCPGO_CLIENT})
+    assert records["a/main.go"].framework is None and records["b/main.go"].framework is None
+
+
+def test_go_client_look_alikes(analyze_files) -> None:
+    """A receiver that is not a proven client, a reassigned session, another package: none."""
+    files = {
+        "a.go": """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func f(sessions []*mcp.ClientSession, s *Other) {
+	sessions[0].CallTool(ctx, &mcp.CallToolParams{Name: "x"})
+	s.CallTool(ctx, &mcp.CallToolParams{Name: "y"})
+	cs, _ := mcp.NewClient(nil, nil).Connect(ctx, t, nil)
+	cs = other
+	cs.CallTool(ctx, &mcp.CallToolParams{Name: "z"})
+}
+""",
+        "b.go": """
+package main
+
+import (
+	"github.com/mark3labs/mcp-go/client"
+	"example.com/fake/mcp"
+)
+
+func f() {
+	c, _ := client.NewStdioMCPClient("s", nil)
+	c.CallTool(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "x"}})
+}
+""",
+    }
+    assert not [s for s in analyze_files(files) if s.semanticType == "mcp_call"]
+
+
+JAVA_CLIENT = """
+package demo;
+
+import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.client.McpAsyncClient;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.List;
+import java.util.Map;
+
+public class Calls {
+    private final McpAsyncClient async;
+
+    void run(McpClientTransport transport) {
+        var client = McpClient.sync(transport).build();
+        client.callTool(new McpSchema.CallToolRequest("add", Map.of("a", 1)));
+        client.readResource(new McpSchema.ReadResourceRequest("memo://insights"));
+        client.getPrompt(new McpSchema.GetPromptRequest("review", Map.of()));
+        client.callTool(McpSchema.CallToolRequest.builder().name("built").arguments(Map.of()).build());
+        client.callTool(new McpSchema.CallToolRequest(toolName, Map.of()));
+        this.async.callTool(new McpSchema.CallToolRequest(mapper, "json", "{}"));
+    }
+
+    void spring(List<McpSyncClient> clients) {
+        clients.get(0).callTool(new McpSchema.CallToolRequest("x", Map.of()));
+    }
+}
+"""
+
+
+def test_java_client_calls(analyze_files) -> None:
+    assert _calls(analyze_files({"Calls.java": JAVA_CLIENT})) == [
+        ("TOOL", "add", "java-mcp"),
+        ("RESOURCE", "memo://insights", "java-mcp"),
+        ("PROMPT", "review", "java-mcp"),
+        ("TOOL", "built", "java-mcp"),
+        ("TOOL", "json", "java-mcp"),
+    ]
+
+
+def test_java_client_only_file_has_no_framework(analyze_records) -> None:
+    assert analyze_records({"Calls.java": JAVA_CLIENT})["Calls.java"].framework is None
+
+
+def test_java_client_look_alikes(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class Other {
+    void f(SomeClient client, Object McpClient) {
+        client.callTool(new McpSchema.CallToolRequest("x", null));
+        var c = Factory.sync(t).build();
+        c.callTool(new McpSchema.CallToolRequest("y", null));
+    }
+}
+"""
+    assert not [s for s in analyze_files({"Other.java": src}) if s.semanticType == "mcp_call"]
+
+
+KOTLIN_CLIENT = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+import io.modelcontextprotocol.kotlin.sdk.types.*
+import io.modelcontextprotocol.client.McpClient
+import io.modelcontextprotocol.spec.McpSchema
+
+class App(private val transport: Any) {
+    private val mcp: Client = Client(clientInfo = Implementation(name = "app", version = "1"))
+
+    suspend fun run() {
+        mcp.callTool(name = "add", arguments = mapOf("a" to 1))
+        this.mcp.callTool("positional", mapOf())
+        mcp.readResource(ReadResourceRequest(ReadResourceRequestParams(uri = "memo://insights")))
+        mcp.getPrompt(GetPromptRequest(GetPromptRequestParams(name = "review")))
+        mcp.callTool(name = toolName, arguments = mapOf())
+        val sync = McpClient.sync(transport).build()
+        sync.callTool(McpSchema.CallToolRequest("java", mapOf()))
+    }
+}
+"""
+
+
+def test_kotlin_client_calls(analyze_files) -> None:
+    assert _calls(analyze_files({"App.kt": KOTLIN_CLIENT})) == [
+        ("TOOL", "add", "kotlin-mcp"),
+        ("TOOL", "positional", "kotlin-mcp"),
+        ("RESOURCE", "memo://insights", "kotlin-mcp"),
+        ("PROMPT", "review", "kotlin-mcp"),
+        ("TOOL", "java", "java-mcp"),
+    ]
+
+
+def test_kotlin_client_only_file_has_no_framework(analyze_records) -> None:
+    assert analyze_records({"App.kt": KOTLIN_CLIENT})["App.kt"].framework is None
+
+
+def test_kotlin_client_look_alikes(analyze_files) -> None:
+    """A ``Client`` not imported from the Kotlin SDK (Ktor's ``HttpClient`` is no client either)."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.spec.McpSchema
+import com.acme.Client
+
+val client = Client()
+suspend fun f() { client.callTool(name = "x", arguments = mapOf()) }
+"""
+    assert not [s for s in analyze_files({"Other.kt": src}) if s.semanticType == "mcp_call"]
+
+
+CSHARP_CLIENT = """
+using ModelContextProtocol.Client;
+
+public class App
+{
+    private readonly IMcpClient _typed;
+
+    public async Task RunAsync(IClientTransport transport)
+    {
+        var client = await McpClient.CreateAsync(transport);
+        var result = await client.CallToolAsync("echo", new Dictionary<string, object?>());
+        await client.ReadResourceAsync("memo://insights");
+        await client.ReadResourceAsync(new Uri("file:///logs/app.log"));
+        await client.GetPromptAsync(name: "review");
+        await client.CallToolAsync(toolName, null);
+        await _typed.CallToolAsync("typed");
+    }
+}
+"""
+
+
+def test_csharp_client_calls(analyze_files) -> None:
+    assert _calls(analyze_files({"App.cs": CSHARP_CLIENT})) == [
+        ("TOOL", "echo", "csharp-mcp"),
+        ("RESOURCE", "memo://insights", "csharp-mcp"),
+        ("RESOURCE", "file:///logs/app.log", "csharp-mcp"),
+        ("PROMPT", "review", "csharp-mcp"),
+        ("TOOL", "typed", "csharp-mcp"),
+    ]
+
+
+def test_csharp_client_only_file_has_no_framework(analyze_records) -> None:
+    assert analyze_records({"App.cs": CSHARP_CLIENT})["App.cs"].framework is None
+
+
+def test_csharp_client_look_alikes(analyze_files) -> None:
+    src = """
+using ModelContextProtocol.Client;
+
+public class Other
+{
+    public async Task F(SomeClient client)
+    {
+        await client.CallToolAsync("x");
+        var made = await Factory.CreateAsync(t);
+        await made.CallToolAsync("y");
+    }
+}
+"""
+    assert not [s for s in analyze_files({"Other.cs": src}) if s.semanticType == "mcp_call"]

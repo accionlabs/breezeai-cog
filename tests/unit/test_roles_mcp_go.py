@@ -273,10 +273,20 @@ func cfgHandler() {}
 
 def test_mcpgo_resources_with_no_tool(analyze_files) -> None:
     resources = _of(analyze_files({"main.go": MCPGO_RESOURCES}), "mcp_resource")
-    assert set(resources) == {"docs://readme", "users://{id}/profile", "odd://{literal}", "cfg://app"}
+    assert set(resources) == {
+        "docs://readme",
+        "users://{id}/profile",
+        "odd://{literal}",
+        "cfg://app",
+    }
     readme = resources["docs://readme"]
-    assert (readme.method, readme.description, readme.handler, readme.handlerLine, readme.params) == (
-        "RESOURCE", "The README", "readmeHandler", 21, [])
+    assert (
+        readme.method,
+        readme.description,
+        readme.handler,
+        readme.handlerLine,
+        readme.params,
+    ) == ("RESOURCE", "The README", "readmeHandler", 21, [])
     user = resources["users://{id}/profile"]
     assert (user.description, user.handler, user.handlerLine) == ("A user", "userHandler", 22)
     assert _params(user) == [("id", "string", True, None, None)]
@@ -312,7 +322,11 @@ def test_mcpgo_prompts_with_no_tool(analyze_files) -> None:
     assert set(prompts) == {"review", "simple", "opts"}
     review = prompts["review"]
     assert (review.method, review.description, review.handler, review.handlerLine) == (
-        "PROMPT", "Review code", "reviewHandler", 20)
+        "PROMPT",
+        "Review code",
+        "reviewHandler",
+        20,
+    )
     assert _params(review) == [
         ("code", None, True, None, "The code"),
         ("style", None, False, None, None),

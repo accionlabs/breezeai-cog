@@ -410,10 +410,19 @@ function readSearch() { return { contents: [] }; }
 
 def test_typescript_resources_with_no_tool(analyze_files) -> None:
     resources = _of(analyze_files({"srv.ts": TS_RESOURCES}), "mcp_resource")
-    assert set(resources) == {"config://app", "users://{id}", "file:///logs/app.log", "search://{?q}"}
+    assert set(resources) == {
+        "config://app",
+        "users://{id}",
+        "file:///logs/app.log",
+        "search://{?q}",
+    }
     config = resources["config://app"]
     assert (config.method, config.params, config.description, config.handler) == (
-        "RESOURCE", [], None, None)
+        "RESOURCE",
+        [],
+        None,
+        None,
+    )
     assert config.handlerLine == 6 and config.startLine == 6
     user = resources["users://{id}"]
     assert (user.description, user.handler, user.handlerLine) == ("A user", "readUser", 18)
@@ -458,7 +467,10 @@ def test_typescript_prompts_with_no_tool(analyze_files) -> None:
     ]
     explain = prompts["explain"]
     assert (explain.description, explain.handler, explain.handlerLine) == (
-        "Explain a topic", "explainHandler", 21)
+        "Explain a topic",
+        "explainHandler",
+        21,
+    )
     assert _params(explain) == [("topic", None, True, None, None)]
     assert prompts["shaped"].params is None  # a variable shape: unknown
 
@@ -529,7 +541,11 @@ def test_typescript_lowlevel_resources_and_prompts_with_no_tool(analyze_files) -
     assert set(resources) == {"console://logs", "test://static/{id}"}
     logs = resources["console://logs"]
     assert (logs.description, logs.handler, logs.handlerLine, logs.params) == (
-        "Console", "readResource", 37, [])
+        "Console",
+        "readResource",
+        37,
+        [],
+    )
     assert _params(resources["test://static/{id}"]) == [("id", "string", True, None, None)]
     assert resources["test://static/{id}"].handler == "readResource"
     prompts = _of(statements, "mcp_prompt")

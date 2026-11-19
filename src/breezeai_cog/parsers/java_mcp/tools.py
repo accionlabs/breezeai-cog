@@ -213,12 +213,19 @@ def _prompt_argument(node: Node, source: bytes) -> Parameter | None:
             return None
         calls = {method: args for method, args in chain[1]}
         builder_args = calls.get("builder") or []
-        if len(builder_args) != 1 or set(calls) - {"builder", "title", "description", "required", "build"}:
+        if len(builder_args) != 1 or set(calls) - {
+            "builder",
+            "title",
+            "description",
+            "required",
+            "build",
+        }:
             return None
+        desc_args, req_args = calls.get("description") or [], calls.get("required") or []
         values = {
             "name": builder_args[0],
-            "description": (calls.get("description") or [None])[0],
-            "required": (calls.get("required") or [None])[0],
+            "description": desc_args[0] if desc_args else None,
+            "required": req_args[0] if req_args else None,
         }
     name = java_string(values["name"], source)
     desc_node, req_node = values["description"], values["required"]
@@ -302,8 +309,10 @@ def _sdk_entries(dc: DetectContext) -> list[Emit]:
     """``Sync…`` / ``Async…`` ``ResourceSpecification`` / ``ResourceTemplateSpecification`` /
     ``PromptSpecification`` of the MCP Java SDK."""
     source = dc.source
-    if b"ResourceSpecification" not in source and b"ResourceTemplateSpecification" not in source and (
-        b"PromptSpecification" not in source
+    if (
+        b"ResourceSpecification" not in source
+        and b"ResourceTemplateSpecification" not in source
+        and (b"PromptSpecification" not in source)
     ):
         return []
     variables = _local_variables(dc.root, source)

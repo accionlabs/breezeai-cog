@@ -130,3 +130,29 @@ def test_fit_params_measures_json_bytes() -> None:
     fitted = fit_params(params)
     assert fitted is not None and params_json_bytes(fitted) <= 15 * 1024
     assert [p.description is not None for p in fitted] == [True] * 3 + [False] * 3
+
+
+def test_tool_resource_and_prompt_on_one_position_get_unique_ids() -> None:
+    """Every emit goes through ``emits.apply``: three records on one ``path:line:col`` get
+    ``#2`` / ``#3``."""
+    from breezeai_cog.parsers.emits import apply
+    from breezeai_cog.schemas import FileRecord
+
+    node, source = _node()
+    record = FileRecord(id="a.ts", path="a.ts", type="code", language="typescript", loc=1)
+    common = dict(
+        endpoint="x",
+        framework="typescript-mcp",
+        handler=None,
+        handler_line=1,
+        description=None,
+        params=[],
+    )
+    apply(
+        record,
+        [mcp_emit(node, source, kind=k, **common) for k in (TOOL, RESOURCE, PROMPT)],
+        source,
+        "a.ts",
+    )
+    assert [s.id for s in record.statements] == ["a.ts:1:0", "a.ts:1:0#2", "a.ts:1:0#3"]
+    assert [s.semanticType for s in record.statements] == ["mcp_tool", "mcp_resource", "mcp_prompt"]

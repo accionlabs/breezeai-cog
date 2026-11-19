@@ -308,7 +308,12 @@ def test_go_sdk_resources_with_no_tool(analyze_files) -> None:
     assert set(resources) == {"embedded:info", "users://{id}", "http://x/~{+path}"}
     info = resources["embedded:info"]
     assert (info.method, info.description, info.handler, info.handlerLine, info.params) == (
-        "RESOURCE", "Info", "readInfo", 15, [])
+        "RESOURCE",
+        "Info",
+        "readInfo",
+        15,
+        [],
+    )
     user = resources["users://{id}"]
     assert user.handler == "readUser" and _params(user) == [("id", "string", True, None, None)]
     assert resources["http://x/~{+path}"].params is None
@@ -362,3 +367,30 @@ func run(registry *Registry) {
 """
     statements = analyze_files({"main.go": src})
     assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+def test_go_sdk_resource_variable_read_only_when_its_sole_use_is_the_registration(
+    analyze_files,
+) -> None:
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func run(server *mcp.Server) {
+	kept := &mcp.Resource{URI: "kept://x", Name: "kept"}
+	server.AddResource(kept, h)
+	changed := &mcp.Resource{URI: "changed://x", Name: "changed"}
+	changed.URI = other
+	server.AddResource(changed, h)
+	p := &mcp.Prompt{Name: "aliased"}
+	alias := p
+	server.AddPrompt(p, h)
+	use(alias)
+}
+
+func h() {}
+"""
+    statements = analyze_files({"main.go": src})
+    assert set(_of(statements, "mcp_resource")) == {"kept://x"}
+    assert not _of(statements, "mcp_prompt")

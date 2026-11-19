@@ -337,7 +337,9 @@ def _prompt_arguments(node: Node | None, source: bytes, pkgs: set[str]) -> list[
         return None
     out: list[Parameter] = []
     for el in _args(node.child_by_field_name("body")):
-        value = el.named_children[0] if el.type == "literal_element" and el.named_children else el
+        value: Node | None = (
+            el.named_children[0] if el.type == "literal_element" and el.named_children else el
+        )
         _, value = _unwrap_ref(value)
         if value is not None and value.type == "composite_literal":
             if not _pkg_selector(value.child_by_field_name("type"), source, pkgs, "PromptArgument"):

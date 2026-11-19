@@ -865,8 +865,10 @@ def _prompt_argument(node: Node, source: bytes, aliases: dict[str, str]) -> Para
         if set(calls) - {"builder", "title", "description", "required", "build"}:
             return None
         name_node: Node | None = builder_args[0]
-        desc_node = (calls.get("description") or [None])[0]
-        req_node = (calls.get("required") or [None])[0]
+        desc_args = calls.get("description") or []
+        req_args = calls.get("required") or []
+        desc_node: Node | None = desc_args[0] if desc_args else None
+        req_node: Node | None = req_args[0] if req_args else None
     elif _type_callee(node, source, aliases) == "PromptArgument":
         args = kotlin_call_args(node, source)
         pos = _positional(args)
@@ -1032,9 +1034,13 @@ def _entries(dc: DetectContext) -> list[Emit]:
             entry = _KOTLIN_ADDERS[_callee_name(node, source)]
             framework = KOTLIN_MCP
             args = kotlin_call_args(node, source)
-            handler = next(
-                (v for k, v in reversed(args) if k is None and v.type == "lambda_literal"), None
-            ) or _named(args, "readHandler") or _named(args, "promptProvider")
+            handler = (
+                next(
+                    (v for k, v in reversed(args) if k is None and v.type == "lambda_literal"), None
+                )
+                or _named(args, "readHandler")
+                or _named(args, "promptProvider")
+            )
             pos = [v for k, v in args if k is None and v.type != "lambda_literal"]
             first = pos[0] if len(pos) == 1 and len(args) <= 2 else None
             if (
@@ -1043,8 +1049,10 @@ def _entries(dc: DetectContext) -> list[Emit]:
                 and _type_callee(first, source, aliases) == entry
             ):  # addPrompt(Prompt(…)) { … }
                 fields = _named_entry(kotlin_call_args(first, source), entry, source, aliases)
-            elif entry != "ResourceTemplate" or _named(args, "uriTemplate") is not None or (
-                len(pos) >= 2
+            elif (
+                entry != "ResourceTemplate"
+                or _named(args, "uriTemplate") is not None
+                or (len(pos) >= 2)
             ):
                 fields = _named_entry(args, entry, source, aliases)
             if handler is None:
@@ -1053,6 +1061,7 @@ def _entries(dc: DetectContext) -> list[Emit]:
             continue
         endpoint, description, params = fields
         handler_name, handler_line = _handler(handler, source, methods)
+        assert entry is not None
         found.append(
             mcp_emit(
                 node,

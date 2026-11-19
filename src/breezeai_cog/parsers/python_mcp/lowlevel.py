@@ -103,9 +103,7 @@ class _Kind:
     """One kind of thing a low-level server lists: its lister and dispatcher decorators, the
     SDK type of an entry, the list result type and its keyword."""
 
-    def __init__(
-        self, lister: str, dispatcher: str, entry: str, result: str, key: str
-    ) -> None:
+    def __init__(self, lister: str, dispatcher: str, entry: str, result: str, key: str) -> None:
         self.lister, self.dispatcher, self.entry = lister, dispatcher, entry
         self.result, self.key = result, key
 
@@ -426,7 +424,9 @@ def _url(node: Node | None, source: bytes) -> str | None:
     if node is not None and node.type == "call":
         fn = node.child_by_field_name("function")
         args = node.child_by_field_name("arguments")
-        items = [a for a in (args.named_children if args is not None else []) if a.type != "comment"]
+        items = [
+            a for a in (args.named_children if args is not None else []) if a.type != "comment"
+        ]
         if fn is None or node_text(fn, source).rsplit(".", 1)[-1] not in _URL_WRAPPERS:
             return None
         if len(items) != 1:
@@ -453,8 +453,10 @@ def _prompt_params(node: Node | None, source: bytes, arguments: set[str]) -> lis
         description = _string(desc_node, source) if desc_node is not None else None
         req = _kwarg(item, "required", source)
         required_text = node_text(req, source) if req is not None else "None"
-        if not name or required_text not in ("True", "False", "None") or (
-            desc_node is not None and desc_node.type != "none" and description is None
+        if (
+            not name
+            or required_text not in ("True", "False", "None")
+            or (desc_node is not None and desc_node.type != "none" and description is None)
         ):
             return None
         out.append(param(name, None, required=required_text == "True", description=description))

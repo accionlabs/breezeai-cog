@@ -329,8 +329,13 @@ def test_kotlin_sdk_resources_and_prompts_with_no_tool(analyze_files) -> None:
     resources = _of(statements, "mcp_resource")
     assert set(resources) == {"docs://readme", "file:///{literal}", "users://{id}"}
     readme = resources["docs://readme"]
-    assert (readme.framework, readme.method, readme.description, readme.handlerLine, readme.params) == (
-        "kotlin-mcp", "RESOURCE", "The README", 9, [])
+    assert (
+        readme.framework,
+        readme.method,
+        readme.description,
+        readme.handlerLine,
+        readme.params,
+    ) == ("kotlin-mcp", "RESOURCE", "The README", 9, [])
     assert resources["file:///{literal}"].description == "A file"
     assert resources["file:///{literal}"].params == []
     assert _params(resources["users://{id}"]) == [("id", "string", True, None, None)]
@@ -338,7 +343,10 @@ def test_kotlin_sdk_resources_and_prompts_with_no_tool(analyze_files) -> None:
     assert set(prompts) == {"review", "dyn"}
     review = prompts["review"]
     assert (review.framework, review.description, review.handlerLine) == (
-        "kotlin-mcp", "Review code", 19)
+        "kotlin-mcp",
+        "Review code",
+        19,
+    )
     assert _params(review) == [
         ("code", None, True, None, "The code"),
         ("style", None, False, None, None),
@@ -364,7 +372,11 @@ def test_kotlin_java_sdk_resources_and_prompts(analyze_files) -> None:
     statements = analyze_files({"Specs.kt": KOTLIN_JAVA_SDK_ENTRIES})
     memo = _of(statements, "mcp_resource")["memo://insights"]
     assert (memo.framework, memo.description, memo.params, memo.handlerLine) == (
-        "java-mcp", "Memo", [], 8)
+        "java-mcp",
+        "Memo",
+        [],
+        8,
+    )
     review = _of(statements, "mcp_prompt")["review"]
     assert review.framework == "java-mcp" and review.description == "Review"
     assert _params(review) == [("code", None, True, None, "The code")]

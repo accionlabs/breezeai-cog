@@ -207,7 +207,11 @@ def _walk(node: Node) -> list[Node]:
 
 
 #: The SDK's attributes → the kind of record they declare.
-_ATTRIBUTES = (("McpServerTool", TOOL), ("McpServerResource", RESOURCE), ("McpServerPrompt", PROMPT))
+_ATTRIBUTES = (
+    ("McpServerTool", TOOL),
+    ("McpServerResource", RESOURCE),
+    ("McpServerPrompt", PROMPT),
+)
 
 
 def _detect(dc: DetectContext) -> Detection | None:

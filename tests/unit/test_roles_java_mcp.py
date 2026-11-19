@@ -262,7 +262,12 @@ def test_java_resources_with_no_tool(analyze_files) -> None:
     assert set(resources) == {"memo://insights", "users://{id}", "file:///{literal}"}
     memo = resources["memo://insights"]
     assert (memo.method, memo.description, memo.handler, memo.handlerLine, memo.params) == (
-        "RESOURCE", "The memo", None, 12, [])
+        "RESOURCE",
+        "The memo",
+        None,
+        12,
+        [],
+    )
     user = resources["users://{id}"]
     assert (user.description, user.handler, user.handlerLine) == ("A user", "readUser", 29)
     assert _params(user) == [("id", "string", True, None, None)]
@@ -304,7 +309,11 @@ def test_java_prompts_with_no_tool(analyze_files) -> None:
     assert set(prompts) == {"review", "greet", "dyn"}
     review = prompts["review"]
     assert (review.method, review.description, review.handler, review.handlerLine) == (
-        "PROMPT", "Review code", "render", 26)
+        "PROMPT",
+        "Review code",
+        "render",
+        26,
+    )
     assert _params(review) == [
         ("code", None, True, None, "The code"),
         ("style", None, False, None, None),
@@ -330,7 +339,7 @@ public class Other {
 
 
 def test_java_sdk_1_tool_builder_names_the_tool(analyze_files) -> None:
-    src = '''
+    src = """
 package demo;
 
 import io.modelcontextprotocol.server.McpServerFeatures;
@@ -346,7 +355,7 @@ public class Tools {
 
     Object run(Object exchange, Object req) { return null; }
 }
-'''
+"""
     tools = _tools(analyze_files({"Tools.java": src}))
     assert set(tools) == {"plain", "mapped", "json"}
     assert tools["plain"].params == [] and tools["plain"].description == "Plain"
