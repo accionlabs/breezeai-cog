@@ -53,20 +53,75 @@ def _endpoints(analyze_files, files: dict[str, str]) -> dict[str, list[str | Non
 
 # --- the module's settings, whichever Struts file declares them -------------------------------
 
-def test_a_constant_in_another_struts_file_of_the_module_applies(analyze_files) -> None:
+def test_a_constant_in_an_included_file_applies_to_the_configuration(analyze_files) -> None:
     eps = _endpoints(analyze_files, {
-        f"{RES}/struts.xml": _xml(_ACTION),
-        f"{RES}/struts-constants.xml": _xml("", _ext("do")),  # not included: still the module's
-    })
+        f"{RES}/struts.xml": _xml(_ACTION, '<include file="struts-constants.xml"/>\n'),
+        f"{RES}/struts-constants.xml": _xml("", '<include file="struts.xml"/>\n' + _ext("do")),
+    })  # the include cycle is harmless
     assert eps == {f"{RES}/struts.xml": ["/n/a.do"]}
 
 
-def test_two_struts_files_that_disagree_leave_the_extension_unknown(analyze_files) -> None:
+def test_a_struts_file_nothing_includes_is_not_loaded(analyze_files) -> None:
+    # Struts loads `struts.xml` and what it includes; a stray file's constant is not the app's.
+    eps = _endpoints(analyze_files, {
+        f"{RES}/struts.xml": _xml(_ACTION),
+        f"{RES}/struts-old.xml": _xml("", _ext("html")),
+        "conf/struts-extra.xml": _xml("", _ext("xyz")),
+    })
+    assert eps == {f"{RES}/struts.xml": ["/n/a.action"]}
+
+
+def test_a_stray_file_of_a_module_is_not_the_repositorys_configuration(analyze_files) -> None:
+    eps = _endpoints(analyze_files, {
+        "shop/pom.xml": "<project/>",
+        f"shop/{RES}/struts.xml": _xml(_ACTION),
+        "shop/conf/extra.xml": _xml("", _ext("xyz")),  # outside src/main, inside the module
+    })
+    assert eps == {f"shop/{RES}/struts.xml": ["/n/a.action"]}
+
+
+def test_a_stray_file_does_not_contradict_the_configuration(analyze_files) -> None:
     eps = _endpoints(analyze_files, {
         f"{RES}/struts.xml": _xml(_ACTION, _ext("do")),
         f"{RES}/struts-old.xml": _xml("", _ext("html")),
     })
+    assert eps == {f"{RES}/struts.xml": ["/n/a.do"]}
+
+
+def test_two_included_files_that_disagree_leave_the_extension_unknown(analyze_files) -> None:
+    eps = _endpoints(analyze_files, {
+        f"{RES}/struts.xml": _xml(_ACTION, '<include file="a.xml"/>\n<include file="b.xml"/>\n'),
+        f"{RES}/a.xml": _xml("", _ext("do")),
+        f"{RES}/b.xml": _xml("", _ext("html")),
+    })
     assert eps == {f"{RES}/struts.xml": [None]}  # never one of the two
+
+
+def test_a_filter_naming_its_own_configuration_files_counts_every_struts_file(analyze_files) -> None:
+    # Which files the `config` init-param loads is not read, so any Struts file may be one.
+    web = _WEB_XML.format("x").replace("struts.action.extension", "config")
+    files = {f"{RES}/struts.xml": _xml(_ACTION), f"{RES}/custom.xml": _xml("", _ext("do")),
+             f"{WEB}/web.xml": web}
+    assert _endpoints(analyze_files, files) == {f"{RES}/struts.xml": ["/n/a.do"]}
+    files[f"{RES}/other.xml"] = _xml("", _ext("html"))
+    assert _endpoints(analyze_files, files) == {f"{RES}/struts.xml": [None]}
+
+
+def test_a_module_without_a_struts_xml_counts_every_struts_file(analyze_files) -> None:
+    eps = _endpoints(analyze_files, {
+        f"{RES}/app-actions.xml": _xml(_ACTION),
+        f"{RES}/app-constants.xml": _xml("", _ext("do")),
+    })
+    assert eps == {f"{RES}/app-actions.xml": ["/n/a.do"]}
+
+
+def test_struts_properties_counts_beside_the_struts_xml_only(analyze_files) -> None:
+    eps = _endpoints(analyze_files, {
+        f"{RES}/struts.xml": _xml(_ACTION, '<include file="sub/more.xml"/>\n' + _ext("do")),
+        f"{RES}/sub/more.xml": _xml(""),
+        f"{RES}/sub/struts.properties": "struts.action.extension=html\n",  # not the classpath root
+    })
+    assert eps == {f"{RES}/struts.xml": ["/n/a.do"]}
 
 
 def test_web_xml_overrides_the_xml_constant(analyze_files) -> None:
