@@ -302,8 +302,11 @@ The full list is in [`docs/architecture/statement-model.md` §9](../../docs/arch
 The ones most often broken:
 
 - **`nodeType` is the raw tree-sitter `node.type`** of the node the statement came from, in the
-  file's own (host-language) tree. A detection with no node of its own there — a route built
-  from an annotation, a config entry, a file name — uses `synthetic`. Never invent a label
+  file's own (host-language) tree. An annotation or decorator is a node there (`annotation`,
+  `marker_annotation`, `decorator`), and so is a config entry in a dict (`pair`): a route read
+  from one takes that type. Only a detection with no node of its own there — a route given by a
+  file name, a whole-file statement, a directive the grammar does not parse — uses `synthetic`.
+  Check what tree-sitter returns before choosing `synthetic`. Never invent a label
   (`graphql_field`, `page_directive`). For an embedded DSL (SQL in a string, SDL in a
   `` gql`…` `` template) use the host node that wraps it, never the embedded grammar's type.
   The kind of thing is carried by `semanticType` / `routeKind`, not by `nodeType`.
