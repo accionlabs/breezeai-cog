@@ -865,6 +865,8 @@ import (
         'req := mcp.CallToolRequest{}\n\tfor _, n := range ns { req.Params.Name = "loop" }\n\tc.CallTool(ctx, req)',
         'req := mcp.CallToolRequest{}\n\tswitch k { case 1: req.Params.Name = "case" }\n\tc.CallTool(ctx, req)',
         'req := mcp.CallToolRequest{}\n\tset := func() { req.Params.Name = "closure" }\n\tset()\n\tc.CallTool(ctx, req)',
+        # in a `switch` header: only an `if`'s initializer is followed
+        'req := mcp.CallToolRequest{}\n\tswitch req.Params.Name = "hdr"; k { default: }\n\tc.CallTool(ctx, req)',
         # the call in another block than the declaration
         'req := mcp.CallToolRequest{}\n\tif admin { req.Params.Name = "inner"; c.CallTool(ctx, req) }',
         # the resource / prompt variants go the same way

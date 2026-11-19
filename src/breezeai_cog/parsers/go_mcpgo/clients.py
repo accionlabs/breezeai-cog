@@ -179,17 +179,14 @@ def _home(node: Node) -> Node | None:
     """The statement list ``node`` runs straight through in, or None when an ``if`` / ``for`` /
     ``switch`` / ``select`` / func literal sits between them (an ``if``'s initializer runs once,
     unconditionally, in the enclosing list)."""
-    cur = node
-    while cur.parent is not None:
-        parent = cur.parent
-        if parent.type in ("statement_list", "block"):
-            return parent
+    cur, parent = node, node.parent
+    while parent is not None and parent.type not in ("statement_list", "block"):
         if parent.type in _BRANCHES and not (
             parent.type == "if_statement" and parent.child_by_field_name("initializer") == cur
         ):
             return None
-        cur = parent
-    return None
+        cur, parent = parent, parent.parent
+    return parent
 
 
 def _request_endpoint(
