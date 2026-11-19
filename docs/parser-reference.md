@@ -509,7 +509,9 @@ def _detect(dc: DetectContext) -> Detection | None:
   the pipeline hand those files to this language's index too. They reach only the facts that
   list them — never the language's own indexing — parsed with `grammar` (or `root=None` without
   one); the owning parser still emits their records. `csharp_wcf/svc_hosts.py`
-  (`wcf.svc-hosts`, `.svc` → C#) is the worked example.
+  (`wcf.svc-hosts`, `.svc` → C#) is the worked example. With `path_only=True`, `collect` gets
+  only the path: the file is not read (`source` is `b""`, no tree) and `gate` is not applied —
+  for a fact decided by where a file is, such as `next.apps` counting `.mdx` paths.
 - The fact is stored as `index.facts[<fact name>]`, built once before parsing, read-only after.
   `index_fact()` returns `None` without an index (single-file parsing), so the reader must cope.
 - Wiring (a prefix, a guard, a registration, a host from another construct) is collected as the

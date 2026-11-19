@@ -19,7 +19,7 @@ from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
 from ..parsers.additive import fact_sources
 from ..parsers.contract import validate as validate_contract
-from ..parsers.markdown.classify import AGENT_DOCUMENT_KINDS
+from ..parsers.markdown.classify import AGENT_DOCUMENT_KINDS, DOCUMENT_STATEMENT_TYPES
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
@@ -328,10 +328,14 @@ def _assemble(
         )
         is_doc = record.language in DOC_LANGUAGES
         # A document is any record read as one (``category: documentation``) — an ``.mdx`` file
-        # too, which is code (its ESM lines count as LOC) with a Markdown document in it.
+        # too, which is code (its ESM lines count as LOC) with a Markdown document in it. Only
+        # its document statement counts as text: not a page record a detector added beside it.
         if (record.metadata or {}).get("category") == "documentation":
             markdown_docs += 1
-            markdown_chars += sum(len(st.text) for st in record.statements)
+            markdown_chars += sum(
+                len(st.text) for st in record.statements
+                if st.semanticType in DOCUMENT_STATEMENT_TYPES
+            )
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)

@@ -262,6 +262,29 @@ def test_mdx_documents_count_in_the_document_totals(tmp_path, monkeypatch) -> No
     assert meta.totalLinesOfCode == 1
 
 
+def test_a_page_record_does_not_count_as_document_text(tmp_path, monkeypatch) -> None:
+    """``markdown_chars`` counts an ``.mdx`` file's document statement, not the Next.js page
+    record beside it."""
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+    from breezeai_cog.emit.sinks import MemorySink
+
+    repo = tmp_path / "repo"
+    (repo / "app" / "about").mkdir(parents=True)
+    (repo / "next.config.mjs").write_text(
+        "const nextConfig = { pageExtensions: ['tsx', 'mdx'] };\nexport default nextConfig;\n"
+    )
+    page = "import x from 'x'\n\n# About\n\nText.\n"
+    (repo / "app" / "about" / "page.mdx").write_text(page)
+    log = _Info()
+    monkeypatch.setattr(pipeline, "log", log)
+    sink = MemorySink()
+    pipeline.run(repo, Settings(jobs=1), sink)
+    [rec] = [r for r in sink.records if r.path == "app/about/page.mdx"]
+    assert sorted(st.semanticType or "" for st in rec.statements) == ["doc", "route"]
+    assert log.events["analysis.complete"]["markdown_chars"] == len(page)
+
+
 def test_front_matter_is_skipped(capture) -> None:
     recs = capture(
         {
