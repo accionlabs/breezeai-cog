@@ -661,3 +661,54 @@ const arrow = async () => ({ content: [] });
     assert tools["top"].handlerLine == 20
     assert tools["exported"].handlerLine == 21
     assert tools["arrow"].handlerLine == 22
+
+
+def test_typescript_handler_name_bound_by_an_enclosing_scope_is_not_the_top_level_function(
+    analyze_files,
+) -> None:
+    """A handler name that a parameter, a local, a ``catch`` or loop variable or a nested
+    declaration binds at the call is that local, not the top-level function of the name: no
+    line (``tool`` / ``registerTool``, a wrapper's argument, and the low-level dispatcher). The
+    top-level function still gives its line where nothing binds the name."""
+    src = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+async function lookup(args) { return { content: [] }; }
+async function dispatch(request) { return { content: [] }; }
+
+function reg(mcp: McpServer, lookup: any) {
+  mcp.tool("param", {}, lookup);
+}
+function reg2(mcp: McpServer) {
+  const lookup = makeHandler();
+  mcp.tool("localconst", {}, lookup);
+}
+function reg3(s: Server, dispatch: any) {
+  s.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "low" }] }));
+  s.setRequestHandler(CallToolRequestSchema, dispatch);
+}
+const reg4 = (mcp: McpServer, { lookup }) => mcp.tool("destructured", {}, lookup);
+function reg6(mcp: McpServer, all) {
+  for (const lookup of all) { mcp.registerTool("forof", { description: "d" }, lookup); }
+  try { run(); } catch (lookup) { mcp.tool("caught", {}, lookup); }
+  mcp.tool("wrapped", {}, withErrors(lookup));
+  class lookup {}
+}
+const mcp = new McpServer({ name: "y", version: "1" });
+mcp.tool("top", {}, lookup);
+mcp.tool("topwrapped", {}, withErrors(lookup));
+function reg7(m: McpServer, other) {
+  m.tool("unbound", {}, lookup);
+}
+"""
+    tools = _tools(analyze_files({"src/index.ts": src}))
+    for name in ("param", "localconst", "destructured", "forof", "caught"):
+        assert (tools[name].handler, tools[name].handlerLine) == ("lookup", None), name
+    assert (tools["low"].handler, tools["low"].handlerLine) == ("dispatch", None)
+    # A wrapper of a local is not looked into: no handler, the wrapper's line.
+    assert (tools["wrapped"].handler, tools["wrapped"].handlerLine) == (None, 24)
+    assert (tools["top"].handler, tools["top"].handlerLine) == ("lookup", 6)
+    assert (tools["topwrapped"].handler, tools["topwrapped"].handlerLine) == ("lookup", 6)
+    assert (tools["unbound"].handler, tools["unbound"].handlerLine) == ("lookup", 6)

@@ -31,12 +31,17 @@ MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
 * As in Java (``java_mcp``): the tool is a ``Tool`` constructor or builder, inline or a
   ``val`` / ``var`` declared once in the file; a non-literal name → no record; ``params`` from a
   JSON-schema string literal (``.trimIndent()`` allowed), else None (unknown); a callable
-  reference (``::calc``, ``this::calc``) names the handler, a lambda gives only its line.
+  reference (``::calc``, ``this::calc``) names the handler, a lambda gives only its line. The
+  handler's line: for ``::calc`` the file's one top-level ``fun calc`` (none when ``calc`` is
+  imported, or a class or block around the reference declares its own ``calc``), for
+  ``this::calc`` the one ``calc`` of the class or object around it (none inside a lambda or an
+  object literal, whose ``this`` may be another); ``Type::calc`` and ``expr::calc`` give none.
 * The server builder's shortcut ``McpServer.sync(…)….tool(tool) { … }`` / ``.toolCall(tool,
   handler)`` (also ``async``) is read the same way, only on a chain that starts at
   ``McpServer.sync(`` / ``.async(`` with ``McpServer`` imported from
   ``io.modelcontextprotocol.server`` (by name, ``.*`` or an ``as`` alias, and no other
-  ``McpServer`` imported) or written fully qualified; ``.tools(spec…)`` is not read.
+  ``McpServer`` imported; by ``.*`` only when the repository index shows no ``McpServer`` in
+  the file's own package) or written fully qualified; ``.tools(spec…)`` is not read.
 
 Resources and prompts, of either SDK::
 
@@ -90,6 +95,7 @@ from ..jvm_mcp_common import (
     kotlin_string,
     kotlin_suffix_name,
     kotlin_type_name,
+    index_types,
     mcp_server_names,
     shortcut_emit,
     walk,
@@ -278,32 +284,116 @@ def _tool_fields(
     return name, description, params
 
 
+_CLASS_SCOPES = ("class_declaration", "object_declaration", "companion_object")
+
+
+def _fun_name(decl: Node, source: bytes) -> str | None:
+    """The name of a ``function_declaration`` that is not an extension (``fun String.calc()``
+    is never what a bare ``::calc`` or ``this::calc`` reaches)."""
+    if decl.child_by_field_name("receiver") is not None:
+        return None
+    ident = next((c for c in decl.named_children if c.type == "simple_identifier"), None)
+    return node_text(ident, source) if ident is not None else None
+
+
+def _declared_funs(holder: Node | None, name: str, source: bytes) -> list[Node]:
+    """The functions called ``name`` declared directly in ``holder`` (a file, a class body, a
+    block), extensions included (a same-named extension makes the name ambiguous)."""
+    out: list[Node] = []
+    for c in holder.named_children if holder is not None else ():
+        if c.type != "function_declaration":
+            continue
+        ident = next((x for x in c.named_children if x.type == "simple_identifier"), None)
+        if ident is not None and node_text(ident, source) == name:
+            out.append(c)
+    return out
+
+
+class _HandlerSites:
+    """Where a callable reference passed as a handler is declared: a bare ``::calc`` is a
+    top-level function of the file (one of the name, not an extension, and ``calc`` not
+    imported), unless a class or block around the reference declares a ``calc`` of its own;
+    ``this::calc`` is a method of the class or object around it. Anything else gives no line."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        self.root = root
+        self.source = source
+        self.imported: set[str] = set()
+        headers = [
+            h
+            for top in root.named_children
+            for h in (top.named_children if top.type == "import_list" else [top])
+            if h.type == "import_header"
+        ]
+        for header in headers:
+            alias = next((c for c in header.named_children if c.type == "import_alias"), None)
+            path = next((c for c in header.named_children if c.type == "identifier"), None)
+            if alias is not None:
+                self.imported.add(node_text(alias, source).split()[-1])
+            elif path is not None and not any(
+                c.type == "wildcard_import" for c in header.named_children
+            ):
+                self.imported.add(node_text(path, source).rsplit(".", 1)[-1].strip())
+
+    def top_level(self, ref: Node, name: str) -> int | None:
+        if name in self.imported:
+            return None  # the imported function, declared elsewhere
+        node = ref.parent
+        while node is not None and node.type != "source_file":
+            if node.type in ("class_body", "statements") and _declared_funs(
+                node, name, self.source
+            ):
+                return None  # a member or local function of the name is nearer
+            node = node.parent
+        found = _declared_funs(self.root, name, self.source)
+        if len(found) != 1 or _fun_name(found[0], self.source) != name:
+            return None
+        return found[0].start_point[0] + 1
+
+    def own_method(self, ref: Node, name: str) -> int | None:
+        node = ref.parent
+        while node is not None and node.type not in _CLASS_SCOPES:
+            if node.type in ("lambda_literal", "anonymous_function", "object_literal"):
+                return None  # `this` may be the lambda's receiver or the object literal
+            node = node.parent
+        if node is None:
+            return None
+        body = next((c for c in node.named_children if c.type == "class_body"), None)
+        found = _declared_funs(body, name, self.source)
+        if len(found) != 1 or _fun_name(found[0], self.source) != name:
+            return None
+        return found[0].start_point[0] + 1
+
+
 def _handler(
-    node: Node | None, source: bytes, methods: dict[str, int | None]
+    node: Node | None, source: bytes, sites: _HandlerSites
 ) -> tuple[str | None, int | None]:
-    """A lambda → its line; a callable reference (``::calc``, ``this::calc``) → its name."""
+    """A lambda → its line; a callable reference (``::calc``, ``this::calc``) → its name, and the
+    line :class:`_HandlerSites` finds for it; ``Type::calc`` / ``expr::calc`` → the name only."""
     if node is None:
         return None, None
     if node.type == "lambda_literal":
         return None, node.start_point[0] + 1
-    name = ""
     if node.type == "callable_reference":
         ident = [c for c in node.named_children if c.type == "simple_identifier"]
         name = node_text(ident[-1], source) if ident else ""
-    elif node.type == "navigation_expression":
+        if not name:
+            return None, None
+        if len(node.named_children) != 1:
+            return name, None  # `Type::calc`
+        return name, sites.top_level(node, name)
+    if node.type == "navigation_expression":
         suffix = node.named_children[-1] if node.named_children else None
-        if suffix is not None and node_text(suffix, source).startswith("::"):
-            name = kotlin_suffix_name(node, source)
-    if name:
-        return name, methods.get(name)
+        if suffix is None or not node_text(suffix, source).startswith("::"):
+            return None, None
+        name = kotlin_suffix_name(node, source)
+        if not name:
+            return None, None
+        receiver = node.named_children[0]
+        if receiver.type == "this_expression" and not receiver.named_children:
+            return name, sites.own_method(node, name)
+        return name, None  # `this@Outer::calc`, `expr::calc`
     return None, None
-
-
-def _methods(dc: DetectContext) -> dict[str, int | None]:
-    lines: dict[str, list[int]] = {}
-    for f in dc.record.functions:
-        lines.setdefault(f.name, []).append(f.startLine)
-    return {name: ls[0] if len(ls) == 1 else None for name, ls in lines.items()}
 
 
 def _sdk_tools(dc: DetectContext) -> list[Emit]:
@@ -312,7 +402,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
     if b"io.modelcontextprotocol" not in source or b"ToolSpecification" not in source:
         return []
     variables = _local_variables(dc.root, source)
-    methods = _methods(dc)
+    sites = _HandlerSites(dc.root, source)
     aliases = kotlin_aliases(source)
     found: list[Emit] = []
     for node in walk(dc.root):
@@ -344,7 +434,7 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
         if fields is None:
             continue
         name, description, params = fields
-        handler_name, handler_line = _handler(handler, source, methods)
+        handler_name, handler_line = _handler(handler, source, sites)
         found.append(
             tool_emit(
                 node,
@@ -406,9 +496,9 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
     ):
         return []
     variables = _local_variables(dc.root, source)
-    methods = _methods(dc)
+    sites = _HandlerSites(dc.root, source)
     aliases = kotlin_aliases(source)
-    servers = mcp_server_names(source)
+    servers = mcp_server_names(source, index_types(dc.ctx))
     found: list[Emit] = []
     rooted: dict[tuple[int, int], bool] = {}
     for node in walk(dc.root):
@@ -431,7 +521,7 @@ def _shortcut_tools(dc: DetectContext) -> list[Emit]:
             (c for c in suffix.named_children if c.type == "simple_identifier"), suffix
         )
         found.append(
-            shortcut_emit(node, name_node, fields, _handler(pos[1], source, methods), source)
+            shortcut_emit(node, name_node, fields, _handler(pos[1], source, sites), source)
         )
     return found
 
@@ -532,7 +622,7 @@ def _kotlin_sdk_tool(
     pos: list[Node],
     handler: Node | None,
     source: bytes,
-    methods: dict[str, int | None],
+    sites: _HandlerSites,
     aliases: dict[str, str],
 ) -> Emit | None:
     """One Kotlin SDK tool: ``fields`` are ``addTool``'s (or its ``Tool(…)``'s) arguments, ``pos``
@@ -545,7 +635,7 @@ def _kotlin_sdk_tool(
     )
     schema = _named(fields, "inputSchema") or (pos[2] if len(pos) > 2 else None)
     params = _kotlin_schema_params(schema, source, aliases) if schema is not None else []
-    handler_name, handler_line = _handler(handler, source, methods)
+    handler_name, handler_line = _handler(handler, source, sites)
     return tool_emit(
         node,
         source,
@@ -731,7 +821,9 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
     it.
 
     A class's instance property is not visible inside a nested class that is not ``inner`` (nor
-    a nested ``object`` / companion): Kotlin resolves the name further out there. Not modelled:
+    a nested ``object`` / companion): Kotlin resolves the name further out there. A property of
+    the ``companion object`` of a class around ``use`` (and nearer than the declaration found)
+    is what the name resolves to: then None, the companion's list is not read. Not modelled:
     extension receivers, inherited members and ``with(x) { … }`` / ``apply`` implicit receivers
     (a name read through one of them is taken for the lexical declaration)."""
     best: Node | None = None
@@ -756,8 +848,27 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
     while node is not None and node != stop:
         if _binds(node, name, source):
             return None  # a nearer binding hides it
+        if node.type == "class_declaration" and _companion_declares(node, name, source):
+            return None  # the companion's member is nearer than any declaration further out
         node = node.parent
     return best
+
+
+def _companion_declares(cls: Node, name: str, source: bytes) -> bool:
+    """True when the ``companion object`` of the class ``cls`` declares a property ``name``: the
+    name resolves to it anywhere in the class (and the classes nested in it) unless the class
+    itself declares one. Which list it holds is not read: the name is then left unresolved."""
+    body = next(
+        (c for c in cls.named_children if c.type in ("class_body", "enum_class_body")), None
+    )
+    for member in body.named_children if body is not None else ():
+        if member.type != "companion_object":
+            continue
+        cbody = next((c for c in member.named_children if c.type == "class_body"), None)
+        for decl in cbody.named_children if cbody is not None else ():
+            if decl.type == "property_declaration" and name in _declared_names(decl, source):
+                return True
+    return False
 
 
 def _behind_nested_class(use: Node, body: Node, source: bytes) -> bool:
@@ -942,7 +1053,7 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
     source = dc.source
     if b"io.modelcontextprotocol.kotlin.sdk.server" not in source or b"addTool" not in source:
         return []
-    methods = _methods(dc)
+    sites = _HandlerSites(dc.root, source)
     aliases = kotlin_aliases(source)
     found: list[Emit] = []
     registered: set[int] = set()
@@ -974,7 +1085,7 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
                     kotlin_call_args(first, source),
                     [],
                 )  # addTool(Tool(name = …, …)) { … }
-            emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, methods, aliases))
+            emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, sites, aliases))
         elif method == "addTools":
             # A list read from a `val` or a function is new: its failure keeps the other tools.
             listed = guarded(dc.path, _registered_tools, node, source, aliases, names)
@@ -989,7 +1100,7 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
                         [],
                         handler,
                         source,
-                        methods,
+                        sites,
                         aliases,
                     )
                 )
@@ -1181,7 +1292,7 @@ def _entries(dc: DetectContext) -> list[Emit]:
     if not java and not kotlin_sdk:
         return []
     variables = _local_variables(dc.root, source) if java else {}
-    methods = _methods(dc)
+    sites = _HandlerSites(dc.root, source)
     aliases = kotlin_aliases(source)
     found: list[Emit] = []
     for node in walk(dc.root):
@@ -1228,7 +1339,7 @@ def _entries(dc: DetectContext) -> list[Emit]:
         if fields is None:
             continue
         endpoint, description, params = fields
-        handler_name, handler_line = _handler(handler, source, methods)
+        handler_name, handler_line = _handler(handler, source, sites)
         assert entry is not None
         found.append(
             mcp_emit(

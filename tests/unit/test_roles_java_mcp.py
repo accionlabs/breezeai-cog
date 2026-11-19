@@ -466,3 +466,48 @@ public class App {{
 {declaration}
 """
     assert set(_tools(analyze_files({"src/main/java/demo/App.java": src}))) == {"qualified"}
+
+
+@pytest.mark.parametrize(
+    ("other_file", "imports", "expected"),
+    [
+        # a same-package McpServer in another file wins over the SDK's `*`
+        (
+            ("src/main/java/demo/McpServer.java", "package demo;\npublic class McpServer {}\n"),
+            "import io.modelcontextprotocol.server.*;",
+            set(),
+        ),
+        # imported by name, the SDK's class wins over the same-package one
+        (
+            ("src/main/java/demo/McpServer.java", "package demo;\npublic class McpServer {}\n"),
+            "import io.modelcontextprotocol.server.McpServer;",
+            {"calc"},
+        ),
+        # a McpServer of another package is not visible: the `*` import is the SDK's
+        (
+            ("src/main/java/other/McpServer.java", "package other;\npublic class McpServer {}\n"),
+            "import io.modelcontextprotocol.server.*;",
+            {"calc"},
+        ),
+    ],
+)
+def test_mcp_java_sdk_wildcard_mcp_server_loses_to_a_same_package_class(
+    analyze_files, other_file, imports, expected
+) -> None:
+    """In Java a type of the file's own package hides one imported by ``*``: with only
+    ``io.modelcontextprotocol.server.*``, a ``McpServer`` declared in another file of the same
+    package is what the bare name means."""
+    src = f"""package demo;
+
+{imports}
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class App {{
+    void start(Object transport) {{
+        McpServer.sync(transport).tool(new McpSchema.Tool("calc", "C", "{{}}"), (e, a) -> null).build();
+    }}
+}}
+"""
+    path, other = other_file
+    tools = _tools(analyze_files({"src/main/java/demo/App.java": src, path: other}))
+    assert set(tools) == expected

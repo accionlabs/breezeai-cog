@@ -586,3 +586,150 @@ class Outer {
         if s.semanticType == "mcp_tool"
     ]
     assert sorted(t.endpoint for t in tools) == ["local", "outer", "top"]
+
+
+def test_kotlin_add_tools_name_a_companion_declares_is_not_the_top_level_list(
+    analyze_files,
+) -> None:
+    """In a class whose ``companion object`` declares ``tools``, the name resolves to the
+    companion's property (also from a nested class), not to a top-level ``tools``: its list is
+    not read, so no record. Inside the companion its own list is read, and a class with no such
+    companion still reads the top-level list."""
+    header = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+val tools = listOf(RegisteredTool(Tool(name = "outer")) { _ -> null })
+"""
+    companion = """
+class A {
+    companion object {
+        val tools = listOf(RegisteredTool(Tool(name = "comp")) { _ -> null })
+        fun g(s: Server) { s.addTools(tools) }
+    }
+    fun f(s: Server) { s.addTools(tools) }
+    class N { fun h(s: Server) { s.addTools(tools) } }
+}
+"""
+    plain = """
+class B {
+    fun f(s: Server) { s.addTools(tools) }
+}
+"""
+
+    def endpoints(body: str) -> list[str | None]:
+        stmts = analyze_files({"src/main/kotlin/demo/A.kt": header + body})
+        return sorted(s.endpoint for s in stmts if s.semanticType == "mcp_tool")
+
+    assert endpoints(companion) == ["comp"]
+    assert endpoints(plain) == ["outer"]
+
+
+def test_kotlin_callable_reference_handler_line_is_never_another_class_method(
+    analyze_files,
+) -> None:
+    """A bare ``::calc`` is a top-level function: an imported ``calc`` or a method of another
+    class never lends its line; ``this::calc`` is a method of the class around it only. The
+    file's own top-level function and the enclosing class's method still give their lines."""
+    imported = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+import com.acme.handlers.calc
+
+class Other {
+    fun calc(e: Any, a: Any): Any? = null
+}
+
+fun start() {
+    val spec = McpServerFeatures.SyncToolSpecification(McpSchema.Tool("calc", "C", "{}"), ::calc)
+}
+"""
+    tool = _tools(analyze_files({"src/main/kotlin/demo/A.kt": imported}))["calc"]
+    assert (tool.handler, tool.handlerLine) == ("calc", None)
+
+    own = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+class Other {
+    fun calc(e: Any, a: Any): Any? = null
+    fun echo(e: Any, a: Any): Any? = null
+}
+
+fun calc(e: Any, a: Any): Any? = null
+
+fun start() {
+    val a = McpServerFeatures.SyncToolSpecification(McpSchema.Tool("top", "C", "{}"), ::calc)
+    val b = McpServerFeatures.SyncToolSpecification(McpSchema.Tool("other_only", "C", "{}"), ::echo)
+}
+
+class Mine {
+    fun echo(e: Any, a: Any): Any? = null
+    fun specs() = listOf(
+        McpServerFeatures.SyncToolSpecification(McpSchema.Tool("mine", "C", "{}"), this::echo),
+        McpServerFeatures.SyncToolSpecification(McpSchema.Tool("not_mine", "C", "{}"), this::calc),
+        McpServerFeatures.SyncToolSpecification(McpSchema.Tool("typed", "C", "{}"), Other::echo),
+    )
+}
+"""
+    tools = _tools(analyze_files({"src/main/kotlin/demo/B.kt": own}))
+    assert (tools["top"].handler, tools["top"].handlerLine) == ("calc", 12)
+    assert (tools["other_only"].handler, tools["other_only"].handlerLine) == ("echo", None)
+    assert (tools["mine"].handler, tools["mine"].handlerLine) == ("echo", 20)
+    assert (tools["not_mine"].handler, tools["not_mine"].handlerLine) == ("calc", None)
+    assert (tools["typed"].handler, tools["typed"].handlerLine) == ("echo", None)
+
+
+@pytest.mark.parametrize(
+    ("other_file", "imports", "expected"),
+    [
+        # a same-package McpServer in another file wins over the SDK's `*`
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.*",
+            set(),
+        ),
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nobject McpServer\n"),
+            "import io.modelcontextprotocol.server.*",
+            set(),
+        ),
+        # imported by name, the SDK's class wins over the same-package one
+        (
+            ("src/main/kotlin/demo/McpServer.kt", "package demo\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.McpServer",
+            {"calc"},
+        ),
+        # a McpServer of another package is not visible: the `*` import is the SDK's
+        (
+            ("src/main/kotlin/other/McpServer.kt", "package other\n\nclass McpServer\n"),
+            "import io.modelcontextprotocol.server.*",
+            {"calc"},
+        ),
+    ],
+)
+def test_kotlin_wildcard_mcp_server_loses_to_a_same_package_class(
+    analyze_files, other_file, imports, expected
+) -> None:
+    """In Kotlin a type of the file's own package hides one imported by ``*``: with only
+    ``io.modelcontextprotocol.server.*``, a ``McpServer`` declared in another file of the same
+    package is what the bare name means."""
+    src = f"""package demo
+
+{imports}
+import io.modelcontextprotocol.spec.McpSchema
+
+fun build(transport: Any) {{
+    McpServer.sync(transport).tool(McpSchema.Tool("calc", "C", "{{}}")) {{ _, _ -> null }}.build()
+}}
+"""
+    path, other = other_file
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Build.kt": src, path: other}))
+    assert set(tools) == expected

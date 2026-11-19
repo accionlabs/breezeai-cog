@@ -63,6 +63,7 @@ from ..emits import Emit
 from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
 from ..typescript.declarations import import_bindings
 from ..treesitter import node_text
+from .scopes import function_line
 
 #: ``(call, name, source, typed, built) → shadowed?`` — ``tools._shadowed``.
 Shadowed = Callable[
@@ -403,7 +404,7 @@ def detect_lowlevel(
                 handler_line = cb.start_point[0] + 1
             elif cb.type == "identifier":
                 handler = node_text(cb, source)
-                handler_line = functions.get(handler)
+                handler_line = function_line(cb, source, functions)
         for result in _returned_objects(fn):
             entries = _unparen(_pairs(result, source).get(array_key))
             if entries is None or entries.type != "array":

@@ -37,12 +37,12 @@ from ..mcp_common import call_emit
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings
 from .lowlevel import _pairs, _sdk_names, _string, _unparen, _walk
+from .scopes import binds as _binds
 from .tools import (
     _FUNCTION_SCOPES,
     _PARAMETERS,
     FRAMEWORK,
     BlockDeclarations,
-    _binds,
     block_declarations,
     bound_names,
 )
