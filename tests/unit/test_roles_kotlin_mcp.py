@@ -466,3 +466,62 @@ class B {
 
     assert endpoints(companion) == ["comp"]
     assert endpoints(plain) == ["outer"]
+
+
+def test_kotlin_callable_reference_handler_line_is_never_another_class_method(
+    analyze_files,
+) -> None:
+    """A bare ``::calc`` is a top-level function: an imported ``calc`` or a method of another
+    class never lends its line; ``this::calc`` is a method of the class around it only. The
+    file's own top-level function and the enclosing class's method still give their lines."""
+    imported = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+import com.acme.handlers.calc
+
+class Other {
+    fun calc(e: Any, a: Any): Any? = null
+}
+
+fun start() {
+    val spec = McpServerFeatures.SyncToolSpecification(McpSchema.Tool("calc", "C", "{}"), ::calc)
+}
+"""
+    tool = _tools(analyze_files({"src/main/kotlin/demo/A.kt": imported}))["calc"]
+    assert (tool.handler, tool.handlerLine) == ("calc", None)
+
+    own = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+class Other {
+    fun calc(e: Any, a: Any): Any? = null
+    fun echo(e: Any, a: Any): Any? = null
+}
+
+fun calc(e: Any, a: Any): Any? = null
+
+fun start() {
+    val a = McpServerFeatures.SyncToolSpecification(McpSchema.Tool("top", "C", "{}"), ::calc)
+    val b = McpServerFeatures.SyncToolSpecification(McpSchema.Tool("other_only", "C", "{}"), ::echo)
+}
+
+class Mine {
+    fun echo(e: Any, a: Any): Any? = null
+    fun specs() = listOf(
+        McpServerFeatures.SyncToolSpecification(McpSchema.Tool("mine", "C", "{}"), this::echo),
+        McpServerFeatures.SyncToolSpecification(McpSchema.Tool("not_mine", "C", "{}"), this::calc),
+        McpServerFeatures.SyncToolSpecification(McpSchema.Tool("typed", "C", "{}"), Other::echo),
+    )
+}
+"""
+    tools = _tools(analyze_files({"src/main/kotlin/demo/B.kt": own}))
+    assert (tools["top"].handler, tools["top"].handlerLine) == ("calc", 12)
+    assert (tools["other_only"].handler, tools["other_only"].handlerLine) == ("echo", None)
+    assert (tools["mine"].handler, tools["mine"].handlerLine) == ("echo", 20)
+    assert (tools["not_mine"].handler, tools["not_mine"].handlerLine) == ("calc", None)
+    assert (tools["typed"].handler, tools["typed"].handlerLine) == ("echo", None)
