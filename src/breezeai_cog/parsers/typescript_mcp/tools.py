@@ -21,8 +21,10 @@
 * ``params`` — ``[]`` only for no schema or an empty shape ``{}``; a schema that cannot be read
   whole (a variable, ``{ id: idSchema }``, a spread, ``MySchema.shape``) → ``None`` (unknown),
   never a partial list.
-* ``handler`` — a named callback (its line when declared in this file); an inline callback has
-  no name, only its ``handlerLine``. A wrapper call is looked into only for a function literal,
+* ``handler`` — a named callback (its line when it is a function declared at the top of this
+  file and no enclosing scope binds the name first: a parameter, a local, a nested declaration,
+  a ``catch`` or loop variable gives no line, see :mod:`.scopes`); an inline callback has no
+  name, only its ``handlerLine``. A wrapper call is looked into only for a function literal,
   or a function declared in this file passed as its only argument
   (``withErrors(namedHandler)``); any other wrapper (``createHandler(apiClient)``) gives no
   ``handler``, only the wrapper's line.
@@ -45,6 +47,8 @@ from ..mcp_common import function_lines, guarded, param, tool_emit
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings, top_level_declarations
 from .lowlevel import detect_lowlevel_tools
+from .scopes import binds as _binds
+from .scopes import function_line
 
 FRAMEWORK = "typescript-mcp"
 _CALLBACKS = (
@@ -162,21 +166,6 @@ def _new_mcp_server(node: Node | None, source: bytes) -> bool:
         return False
     ctor = node.child_by_field_name("constructor")
     return ctor is not None and node_text(ctor, source).rsplit(".", 1)[-1] == "McpServer"
-
-
-def _binds(pattern: Node | None, name: str, source: bytes) -> bool:
-    """True when the binding pattern ``pattern`` (a name, a destructuring) declares ``name``."""
-    if pattern is None:
-        return False
-    if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
-        return node_text(pattern, source) == name
-    if pattern.type in ("assignment_pattern", "object_assignment_pattern"):
-        return _binds(pattern.child_by_field_name("left"), name, source)
-    if pattern.type == "pair_pattern":
-        return _binds(pattern.child_by_field_name("value"), name, source)
-    if pattern.type in ("object_pattern", "array_pattern", "rest_pattern"):
-        return any(_binds(c, name, source) for c in pattern.named_children)
-    return False
 
 
 def _shadowed(
@@ -429,7 +418,7 @@ def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
         if len(args) != 1:
             return cb
         (arg,) = args
-        if arg.type == "identifier" and node_text(arg, source) in functions:
+        if arg.type == "identifier" and function_line(arg, source, functions) is not None:
             return arg
         if arg.type != "call_expression":
             return cb
@@ -438,7 +427,9 @@ def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
 
 
 def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | None, int | None]:
-    if cb.type in ("identifier", "member_expression"):
+    if cb.type == "identifier":
+        return node_text(cb, source), function_line(cb, source, functions)
+    if cb.type == "member_expression":
         name = node_text(cb, source)
         return name, functions.get(name)
     return None, cb.start_point[0] + 1

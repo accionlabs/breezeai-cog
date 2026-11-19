@@ -45,6 +45,7 @@ from ..emits import Emit
 from ..mcp_common import tool_emit
 from ..typescript.declarations import import_bindings
 from ..treesitter import node_text
+from .scopes import function_line
 
 #: ``(call, name, source, typed, built) → shadowed?`` — ``tools._shadowed``.
 Shadowed = Callable[
@@ -361,7 +362,7 @@ def detect_lowlevel_tools(
                 handler_line = cb.start_point[0] + 1
             elif cb.type == "identifier":
                 handler = node_text(cb, source)
-                handler_line = functions.get(handler)
+                handler_line = function_line(cb, source, functions)
         for result in _returned_objects(fn):
             tools = _unparen(_pairs(result, source).get("tools"))
             if tools is None or tools.type != "array":
