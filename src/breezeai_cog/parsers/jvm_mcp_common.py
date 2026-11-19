@@ -190,14 +190,52 @@ _DECLARES_MCP_SERVER = re.compile(
 _PACKAGE = re.compile(rb"^[ \t]*package[ \t]+([\w.]*\w)", re.MULTILINE)
 
 
+#: Fact: the ``package.McpServer`` names that Java and Kotlin files declare (a class,
+#: interface, object or ``typealias``, at any depth). Registered for both languages, each also
+#: reading the other's files, so a Java file sees a Kotlin ``McpServer`` of its package and a
+#: Kotlin file a Java one; a language's own ``package.Type`` index has no Kotlin typealias and
+#: none of the other language's types.
+MCP_SERVER_TYPES = "jvm-mcp.mcp-server-types"
+
+
+def _collect_mcp_server_type(root: Any, source: bytes, rel: str, repo_root: Path | None) -> Any:
+    if not _DECLARES_MCP_SERVER.search(source):
+        return None
+    pkg = _PACKAGE.search(source)
+    return f"{pkg.group(1).decode()}.McpServer" if pkg is not None else "McpServer"
+
+
+def _resolve_mcp_server_types(values: list[Any], index: object) -> frozenset[str]:
+    return frozenset(values)
+
+
+for _language, _other in (("java", (".kt", ".kts")), ("kotlin", (".java",))):
+    register_fact(
+        FactSpec(
+            name=MCP_SERVER_TYPES,
+            language=_language,
+            gate=(b"McpServer",),
+            collect=_collect_mcp_server_type,
+            resolve=_resolve_mcp_server_types,
+            sources=_other,
+            grammar=None,
+        )
+    )
+
+
 def index_types(ctx: Any) -> list[Any]:
-    """The ``package.Type → path`` maps of the indexes a parse context holds (its own language's
-    and the related languages'); empty when no index was built."""
+    """The ``package.Type`` collections a parse context holds: the ``package.Type → path`` maps
+    of its own language's and the related languages' indexes, and the Java and Kotlin
+    ``McpServer`` declarations (fact :data:`MCP_SERVER_TYPES`); empty when no index was
+    built."""
     out: list[Any] = []
     for idx in (ctx.resolution_index, *ctx.related_indexes.values()):
         fqcn = idx if isinstance(idx, dict) else getattr(idx, "fqcn", None)
         if isinstance(fqcn, dict):
             out.append(fqcn)
+    declared = index_fact(ctx.resolution_index, MCP_SERVER_TYPES)
+    if declared is not None:
+        out.append(declared)
     return out
 
 
@@ -208,9 +246,10 @@ def mcp_server_names(source: bytes, types: list[Any]) -> frozenset[str]:
     not, shadows the import); a Kotlin ``import … as`` alias of it.
 
     With only the package's ``*`` imported, a type ``McpServer`` of the file's own package (in
-    another file) wins over the wildcard in Java and Kotlin: bare ``McpServer`` is the SDK's only
-    when ``types`` (the indexes' ``package.Type`` maps, :func:`index_types`) are there and none
-    has ``<package>.McpServer``. Without an index it is not proven."""
+    another file, Java or Kotlin, a Kotlin ``typealias`` included) wins over the wildcard in
+    Java and Kotlin: bare ``McpServer`` is the SDK's only when ``types`` (the indexes'
+    ``package.Type`` collections, :func:`index_types`) are there and none has
+    ``<package>.McpServer``. Without an index it is not proven."""
     names = {MCP_SERVER}
     by_name = wildcard = other = False
     if _DECLARES_MCP_SERVER.search(source):

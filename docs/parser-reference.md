@@ -630,7 +630,8 @@ emitted once, by the package of the framework its construct belongs to.
 Code two packages share is in a common module next to them, not in either package:
 `python_mcp_common.py` (the `@<server>.tool` reader and the `mcp.servers` fact, for
 `python_fastmcp` and `python_mcp`), `jvm_mcp_common.py` (the `spring-ai.mcp-server` fact, the
-JSON-schema text reader, the `McpServer` shortcut record and the string-literal readers, for the
+`jvm-mcp.mcp-server-types` fact — the `package.McpServer` types Java and Kotlin files declare, a
+Kotlin `typealias` included, each language reading the other's files — the JSON-schema text reader, the `McpServer` shortcut record and the string-literal readers, for the
 four Java / Kotlin packages) and `go_mcp_common.py` (Go string literals and import names, for
 `go_mcpgo` and `go_mcp`). The Python, Go, Java and Kotlin readers turn a JSON-schema literal into `params` with
 `mcp_common.schema_params` (a schema without `properties` → `[]`). TypeScript and C# keep their
