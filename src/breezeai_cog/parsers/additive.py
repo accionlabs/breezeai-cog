@@ -290,6 +290,24 @@ def split_fact_sources(language: str, files: list[Path]) -> tuple[list[Path], li
     return own, foreign
 
 
+class _CollectFailed:
+    """The type of :data:`COLLECT_FAILED`; pickled by name, so it stays the one instance when a
+    worker process sends it back."""
+
+    __slots__ = ()
+
+    def __reduce__(self) -> str:
+        return "COLLECT_FAILED"
+
+    def __repr__(self) -> str:
+        return "COLLECT_FAILED"
+
+
+#: Collected in place of a fact's value for a file whose ``collect`` raised: the fact is then
+#: dropped for the language (:func:`resolve_additive`), never resolved from the other files.
+COLLECT_FAILED = _CollectFailed()
+
+
 def _collect_source_one(args: tuple[str, str, str, str]) -> dict[str, Any]:
     """Collect every fact of ``language`` that reads this fact-source file (picklable worker)."""
     language, file_s, rel, repo_root_s = args
@@ -306,13 +324,19 @@ def _collect_source_one(args: tuple[str, str, str, str]) -> dict[str, Any]:
             if spec.grammar is not None and spec.grammar not in roots:
                 from .treesitter import parse_source
                 roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
-            value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
-                                 source, rel, Path(repo_root_s))
-        except Exception as exc:  # a fact never takes the index down: this file adds nothing
+        except Exception as exc:  # a file that cannot be parsed adds nothing, like an own file
             from ..logging import get_logger
             get_logger("breezeai_cog.index").warning(
                 "index.fact.skipped", path=rel, fact=spec.name, error=str(exc))
             continue
+        try:
+            value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
+                                 source, rel, Path(repo_root_s))
+        except Exception as exc:  # a fact never takes the index down; this one is dropped
+            from ..logging import get_logger
+            get_logger("breezeai_cog.index").warning(
+                "index.fact.skipped", path=rel, fact=spec.name, error=str(exc))
+            value = COLLECT_FAILED
         if value is not None:
             out[spec.name] = value
     return out
@@ -376,7 +400,8 @@ def collect_additive(
 ) -> dict[str, Any]:
     """Run every fact ``collect`` registered for ``language`` on one file, from the language's
     ``build_index`` per-file pass. Returns fact name → collected value, for the facts whose
-    gate matched and that found something."""
+    gate matched and that found something, and :data:`COLLECT_FAILED` for a fact whose
+    ``collect`` raised (the fact is then dropped: :func:`resolve_additive`)."""
     out: dict[str, Any] = {}
     for spec in facts_for(language):
         if not any(g in source for g in spec.gate):
@@ -390,7 +415,7 @@ def collect_additive(
             get_logger("breezeai_cog.index").warning(
                 "index.fact.skipped", path=rel, fact=spec.name,
                 error=f"{type(exc).__name__}: {exc}"[:500])
-            continue
+            value = COLLECT_FAILED
         if value is not None:
             out[spec.name] = value
     return out
@@ -400,9 +425,18 @@ def resolve_additive(language: str, collected: dict[str, list[Any]], index: Any)
     """Resolve every fact for ``language`` once, after the language's index is reduced.
     ``collected`` maps fact name → its per-file values in file order. Returns fact name →
     fact (a fact that resolved to ``None`` is left out), to be stored on the index for
-    :func:`index_fact`."""
-    facts = {spec.name: spec.resolve(collected.get(spec.name, []), index)
-             for spec in facts_for(language)}
+    :func:`index_fact`. A fact whose ``collect`` failed on any file (:data:`COLLECT_FAILED`) is
+    left out too: resolved from the other files alone it could read as complete and be wrong
+    (a router mount missing gives routes without their prefix), so its readers see no fact."""
+    facts: dict[str, Any] = {}
+    for spec in facts_for(language):
+        values = collected.get(spec.name, [])
+        if any(v is COLLECT_FAILED for v in values):
+            from ..logging import get_logger
+            get_logger("breezeai_cog.index").warning(
+                "index.fact.dropped", language=language, fact=spec.name)
+            continue
+        facts[spec.name] = spec.resolve(values, index)
     return {name: fact for name, fact in facts.items() if fact is not None}
 
 
