@@ -88,11 +88,10 @@ def test_no_statement_without_statement_capture() -> None:
     assert rec.statements == [] and rec.metadata["kind"] == "skill"
 
 
-def test_markdown_owns_md_mdx_mdc_and_readme_rst() -> None:
+def test_markdown_owns_md_mdc_and_readme_rst() -> None:
     registry.discover_builtin()
     for path in (
         "a/notes.md",
-        "page.mdx",
         ".cursor/rules/x.mdc",
         "README.md",
         "README.rst",
@@ -166,7 +165,6 @@ def test_markdown_owns_md_mdx_mdc_and_readme_rst() -> None:
         ("adr/overview.md", "# About our ADRs\n", "doc"),
         ("tools/adr/index.md", "# Index\n", "doc"),
         ("adr/template.md", "# T\n## Status\n## Decision\n", "doc"),
-        ("page.mdx", "# Page\n<Comp />\n", "doc"),
     ],
 )
 def test_kind(path: str, text: str, kind: str) -> None:
@@ -846,8 +844,9 @@ def test_prose_env_pair_inside_inline_code_is_masked_once() -> None:
 
 def test_upper_case_markdown_suffixes_are_claimed(analyze_files) -> None:
     registry.discover_builtin()
-    for path in ("README.MD", "CHANGELOG.MD", "docs/Guide.Md", "docs/page.MDX", "rules/x.MDC"):
+    for path in ("README.MD", "CHANGELOG.MD", "docs/Guide.Md", "rules/x.MDC"):
         assert registry.select(path, b"# x\n").name == "markdown", path
+    assert all(p.name != "markdown" for p in registry.parsers_for("docs/page.MDX"))
     assert _kind("README.MD") == "readme" and _kind("CHANGELOG.MD") == "changelog"
     assert all(p.name != "markdown" for p in registry.parsers_for("src/app.TS"))
     statements = analyze_files({"README.MD": "# Hi\n", "CHANGELOG.MD": "# 1.0\n"})

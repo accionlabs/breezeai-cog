@@ -457,7 +457,7 @@ register_detector(Detector(
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.
-- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `vb`, `java`, `kotlin`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`); `order` must be
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `vb`, `java`, `kotlin`, `python`, `scala`, `php`, `go`, `c`, `cpp`, `cuda`, `mdx`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
@@ -508,8 +508,11 @@ def _detect(dc: DetectContext) -> Detection | None:
 - **Files another parser owns.** `sources=(".svc",)` (and optionally `grammar="graphql"`) makes
   the pipeline hand those files to this language's index too. They reach only the facts that
   list them — never the language's own indexing — parsed with `grammar` (or `root=None` without
-  one); the owning parser still emits their records. `csharp_wcf/svc_hosts.py`
-  (`wcf.svc-hosts`, `.svc` → C#) is the worked example.
+  one); the owning parser still emits their records. `dotnet_hosts.py`
+  (`dotnet.host-files`, `.svc` / `.asmx` / `.ashx` → C# and VB) is the worked example. With
+  `path_only=True`, `collect` gets only the path: the file is not read (`source` is `b""`, no
+  tree) and `gate` is not applied — for a fact decided by where a file is, such as `next.apps`
+  counting `.mdx` paths.
 - The fact is stored as `index.facts[<fact name>]`, built once before parsing, read-only after.
   `index_fact()` returns `None` without an index (single-file parsing), so the reader must cope.
 - Wiring (a prefix, a guard, a registration, a host from another construct) is collected as the
@@ -533,8 +536,10 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 
 ### Document parser: Markdown (`parsers/markdown/`)
 Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
-project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`, `.mdx`,
+project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`,
 `.mdc` (in any case: `README.MD`), `README.rst` and `.cursorrules`; it reads text and never builds a tree.
+`.mdx` is owned by the MDX parser (below), which reads its prose through this parser's
+`read_document`.
 
 - **Record.** One `type="config"` `FileRecord` per file (`language` = `markdown` or `rst`), so a
   document never counts as an analyzed language and adds no lines of code — in the full scan
@@ -566,8 +571,8 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 | `agent` | `*.agent.md`; or `agents/*.md` with `name` + `description` under `.claude/`, in a plugin root's `agents/`, or with an agent key (`tools`, `model`, `color`) |
 | `command` | `.claude/commands/*.md`, `.cursor/commands/*.md`, `.github/prompts/*.prompt.md`; a plugin root's `commands/*.md`; or `commands/*.md` with a command key (`argument-hint`, `allowed-tools`, …) |
 | `agent_instructions` | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md` (in that exact case: `docs/agents.md` is a `doc`), `.github/copilot-instructions.md`, `.cursorrules`, any `.mdc` (Cursor rule) |
-| `readme` | `README.md` / `.mdx` / `.rst` |
-| `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md` / `.mdx`) |
+| `readme` | `README.md` / `.rst` |
+| `changelog` | `CHANGELOG`, `HISTORY`, `RELEASES` (`.md`) |
 | `adr` | under `docs/adr/` or `docs/decisions/`; under another `adr/`, named `NNNN-*.md` or with `## Status` and `## Decision`; elsewhere `NNNN-*.md` with both headings. Never a folder's `index` / `README` or a `*template*` file |
 | `doc` | anything else |
 
@@ -604,6 +609,40 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   `# Deploy with API_TOKEN=x` keeps no secret in `metadata.headings` either.
 - **Volume.** Every Markdown file the scan keeps becomes a File node, so a docs-heavy
   repository can leave prose folders it does not need in the graph out with `.repoignore`.
+
+### Language parser: MDX (`parsers/mdx/`)
+`MdxParser` (`name = "mdx"`) owns `.mdx` in any case. An MDX file is Markdown with JSX and ESM
+`import` / `export` blocks, so it gets both readings:
+
+- **Record.** One `type="code"`, `language="mdx"` `FileRecord`, with `importFiles` /
+  `externalImports` / `exports` from the ESM blocks, resolved like a `.tsx` file's (relative
+  paths, `index` files, tsconfig / Vite aliases from the TypeScript index via
+  `related_languages`).
+- **Document.** The prose is read by the Markdown parser's `read_document`, so `metadata` and
+  the whole-file `doc` / `readme` / `changelog` / … statement are what the same text in an
+  `.md` file gives (front matter, title, headings, secrets masked). ESM lines are left out of
+  the outline: a `#` line in an `export` template literal is not a heading. The statement is
+  added before the detectors run, so it keeps the id `<path>:1:0` and a Next.js page record
+  at the same spot gets `<path>:1:0#2`.
+- **How it is read.** There is no MDX grammar, and tree-sitter-markdown (CommonMark: indented
+  code blocks, no JSX) would misread MDX, so the block structure — fences, JSX tags, `{…}`
+  expressions, code spans, HTML comments — is found by a scanner (`esm.py`). Only the ESM code
+  is parsed by tree-sitter (`tsx`), in a shadow of the file with everything else blanked, so
+  lines and columns are the file's own. A paragraph led by `import` / `export` is a block only
+  when it parses and holds nothing but `import` / `export` statements; anything else is prose.
+  These block parses are bounded (see [architecture §11](architecture.md#11-performance-model)).
+- **Scope.** The ESM code is read for its imports and export names only: `export function
+  Hero() { … }` gets no Function record (Vue's `<script>` gets full TypeScript extraction).
+  `loc` counts only the ESM lines that parse — prose is a document, not lines of code (JSP,
+  Razor and WebForms count the whole file, markup included).
+- **Failures.** A parse that times out keeps the File record and logs `mdx.parse_timeout`
+  once per stage. `stage: block`: that block and the rest of the file are not probed (their
+  imports are missing) and the document has no headings, since which lines are code is
+  unknown. `stage: file`: the shadow parse timed out and no import is read. A file whose block
+  budget is spent logs `mdx.esm_parse_budget_reached`.
+- **Detectors.** `run_additive("mdx", …)`: a framework that serves `.mdx` files registers a
+  `Gate("mdx", …)` detector in its own package (Next.js: `typescript_nextjs/mdx_pages.py`,
+  see [Next.js MDX pages](entry-point-roles/nextjs.md#mdx-pages)).
 
 ### MCP tool detectors (one package per framework)
 A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,

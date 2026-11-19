@@ -124,6 +124,16 @@ def _inserted_scope(inner: Node | None) -> Node | None:
     return None
 
 
+def qualified_name_node(node: Node) -> Node | None:
+    """The declared name of a ``qualified_identifier`` (``m`` in ``A::B::m``). The grammar
+    nests a deep qualification as scope ``A`` / name ``B::m``, so the ``name`` field is
+    followed until it is no longer qualified."""
+    name = node.child_by_field_name("name")
+    while name is not None and name.type == "qualified_identifier":
+        name = name.child_by_field_name("name")
+    return name
+
+
 def is_inserted_scope(inner: Node | None) -> bool:
     """Whether a function's ``Scope::name`` is a type and a name the grammar joined
     (:func:`_inserted_scope`): a free function, not a method of ``Scope``."""
@@ -238,11 +248,13 @@ def _callee(call: Node, source: bytes) -> tuple[str, str | None] | None:
         receiver = node_text(obj, source) if obj is not None else None
         return node_text(field, source), receiver
     if fn.type == "qualified_identifier":
-        name = fn.child_by_field_name("name")
-        scope = fn.child_by_field_name("scope")
+        # `A::B::m()` → name `m`, receiver the whole scope `A::B` (`::m()` has no scope).
+        name = qualified_name_node(fn)
         if name is None:
             return None
-        return node_text(name, source), node_text(scope, source) if scope is not None else None
+        scope = source[fn.start_byte:name.start_byte].decode("utf-8", "replace")
+        scope = scope.rstrip().removesuffix("::").rstrip()
+        return node_text(name, source), scope or None
     return None
 
 
@@ -381,7 +393,7 @@ def _add_def_name(fn: Node, source: bytes, names: set[str]) -> None:
     elif inner.type == "identifier":
         names.add(node_text(inner, source))
     elif inner.type == "qualified_identifier":
-        nm = inner.child_by_field_name("name")
+        nm = qualified_name_node(inner)
         if nm is not None:
             names.add(node_text(nm, source))
 
@@ -1115,17 +1127,21 @@ def build_function(
 ) -> tuple[Function, list[Statement]]:
     """A ``function_definition`` → a ``Function`` (+ its flat statements). ``kind`` is
     ``"function"`` for a free function or ``"method"`` for an out-of-class ``Class::method``
-    definition; ``class_name`` qualifies the id (and, for a method, is the declaring class).
+    definition (``"constructor"`` when named after its class); ``class_name`` qualifies the
+    id (and, for a method, is the declaring class). The name is the declared name alone,
+    however deeply the definition is qualified.
     ``read`` carries a name a macro moved and whether the return type is known."""
     fd = function_declarator_of(node.child_by_field_name("declarator"))
     inner = function_name_node(fd)
     if inner is not None and inner.type == "qualified_identifier":
-        nm = inner.child_by_field_name("name")
+        nm = qualified_name_node(inner)
         name = node_text(nm, source) if nm is not None else ""
     else:
         name = node_text(inner, source) if inner is not None else ""
     if read.name is not None:
         name = read.name
+    if kind == "method" and class_name and name == class_name.split("<", 1)[0].strip():
+        kind = "constructor"  # an out-of-class `Cls::Cls(…)`, as its in-class declaration
 
     start, end = line_span(node)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
