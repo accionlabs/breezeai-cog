@@ -872,6 +872,9 @@ import (
         # the resource / prompt variants go the same way
         'req := mcp.ReadResourceRequest{}\n\tif admin { req.Params.URI = "memo://x" }\n\tc.ReadResource(ctx, req)',
         'req := mcp.GetPromptRequest{}\n\tc.GetPrompt(ctx, req)\n\treq.Params.Name = "late"',
+        # a `goto` jumps over the write: the call may send no name
+        'req := mcp.CallToolRequest{}\n\tif admin { goto send }\n\treq.Params.Name = "add"\nsend:\n\tc.CallTool(ctx, req)',
+        'req := mcp.CallToolRequest{}\n\tif admin { goto send }\n\treq.Params.Name = "add"\n\tsend: c.CallTool(ctx, req)',
     ],
 )
 def test_mcpgo_request_name_write_must_precede_the_call_unconditionally(

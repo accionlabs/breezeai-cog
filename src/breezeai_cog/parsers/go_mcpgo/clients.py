@@ -19,13 +19,16 @@
   variable of the function declared once; for a variable, its ``Params.Name`` may instead be set
   by one ``req.Params.Name = "…"`` (the only such write) that runs before the call on every path
   — straight in the statement list that declares the request and makes the call, ahead of the
-  call, with no ``if`` / ``for`` / ``switch`` / ``select`` / func literal around it — and the
-  variable must be passed to this one call only. Anything else → no record.
+  call, with no ``if`` / ``for`` / ``switch`` / ``select`` / func literal around it and no
+  ``goto`` anywhere in the function — and the variable must be passed to this one call only.
+  Anything else → no record.
 * The record is the call's own statement, with no handler; a client-only file gets no file-level
   framework.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from tree_sitter import Node
 
@@ -65,6 +68,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         return None
     cache: dict[tuple[int, int], dict[str, list[Binding]]] = {}
     idents: dict[tuple[int, int], dict[str, list[Node]]] = {}
+    jumps: dict[tuple[int, int], bool] = {}
 
     def bindings(fn: Node) -> dict[str, list[Binding]]:
         key = (fn.start_byte, fn.end_byte)
@@ -82,6 +86,13 @@ def _detect(dc: DetectContext) -> Detection | None:
                     found.setdefault(node_text(n, source), []).append(n)
             idents[key] = found
         return idents[key]
+
+    def has_goto(fn: Node) -> bool:
+        """The function holds a ``goto``, which may jump over a ``Params`` write."""
+        key = (fn.start_byte, fn.end_byte)
+        if key not in jumps:
+            jumps[key] = any(n.type == "goto_statement" for n in walk(fn))
+        return jumps[key]
 
     def is_client(binding: Binding) -> bool:
         value, type_node = binding
@@ -113,7 +124,9 @@ def _detect(dc: DetectContext) -> Detection | None:
         args = call_args(call)
         if len(args) != 2:
             continue
-        endpoint = _request_endpoint(args[1], kind, uses(fn), bindings(fn), source, mcp)
+        endpoint = _request_endpoint(
+            args[1], kind, uses(fn), bindings(fn), source, mcp, lambda: has_goto(fn)
+        )
         if endpoint:
             emits.append(
                 call_emit(call, source, method=kind[0], endpoint=endpoint, framework=FRAMEWORK)
@@ -196,6 +209,7 @@ def _request_endpoint(
     bindings: dict[str, list[Binding]],
     source: bytes,
     mcp: set[str],
+    has_goto: Callable[[], bool],
 ) -> str | None:
     if arg.type != "identifier":
         ok, value = _params_value(arg, kind, source, mcp)
@@ -253,10 +267,12 @@ def _request_endpoint(
         if value is not None or len(writes) != 1:
             return None
         # The write runs on every path to the call, before it: it sits straight in the statement
-        # list that declares the request and makes the call, ahead of the call.
+        # list that declares the request and makes the call, ahead of the call, and no `goto` in
+        # the function can jump over it.
         write, home = writes[0], _home(writes[0])
         if (
             write.start_byte >= arg.start_byte
+            or has_goto()
             or declared is None
             or home is None
             or home != _home(declared)
