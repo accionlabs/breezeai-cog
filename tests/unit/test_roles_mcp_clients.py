@@ -1031,6 +1031,58 @@ async function g(x: number) {
     ]
 
 
+# ── TypeScript: a function or class declared in a block is not a client ─────
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "function client() {}",
+        "function* client() {}",
+        "async function client() {}",
+        "class client {}",
+        "abstract class client {}",
+    ],
+)
+def test_typescript_block_function_or_class_hides_a_module_client(
+    analyze_files, declaration: str
+) -> None:
+    src = f"""
+import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({{ name: "x", version: "1" }});
+function f(x: number) {{
+  {{
+    {declaration}
+    client.callTool({{ name: "fn_decl_block" }});
+  }}
+  switch (x) {{
+    case 1:
+      {declaration}
+      client.callTool({{ name: "fn_decl_switch" }});
+  }}
+}}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == []
+
+
+def test_typescript_block_function_of_another_name_keeps_a_module_client(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "x", version: "1" });
+function f() {
+  {
+    function helper() { client.callTool({ name: "in_helper" }); }
+    class Other {}
+    client.callTool({ name: "kept" });
+  }
+}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == [
+        ("TOOL", "in_helper", "typescript-mcp"),
+        ("TOOL", "kept", "typescript-mcp"),
+    ]
+
+
 # ── TypeScript: any write to the name, not only a plain `x = …`, rebinds it ──
 
 
