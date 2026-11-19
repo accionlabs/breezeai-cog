@@ -306,12 +306,6 @@ def _collect_source_one(args: tuple[str, str, str, str]) -> dict[str, Any]:
             if spec.grammar is not None and spec.grammar not in roots:
                 from .treesitter import parse_source
                 roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
-        except Exception as exc:  # a file that cannot be parsed adds nothing, like an own file
-            from ..logging import get_logger
-            get_logger("breezeai_cog.index").warning(
-                "index.fact.skipped", path=rel, fact=spec.name, error=str(exc))
-            continue
-        try:
             value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
                                  source, rel, Path(repo_root_s))
         except Exception as exc:  # a fact never takes the index down: this file adds nothing
