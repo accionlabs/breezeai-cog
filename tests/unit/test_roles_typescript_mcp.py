@@ -424,3 +424,48 @@ other.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "
 async function listAll() { return { tools: [] }; }
 """
     assert set(_tools(analyze_files({"src/index.ts": src}))) == {"only"}
+
+
+def test_typescript_handler_line_is_never_a_nested_function_or_an_import(analyze_files) -> None:
+    """A handler passed by name gets the line of a function declared at the top of the file
+    (or exported) only: a same-named function nested in another one is not what the name
+    reaches, and a name the file imports is declared elsewhere."""
+    src = (
+        'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"; '
+        'import { lookupHandler } from "./h"; import { z } from "zod"; '
+        'const server = new McpServer({name:"demo",version:"1.0.0"}); '
+        'server.tool("lookup", { id: z.string() }, lookupHandler); '
+        "function boot(app) { app.post(\"/x\", function lookupHandler(req, res) { return 1; }); }"
+    )
+    tool = _tools(analyze_files({"src/server.ts": src}))["lookup"]
+    assert (tool.handler, tool.handlerLine) == ("lookupHandler", None)
+
+    nested_only = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+const mcp = new McpServer({ name: "y", version: "1" });
+mcp.tool("inner", {}, inner);
+mcp.tool("top", {}, top);
+mcp.tool("exported", {}, exported);
+mcp.tool("arrow", {}, arrow);
+
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "low" }] }));
+server.setRequestHandler(CallToolRequestSchema, dispatch);
+
+function boot() {
+  function inner() { return 1; }
+  function dispatch(request) { return 2; }
+}
+async function top() { return { content: [] }; }
+export async function exported() { return { content: [] }; }
+const arrow = async () => ({ content: [] });
+"""
+    tools = _tools(analyze_files({"src/index.ts": nested_only}))
+    assert (tools["inner"].handler, tools["inner"].handlerLine) == ("inner", None)
+    assert (tools["low"].handler, tools["low"].handlerLine) == ("dispatch", None)
+    assert tools["top"].handlerLine == 20
+    assert tools["exported"].handlerLine == 21
+    assert tools["arrow"].handlerLine == 22

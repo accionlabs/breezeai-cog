@@ -43,6 +43,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..mcp_common import function_lines, guarded, param, tool_emit
 from ..treesitter import node_text
+from ..typescript.declarations import import_bindings, top_level_declarations
 from .lowlevel import detect_lowlevel_tools
 
 FRAMEWORK = "typescript-mcp"
@@ -443,10 +444,35 @@ def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | 
     return None, cb.start_point[0] + 1
 
 
+_TOP_LEVEL_FUNCTIONS = (
+    "function_declaration",
+    "generator_function_declaration",
+    "arrow_function",
+    "function_expression",
+    "function",
+    "generator_function",
+)
+
+
+def _top_level_function_lines(dc: DetectContext) -> dict[str, int]:
+    """Name → line of the functions declared at the top of the file (``function f``, ``export
+    function f``, ``const f = () => …``), for a handler passed by name. A function nested in
+    another one is recorded with the file as its parent too, so the record alone cannot tell it
+    from a top-level one; the tree can. A name the file imports is left out: the handler is the
+    imported one, declared elsewhere."""
+    top = top_level_declarations(dc.root, dc.source)
+    imported = import_bindings(dc.root, dc.source)
+    return {
+        name: line
+        for name, line in function_lines(dc.record).items()
+        if name in top and top[name][1].type in _TOP_LEVEL_FUNCTIONS and name not in imported
+    }
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
-    functions = function_lines(dc.record)
+    functions = _top_level_function_lines(dc)
     found: list[Emit] = guarded(
         dc.path,
         detect_lowlevel_tools,
