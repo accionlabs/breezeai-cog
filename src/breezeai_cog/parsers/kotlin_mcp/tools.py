@@ -48,6 +48,7 @@ Only registrations are read here. A Spring AI ``@McpTool`` / ``@Tool`` function 
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Callable
 
 from tree_sitter import Node
@@ -552,25 +553,113 @@ def _binds_param(node: Node, name: str, source: bytes) -> bool:
     return False
 
 
+def _ident_is(node: Node, name: str, source: bytes) -> bool:
+    """True when ``node`` (a ``class_parameter`` / ``variable_declaration``) declares ``name``."""
+    ident = next((x for x in node.named_children if x.type == "simple_identifier"), None)
+    return ident is not None and node_text(ident, source) == name
+
+
+def _binds(node: Node, name: str, source: bytes) -> bool:
+    """True when ``node`` binds ``name`` for the code inside it other than by a ``val`` / ``var``
+    declaration: a parameter of a function, constructor or lambda, a class's primary-constructor
+    parameter, a ``for`` loop variable, a ``catch`` parameter or a ``when (val x = …)`` subject."""
+    if node.type in (
+        "function_declaration",
+        "lambda_literal",
+        "anonymous_function",
+        "secondary_constructor",
+    ):
+        return _binds_param(node, name, source)
+    if node.type == "class_declaration":
+        ctor = next((c for c in node.named_children if c.type == "primary_constructor"), None)
+        return ctor is not None and any(
+            c.type == "class_parameter" and _ident_is(c, name, source) for c in ctor.named_children
+        )
+    if node.type == "for_statement":
+        return any(
+            v.type == "variable_declaration" and _ident_is(v, name, source)
+            for c in node.named_children
+            if c.type in ("variable_declaration", "multi_variable_declaration")
+            for v in ([c] if c.type == "variable_declaration" else c.named_children)
+        )
+    if node.type == "catch_block":
+        ident = next((c for c in node.named_children if c.type == "simple_identifier"), None)
+        return ident is not None and node_text(ident, source) == name
+    if node.type == "when_expression":
+        subject = next((c for c in node.named_children if c.type == "when_subject"), None)
+        return subject is not None and any(
+            c.type == "variable_declaration" and _ident_is(c, name, source)
+            for c in subject.named_children
+        )
+    return False
+
+
+#: Nodes whose own ``val`` / ``var`` declarations are indexed together (:class:`_Names`): a
+#: name used inside one is declared in it or in one around it, never in a sibling.
+_OWNERS = (
+    "source_file",
+    "class_declaration",
+    "object_declaration",
+    "function_declaration",
+    "secondary_constructor",
+    "lambda_literal",
+    "anonymous_function",
+)
+
+_Span = tuple[int, int]
+
+
+def _owner(node: Node) -> _Span:
+    """The span of the nearest :data:`_OWNERS` node around (or at) ``node``."""
+    n: Node | None = node
+    while n is not None and n.type not in _OWNERS:
+        n = n.parent
+    target = n if n is not None else node
+    return (target.start_byte, target.end_byte)
+
+
 class _Names:
     """The file's declarations and uses by name, built once (on the first ``addTools`` whose list
-    is not written inline): ``val`` / ``var`` declarations, functions and identifier uses."""
+    is not written inline): ``val`` / ``var`` declarations by name and the :data:`_OWNERS` node
+    they are declared in, functions, and identifier uses in source order. An ``addTools`` call
+    then looks only at the declarations of the nodes around it, and a list only at the uses
+    inside its own block, so a file of many functions each declaring the same name stays linear."""
 
     def __init__(self, root: Node, source: bytes) -> None:
-        self.props: dict[str, list[Node]] = {}
+        self.props: dict[tuple[str, _Span], list[Node]] = {}
         self.funcs: dict[str, list[Node]] = {}
         self.uses: dict[str, list[Node]] = {}
+        self.use_starts: dict[str, list[int]] = {}
         for n in walk(root):
             if n.type == "property_declaration":
                 name = _declared_name(n, source)
                 if name is not None:
-                    self.props.setdefault(name, []).append(n)
+                    self.props.setdefault((name, _owner(n)), []).append(n)
             elif n.type == "function_declaration":
                 ident = next((c for c in n.named_children if c.type == "simple_identifier"), None)
                 if ident is not None:
                     self.funcs.setdefault(node_text(ident, source), []).append(n)
             elif n.type == "simple_identifier":
-                self.uses.setdefault(node_text(n, source), []).append(n)
+                text = node_text(n, source)
+                self.uses.setdefault(text, []).append(n)
+                self.use_starts.setdefault(text, []).append(n.start_byte)
+
+    def declarations(self, name: str, use: Node) -> list[Node]:
+        """Declarations of ``name`` in the :data:`_OWNERS` nodes around ``use``."""
+        out: list[Node] = []
+        n: Node | None = use
+        while n is not None:
+            if n.type in _OWNERS:
+                out.extend(self.props.get((name, (n.start_byte, n.end_byte)), []))
+            n = n.parent
+        return out
+
+    def uses_in(self, name: str, scope: Node) -> list[Node]:
+        """Uses of ``name`` inside ``scope`` (identifier uses are leaves, kept in source order)."""
+        starts = self.use_starts.get(name, [])
+        lo = bisect.bisect_left(starts, scope.start_byte)
+        hi = bisect.bisect_left(starts, scope.end_byte)
+        return self.uses[name][lo:hi] if hi > lo else []
 
 
 def _contains(outer: Node, inner: Node) -> bool:
@@ -580,9 +669,12 @@ def _contains(outer: Node, inner: Node) -> bool:
 def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Node | None:
     """The innermost declaration of ``name`` visible at ``use``: a local declared before it in
     an enclosing block, a property of an enclosing class, or a top-level one. None when the
-    innermost binding is a parameter, or nothing declares it."""
-    visible: list[Node] = []
-    for decl in names.props.get(name, []):
+    innermost binding is anything else (a parameter, a primary-constructor parameter, a loop
+    variable, a ``catch`` parameter, a ``when`` subject — :func:`_binds`), or nothing declares
+    it."""
+    best: Node | None = None
+    best_key: tuple[int, int] | None = None
+    for decl in names.declarations(name, use):
         container = decl.parent
         if container is None or container.type not in ("statements", "class_body", "source_file"):
             continue
@@ -590,28 +682,26 @@ def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Nod
             continue
         if container.type == "statements" and decl.start_byte >= use.start_byte:
             continue  # a local is visible only after its declaration
-        visible.append(decl)
-    # The containers holding the use are nested: the smallest is the innermost; in one block
-    # the latest declaration before the use.
-    best = min(
-        visible,
-        key=lambda d: (d.parent.end_byte - d.parent.start_byte, -d.start_byte),  # type: ignore[union-attr]
-        default=None,
-    )
+        # The containers holding the use are nested: the smallest is the innermost; in one
+        # block the latest declaration before the use.
+        key = (container.end_byte - container.start_byte, -decl.start_byte)
+        if best_key is None or key < best_key:
+            best, best_key = decl, key
+    stop = best.parent if best is not None else None
     node = use.parent
-    while node is not None and (best is None or node != best.parent):
-        if node.type in ("function_declaration", "lambda_literal", "anonymous_function") and (
-            _binds_param(node, name, source)
-        ):
-            return None  # a parameter of an enclosing function hides it
+    while node is not None and node != stop:
+        if _binds(node, name, source):
+            return None  # a nearer binding hides it
         node = node.parent
     return best
 
 
 def _only_passed_to_add_tools(name: str, decl: Node, source: bytes, names: _Names) -> bool:
-    """True when every use of ``name`` in the file is the sole argument of an ``addTools`` call
-    (a mutable list nothing adds to, removes from or clears)."""
-    for n in names.uses.get(name, []):
+    """True when every use of ``name`` where ``decl`` is visible (its block; the whole file for a
+    property) is the sole argument of an ``addTools`` call (a mutable list nothing adds to,
+    removes from or clears)."""
+    scope = decl.parent if decl.parent is not None and decl.parent.type == "statements" else None
+    for n in names.uses_in(name, scope if scope is not None else _root(decl)):
         if _contains(decl, n):
             continue  # the declaration itself
         arg = n.parent
@@ -628,6 +718,12 @@ def _only_passed_to_add_tools(name: str, decl: Node, source: bytes, names: _Name
         ):
             return False
     return True
+
+
+def _root(node: Node) -> Node:
+    while node.parent is not None:
+        node = node.parent
+    return node
 
 
 def _function_list(call: Node, source: bytes, names: _Names) -> Node | None:

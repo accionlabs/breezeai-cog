@@ -475,6 +475,22 @@ def _kotlin_mcp_add_tools(n: int) -> str:
     )
 
 
+def _kotlin_mcp_add_tools_functions(n: int) -> str:
+    """One function per list, each with its own local ``tools`` of the same name."""
+    funcs = "".join(
+        f"fun reg{i}(server: Server) {{\n"
+        f'    val tools = mutableListOf(RegisteredTool(Tool(name = "t{i}")) {{ _ -> null }})\n'
+        f"    server.addTools(tools)\n}}\n"
+        for i in range(n)
+    )
+    return (
+        "package demo\nimport io.modelcontextprotocol.kotlin.sdk.RegisteredTool\n"
+        "import io.modelcontextprotocol.kotlin.sdk.Tool\n"
+        "import io.modelcontextprotocol.kotlin.sdk.server.Server\n"
+        f"{funcs}"
+    )
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -509,6 +525,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "go-mcp-functions": ("tools.go", _go_mcp_functions),
     "java-mcp-shortcut": ("App.java", _java_mcp_shortcut),
     "kotlin-mcp-add-tools": ("Registry.kt", _kotlin_mcp_add_tools),
+    "kotlin-mcp-add-tools-functions": ("Registry.kt", _kotlin_mcp_add_tools_functions),
 }
 
 

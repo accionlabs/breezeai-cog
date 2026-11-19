@@ -253,6 +253,61 @@ def test_kotlin_add_tools_variable_without_the_mcp_sdk_is_not_a_tool(analyze_fil
     assert _tools(analyze_files({"src/main/kotlin/demo/Registry.kt": src})) == {}
 
 
+def test_kotlin_add_tools_name_bound_nearer_than_the_val_is_not_read(analyze_files) -> None:
+    """The ``val`` of the same name further out is hidden by a primary-constructor parameter, a
+    ``for`` loop variable, a ``catch`` parameter and a ``when (val …)`` subject."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+val tools = listOf(RegisteredTool(Tool(name = "a")) { _ -> null })
+val loopy = listOf(RegisteredTool(Tool(name = "b")) { _ -> null })
+val failed = listOf(RegisteredTool(Tool(name = "c")) { _ -> null })
+val picked = listOf(RegisteredTool(Tool(name = "d")) { _ -> null })
+
+class Reg(val tools: List<RegisteredTool>) { fun r(s: Server) = s.addTools(tools) }
+
+fun r2(s: Server, gs: List<List<RegisteredTool>>) {
+    for (loopy in gs) s.addTools(loopy)
+    for ((picked, _) in gs.map { it to 1 }) s.addTools(picked)
+    try { s.ping() } catch (failed: Exception) { s.addTools(failed) }
+    when (val picked = gs.first()) { else -> s.addTools(picked) }
+    for (g in gs) {
+        val loopy = listOf(RegisteredTool(Tool(name = "in_loop")) { _ -> null })
+        s.addTools(loopy)
+    }
+}
+"""
+    assert set(_tools(analyze_files({"src/main/kotlin/demo/Reg.kt": src}))) == {"in_loop"}
+
+
+def test_kotlin_add_tools_mutable_list_is_judged_by_its_own_block(analyze_files) -> None:
+    """A ``mutableListOf`` local is read when nothing in its block changes it, whatever another
+    function does with a local of the same name."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+fun a(s: Server) {
+    val tools = mutableListOf(RegisteredTool(Tool(name = "kept")) { _ -> null })
+    s.addTools(tools)
+}
+
+fun b(s: Server) {
+    val tools = mutableListOf(RegisteredTool(Tool(name = "grown")) { _ -> null })
+    tools.add(extra())
+    s.addTools(tools)
+}
+"""
+    assert set(_tools(analyze_files({"src/main/kotlin/demo/Two.kt": src}))) == {"kept"}
+
+
 KOTLIN_SHORTCUT = '''
 package demo
 
