@@ -430,6 +430,16 @@ def _go_mcp(n: int) -> str:
     )
 
 
+def _go_mcp_functions(n: int) -> str:
+    """One function per tool, each with its own tool variable ``t``."""
+    funcs = "".join(
+        f"func reg{i}(s *mcp.Server) {{\n\tt := &mcp.Tool{{Name: \"t{i}\"}}\n"
+        f"\tmcp.AddTool(s, t, h)\n}}\n\n"
+        for i in range(n)
+    )
+    return f'package main\n\nimport "github.com/modelcontextprotocol/go-sdk/mcp"\n\n{funcs}'
+
+
 def _java_mcp_shortcut(n: int) -> str:
     tools = "".join(
         f'            .tool(new McpSchema.Tool("t{i}", "Tool {i}", "{{}}"), (exchange, args) -> null)\n'
@@ -496,6 +506,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "python-mcp-lowlevel": ("server.py", _python_mcp_lowlevel),
     "typescript-mcp-lowlevel": ("server.ts", _typescript_mcp_lowlevel),
     "go-mcp": ("main.go", _go_mcp),
+    "go-mcp-functions": ("tools.go", _go_mcp_functions),
     "java-mcp-shortcut": ("App.java", _java_mcp_shortcut),
     "kotlin-mcp-add-tools": ("Registry.kt", _kotlin_mcp_add_tools),
 }

@@ -632,8 +632,9 @@ Code two packages share is in a common module next to them, not in either packag
 `python_fastmcp` and `python_mcp`), `jvm_mcp_common.py` (the `spring-ai.mcp-server` fact, the
 JSON-schema text reader, the `McpServer` shortcut record and the string-literal readers, for the
 four Java / Kotlin packages) and `go_mcp_common.py` (Go string literals and import names, for
-`go_mcpgo` and `go_mcp`). Every JSON-schema literal, whatever its language, is turned into
-`params` by `mcp_common.schema_params`.
+`go_mcpgo` and `go_mcp`). The Python, Go, Java and Kotlin readers turn a JSON-schema literal into `params` with
+`mcp_common.schema_params` (a schema without `properties` → `[]`). TypeScript and C# keep their
+own readers; TypeScript's leaves `params` null for a JSON schema without `properties`.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

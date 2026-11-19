@@ -308,3 +308,22 @@ def test_lowlevel_server_in_another_module_for_any_jobs(capture_mcp_tools, jobs)
     tools = capture_mcp_tools(files, jobs)
     assert set(tools) == {"hello"}
     assert (tools["hello"]["framework"], tools["hello"]["handler"]) == ("python-mcp", "dispatch")
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_lowlevel_imported_server_rebound_in_the_module_is_not_proven(
+    capture_mcp_tools, jobs
+) -> None:
+    """``from app.server import server`` proves the server only while nothing else in the
+    module binds the name: ``server = wrap(server)`` may be anything."""
+    files = {
+        "app/server.py": "from mcp.server.lowlevel import Server\n\nserver = Server('x')\n",
+        "app/tools.py": (
+            "from mcp import types\n"
+            "from app.server import server\n\n"
+            "server = wrap(server)\n\n\n"
+            "@server.list_tools()\nasync def list_tools():\n"
+            "    return [types.Tool(name='wrapped', inputSchema={})]\n"
+        ),
+    }
+    assert capture_mcp_tools(files, jobs) == {}

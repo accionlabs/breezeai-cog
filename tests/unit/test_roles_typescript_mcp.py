@@ -349,3 +349,28 @@ export const weather = tool({ description: "Weather", parameters: z.object({ cit
 """,
     }
     assert _tools(analyze_files(files)) == {}
+
+
+def test_typescript_lowlevel_reads_only_module_level_consts(analyze_files) -> None:
+    """``tools: [SEARCH]`` names the imported ``SEARCH``, not a ``const`` of the same name
+    inside some function; a module-level ``const`` is read only when nothing else in the file
+    declares its name."""
+    src = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { SEARCH } from "./tools";
+
+export const KEPT = { name: "kept" };
+const SHADOWED = { name: "shadowed" };
+
+function helper() {
+  const SEARCH = { name: "fake" };
+  return SEARCH;
+}
+
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [SEARCH, KEPT, SHADOWED] }));
+
+function other(SHADOWED: unknown) { return SHADOWED; }
+"""
+    assert set(_tools(analyze_files({"src/index.ts": src}))) == {"kept"}

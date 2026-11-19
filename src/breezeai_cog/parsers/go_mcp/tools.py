@@ -19,7 +19,9 @@
   decides). ``mcp`` is the SDK's package under any import name.
 * The tool is a ``&mcp.Tool{…}`` literal, inline or a variable of the same function that holds
   one (``t := &mcp.Tool{…}`` passed as ``t``; ``t := mcp.Tool{…}`` passed as ``&t``), only when
-  nothing else in the function assigns the variable or one of its fields (``t.Name = …``).
+  the variable is declared once and used nowhere else in the function than as an ``AddTool``
+  tool argument: reassigned, aliased (``p := t``), passed to another call, dereferenced
+  (``*t = …``) or a field written (``t.Name = …``) → no record.
 * ``endpoint`` — ``Name``, a string literal; anything else → no record. ``description`` —
   ``Description`` when a literal.
 * ``params`` — from a literal ``InputSchema: &jsonschema.Schema{Type, Properties:
@@ -35,6 +37,7 @@
 
 from __future__ import annotations
 
+import bisect
 import re
 
 from tree_sitter import Node
@@ -293,9 +296,10 @@ def _detect(dc: DetectContext) -> Detection | None:
     functions = {f.name: f.startLine for f in dc.record.functions}
     # Per scope (function span, or the file): name → True when every binding there is a server.
     servers: dict[Span, dict[str, bool]] = {}
-    # Per scope: name → the values assigned to it, and the names whose fields are assigned.
-    values: dict[Span, dict[str, list[Node | None]]] = {}
-    field_writes: dict[Span, set[str]] = {}
+    # Per function: name → the (target, value) pairs that declare or assign it there.
+    values: dict[Span, dict[str, list[tuple[Node, Node | None]]]] = {}
+    # Every identifier of the file by name, in source order (start byte, node).
+    uses: dict[str, list[tuple[int, Node]]] = {}
     structs: dict[str, Node | None] = {}
     declared_funcs: dict[str, Node | None] = {}
 
@@ -318,21 +322,9 @@ def _detect(dc: DetectContext) -> Detection | None:
                     while block is not None:
                         block = _block_of(block)
                         bind(block, name, False)
-                values.setdefault(_span(scope), {}).setdefault(name, []).append(rv)
-            if n.type == "assignment_statement":
-                for target in _args(n.child_by_field_name("left")):
-                    # `t.Name = …` / `t.Meta["k"] = …`: a write to the variable `t`.
-                    while target.type in ("selector_expression", "index_expression"):
-                        operand = target.child_by_field_name("operand")
-                        if operand is None:
-                            break
-                        target = operand
-                    if (
-                        target.type == "identifier"
-                        and target.parent is not None
-                        and (target.parent.type != "expression_list")
-                    ):
-                        field_writes.setdefault(_span(scope), set()).add(node_text(target, source))
+                values.setdefault(_span(scope), {}).setdefault(name, []).append((ln, rv))
+        elif n.type == "identifier":
+            uses.setdefault(node_text(n, source), []).append((n.start_byte, n))
         elif n.type == "parameter_declaration":
             type_node = n.child_by_field_name("type")
             typed = (
@@ -368,6 +360,61 @@ def _detect(dc: DetectContext) -> Detection | None:
                 return False
             scope = _block_of(scope)
 
+    def registration(call: Node) -> tuple[Node, Node, bool] | None:
+        """``(tool argument, handler, generic)`` of an ``AddTool`` call of the SDK on a proven
+        server; None for any other call."""
+        fn = _callee(call)
+        args = _args(call.child_by_field_name("arguments"))
+        if _pkg_selector(fn, source, pkgs, "AddTool"):
+            return (args[1], args[2], True) if len(args) == 3 else None
+        if (
+            fn is None
+            or fn.type != "selector_expression"
+            or len(args) != 2
+            or node_text(fn.child_by_field_name("field"), source) != "AddTool"  # type: ignore[arg-type]
+        ):
+            return None
+        receiver = fn.child_by_field_name("operand")
+        if receiver is None or receiver.type != "identifier" or not is_server(receiver):
+            return None
+        return args[0], args[1], False
+
+    registrations = [
+        (n, reg) for n in nodes if n.type == "call_expression" for reg in [registration(n)] if reg
+    ]
+    # The identifiers passed as an ``AddTool`` tool (``t`` / ``&t``): the only use a tool
+    # variable may have besides its declaration.
+    tool_args = {
+        target.start_byte
+        for _, (arg, _, _) in registrations
+        for target in [_unwrap_ref(arg)[1]]
+        if target is not None and target.type == "identifier"
+    }
+
+    def only_registered(name: str, decl: Node, scope: Node) -> bool:
+        """True when every other use of ``name`` in the function ``scope`` (closures inside it
+        included) is an ``AddTool`` tool argument: nothing reassigns, aliases, passes on,
+        dereferences or changes a field of it."""
+        found = uses.get(name, [])
+        lo = bisect.bisect_left(found, scope.start_byte, key=lambda u: u[0])
+        hi = bisect.bisect_left(found, scope.end_byte, key=lambda u: u[0])
+        for start, ident in found[lo:hi]:
+            if start == decl.start_byte or start in tool_args:
+                continue
+            parent = ident.parent
+            if (
+                parent is not None
+                and parent.type == "literal_element"
+                and (
+                    parent.parent is not None
+                    and parent.parent.type == "keyed_element"
+                    and parent.parent.named_children[0] == parent
+                )
+            ):
+                continue  # a key of a composite literal (`{Name: …}`), not the variable
+            return False
+        return True
+
     def tool_literal(arg: Node, call: Node) -> Node | None:
         """The ``mcp.Tool{…}`` literal body the argument stands for."""
         ref, target = _unwrap_ref(arg)
@@ -376,21 +423,10 @@ def _detect(dc: DetectContext) -> Detection | None:
             if scope is None:
                 return None
             name = node_text(target, source)
-            # Every write to the name in the function, closures inside it included.
-            inside = [
-                sp
-                for sp in set(values) | set(field_writes)
-                if scope.start_byte <= sp[0] and sp[1] <= scope.end_byte
-            ]
             assigned = values.get(_span(scope), {}).get(name, [])
-            writes = sum(len(values.get(sp, {}).get(name, [])) for sp in inside)
-            if (
-                len(assigned) != 1
-                or writes != 1
-                or any(name in field_writes.get(sp, set()) for sp in inside)
-            ):
+            if len(assigned) != 1 or not only_registered(name, assigned[0][0], scope):
                 return None
-            value_ref, target = _unwrap_ref(assigned[0])
+            value_ref, target = _unwrap_ref(assigned[0][1])
             if value_ref == ref:  # `t := &mcp.Tool{}` is passed as `t`, `t := mcp.Tool{}` as `&t`
                 return None
         elif not ref:
@@ -430,27 +466,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         return None
 
     found: list[Emit] = []
-    for n in nodes:
-        if n.type != "call_expression":
-            continue
-        fn = _callee(n)
-        args = _args(n.child_by_field_name("arguments"))
-        generic = _pkg_selector(fn, source, pkgs, "AddTool")
-        if generic and len(args) == 3:
-            tool_arg, handler = args[1], args[2]
-        elif (
-            not generic
-            and fn is not None
-            and fn.type == "selector_expression"
-            and len(args) == 2
-            and node_text(fn.child_by_field_name("field"), source) == "AddTool"  # type: ignore[arg-type]
-        ):
-            receiver = fn.child_by_field_name("operand")
-            if receiver is None or receiver.type != "identifier" or not is_server(receiver):
-                continue
-            tool_arg, handler = args
-        else:
-            continue
+    for n, (tool_arg, handler, generic) in registrations:
         fields = _keyed(tool_literal(tool_arg, n), source)
         if fields is None:
             continue

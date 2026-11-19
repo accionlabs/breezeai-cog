@@ -171,6 +171,46 @@ func handleKept(ctx context.Context, r *mcp.CallToolRequest) (*mcp.CallToolResul
     )
 
 
+def test_go_sdk_tool_variable_with_any_other_use_is_not_read(analyze_files) -> None:
+    """A tool variable is read only when the function uses it as nothing but the ``AddTool``
+    argument: anything that could change it, or let something else change it, drops it."""
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+func register(srv *mcp.Server) {
+	twice := &mcp.Tool{Name: "twice"}
+	srv.AddTool(twice, h)
+	mcp.AddTool(srv, twice, g)
+
+	passed := &mcp.Tool{Name: "passed"}
+	decorate(passed)
+	srv.AddTool(passed, h)
+
+	aliased := &mcp.Tool{Name: "aliased"}
+	p := aliased
+	p.Name = "renamed"
+	srv.AddTool(aliased, h)
+
+	assignedTo := &mcp.Tool{Name: "assignedTo"}
+	var q *mcp.Tool
+	q = assignedTo
+	srv.AddTool(assignedTo, h)
+
+	deref := &mcp.Tool{Name: "deref"}
+	*deref = mcp.Tool{Name: "other"}
+	srv.AddTool(deref, h)
+
+	read := &mcp.Tool{Name: "read"}
+	log.Println(read.Name)
+	srv.AddTool(read, h)
+}
+"""
+    tools = [s for s in analyze_files({"tools.go": src}) if s.semanticType == "mcp_tool"]
+    assert sorted(t.endpoint for t in tools) == ["twice", "twice"]  # two registrations
+
+
 def test_go_sdk_add_tool_on_an_object_not_proven_a_server(analyze_files) -> None:
     src = """
 package main

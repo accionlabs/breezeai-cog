@@ -20,7 +20,8 @@
 
 * **Server receiver** — the decorator's object must be proven a low-level server: a name
   assigned ``Server(…)`` in its scope or an enclosing one, a parameter annotated ``Server``, or
-  a name imported from a module that assigns one at module level (fact :data:`FACT`) — with
+  a name imported from a module that assigns one at module level (fact :data:`FACT`) and bound
+  by nothing else in this module (``server = wrap(server)`` is no proof) — with
   ``Server`` imported from ``mcp.server.lowlevel``, ``mcp.server.lowlevel.server`` or
   ``mcp.server``. A local class named ``Server`` is not one; a nearer binding of the name that
   is not a server hides it.
@@ -153,16 +154,29 @@ def _pattern_names(node: Node, source: bytes) -> list[str]:
 _Bindings = dict[tuple[int, int], dict[str, bool]]
 
 
-def _bindings(root: Node, source: bytes, classes: set[str]) -> _Bindings:
+def _bindings(
+    root: Node,
+    source: bytes,
+    classes: set[str],
+    only_imported: set[str] | None = None,
+) -> _Bindings:
     """Every name each scope binds, and whether it is a low-level server there: assigned
     ``Server(…)`` or a parameter annotated ``Server``. Any other binding (an assignment of
     something else, an untyped parameter, an import, a loop or ``with`` target, a ``def`` or
-    ``class``) makes the name not a server in that scope."""
+    ``class``) makes the name not a server in that scope. ``only_imported`` receives the names
+    the module binds by one ``from … import`` and nothing else (the ones the cross-file fact
+    may prove)."""
     out: _Bindings = {}
+    #: Module-level bindings per name: how many, and how many are a ``from … import``.
+    counts: dict[str, list[int]] = {}
 
-    def bind(scope: Node | None, name: str, is_server: bool) -> None:
+    def bind(scope: Node | None, name: str, is_server: bool, from_import: bool = False) -> None:
         names = out.setdefault(_scope_key(scope), {})
         names[name] = names.get(name, True) and is_server
+        if scope is None:
+            count = counts.setdefault(name, [0, 0])
+            count[0] += 1
+            count[1] += from_import
 
     for node in _walk(root):
         t = node.type
@@ -215,12 +229,16 @@ def _bindings(root: Node, source: bytes, classes: set[str]) -> _Bindings:
                     "module_name"
                 ):
                     continue
+                from_import = t == "import_from_statement"
                 if child.type == "aliased_import":
                     alias = child.child_by_field_name("alias")
                     if alias is not None:
-                        bind(scope, node_text(alias, source), False)
+                        bind(scope, node_text(alias, source), False, from_import)
                 elif child.type == "dotted_name":
-                    bind(scope, node_text(child, source).split(".")[0], False)
+                    bind(scope, node_text(child, source).split(".")[0], False, from_import)
+    if only_imported is not None:
+        # The names bound at module level by one `from … import` and nothing else.
+        only_imported.update(name for name, (total, froms) in counts.items() if total == froms == 1)
     return out
 
 
@@ -373,7 +391,8 @@ def detect_lowlevel_tools(dc: DetectContext) -> list[Emit]:
         return []
     classes = server_class_names(root, source)
     results = _types_names(root, source, "ListToolsResult")
-    bindings = _bindings(root, source, classes)
+    only_imported: set[str] = set()
+    bindings = _bindings(root, source, classes, only_imported)
     imported: dict[str, frozenset[str]] = index_fact(dc.ctx.resolution_index, FACT) or {}
     modules = dc.bindings or {}
     aliases = _import_aliases(root, source)
@@ -391,9 +410,9 @@ def detect_lowlevel_tools(dc: DetectContext) -> list[Emit]:
                 if name in names:
                     if names[name]:
                         return ("local", _scope_key(scope), name)
-                    if scope is not None or name not in modules:
+                    if scope is not None or name not in modules or name not in only_imported:
                         return None
-                    break  # a module-level import of an in-repo module: the fact decides
+                    break  # bound only by an import of an in-repo module: the fact decides
             if scope is None:
                 break
             innermost = False

@@ -22,7 +22,8 @@
   ``@modelcontextprotocol/sdk/types.js``; the same name from anywhere else is not it.
 * **Tools** — the object literals of the ``tools: [...]`` array of the object the list handler
   returns (an arrow function's expression body, or a ``return`` of the function itself), and a
-  ``const`` of this file holding such an object, referenced by name in that array. A list built
+  module-level ``const`` holding such an object, referenced by name in that array (only when
+  nothing else in the file declares or imports that name). A list built
   any other way (a variable, ``.map``, a spread, a condition) → no record.
 * ``endpoint`` — ``name``, a string literal; anything else → no record. ``description`` — a
   string literal or a ``+`` of them. ``params`` — a JSON-schema ``inputSchema`` literal
@@ -156,13 +157,26 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
-def _const_objects(root: Node, source: bytes) -> dict[str, Node | None]:
-    """``const X = {…}`` / ``const X: Tool = {…}`` of this file → the object (None when the name
-    is declared more than once, or once with something else)."""
-    out: dict[str, Node | None] = {}
+def _const_objects(
+    root: Node, source: bytes, imports: dict[str, tuple[str, str]]
+) -> dict[str, Node | None]:
+    """Module-level ``const X = {…}`` / ``const X: Tool = {…}`` (also ``export const``) → the
+    object. None when the name is declared more than once anywhere in the file (a local or a
+    parameter could shadow it where it is used), is also an import, or is declared with
+    something else."""
+    out: dict[str, Node | None] = {name: None for name in imports}
     for node in _walk(root):
+        if node.type in ("required_parameter", "optional_parameter"):
+            pattern = node.child_by_field_name("pattern")
+            if pattern is not None and pattern.type == "identifier":
+                out[node_text(pattern, source)] = None
+            continue
         if node.type not in ("lexical_declaration", "variable_declaration"):
             continue
+        parent = node.parent
+        if parent is not None and parent.type == "export_statement":
+            parent = parent.parent
+        top = parent is not None and parent.type == "program"
         const = node.type == "lexical_declaration" and node_text(node, source).startswith("const")
         for decl in node.named_children:
             if decl.type != "variable_declarator":
@@ -172,7 +186,7 @@ def _const_objects(root: Node, source: bytes) -> dict[str, Node | None]:
                 continue
             key = node_text(name, source)
             value = _unparen(decl.child_by_field_name("value"))
-            obj = value if const and value is not None and value.type == "object" else None
+            obj = value if top and const and value is not None and value.type == "object" else None
             out[key] = None if key in out else obj
     return out
 
@@ -327,7 +341,7 @@ def detect_lowlevel_tools(
             listers.append((key, args[1]))
         elif schema in call_schema:
             dispatchers.setdefault(key, []).append(args[1])
-    consts = _const_objects(dc_root, source)
+    consts = _const_objects(dc_root, source, imports)
     found: list[Emit] = []
     seen: set[int] = set()
     for key, fn in listers:
