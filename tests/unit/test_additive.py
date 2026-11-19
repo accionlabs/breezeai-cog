@@ -303,11 +303,11 @@ def _collect_fails(root, source: bytes, rel: str, repo_root) -> str:
 
 
 @pytest.mark.parametrize("jobs", [1, 2])
-def test_a_failing_fact_collector_drops_only_that_fact(isolated, tmp_path, jobs) -> None:
-    """A collector that raises on one file drops its whole fact (resolved from the other files
-    alone it could read as complete and be wrong), and only that fact: the file's other facts,
-    the other files and the index are kept, and the failure is logged."""
-    from breezeai_cog.parsers.additive import COLLECT_FAILED, collect_additive
+def test_a_failing_fact_collector_skips_only_that_fact_and_file(isolated, tmp_path, jobs) -> None:
+    """A collector that raises costs only its own value for that file: the file's other facts,
+    the other files' values for the same fact and the index are kept, and the failure is
+    logged."""
+    from breezeai_cog.parsers.additive import collect_additive
     from breezeai_cog.parsers.csharp.imports import build_csharp_index
 
     register_fact(_marked(name="test.failing", collect=_collect_fails,
@@ -319,23 +319,14 @@ def test_a_failing_fact_collector_drops_only_that_fact(isolated, tmp_path, jobs)
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(src)
         paths.append(f)
-    with capture_logs() as logs:
-        index = build_csharp_index(tmp_path, paths, jobs)
-    assert index_fact(index, "test.failing") is None
+    index = build_csharp_index(tmp_path, paths, jobs)
+    assert index_fact(index, "test.failing") == ["b/Ok.cs"]
     assert index_fact(index, "test.marked") == ["a/Boom.cs", "b/Ok.cs"]
     assert {"Boom", "Ok"} <= set(index.types)
-    assert any(e["event"] == "index.fact.dropped" and e["fact"] == "test.failing" for e in logs)
-    assert collect_additive("csharp", None, b"// MARK BOOM", "x.cs", None) == {
-        "test.failing": COLLECT_FAILED, "test.marked": "x.cs"}
-
-
-def test_collect_failed_stays_one_instance_across_processes() -> None:
-    import pickle
-
-    from breezeai_cog.parsers.additive import COLLECT_FAILED
-
-    assert pickle.loads(pickle.dumps(COLLECT_FAILED)) is COLLECT_FAILED
-    assert repr(COLLECT_FAILED) == "COLLECT_FAILED"
+    with capture_logs() as logs:
+        assert collect_additive("csharp", None, b"// MARK BOOM", "x.cs", None) == {
+            "test.marked": "x.cs"}
+    assert any(e["event"] == "index.fact.skipped" and e["fact"] == "test.failing" for e in logs)
 
 
 def test_a_parse_timeout_in_a_fact_collector_is_not_swallowed(isolated) -> None:
@@ -350,7 +341,7 @@ def test_a_parse_timeout_in_a_fact_collector_is_not_swallowed(isolated) -> None:
         collect_additive("csharp", None, b"// MARK", "x.cs", None)
 
 
-def test_a_failing_fact_source_collector_drops_its_fact(isolated, tmp_path) -> None:
+def test_a_failing_fact_source_collector_skips_only_that_file(isolated, tmp_path) -> None:
     from breezeai_cog.parsers.csharp.imports import build_csharp_index
 
     register_fact(_marked(name="test.hosts", gate=(b"ServiceHost",), sources=(".svc",),
@@ -358,7 +349,7 @@ def test_a_failing_fact_source_collector_drops_its_fact(isolated, tmp_path) -> N
     (tmp_path / "Ok.svc").write_bytes(b'<%@ ServiceHost Service="A.Ok" %>')
     (tmp_path / "Boom.svc").write_bytes(b'<%@ ServiceHost Service="A.Boom" %> BOOM')
     index = build_csharp_index(tmp_path, [tmp_path / "Ok.svc", tmp_path / "Boom.svc"], 1)
-    assert index_fact(index, "test.hosts") is None
+    assert index_fact(index, "test.hosts") == ["Ok.svc"]
 
 
 def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:

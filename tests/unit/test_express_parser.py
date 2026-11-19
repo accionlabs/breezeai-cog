@@ -980,3 +980,36 @@ def test_es_export_of_a_require_is_never_the_require_line(analyze_files) -> None
     })
     assert got["/p"][1:] == (None, None)
     assert got["/u"] == ("users.list", None, None)  # never the `require` line of src/index.ts
+
+
+def test_a_mount_collector_failing_on_one_file_keeps_the_other_files_mounts(analyze_files) -> None:
+    """A fact collector that raises on one file costs only that file's value: the mounts read
+    from the other files still prefix their routes (dropping the whole fact would strip every
+    route's prefix)."""
+    from breezeai_cog.parsers import additive
+    from breezeai_cog.parsers.typescript_express import mounts
+
+    spec = next(s for s in additive.facts_for("typescript") if s.name == mounts.FACT)
+    original = spec.collect
+
+    def _boom(root, source, rel, repo_root):
+        if b"BOOM" in source:
+            raise ValueError("collector bug")
+        return original(root, source, rel, repo_root)
+
+    object.__setattr__(spec, "collect", _boom)
+    try:
+        routes = _routes(analyze_files, {
+            "src/index.js": (
+                "import express from 'express'; import users from './users.js'; "
+                "const app = express(); app.use('/users', users);"
+            ),
+            "src/users.js": (
+                "import express from 'express'; const router = express.Router(); "
+                "router.get('/:id', getUser); export default router;"
+            ),
+            "src/util.js": "import { Router } from 'express'; // BOOM\nconst x = 1; x.use;",
+        })
+    finally:
+        object.__setattr__(spec, "collect", original)
+    assert routes[("src/users.js", "GET")] == "/users/:id"
