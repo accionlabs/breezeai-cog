@@ -17,8 +17,8 @@
 * **Client receiver** — a name bound, in the nearest scope that binds it, only to the client
   class: assigned ``ClientSession(…)`` / ``Client(…)`` (``=`` or ``:=``), the target of
   ``with … as name``, or a parameter annotated with the class. Any other binding in that scope —
-  a loop variable, a ``def`` / ``class`` of that name, an ``import … as name`` — makes it not
-  one; ``global`` / ``nonlocal`` send a function's bindings of the name to the module / the
+  a loop variable, ``except … as name``, a ``match`` capture, a ``def`` / ``class`` of that
+  name, an ``import … as name`` — makes it not one; ``global`` / ``nonlocal`` send a function's bindings of the name to the module / the
   enclosing function. The class must be imported from the SDK (``mcp``,
   ``mcp.client.session``; ``fastmcp``, ``fastmcp.client``): ``aiohttp.ClientSession`` and an
   agent framework's MCP server object (``MCPServerStdio.call_tool``) are not clients.
@@ -127,13 +127,27 @@ def _detect(dc: DetectContext) -> Detection | None:
             target = node.child_by_field_name("name")
             if target is not None:
                 bind(target, _scope_of(node), node.child_by_field_name("value"))
-        elif t == "as_pattern":
+        elif t == "as_pattern" and (node.parent is None or node.parent.type != "case_pattern"):
             target = next((c for c in node.named_children if c.type == "as_pattern_target"), None)
             inner = (
                 target.named_children[0] if target is not None and target.named_children else None
             )
             if inner is not None:
                 bind(inner, _scope_of(node), node.named_children[0])
+        elif t == "dotted_name" and node.parent is not None and len(node.named_children) == 1:
+            # `case session:`, `case [session]:`, `case Foo(a=session):`: a bare name in a
+            # `match` pattern captures (a dotted one, `case mod.session:`, is a value)
+            if node.parent.type in ("case_pattern", "keyword_pattern") and (
+                node.parent.type != "keyword_pattern" or node != node.parent.named_children[0]
+            ):
+                bind(node.named_children[0], _scope_of(node), None)
+        elif t == "splat_pattern" or (
+            t == "as_pattern" and node.parent is not None and node.parent.type == "case_pattern"
+        ):
+            # `case [*session]:`, `case {**session}:`, `case Bar() as session:`
+            last = node.named_children[-1] if node.named_children else None
+            if last is not None and last.type == "identifier":
+                bind(last, _scope_of(node), None)
         elif t in ("for_statement", "for_in_clause", "augmented_assignment"):
             left = node.child_by_field_name("left")
             if left is not None:

@@ -1132,6 +1132,82 @@ public class C
     assert _calls(analyze_files({"C.cs": src})) == [("TOOL", "kept", "csharp-mcp")]
 
 
+@pytest.mark.parametrize(
+    "other",
+    [
+        "val (client, x) = pair",
+        "try { } catch (client: Exception) { }",
+        "when (val client = x) { else -> { } }",
+        "for ((client, y) in pairs) { }",
+        "xs.forEach { (client, z) -> }",
+        "xs.forEach(fun(client: Other) { })",
+    ],
+)
+def test_kotlin_other_declaration_kinds_are_not_clients(analyze_files, other: str) -> None:
+    src = f"""
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+
+val client = Client(clientInfo = info)
+fun a() {{ {other} }}
+suspend fun b() {{ client.callTool(name = "wipe", arguments = mapOf()) }}
+"""
+    assert _calls(analyze_files({"K.kt": src})) == []
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "case session:\n            pass",
+        "case [session, *rest]:\n            pass",
+        "case [*session]:\n            pass",
+        "case Foo(a=session):\n            pass",
+        "case {'k': session}:\n            pass",
+        "case {**session}:\n            pass",
+        "case Bar() as session:\n            pass",
+    ],
+)
+def test_python_match_capture_rebinds_a_client(analyze_files, other: str) -> None:
+    src = f"""
+from mcp import ClientSession
+
+
+async def run(r, w, x):
+    session = ClientSession(r, w)
+    match x:
+        {other}
+    await session.call_tool("wipe", {{}})
+"""
+    assert _calls(analyze_files({"c.py": src})) == []
+
+
+def test_python_except_alias_and_match_value_pattern(analyze_files) -> None:
+    src = """
+from mcp import ClientSession
+
+
+async def caught(r, w):
+    session = ClientSession(r, w)
+    try:
+        pass
+    except Exception as session:
+        pass
+    await session.call_tool("caught", {})
+
+
+async def value_pattern(r, w, x):
+    session = ClientSession(r, w)
+    match x:
+        case mod.session:
+            pass
+        case Foo(session=1):
+            pass
+    await session.call_tool("kept", {})
+"""
+    assert _calls(analyze_files({"c.py": src})) == [("TOOL", "kept", "python-mcp")]
+
+
 # ── Java / C# / Kotlin: a name declared more than once, every time a client ──
 
 
