@@ -29,6 +29,9 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
+from ..go_mcp_common import go_string as _string
+from ..go_mcp_common import package_names
+from ..go_mcp_common import walk as _walk
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
 
@@ -65,37 +68,9 @@ _NON_PARAM_OPTIONS = frozenset(
 _MAX_DEFAULT = 200
 
 
-def _walk(node: Node) -> list[Node]:
-    out, stack = [], [node]
-    while stack:
-        n = stack.pop()
-        out.append(n)
-        stack.extend(reversed(n.named_children))
-    return out
-
-
-def _string(node: Node | None, source: bytes) -> str | None:
-    if node is None:
-        return None
-    if node.type == "interpreted_string_literal":
-        return node_text(node, source)[1:-1]
-    if node.type == "raw_string_literal":
-        return node_text(node, source)[1:-1]
-    return None
-
-
 def _package_names(root: Node, source: bytes, package: str = _PACKAGE) -> set[str]:
     """Local names of an mcp-go package (``mcp`` / ``server``, or an import alias)."""
-    out: set[str] = set()
-    for spec in _walk(root):
-        if spec.type != "import_spec":
-            continue
-        path = _string(spec.child_by_field_name("path"), source)
-        if path != package:
-            continue
-        alias = spec.child_by_field_name("name")
-        out.add(node_text(alias, source) if alias is not None else package.rsplit("/", 1)[-1])
-    return out
+    return package_names(root, source, package)
 
 
 def _unwrap(handler: Node | None, source: bytes, pkgs: set[str]) -> Node | None:

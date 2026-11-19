@@ -179,3 +179,111 @@ def test_kotlin_sdk_add_tools_with_an_inline_list(analyze_files) -> None:
 def test_kotlin_add_tools_without_the_mcp_sdk_is_not_a_tool(analyze_files) -> None:
     src = KOTLIN_ADD_TOOLS.replace("io.modelcontextprotocol.kotlin.sdk", "com.acme.agent")
     assert _tools(analyze_files({"src/main/kotlin/demo/Server.kt": src})) == {}
+
+
+KOTLIN_ADD_TOOLS_VARIABLES = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.RegisteredTool
+import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+
+val topTools = listOf(RegisteredTool(Tool(name = "top", description = "Top")) { _ -> null })
+val shadowed = listOf(RegisteredTool(Tool(name = "outer")) { _ -> null })
+
+class Registry(private val server: Server) {
+    private val classTools = arrayOf(RegisteredTool(Tool(name = "member")) { _ -> null })
+    private val untouched = mutableListOf(RegisteredTool(Tool(name = "untouched")) { _ -> null })
+    private val grown = mutableListOf(RegisteredTool(Tool(name = "grown")) { _ -> null })
+    private var reassignable = listOf(RegisteredTool(Tool(name = "var")) { _ -> null })
+
+    fun register() {
+        server.addTools(topTools)
+        server.addTools(topTools)
+        server.addTools(classTools)
+        server.addTools(untouched)
+        grown.add(extra())
+        server.addTools(grown)
+        server.addTools(reassignable)
+        val shadowed = listOf(RegisteredTool(Tool(name = "inner")) { _ -> null })
+        server.addTools(shadowed)
+        server.addTools(built())
+        server.addTools(returned())
+        server.addTools(withArgs(1))
+        server.addTools(buildList { add(RegisteredTool(Tool(name = "builder")) { _ -> null }) })
+    }
+
+    fun fromParam(shadowed: List<RegisteredTool>) {
+        server.addTools(shadowed)
+    }
+}
+
+fun built() = listOf(RegisteredTool(Tool(name = "built")) { _ -> null })
+
+fun returned(): List<RegisteredTool> {
+    return listOf(RegisteredTool(Tool(name = "returned")) { _ -> null })
+}
+
+fun withArgs(n: Int) = listOf(RegisteredTool(Tool(name = "withArgs")) { _ -> null })
+"""
+
+
+def test_kotlin_sdk_add_tools_with_a_list_variable_or_function(analyze_files) -> None:
+    statements = analyze_files({"src/main/kotlin/demo/Registry.kt": KOTLIN_ADD_TOOLS_VARIABLES})
+    tools = [s for s in statements if s.semanticType == "mcp_tool"]
+    # one record per element even when the list is passed twice; the innermost `val` wins;
+    # a `var`, a `mutableListOf` something adds to, a call with arguments, `buildList` and a
+    # parameter are not read
+    assert sorted(t.endpoint for t in tools) == [
+        "built",
+        "inner",
+        "member",
+        "returned",
+        "top",
+        "untouched",
+    ]
+    top = next(t for t in tools if t.endpoint == "top")
+    assert (top.framework, top.description, top.startLine) == ("kotlin-mcp", "Top", 8)
+
+
+def test_kotlin_add_tools_variable_without_the_mcp_sdk_is_not_a_tool(analyze_files) -> None:
+    src = KOTLIN_ADD_TOOLS_VARIABLES.replace("io.modelcontextprotocol.kotlin.sdk", "com.acme.agent")
+    assert _tools(analyze_files({"src/main/kotlin/demo/Registry.kt": src})) == {}
+
+
+KOTLIN_SHORTCUT = '''
+package demo
+
+import io.modelcontextprotocol.server.McpServer
+import io.modelcontextprotocol.spec.McpSchema
+
+fun build(transport: Any) {
+    val calc = McpSchema.Tool("calc", "Calculator", """{"type": "object", "properties": {"a": {"type": "number"}}}""")
+    McpServer.sync(transport)
+        .serverInfo("demo", "1.0")
+        .tool(calc) { exchange, args -> null }
+        .toolCall(McpSchema.Tool.builder().name("echo").description("Echo").build(), ::echo)
+        .build()
+    ChatClient.create(model).prompt().tool(calc) { _, _ -> null }
+}
+
+fun echo(exchange: Any, request: Any): Any? = null
+'''
+
+
+def test_kotlin_mcp_server_shortcut(analyze_files) -> None:
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Build.kt": KOTLIN_SHORTCUT}))
+    assert set(tools) == {"calc", "echo"}  # `.tool(…)` on a chain not rooted at McpServer: none
+    calc = tools["calc"]
+    assert (calc.framework, calc.description, calc.startLine, calc.handlerLine) == (
+        "java-mcp",
+        "Calculator",
+        11,
+        11,
+    )
+    assert _params(calc) == [("a", "number", False, None, None)]
+    assert (tools["echo"].handler, tools["echo"].handlerLine, tools["echo"].startLine) == (
+        "echo",
+        17,
+        12,
+    )

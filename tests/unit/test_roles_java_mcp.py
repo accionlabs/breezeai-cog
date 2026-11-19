@@ -130,3 +130,85 @@ def test_a_long_string_concatenation_is_read_without_recursion(language, kind, r
     assert read(node, src) == "ab" * (sys.getrecursionlimit() + 500)
     other = b'class A { boolean x = "a" == "b"; }' if language == "java" else b'val x = "a" - "b"'
     assert read(_first(parse_source(language, other, 0).root_node, kind), other) is None
+
+
+JAVA_SHORTCUT = """
+package demo;
+
+import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.spec.McpSchema;
+import io.modelcontextprotocol.spec.McpSchema.Tool;
+
+public class App {
+    void start(Object transport) {
+        Tool calc = new Tool("calc", "Calculator", "{\\"type\\":\\"object\\",\\"properties\\":{\\"a\\":{\\"type\\":\\"number\\"}},\\"required\\":[\\"a\\"]}");
+        var server = McpServer.sync(transport)
+            .serverInfo("demo", "1.0")
+            .tool(calc, (exchange, args) -> null)
+            .toolCall(McpSchema.Tool.builder().name("echo").description("Echo").build(), this::echo)
+            .tool(new Tool(computed(), "x", "{}"), (exchange, args) -> null)
+            .build();
+        McpServer.async(transport).tool(new McpSchema.Tool("later", "Async", "{}"), App::later).build();
+        prepareBuilder().tool(calc, (exchange, args) -> null);
+        chatClient.prompt().tool(calc, (exchange, args) -> null);
+    }
+
+    Object echo(Object exchange, Object request) { return null; }
+    static Object later(Object exchange, Object args) { return null; }
+}
+"""
+
+
+def test_mcp_java_sdk_server_shortcut(analyze_files) -> None:
+    """``McpServer.sync(…)….tool(tool, handler)`` / ``.toolCall(…)``, in a file with no tool
+    specification: only a chain that starts at ``McpServer.sync`` / ``async`` counts."""
+    tools = _tools(analyze_files({"src/main/java/demo/App.java": JAVA_SHORTCUT}))
+    assert set(tools) == {"calc", "echo", "later"}
+    calc = tools["calc"]
+    assert (calc.framework, calc.description, calc.startLine, calc.handlerLine) == (
+        "java-mcp",
+        "Calculator",
+        13,
+        13,  # the lambda's line
+    )
+    assert calc.text.startswith("tool(calc")
+    assert _params(calc) == [("a", "number", True, None, None)]
+    echo = tools["echo"]
+    assert (echo.description, echo.handler, echo.handlerLine, echo.startLine) == (
+        "Echo",
+        "echo",
+        22,
+        14,
+    )
+    assert (tools["later"].handler, tools["later"].handlerLine) == ("later", 23)
+
+
+def test_mcp_java_sdk_shortcut_needs_the_sdk(analyze_files) -> None:
+    src = JAVA_SHORTCUT.replace("io.modelcontextprotocol", "com.acme")
+    assert _tools(analyze_files({"src/main/java/demo/App.java": src})) == {}
+
+
+def test_a_spec_passed_to_tools_is_recorded_once(analyze_files) -> None:
+    """``.tools(spec)`` is not read: the spec is recorded where it is built, once."""
+    src = """
+package demo;
+
+import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class App {
+    void start(Object transport) {
+        var spec = new McpServerFeatures.SyncToolSpecification(
+            new McpSchema.Tool("calc", "Calculator", "{}"), (exchange, args) -> null);
+        McpServer.sync(transport).tools(spec).build();
+        McpServer.sync(transport).tools(List.of(spec)).build();
+    }
+}
+"""
+    tools = [
+        s
+        for s in analyze_files({"src/main/java/demo/App.java": src})
+        if s.semanticType == "mcp_tool"
+    ]
+    assert [t.endpoint for t in tools] == ["calc"]

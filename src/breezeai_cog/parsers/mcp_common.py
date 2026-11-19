@@ -46,6 +46,33 @@ def param(
     )
 
 
+def schema_params(schema: object) -> list[Parameter] | None:
+    """Params of a JSON schema already read into Python values (``properties`` / ``required``,
+    each property's ``type`` and ``description``); None when it is not an object schema with a
+    ``properties`` object and a ``required`` list (unknown). Shared by every reader of a
+    JSON-schema literal: a JSON string (Java / Kotlin), a Python dict, a Go schema literal."""
+    if not isinstance(schema, dict):
+        return None
+    props = schema.get("properties", {})
+    required = schema.get("required", [])
+    if not isinstance(props, dict) or not isinstance(required, list):
+        return None
+    out = []
+    for name, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        type_ = spec.get("type")
+        desc = spec.get("description")
+        out.append(
+            param(
+                str(name),
+                type_ if isinstance(type_, str) else None,
+                required=name in required,
+                description=desc if isinstance(desc, str) else None,
+            )
+        )
+    return out
+
+
 def clean_doc(text: str | None) -> str | None:
     """A docstring / description with common indentation removed; None when empty."""
     if text is None:

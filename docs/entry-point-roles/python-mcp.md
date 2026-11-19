@@ -1,8 +1,8 @@
 # MCP Python SDK — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/python_mcp/tools.py` (additive detector); the `@<server>.tool` reader and the `mcp.servers` fact are in `parsers/python_mcp_common.py`, shared with [`fastmcp`](fastmcp.md) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_python_mcp.py`
+Parser: `src/breezeai_cog/parsers/python_mcp/tools.py` (additive detector); the `@<server>.tool` reader and the `mcp.servers` fact are in `parsers/python_mcp_common.py`, shared with [`fastmcp`](fastmcp.md); the low-level reader and the `mcp.lowlevel-servers` fact are in `parsers/python_mcp/lowlevel.py` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_python_mcp.py`
 
-A tool of a server built with the official Python SDK (`mcp.server.fastmcp`). The fields of an `mcp_tool` record, how `params` is read and limited, and what an incremental sync does are the same for every MCP framework: [entry-point contract, MCP tools](../architecture/entry-points.md#mcp-tools).
+A tool of a server built with the official Python SDK: its `FastMCP` (`mcp.server.fastmcp`), or its low-level `Server` (`mcp.server.lowlevel`). The fields of an `mcp_tool` record, how `params` is read and limited, and what an incremental sync does are the same for every MCP framework: [entry-point contract, MCP tools](../architecture/entry-points.md#mcp-tools).
 
 Both packages declare a tool the same way, so one reader serves both: every rule of the [FastMCP table](fastmcp.md) for `endpoint`, `description`, `params` and the skipped parameters applies here unchanged. Only the package that built the server differs.
 
@@ -10,6 +10,9 @@ Both packages declare a tool the same way, so one reader serves both: every rule
 |---|---|---|---|
 | `@<server>.tool` / `@<server>.tool(name=…, description=…)` on a function, the server built with `FastMCP` imported from `mcp.server.fastmcp` | Binding | `mcp_tool`, `framework: python-mcp`, at the decorator; every other field as in the [FastMCP table](fastmcp.md) | `<server>` is a name assigned `FastMCP(…)`, a parameter annotated `FastMCP`, or a name imported from a module that assigns one; for an imported server, the file that builds it decides the framework |
 | `@<server>.tool` on a server built with the standalone `fastmcp` package | None here | Recorded once, as [`fastmcp`](fastmcp.md) | Each tool is emitted once, by the package of its server |
-| A computed tool name (`name=NAME`) | None | — | The tool exists, but its name is unknown |
+| `types.Tool(name=…, description=…, inputSchema={…})` / `Tool(…)` returned by a function decorated `@<server>.list_tools()` — a direct element of `return [...]` or of `return ListToolsResult(tools=[...])` — on a low-level `Server` (imported from `mcp.server.lowlevel`, `mcp.server.lowlevel.server` or `mcp.server`) | Binding | `mcp_tool`, `framework: python-mcp`, at the `Tool(…)` call; `endpoint` = `name=` (a string literal); `description` = `description=` when a literal; `params` from a literal `inputSchema` dict read as a JSON schema (`properties` / `required` / `type` / `description`), anything else (`Model.model_json_schema()`, an f-string inside) → `null`; `handler` = the function decorated `@<server>.call_tool()` on the same server in the same file (it dispatches every tool), none or several → no handler | `<server>` is a name assigned `Server(…)` in its scope or an enclosing one, a parameter annotated `Server`, or a name imported from a module that assigns one at module level; `Tool` / `types` must be bound to `mcp.types` (or `mcp`) |
+| A list of tools built any other way in `list_tools` (a comprehension, a filter, a condition, a variable, a nested function) | None | — | Which tools it holds is not written in the code |
+| A computed tool name (`name=NAME`, `name=Tools.X.value`) | None | — | The tool exists, but its name is unknown |
+| `@<x>.list_tools()` on a local class named `Server`, a name rebound in a nearer scope, `types.Tool` with the standard library's `types`; LangChain `@tool` / `StructuredTool`, pydantic-ai `@agent.tool`, OpenAI Agents `@function_tool` | None | — | Not an MCP server tool |
 
-Not covered yet (follow-up): the low-level API (`Server.list_tools` / `call_tool`), `mcp_resource` / `mcp_prompt`, and MCP **client** calls.
+Not covered yet (follow-up): the low-level server's constructor handlers (`Server(…, on_list_tools=…)`, SDK 2), `mcp_resource` / `mcp_prompt`, and MCP **client** calls.

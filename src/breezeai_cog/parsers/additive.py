@@ -381,7 +381,16 @@ def collect_additive(
     for spec in facts_for(language):
         if not any(g in source for g in spec.gate):
             continue
-        value = spec.collect(root, source, rel, repo_root)
+        try:
+            value = spec.collect(root, source, rel, repo_root)
+        except ParserTimeout:
+            raise  # the file's parse budget is spent: handled like any parse timeout
+        except Exception as exc:  # one fact never drops the file's other facts or the index
+            from ..logging import get_logger
+            get_logger("breezeai_cog.index").warning(
+                "index.fact.skipped", path=rel, fact=spec.name,
+                error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
         if value is not None:
             out[spec.name] = value
     return out

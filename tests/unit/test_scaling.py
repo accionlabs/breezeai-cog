@@ -377,6 +377,94 @@ def _typescript_mcp(n: int) -> str:
     )
 
 
+def _python_mcp_lowlevel(n: int) -> str:
+    tools = "".join(
+        f"        types.Tool(name='t{i}', description='Tool {i}',\n"
+        f"                   inputSchema={{'type': 'object', 'properties': {{'q': {{'type': 'string'}}}}}}),\n"
+        for i in range(n)
+    )
+    return (
+        "from mcp.server.lowlevel import Server\nimport mcp.types as types\n\n"
+        "server = Server('demo')\n\n\n@server.list_tools()\nasync def list_tools():\n"
+        f"    return [\n{tools}    ]\n\n\n@server.call_tool()\nasync def call_tool(name, arguments):\n"
+        "    return []\n"
+    )
+
+
+def _typescript_mcp_lowlevel(n: int) -> str:
+    consts = "".join(
+        f"const T{i}: Tool = {{ name: 't{i}', description: 'Tool ' + '{i}', "
+        f"inputSchema: {{ type: 'object', properties: {{ q: {{ type: 'string' }} }} }} }};\n"
+        for i in range(n)
+    )
+    refs = ", ".join(f"T{i}" for i in range(n))
+    return (
+        "import { Server } from '@modelcontextprotocol/sdk/server/index.js';\n"
+        "import { CallToolRequestSchema, ListToolsRequestSchema, Tool } from "
+        "'@modelcontextprotocol/sdk/types.js';\n"
+        f"{consts}const server = new Server({{ name: 'demo', version: '1' }}, {{}});\n"
+        f"server.setRequestHandler(ListToolsRequestSchema, async () => ({{ tools: [{refs}] }}));\n"
+        "server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));\n"
+    )
+
+
+def _go_mcp(n: int) -> str:
+    types = "".join(
+        f"type Args{i} struct {{\n\tName string `json:\"name\" jsonschema:\"who\"`\n"
+        f"\tN int `json:\"n,omitempty\"`\n}}\n\n"
+        f"func h{i}(ctx context.Context, r *mcp.CallToolRequest, in Args{i}) "
+        f"(*mcp.CallToolResult, any, error) {{ return nil, nil, nil }}\n\n"
+        for i in range(n)
+    )
+    adds = "".join(
+        f"\tt{i} := &mcp.Tool{{Name: \"t{i}\", Description: \"Tool {i}\"}}\n"
+        f"\tmcp.AddTool(server, t{i}, h{i})\n"
+        f"\tserver.AddTool(&mcp.Tool{{Name: \"raw{i}\", InputSchema: &jsonschema.Schema{{"
+        f"Type: \"object\", Properties: map[string]*jsonschema.Schema{{\"q\": {{Type: \"string\"}}}}}}}}, raw{i})\n"
+        for i in range(n)
+    )
+    return (
+        'package main\n\nimport (\n\t"context"\n\n\t"github.com/google/jsonschema-go/jsonschema"\n'
+        '\t"github.com/modelcontextprotocol/go-sdk/mcp"\n)\n\n'
+        f"{types}func main() {{\n\tserver := mcp.NewServer(nil, nil)\n{adds}}}\n"
+    )
+
+
+def _java_mcp_shortcut(n: int) -> str:
+    tools = "".join(
+        f'            .tool(new McpSchema.Tool("t{i}", "Tool {i}", "{{}}"), (exchange, args) -> null)\n'
+        f'            .toolCall(McpSchema.Tool.builder().name("c{i}").build(), this::call)\n'
+        for i in range(n)
+    )
+    return (
+        "package demo;\nimport io.modelcontextprotocol.server.McpServer;\n"
+        "import io.modelcontextprotocol.spec.McpSchema;\n"
+        "public class App {\n    void start(Object transport) {\n"
+        f"        McpServer.sync(transport)\n{tools}            .build();\n    }}\n"
+        "    Object call(Object exchange, Object request) { return null; }\n}\n"
+    )
+
+
+def _kotlin_mcp_add_tools(n: int) -> str:
+    vals = "".join(
+        f'val tools{i} = listOf(RegisteredTool(Tool(name = "t{i}", description = "Tool {i}")) {{ _ -> null }})\n'
+        f'val mutable{i} = mutableListOf(RegisteredTool(Tool(name = "m{i}")) {{ _ -> null }})\n'
+        f'fun built{i}() = listOf(RegisteredTool(Tool(name = "b{i}")) {{ _ -> null }})\n'
+        for i in range(n)
+    )
+    calls = "".join(
+        f"    server.addTools(tools{i})\n    server.addTools(mutable{i})\n"
+        f"    server.addTools(built{i}())\n"
+        for i in range(n)
+    )
+    return (
+        "package demo\nimport io.modelcontextprotocol.kotlin.sdk.RegisteredTool\n"
+        "import io.modelcontextprotocol.kotlin.sdk.Tool\n"
+        "import io.modelcontextprotocol.kotlin.sdk.server.Server\n"
+        f"{vals}fun register(server: Server) {{\n{calls}}}\n"
+    )
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -405,6 +493,11 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "markdown": ("docs/guide.md", _markdown),
     "python-mcp": ("server.py", _python_mcp),
     "typescript-mcp": ("server.ts", _typescript_mcp),
+    "python-mcp-lowlevel": ("server.py", _python_mcp_lowlevel),
+    "typescript-mcp-lowlevel": ("server.ts", _typescript_mcp_lowlevel),
+    "go-mcp": ("main.go", _go_mcp),
+    "java-mcp-shortcut": ("App.java", _java_mcp_shortcut),
+    "kotlin-mcp-add-tools": ("Registry.kt", _kotlin_mcp_add_tools),
 }
 
 

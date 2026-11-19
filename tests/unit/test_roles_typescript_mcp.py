@@ -210,3 +210,142 @@ def test_typescript_param_descriptions_stay_under_the_params_limit(analyze_files
     assert documented == sorted(documented, reverse=True)
     size = len(json.dumps([p.model_dump() for p in params], separators=(",", ":")).encode())
     assert size <= 15 * 1024
+
+
+# ── Low-level server (`setRequestHandler(ListToolsRequestSchema, …)`) ────────
+
+TS_LOWLEVEL = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, Tool } from "@modelcontextprotocol/sdk/types.js";
+
+const SEARCH_TOOL: Tool = {
+  name: "search",
+  description: "Search the web. " +
+    "At most 20 results.",
+  inputSchema: {
+    type: "object",
+    properties: { query: { type: "string", description: "Query" }, count: { type: "number" } },
+    required: ["query"],
+  },
+};
+let MUTABLE = { name: "mutable", inputSchema: { type: "object", properties: {} } };
+
+const server = new Server({ name: "demo", version: "1" }, { capabilities: { tools: {} } });
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    SEARCH_TOOL,
+    MUTABLE,
+    { name: "echo", description: `Echo`, inputSchema: { type: "object", properties: {} } },
+    { name: ToolName.ADD, inputSchema: { type: "object", properties: {} } },
+    { name: "zod", inputSchema: zodToJsonSchema(Args) as ToolInput },
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  return { content: [] };
+});
+"""
+
+
+def test_typescript_lowlevel_server_tools(analyze_files) -> None:
+    tools = _tools(analyze_files({"src/index.ts": TS_LOWLEVEL}))
+    assert set(tools) == {"search", "echo", "zod"}  # a `let` and a computed name are not read
+    search = tools["search"]
+    assert (search.framework, search.description) == (
+        "typescript-mcp",
+        "Search the web. At most 20 results.",
+    )
+    assert (search.handler, search.handlerLine) == (None, 29)  # the dispatcher's line
+    assert search.startLine == 5  # the const's object
+    assert _params(search) == [
+        ("query", "string", True, None, "Query"),
+        ("count", "number", False, None, None),
+    ]
+    assert tools["echo"].params == [] and tools["echo"].description == "Echo"
+    assert tools["zod"].params is None  # a schema that is not a literal: unknown
+
+
+def test_typescript_lowlevel_return_statement_named_dispatcher_and_mcp_server(
+    analyze_files,
+) -> None:
+    src = """
+import * as sdk from "@modelcontextprotocol/sdk/server/index";
+import * as types from "@modelcontextprotocol/sdk/types";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+class App {
+  private server = new sdk.Server({ name: "x", version: "1" }, {});
+  constructor() {
+    this.server.setRequestHandler(types.ListToolsRequestSchema, async () => {
+      const unused = () => ({ tools: [{ name: "nested" }] });
+      return { tools: [{ name: "from_class", inputSchema: { type: "object", properties: {} } }] };
+    });
+    this.server.setRequestHandler(types.CallToolRequestSchema, dispatch);
+  }
+}
+
+const mcp = new McpServer({ name: "y", version: "1" });
+mcp.server.setRequestHandler(types.ListToolsRequestSchema, async () => ({ tools: [{ name: "low" }] }));
+
+async function dispatch(request) { return { content: [] }; }
+"""
+    tools = _tools(analyze_files({"src/app.ts": src}))
+    assert set(tools) == {"from_class", "low"}
+    assert (tools["from_class"].handler, tools["from_class"].handlerLine) == ("dispatch", 20)
+    assert tools["low"].handler is None and tools["low"].params is None  # no inputSchema
+
+
+def test_typescript_lowlevel_dispatcher_of_another_server_is_not_the_handler(analyze_files) -> None:
+    src = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+function a() {
+  const server = new Server({ name: "a", version: "1" }, {});
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "only_a" }] }));
+}
+function b() {
+  const server = new Server({ name: "b", version: "1" }, {});
+  server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
+}
+"""
+    tools = _tools(analyze_files({"src/two.ts": src}))
+    assert set(tools) == {"only_a"} and tools["only_a"].handlerLine is None
+
+
+def test_typescript_lowlevel_look_alikes_are_not_tools(analyze_files) -> None:
+    files = {
+        # socket.io's Server, with the SDK's schema
+        "src/socket.ts": """
+import { Server } from "socket.io";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+const server = new Server();
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "socket" }] }));
+""",
+        # the SDK's Server, with a schema of the same name from elsewhere
+        "src/schema.ts": """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "./my-schemas";
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "local_schema" }] }));
+""",
+        # pg's Client and any other object with a setRequestHandler
+        "src/pg.ts": """
+import { Client } from "pg";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+const client = new Client();
+client.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "pg" }] }));
+function f(server: Registry) {
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "param" }] }));
+}
+""",
+        # the Vercel AI SDK's tool()
+        "src/ai.ts": """
+import { tool } from "ai";
+import { z } from "zod";
+export const weather = tool({ description: "Weather", parameters: z.object({ city: z.string() }) });
+""",
+    }
+    assert _tools(analyze_files(files)) == {}

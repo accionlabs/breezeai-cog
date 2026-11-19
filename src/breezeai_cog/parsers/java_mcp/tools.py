@@ -17,7 +17,17 @@
 * ``handler`` — a method reference (``this::calc``, ``Calc::calc``) names it; a lambda has no
   name, only its line.
 
-Only tool specifications are read here. A Spring AI ``@McpTool`` / ``@Tool`` method belongs to
+The server builder's shortcut registers a ``Tool`` directly::
+
+    McpServer.sync(transport)                                       → mcp_tool  java-mcp  TOOL  calc
+        .tool(new McpSchema.Tool("calc", "Calculator", SCHEMA_JSON), (exchange, args) -> …)
+        .toolCall(McpSchema.Tool.builder().name("echo").build(), this::echo)   (also McpServer.async)
+
+* Only on a chain that starts at ``McpServer.sync(`` / ``McpServer.async(``; the record sits on
+  the ``.tool`` / ``.toolCall`` name. The tool and handler are read as above.
+* ``.tools(spec…)`` is not read: each specification is recorded where it is built.
+
+Only tool specifications and the shortcut are read here. A Spring AI ``@McpTool`` / ``@Tool`` method belongs to
 ``java_springai``.
 """
 
@@ -28,7 +38,16 @@ from tree_sitter import Node
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..jvm_mcp_common import JAVA_MCP, java_string, json_schema_params, walk
+from ..jvm_mcp_common import (
+    JAVA_MCP,
+    SERVER_FACTORIES,
+    SHORTCUT_CALL,
+    SHORTCUTS,
+    java_string,
+    json_schema_params,
+    shortcut_emit,
+    walk,
+)
 from ..mcp_common import tool_emit
 from ..treesitter import node_text
 
@@ -154,7 +173,7 @@ def _local_variables(root: Node, source: bytes) -> dict[str, Node | None]:
 def _sdk_tools(dc: DetectContext) -> list[Emit]:
     """``SyncToolSpecification`` / ``AsyncToolSpecification`` of the MCP Java SDK."""
     source = dc.source
-    if b"io.modelcontextprotocol" not in source or b"ToolSpecification" not in source:
+    if b"ToolSpecification" not in source:
         return []
     variables = _local_variables(dc.root, source)
     lines: dict[str, list[int]] = {}
@@ -208,8 +227,71 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
     return found
 
 
+def _rooted_at_server(node: Node, source: bytes, cache: dict[tuple[int, int], bool]) -> bool:
+    """True when the call chain ``node`` belongs to starts with ``McpServer.sync(…)`` /
+    ``McpServer.async(…)``. ``cache`` holds the answer for every call of a chain already
+    walked, so a chain of many ``.tool(…)`` calls is walked once."""
+    seen: list[tuple[int, int]] = []
+    cur: Node | None = node
+    result = False
+    while cur is not None and cur.type == "method_invocation":
+        key = (cur.start_byte, cur.end_byte)
+        if key in cache:
+            result = cache[key]
+            break
+        seen.append(key)
+        obj = cur.child_by_field_name("object")
+        if obj is None or obj.type != "method_invocation":
+            name = cur.child_by_field_name("name")
+            result = (
+                obj is not None
+                and name is not None
+                and node_text(name, source) in SERVER_FACTORIES
+                and node_text(obj, source)
+                in ("McpServer", "io.modelcontextprotocol.server.McpServer")
+            )
+            break
+        cur = obj
+    for key in seen:
+        cache[key] = result
+    return result
+
+
+def _shortcut_tools(dc: DetectContext) -> list[Emit]:
+    """``McpServer.sync(…)….tool(tool, handler)`` / ``.toolCall(tool, handler)`` of the MCP Java
+    SDK; ``.tools(spec…)`` is not read (each spec is recorded where it is built)."""
+    source = dc.source
+    if b"McpServer" not in source or not SHORTCUT_CALL.search(source):
+        return []
+    variables = _local_variables(dc.root, source)
+    lines: dict[str, list[int]] = {}
+    for f in dc.record.functions:
+        lines.setdefault(f.name, []).append(f.startLine)
+    methods = {name: ls[0] if len(ls) == 1 else None for name, ls in lines.items()}
+    found: list[Emit] = []
+    rooted: dict[tuple[int, int], bool] = {}
+    for node in walk(dc.root):
+        if node.type != "method_invocation":
+            continue
+        name_node = node.child_by_field_name("name")
+        if name_node is None or node_text(name_node, source) not in SHORTCUTS:
+            continue
+        args = _args(node)
+        if len(args) != 2 or not _rooted_at_server(node, source, rooted):
+            continue
+        fields = _tool_fields(args[0], source, variables)
+        if fields is None:
+            continue
+        found.append(
+            shortcut_emit(node, name_node, fields, _sdk_handler(args[1], source, methods), source)
+        )
+    return found
+
+
 def _detect(dc: DetectContext) -> Detection | None:
-    found = _sdk_tools(dc)
+    if b"io.modelcontextprotocol" not in dc.source:
+        return None
+    found = _sdk_tools(dc) + _shortcut_tools(dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))
@@ -220,7 +302,7 @@ def _detect(dc: DetectContext) -> Detection | None:
 register_detector(
     Detector(
         name="java-mcp",
-        gate=Gate("java", order=40, guard=b"ToolSpecification", skip_fixtures=True),
+        gate=Gate("java", order=40, guard=b"io.modelcontextprotocol", skip_fixtures=True),
         detect=_detect,
         frameworks=(JAVA_MCP,),
     )

@@ -16,7 +16,10 @@ Official Kotlin SDK (``io.modelcontextprotocol.kotlin.sdk``)::
   a ``listOf("…")`` literal; any other schema → None (unknown).
 * ``addTools(listOf(RegisteredTool(Tool(name = …, …)) { … }, …))`` — one record per
   ``RegisteredTool`` of an inline ``listOf`` / ``mutableListOf`` / ``arrayOf``, read as
-  ``addTool(Tool(…))``; a list from a variable or a call → no record.
+  ``addTool(Tool(…))``; also such a list in the innermost ``val`` visible at the call
+  (``mutableListOf`` only when the name has no other use), or returned by a same-file
+  parameterless function whose body is that list alone. Anything else → no record; a list
+  passed twice gives one record per element.
 
 MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
 
@@ -29,6 +32,9 @@ MCP Java SDK (``io.modelcontextprotocol``) called from Kotlin::
   ``val`` / ``var`` declared once in the file; a non-literal name → no record; ``params`` from a
   JSON-schema string literal (``.trimIndent()`` allowed), else None (unknown); a callable
   reference (``::calc``, ``this::calc``) names the handler, a lambda gives only its line.
+* The server builder's shortcut ``McpServer.sync(…)….tool(tool) { … }`` / ``.toolCall(tool,
+  handler)`` (also ``async``) is read the same way, only on a chain that starts at
+  ``McpServer.sync(`` / ``.async(``; ``.tools(spec…)`` is not read.
 
 Import aliases (``import io.modelcontextprotocol.kotlin.sdk.Tool as McpTool``) are followed for
 the types above when the aliased class is in an MCP package; an alias of any other class
@@ -40,6 +46,8 @@ Only registrations are read here. A Spring AI ``@McpTool`` / ``@Tool`` function 
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tree_sitter import Node
 
 from ...schemas import Parameter
@@ -47,6 +55,9 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..jvm_mcp_common import (
     JAVA_MCP,
+    SERVER_FACTORIES,
+    SHORTCUT_CALL,
+    SHORTCUTS,
     json_schema_params,
     kotlin_aliases,
     kotlin_call_args,
@@ -54,6 +65,7 @@ from ..jvm_mcp_common import (
     kotlin_string,
     kotlin_suffix_name,
     kotlin_type_name,
+    shortcut_emit,
     walk,
 )
 from ..mcp_common import param, tool_emit
@@ -304,6 +316,83 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
     return found
 
 
+def _rooted_at_server(
+    node: Node, source: bytes, aliases: dict[str, str], cache: dict[tuple[int, int], bool]
+) -> bool:
+    """True when the call chain ``node`` belongs to starts with ``McpServer.sync(…)`` /
+    ``McpServer.async(…)``. ``cache`` holds the answer for every call of a chain already
+    walked, so a chain of many ``.tool(…)`` calls is walked once."""
+    seen: list[tuple[int, int]] = []
+    cur: Node | None = node
+    result = False
+    while cur is not None and cur.type == "call_expression":
+        key = (cur.start_byte, cur.end_byte)
+        if key in cache:
+            result = cache[key]
+            break
+        seen.append(key)
+        callee = cur.named_children[0] if cur.named_children else None
+        if callee is None or callee.type != "navigation_expression":
+            break
+        receiver = callee.named_children[0] if callee.named_children else None
+        if receiver is not None and receiver.type == "call_expression":
+            cur = receiver
+            continue
+        result = (
+            receiver is not None
+            and kotlin_suffix_name(callee, source) in SERVER_FACTORIES
+            and (
+                kotlin_type_name(receiver, source, aliases) == "McpServer"
+                if receiver.type == "simple_identifier"
+                else node_text(receiver, source) == "io.modelcontextprotocol.server.McpServer"
+            )
+        )
+        break
+    for key in seen:
+        cache[key] = result
+    return result
+
+
+def _shortcut_tools(dc: DetectContext) -> list[Emit]:
+    """``McpServer.sync(…)….tool(tool) { … }`` / ``.toolCall(tool, handler)`` of the MCP Java
+    SDK; ``.tools(spec…)`` is not read (each spec is recorded where it is built)."""
+    source = dc.source
+    if (
+        b"io.modelcontextprotocol" not in source
+        or b"McpServer" not in source
+        or not SHORTCUT_CALL.search(source)
+    ):
+        return []
+    variables = _local_variables(dc.root, source)
+    methods = _methods(dc)
+    aliases = kotlin_aliases(source)
+    found: list[Emit] = []
+    rooted: dict[tuple[int, int], bool] = {}
+    for node in walk(dc.root):
+        if node.type != "call_expression":
+            continue
+        callee = node.named_children[0] if node.named_children else None
+        if callee is None or callee.type != "navigation_expression":
+            continue
+        if kotlin_suffix_name(callee, source) not in SHORTCUTS:
+            continue
+        args = kotlin_call_args(node, source)
+        pos = _positional(args)
+        if len(pos) != 2 or len(args) != 2 or not _rooted_at_server(node, source, aliases, rooted):
+            continue
+        fields = _tool_fields(pos[0], source, variables, aliases)
+        if fields is None:
+            continue
+        suffix = callee.named_children[-1]
+        name_node = next(
+            (c for c in suffix.named_children if c.type == "simple_identifier"), suffix
+        )
+        found.append(
+            shortcut_emit(node, name_node, fields, _handler(pos[1], source, methods), source)
+        )
+    return found
+
+
 # ── Official Kotlin SDK ─────────────────────────────────────
 
 
@@ -427,14 +516,198 @@ def _kotlin_sdk_tool(
     )
 
 
+def _value_of(decl: Node) -> Node | None:
+    """The initializer of a ``property_declaration`` (``val x = <value>``)."""
+    after_eq = False
+    for c in decl.children:
+        if c.type == "=":
+            after_eq = True
+        elif after_eq and c.is_named:
+            return c
+    return None
+
+
+def _declared_name(decl: Node, source: bytes) -> str | None:
+    var = next((c for c in decl.named_children if c.type == "variable_declaration"), None)
+    ident = (
+        next((c for c in var.named_children if c.type == "simple_identifier"), None)
+        if var is not None
+        else None
+    )
+    return node_text(ident, source) if ident is not None else None
+
+
+def _binds_param(node: Node, name: str, source: bytes) -> bool:
+    """True when the function or lambda ``node`` has a parameter called ``name``."""
+    for c in node.named_children:
+        if c.type in ("function_value_parameters", "lambda_parameters"):
+            for p in walk(c):
+                if p.type in ("parameter", "variable_declaration"):
+                    ident = next(
+                        (x for x in p.named_children if x.type == "simple_identifier"), None
+                    )
+                    if ident is not None and node_text(ident, source) == name:
+                        return True
+    return False
+
+
+class _Names:
+    """The file's declarations and uses by name, built once (on the first ``addTools`` whose list
+    is not written inline): ``val`` / ``var`` declarations, functions and identifier uses."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        self.props: dict[str, list[Node]] = {}
+        self.funcs: dict[str, list[Node]] = {}
+        self.uses: dict[str, list[Node]] = {}
+        for n in walk(root):
+            if n.type == "property_declaration":
+                name = _declared_name(n, source)
+                if name is not None:
+                    self.props.setdefault(name, []).append(n)
+            elif n.type == "function_declaration":
+                ident = next((c for c in n.named_children if c.type == "simple_identifier"), None)
+                if ident is not None:
+                    self.funcs.setdefault(node_text(ident, source), []).append(n)
+            elif n.type == "simple_identifier":
+                self.uses.setdefault(node_text(n, source), []).append(n)
+
+
+def _contains(outer: Node, inner: Node) -> bool:
+    return outer.start_byte <= inner.start_byte and inner.end_byte <= outer.end_byte
+
+
+def _list_declaration(use: Node, name: str, source: bytes, names: _Names) -> Node | None:
+    """The innermost declaration of ``name`` visible at ``use``: a local declared before it in
+    an enclosing block, a property of an enclosing class, or a top-level one. None when the
+    innermost binding is a parameter, or nothing declares it."""
+    visible: list[Node] = []
+    for decl in names.props.get(name, []):
+        container = decl.parent
+        if container is None or container.type not in ("statements", "class_body", "source_file"):
+            continue
+        if not _contains(container, use):
+            continue
+        if container.type == "statements" and decl.start_byte >= use.start_byte:
+            continue  # a local is visible only after its declaration
+        visible.append(decl)
+    # The containers holding the use are nested: the smallest is the innermost; in one block
+    # the latest declaration before the use.
+    best = min(
+        visible,
+        key=lambda d: (d.parent.end_byte - d.parent.start_byte, -d.start_byte),  # type: ignore[union-attr]
+        default=None,
+    )
+    node = use.parent
+    while node is not None and (best is None or node != best.parent):
+        if node.type in ("function_declaration", "lambda_literal", "anonymous_function") and (
+            _binds_param(node, name, source)
+        ):
+            return None  # a parameter of an enclosing function hides it
+        node = node.parent
+    return best
+
+
+def _only_passed_to_add_tools(name: str, decl: Node, source: bytes, names: _Names) -> bool:
+    """True when every use of ``name`` in the file is the sole argument of an ``addTools`` call
+    (a mutable list nothing adds to, removes from or clears)."""
+    for n in names.uses.get(name, []):
+        if _contains(decl, n):
+            continue  # the declaration itself
+        arg = n.parent
+        args = arg.parent if arg is not None and arg.type == "value_argument" else None
+        call = args.parent.parent if args is not None and args.parent is not None else None
+        if (
+            args is None
+            or call is None
+            or call.type != "call_expression"
+            or _callee_name(call, source) != "addTools"
+            or len(args.named_children) != 1
+            or arg is None
+            or len(arg.named_children) != 1
+        ):
+            return False
+    return True
+
+
+def _function_list(call: Node, source: bytes, names: _Names) -> Node | None:
+    """``build()`` → the list a same-file ``fun build() = listOf(…)`` / ``fun build() { return
+    listOf(…) }`` returns (a single expression or ``return``); None for anything else."""
+    callee = call.named_children[0] if call.named_children else None
+    if callee is None or callee.type != "simple_identifier" or kotlin_call_args(call, source):
+        return None
+    decls = names.funcs.get(node_text(callee, source), [])
+    if len(decls) != 1:
+        return None
+    params = next(
+        (c for c in decls[0].named_children if c.type == "function_value_parameters"), None
+    )
+    body = next((c for c in decls[0].named_children if c.type == "function_body"), None)
+    if body is None or (params is not None and params.named_children):
+        return None
+    inner = [c for c in body.named_children if "comment" not in c.type]
+    if len(inner) == 1 and inner[0].type == "statements":
+        stmts = [c for c in inner[0].named_children if "comment" not in c.type]
+        if len(stmts) != 1 or stmts[0].type != "jump_expression":
+            return None
+        if not node_text(stmts[0], source).startswith("return"):
+            return None
+        inner = [c for c in stmts[0].named_children if "comment" not in c.type]
+    return inner[0] if len(inner) == 1 else None
+
+
+def _tools_list(lst: Node | None, source: bytes, names: Callable[[], _Names]) -> Node | None:
+    """The ``listOf(…)`` / ``arrayOf(…)`` (or an unchanged ``mutableListOf(…)``) an ``addTools``
+    argument stands for: written inline, a ``val`` of it, or a same-file function returning it."""
+    if lst is not None and lst.type == "simple_identifier":
+        name = node_text(lst, source)
+        decl = _list_declaration(lst, name, source, names())
+        kind = (
+            next((c for c in decl.named_children if c.type == "binding_pattern_kind"), None)
+            if decl is not None
+            else None
+        )
+        if decl is None or kind is None or node_text(kind, source) != "val":
+            return None
+        value = _value_of(decl)
+        if value is None or value.type != "call_expression":
+            return None
+        if _callee_name(value, source) == "mutableListOf" and not _only_passed_to_add_tools(
+            name, decl, source, names()
+        ):
+            return None
+        return value
+    if lst is not None and lst.type == "call_expression":
+        callee = lst.named_children[0] if lst.named_children else None
+        if (
+            callee is not None
+            and callee.type == "simple_identifier"
+            and node_text(callee, source) not in _LIST_LITERALS
+        ):
+            built = _function_list(lst, source, names())
+            if built is None or built.type != "call_expression":
+                return None
+            callee = built.named_children[0] if built.named_children else None
+            if (
+                callee is None
+                or callee.type != "simple_identifier"
+                or node_text(callee, source) not in ("listOf", "arrayOf")
+            ):
+                return None
+            return built
+    return lst
+
+
 def _registered_tools(
-    node: Node, source: bytes, aliases: dict[str, str]
+    node: Node, source: bytes, aliases: dict[str, str], names: Callable[[], _Names]
 ) -> list[tuple[Node, Node, Node | None]]:
     """``(element, Tool(…) call, handler)`` of each ``RegisteredTool(Tool(…), handler)`` in an
-    ``addTools(listOf(…))`` whose list is written inline; nothing for any other list."""
+    ``addTools(…)`` whose list is written inline, a ``val`` holding one, or a same-file function
+    returning one (:func:`_tools_list`); nothing for any other list."""
     args = kotlin_call_args(node, source)
     pos = _positional(args)
-    lst = _named(args, "toolsToAdd") or (pos[0] if len(pos) == 1 else None)
+    lst = _tools_list(
+        _named(args, "toolsToAdd") or (pos[0] if len(pos) == 1 else None), source, names
+    )
     callee = lst.named_children[0] if lst is not None and lst.named_children else None
     if (
         lst is None
@@ -473,6 +746,14 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
     methods = _methods(dc)
     aliases = kotlin_aliases(source)
     found: list[Emit] = []
+    registered: set[int] = set()
+    index: list[_Names] = []
+
+    def names() -> _Names:
+        if not index:
+            index.append(_Names(dc.root, source))
+        return index[0]
+
     for node in walk(dc.root):
         if node.type != "call_expression":
             continue
@@ -496,7 +777,10 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
                 )  # addTool(Tool(name = …, …)) { … }
             emits.append(_kotlin_sdk_tool(node, fields, pos, handler, source, methods, aliases))
         elif method == "addTools":
-            for element, tool, handler in _registered_tools(node, source, aliases):
+            for element, tool, handler in _registered_tools(node, source, aliases, names):
+                if element.start_byte in registered:
+                    continue  # one list passed to `addTools` twice: one record per element
+                registered.add(element.start_byte)
                 emits.append(
                     _kotlin_sdk_tool(
                         element,
@@ -513,7 +797,7 @@ def _kotlin_sdk_tools(dc: DetectContext) -> list[Emit]:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = _sdk_tools(dc) + _kotlin_sdk_tools(dc)
+    found = _sdk_tools(dc) + _shortcut_tools(dc) + _kotlin_sdk_tools(dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

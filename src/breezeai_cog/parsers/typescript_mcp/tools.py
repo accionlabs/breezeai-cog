@@ -27,9 +27,14 @@
   (``withErrors(namedHandler)``); any other wrapper (``createHandler(apiClient)``) gives no
   ``handler``, only the wrapper's line.
 * A non-literal tool name → no record.
+
+A low-level ``Server``'s ``setRequestHandler(ListToolsRequestSchema, …)`` is read by
+:mod:`.lowlevel` (where the rules are).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from tree_sitter import Node
 
@@ -38,6 +43,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..mcp_common import param, tool_emit
 from ..treesitter import node_text
+from .lowlevel import detect_lowlevel_tools
 
 FRAMEWORK = "typescript-mcp"
 _CALLBACKS = (
@@ -172,12 +178,21 @@ def _binds(pattern: Node | None, name: str, source: bytes) -> bool:
     return False
 
 
-def _shadowed(call: Node, name: str, source: bytes) -> bool:
+def _shadowed(
+    call: Node,
+    name: str,
+    source: bytes,
+    typed: Callable[[Node, bytes], bool] | None = None,
+    built: Callable[[Node | None, bytes], bool] | None = None,
+) -> bool:
     """True when the receiver ``name`` of ``call`` is, at the call, a binding other than the
     ``McpServer``: a parameter of an enclosing function not typed ``McpServer``
     (``function f(server: Foo) { server.tool(…) }``), or a ``let`` / ``const`` / ``var`` of an
     enclosing block not assigned ``new McpServer(…)``. The nearest binding wins; module-level
-    bindings are the ones :func:`_servers` reads."""
+    bindings are the ones :func:`_servers` reads. ``typed`` / ``built`` say what a server
+    parameter / initializer is for another server class (the low-level ``Server``)."""
+    typed = typed or _mcp_typed
+    built = built or _new_mcp_server
     node = call.parent
     while node is not None and node.type != "program":
         if node.type in _FUNCTION_SCOPES:
@@ -188,7 +203,7 @@ def _shadowed(call: Node, name: str, source: bytes) -> bool:
             for p in params.named_children if params is not None else ():
                 if p.type in _PARAMETERS:
                     if _binds(p.child_by_field_name("pattern"), name, source):
-                        return not _mcp_typed(p, source)
+                        return not typed(p, source)
                 elif _binds(p, name, source):
                     return True
         elif node.type == "statement_block":
@@ -199,7 +214,7 @@ def _shadowed(call: Node, name: str, source: bytes) -> bool:
                     if decl.type == "variable_declarator" and _binds(
                         decl.child_by_field_name("name"), name, source
                     ):
-                        return not _new_mcp_server(decl.child_by_field_name("value"), source)
+                        return not built(decl.child_by_field_name("value"), source)
         node = node.parent
     return False
 
@@ -312,33 +327,39 @@ def _input_schema(node: Node, source: bytes, zod: set[str]) -> list[Parameter] |
     chain = _chain(node, source, zod) if node.type == "call_expression" else None
     if chain and chain[0][0] == "object" and chain[0][1]:
         return _object_schema(chain, source, zod)
-    if node.type == "object":  # JSON schema literal
-        pairs = _pairs(node, source)
-        props = pairs.get("properties")
-        if props is None or props.type != "object" or not _literal_object(props, source):
-            return None
-        req = pairs.get("required")
-        required: set[str] = set()
-        if req is not None:
-            if req.type != "array":
-                return None  # `required: fields` — which ones is unknown
-            names = [_string(v, source) for v in req.named_children]
-            if any(n is None for n in names):
-                return None
-            required = {n for n in names if n is not None}
-        out = []
-        for name, spec in _pairs(props, source).items():
-            fields = _pairs(spec, source) if spec.type == "object" else {}
-            out.append(
-                param(
-                    name,
-                    _string(fields.get("type"), source),
-                    required=name in required,
-                    description=_string(fields.get("description"), source),
-                )
-            )
-        return out
+    if node.type == "object":
+        return _json_schema(node, source)
     return None
+
+
+def _json_schema(node: Node, source: bytes) -> list[Parameter] | None:
+    """Params of a JSON-schema object literal (``properties`` / ``required``), or None when it
+    cannot be read whole."""
+    pairs = _pairs(node, source)
+    props = pairs.get("properties")
+    if props is None or props.type != "object" or not _literal_object(props, source):
+        return None
+    req = pairs.get("required")
+    required: set[str] = set()
+    if req is not None:
+        if req.type != "array":
+            return None  # `required: fields` — which ones is unknown
+        names = [_string(v, source) for v in req.named_children]
+        if any(n is None for n in names):
+            return None
+        required = {n for n in names if n is not None}
+    out = []
+    for name, spec in _pairs(props, source).items():
+        fields = _pairs(spec, source) if spec.type == "object" else {}
+        out.append(
+            param(
+                name,
+                _string(fields.get("type"), source),
+                required=name in required,
+                description=_string(fields.get("description"), source),
+            )
+        )
+    return out
 
 
 #: ``z.object({…})`` methods that change no key and no key's optionality.
@@ -425,11 +446,13 @@ def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | 
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     servers = _servers(dc.root, source)
-    if not servers:
+    functions = {f.name: f.startLine for f in dc.record.functions}
+    found: list[Emit] = detect_lowlevel_tools(
+        dc.root, source, servers, functions, _shadowed, lambda n: _json_schema(n, source)
+    )
+    if not servers and not found:
         return None
     zod = _zod_names(dc)
-    functions = {f.name: f.startLine for f in dc.record.functions}
-    found: list[Emit] = []
     for call in _walk(dc.root):
         if call.type != "call_expression":
             continue

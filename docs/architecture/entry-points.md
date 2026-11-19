@@ -242,7 +242,7 @@ A tool an MCP server exposes is an entry point an AI client calls by name. Every
 |---|---|
 | `method` | `TOOL` |
 | `endpoint` | The name clients call, after any rename. A name that is not a literal → **no record** (the tool exists, but its name is unknown) |
-| `framework` | The SDK the tool is declared with: `fastmcp`, `python-mcp`, `typescript-mcp`, `spring-ai-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp`, `mcp-go` (`go-mcp` is kept for the official Go SDK, not read yet) |
+| `framework` | The SDK the tool is declared with: `fastmcp`, `python-mcp`, `typescript-mcp`, `spring-ai-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp`, `mcp-go`, `go-mcp` |
 | `handler` / `handlerLine` | The function that runs the tool; a lambda gives only its line ([above](#anonymous-handlers)) |
 | `description` | The description the server gives the client, when it is a literal |
 | `params` | The input parameters, in the shape of a function's `params`: `[{name, type, default, decorators, required, description}]` |

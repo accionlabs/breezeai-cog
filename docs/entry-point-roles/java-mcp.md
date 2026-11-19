@@ -7,8 +7,11 @@ A tool specification of the MCP Java SDK (`io.modelcontextprotocol`), written in
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | Java `new McpServerFeatures.SyncToolSpecification(tool, handler)` / `AsyncToolSpecification`, or their `builder().tool(…).callHandler(…).build()` (MCP Java SDK, `io.modelcontextprotocol`) | Binding | `mcp_tool`, `framework: java-mcp`, at the constructor / `build()` call; the tool is `new McpSchema.Tool(name, description, schemaJson)` or `McpSchema.Tool.builder().name(…).description(…).inputSchema(…).build()`, inline or a local variable declared once in the file; `description` only from a literal (another `Tool` constructor overload: none); `params` from a JSON-schema string literal, else empty (unknown); `handler` = the method of a method reference (`this::calc`), a lambda gives only its line | A tool specification is server-side by definition |
+| `McpServer.sync(transport)….tool(tool, handler)` / `.toolCall(tool, handler)`, also `McpServer.async(…)` (MCP Java SDK) | Binding — only on a chain that starts at `McpServer.sync(` / `McpServer.async(`, in a file using `io.modelcontextprotocol` | `mcp_tool`, `framework: java-mcp`, at the `.tool` / `.toolCall` name (its line); the tool and `handler` read as for a tool specification above (`new McpSchema.Tool(…)` / `Tool.builder()…build()`, inline or a local variable declared once) | The server builder registers the tool directly |
+| `.tools(spec, …)` on the server builder | Wiring | — | Each specification is recorded once, where it is built (row above) |
+| `.tool(…)` on any other chain (a helper returning the builder, Spring AI's `ChatClient.prompt().tool(…)`) | None | — | Not proven an MCP server |
 | A Spring AI `@McpTool` / `@Tool` method in the same file | None here | Recorded once, as [`spring-ai-mcp`](spring-ai-mcp.md) | Each tool is emitted once, by the package of its construct |
 | A computed tool name (`new McpSchema.Tool(NAME, …)`, `.name(computed())`) | None | — | The tool exists, but its name is unknown |
 | A `…ToolSpecification` in a file that does not use `io.modelcontextprotocol` | None | — | Not the SDK's class |
 
-Not covered yet (follow-up): the `McpServer.sync(…).tool(…)` / `toolCall(…)` shortcuts, `mcp_resource` / `mcp_prompt`, and MCP **client** calls.
+Not covered yet (follow-up): `McpSchema.Tool.builder(name, schema)` (the builder that takes the name as an argument, SDK 1.0+), `mcp_resource` / `mcp_prompt`, and MCP **client** calls.

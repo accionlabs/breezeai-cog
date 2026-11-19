@@ -30,7 +30,8 @@ from tree_sitter import Node
 
 from ..schemas import Parameter
 from .additive import FactSpec, index_fact, register_fact
-from .mcp_common import param
+from .emits import Emit
+from .mcp_common import schema_params, tool_emit
 from .treesitter import node_text
 
 #: ``framework`` of a Spring AI ``@McpTool`` / ``@Tool`` method, in Java or Kotlin.
@@ -154,33 +155,53 @@ def concat_strings(
 
 def json_schema_params(text: str | None) -> list[Parameter] | None:
     """Params of a JSON schema's text (``properties`` / ``required``); None when it does not
-    parse (unknown)."""
+    parse (unknown). The schema itself is read by :func:`~.mcp_common.schema_params`."""
     if text is None:
         return None
     try:
         schema = json.loads(text)
     except (ValueError, RecursionError):  # a deeply nested literal must not fail the file
         return None
-    if not isinstance(schema, dict):
-        return None
-    props = schema.get("properties", {})
-    required = schema.get("required", [])
-    if not isinstance(props, dict) or not isinstance(required, list):
-        return None
-    out = []
-    for name, spec in props.items():
-        spec = spec if isinstance(spec, dict) else {}
-        type_ = spec.get("type")
-        desc = spec.get("description")
-        out.append(
-            param(
-                str(name),
-                type_ if isinstance(type_, str) else None,
-                required=name in required,
-                description=desc if isinstance(desc, str) else None,
-            )
-        )
-    return out
+    return schema_params(schema)
+
+
+# ── The McpServer builder shortcut ───────────────────────────────────────────
+
+#: ``.tool(`` / ``.toolCall(`` — a cheap byte check before any tree walk.
+SHORTCUT_CALL = re.compile(rb"\.\s*tool(?:Call)?\s*\(")
+#: The ``McpServer`` factories a shortcut chain starts from.
+SERVER_FACTORIES = frozenset({"sync", "async"})
+#: The builder methods that register a ``Tool`` with its handler.
+SHORTCUTS = frozenset({"tool", "toolCall"})
+
+
+def shortcut_emit(
+    node: Node,
+    name_node: Node,
+    fields: tuple[str, str | None, list[Parameter] | None],
+    handler: tuple[str | None, int | None],
+    source: bytes,
+) -> Emit:
+    """The record of a ``.tool(…)`` / ``.toolCall(…)`` shortcut: at the method's name, not at
+    the start of the chain (several tools of one chain get their own lines)."""
+    name, description, params = fields
+    emit = tool_emit(
+        node,
+        source,
+        endpoint=name,
+        framework=JAVA_MCP,
+        handler=handler[0],
+        handler_line=handler[1],
+        description=description,
+        params=params,
+        node_type=None,
+    )
+    emit.line = name_node.start_point[0] + 1
+    emit.col = name_node.start_point[1]
+    line_end = source.find(b"\n", name_node.start_byte)
+    stop = node.end_byte if line_end < 0 else min(line_end, node.end_byte)
+    emit.text = source[name_node.start_byte : stop].decode("utf-8", "replace").rstrip()
+    return emit
 
 
 # ── Java literals ────────────────────────────────────────────────────────────
