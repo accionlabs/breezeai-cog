@@ -28,8 +28,8 @@ from ..index_common import record_distinct
 from ..treesitter import node_text
 from .common import (
     EXTENSION_KEY, LOCATORS_KEY, MAP_ALL_KEY, MAPPER_KEY, PROPERTIES_LEVEL, RESULT_PATH_KEY,
-    STRUTS_ROOT, SUFFIX_KEY, WEB_XML_LEVEL, XML_LEVEL, Layered, read_properties,
-    web_xml_constants, xml_constants,
+    STRUTS_FILTERS, STRUTS_ROOT, SUFFIX_KEY, WEB_XML_LEVEL, XML_LEVEL, Layered, included_files, read_properties,
+    web_xml_constants, web_xml_lists_configs, xml_constants,
 )
 
 SETTINGS = "struts2.settings"
@@ -60,7 +60,13 @@ def module_settings(fact: dict[str, dict[str, str | None]] | None, rel: str) -> 
     return fact.get(module_key(rel)) or fact.get("") or {}
 
 
-_Found = list[tuple[str, int, dict[str, str]]]  # (module, level, constants)
+#: What one file contributes. ``("level", module, level, constants)``: constants at one
+#: precedence level (``web.xml``, a build file's plugin flag). ``("struts", rel, includes,
+#: constants, properties)``: a Struts XML file, the files it includes, its ``<constant>``s and
+#: the ``struts.properties`` beside it. ``("custom", module)``: the module's Struts filter names
+#: its own configuration files.
+_Found = list[tuple[Any, ...]]
+_ROOT_NAME = "struts.xml"
 
 
 def _collect_settings(root: Node | None, source: bytes, rel: str,
@@ -69,27 +75,70 @@ def _collect_settings(root: Node | None, source: bytes, rel: str,
     module = module_key(rel)
     found: _Found = []
 
-    def keep(level: int, constants: dict[str, str]) -> None:
-        picked = {k: v for k, v in constants.items() if k in _KEYS}
-        if picked:
-            found.append((module, level, picked))
+    def keep(constants: dict[str, str]) -> dict[str, str]:
+        return {k: v for k, v in constants.items() if k in _KEYS}
 
     if name == "web.xml":
-        keep(WEB_XML_LEVEL, web_xml_constants(source))
+        web = keep(web_xml_constants(source))
+        if web:
+            found.append(("level", module, WEB_XML_LEVEL, web))
+        if web_xml_lists_configs(source):
+            found.append(("custom", module))
     elif rel.endswith(".xml") and STRUTS_ROOT.search(source):
-        keep(XML_LEVEL, xml_constants(source))
-        if repo_root is not None:
-            keep(PROPERTIES_LEVEL, read_properties(repo_root / posixpath.dirname(rel)))
+        properties = keep(read_properties(repo_root / posixpath.dirname(rel))) \
+            if repo_root is not None else {}
+        found.append(("struts", rel, included_files(rel, source), keep(xml_constants(source)),
+                      properties))
     if name in _BUILD_FILES and _PLUGIN in source:
-        found.append((module, XML_LEVEL, {CONVENTION: "true"}))
+        found.append(("level", module, XML_LEVEL, {CONVENTION: "true"}))
     return found or None
 
 
 def _resolve_settings(values: list[_Found], index: Any) -> dict[str, dict[str, str | None]] | None:
+    """Each module's constants as Struts loads them: ``<constant>``s of the module's
+    ``struts.xml`` and of every file its ``<include>`` chain reaches (a constant applies to the
+    whole configuration), the ``struts.properties`` beside that ``struts.xml``, the Struts
+    filter's init-params. A Struts XML file nothing includes is not loaded, so its constants are
+    not the module's.
+
+    Which files are loaded is unknown in a module whose filter names its own configuration
+    files, or that has no ``struts.xml``: there every Struts XML file of the module counts, and
+    two that disagree leave the key unknown."""
     layered = Layered()
+    files: dict[str, tuple[tuple[str, ...], dict[str, str], dict[str, str]]] = {}
+    custom: set[str] = set()
     for file_values in values:
-        for module, level, constants in file_values:
-            layered.add(module, level, constants)
+        for entry in file_values:
+            if entry[0] == "level":
+                layered.add(entry[1], entry[2], entry[3])
+            elif entry[0] == "custom":
+                custom.add(entry[1])
+            else:
+                files[entry[1]] = (entry[2], entry[3], entry[4])
+    roots = sorted(rel for rel in files if posixpath.basename(rel) == _ROOT_NAME)
+    rooted = {module_key(rel) for rel in roots} - custom
+    for root in roots:  # the configuration each `struts.xml` loads, for that file's module
+        module = module_key(root)
+        if module not in rooted:
+            continue
+        layered.add(module, PROPERTIES_LEVEL, files[root][2])
+        seen, queue = {root}, [root]
+        while queue:
+            includes, constants, _ = files[queue.pop()]
+            layered.add(module, XML_LEVEL, constants)
+            for target in includes:
+                if target in files and target not in seen:
+                    seen.add(target)
+                    queue.append(target)
+    for rel, (_, constants, properties) in files.items():
+        module = module_key(rel)
+        # A file outside any `src/main/` but inside a module that has its `struts.xml` (`shop/conf/
+        # extra.xml`) is that module's stray file, not the repository's configuration. A nested
+        # module's file (`shop/sub/src/main/…`) is that module's own.
+        stray = module == "" and any(m and rel.startswith(m + "/") for m in rooted)
+        if module not in rooted and not stray:  # the loaded files are not known: all count
+            layered.add(module, XML_LEVEL, constants)
+            layered.add(module, PROPERTIES_LEVEL, properties)
     return layered.resolve() or None
 
 
@@ -170,12 +219,20 @@ def namespaces_of(annotations: list[Node], source: bytes) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+_SETTINGS_GATE = (b"<struts", b"struts.action.extension", b"struts.convention.",
+                  b"struts.mapper.class", _PLUGIN, *(f.encode() for f in STRUTS_FILTERS))
 register_fact(FactSpec(
-    name=SETTINGS, language="java",
-    gate=(b"<struts", b"struts.action.extension", b"struts.convention.",
-          b"struts.mapper.class", _PLUGIN),
+    name=SETTINGS, language="java", gate=_SETTINGS_GATE,
     collect=_collect_settings, resolve=_resolve_settings,
     sources=(".xml", ".gradle"),
+))
+# The same settings on the ``config`` index, for the ``struts.xml`` parser: a configuration file
+# is not Java, so it never sees the Java index. One collect and resolve, so the XML actions and
+# the annotated ones follow the same module-wide rules.
+register_fact(FactSpec(
+    name=SETTINGS, language="config", gate=_SETTINGS_GATE,
+    collect=_collect_settings, resolve=_resolve_settings,
+    sources=(".xml",),  # Struts files and web.xml; `struts.properties` is read beside them
 ))
 register_fact(FactSpec(
     name=PACKAGE_NAMESPACES, language="java", gate=(b"@Namespace",),

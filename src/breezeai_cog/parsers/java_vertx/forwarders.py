@@ -41,7 +41,8 @@ from ..handler_sites import handler_info, method_lines
 from ..index_common import record_distinct
 from ..java_variables_common import typed_vars
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
-from .java_syntax import (arguments, calls_and_creations, handle_location, handler_class,
+from .java_syntax import (anonymous_handle, arguments, calls_and_creations, handle_location,
+                          handler_class,
                           imports_and_package, known_address, name_of, plain)
 
 FORWARDERS = "vertx.address-forwarders"
@@ -423,6 +424,9 @@ def forwarder_sites(
             impl = cls if self_ else None
             if hidx >= 0 and hidx < len(args):
                 handler, line = handler_info(args[hidx], source, methods)
+                anon_line = anonymous_handle(args[hidx], source) if handler is None else None
+                if anon_line is not None:  # an anonymous handler class: its own `handle`
+                    handler, line = "handle", anon_line
                 if handler is None and line is None:
                     impl = handler_class(args[hidx], source) or (
                         factories.built(args[hidx]) if factories is not None else None)

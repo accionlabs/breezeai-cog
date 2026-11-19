@@ -171,6 +171,9 @@ class Class(BaseModel):
     # closed hierarchy — Kotlin `sealed` (C#/Java `sealed` are the analogue).
     # Sibling of isAbstract; present (True) only when sealed.
     isSealed: bool | None = None
+    # A class with no name in the source: a Java anonymous class (`new T(…) { … }`). Its `name`
+    # is cog's (`Outer$1`, or the field it is stored in). Present (True) only when anonymous.
+    isAnonymous: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
     # The type's other name, given in the same declaration: the tag of a C/C++
