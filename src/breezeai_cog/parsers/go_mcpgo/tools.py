@@ -53,7 +53,15 @@ from ..emits import Emit
 from ..go_mcp_common import go_string as _string
 from ..go_mcp_common import HandlerLines, package_names
 from ..go_mcp_common import walk as _walk
-from ..mcp_common import PROMPT, RESOURCE, TOOL, function_lines, mcp_emit, param, uri_template_params
+from ..mcp_common import (
+    PROMPT,
+    RESOURCE,
+    TOOL,
+    function_lines,
+    mcp_emit,
+    param,
+    uri_template_params,
+)
 from ..treesitter import node_text
 
 FRAMEWORK = "mcp-go"
