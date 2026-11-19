@@ -824,12 +824,7 @@ def _tools_list(lst: Node | None, source: bytes, names: Callable[[], _Names]) ->
             if decl is not None
             else None
         )
-        if (
-            decl is None
-            or kind is None
-            or node_text(kind, source) != "val"
-            or _destructures(decl)
-        ):
+        if decl is None or kind is None or node_text(kind, source) != "val" or _destructures(decl):
             return None
         value = _value_of(decl)
         if value is None or value.type != "call_expression":

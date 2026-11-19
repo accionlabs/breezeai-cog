@@ -435,7 +435,7 @@ def test_typescript_handler_line_is_never_a_nested_function_or_an_import(analyze
         'import { lookupHandler } from "./h"; import { z } from "zod"; '
         'const server = new McpServer({name:"demo",version:"1.0.0"}); '
         'server.tool("lookup", { id: z.string() }, lookupHandler); '
-        "function boot(app) { app.post(\"/x\", function lookupHandler(req, res) { return 1; }); }"
+        'function boot(app) { app.post("/x", function lookupHandler(req, res) { return 1; }); }'
     )
     tool = _tools(analyze_files({"src/server.ts": src}))["lookup"]
     assert (tool.handler, tool.handlerLine) == ("lookupHandler", None)

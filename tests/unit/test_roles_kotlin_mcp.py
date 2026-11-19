@@ -420,5 +420,9 @@ class Outer {
     }
 }
 """
-    tools = [s for s in analyze_files({"src/main/kotlin/demo/Outer.kt": src}) if s.semanticType == "mcp_tool"]
+    tools = [
+        s
+        for s in analyze_files({"src/main/kotlin/demo/Outer.kt": src})
+        if s.semanticType == "mcp_tool"
+    ]
     assert sorted(t.endpoint for t in tools) == ["local", "outer", "top"]
