@@ -251,7 +251,6 @@ def _config_path(node: Node | None, source: bytes,
 def _join_config_path(base: str | None, sub: str | None) -> str | None:
     return _join(base, sub) if base is not None and sub is not None else None
 
-
 def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
                     routes: list[Emit], const_values: dict[str, str | None] | None,
                     inherited: tuple[str, ...] = ()) -> None:
