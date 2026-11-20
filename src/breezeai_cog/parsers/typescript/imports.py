@@ -259,6 +259,105 @@ def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]
     return None
 
 
+_SCOPES = frozenset({
+    "function_declaration", "function_expression", "function", "arrow_function",
+    "method_definition", "generator_function", "generator_function_declaration",
+})
+
+
+def _binds(pattern: Node | None, name: str, source: bytes) -> bool:
+    """Whether the binding pattern ``pattern`` (a name, a destructuring, a typed parameter)
+    declares ``name``."""
+    if pattern is None:
+        return False
+    if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
+        return node_text(pattern, source) == name
+    if pattern.type in ("required_parameter", "optional_parameter"):
+        return _binds(pattern.child_by_field_name("pattern"), name, source)
+    if pattern.type in ("assignment_pattern", "object_assignment_pattern"):
+        return _binds(pattern.child_by_field_name("left"), name, source)
+    if pattern.type == "pair_pattern":
+        return _binds(pattern.child_by_field_name("value"), name, source)
+    if pattern.type in ("object_pattern", "array_pattern", "rest_pattern"):
+        return any(_binds(c, name, source) for c in pattern.named_children)
+    return False
+
+
+def locally_bound(node: Node, name: str, source: bytes) -> bool:
+    """Whether ``name``, read at ``node``, is a binding of an enclosing function: one of its
+    parameters, or a ``const`` / ``let`` / ``var`` of a block inside it (a ``for`` or ``catch``
+    binding included). Such a value is read at runtime even when the repository has a top-level
+    constant of the same name, which the constants table (keyed by name) would otherwise give."""
+    n: Node | None = node.parent
+    while n is not None:
+        if n.type in _SCOPES:
+            single = n.child_by_field_name("parameter")  # `base => …`
+            params = n.child_by_field_name("parameters")
+            if _binds(single, name, source) or any(
+                _binds(p, name, source) for p in (params.named_children if params else ())
+            ):
+                return True
+        elif n.type in ("for_in_statement", "for_statement"):
+            init = n.child_by_field_name("left") or n.child_by_field_name("initializer")
+            if init is not None and name in _declared(init, source):
+                return True
+        elif n.type == "catch_clause" and _binds(n.child_by_field_name("parameter"), name, source):
+            return True
+        elif n.type == "statement_block":  # a module-level name is the constant itself
+            if any(name in _declared(c, source) for c in n.named_children):
+                return True
+        n = n.parent
+    return False
+
+
+def _declared(stmt: Node, source: bytes) -> set[str]:
+    """The names a ``const`` / ``let`` / ``var`` declaration (or a ``for`` head's bare pattern)
+    declares."""
+    if stmt.type not in ("lexical_declaration", "variable_declaration"):
+        return {node_text(stmt, source)} if stmt.type == "identifier" else set()
+    out: set[str] = set()
+    for decl in stmt.named_children:
+        if decl.type == "variable_declarator":
+            pat = decl.child_by_field_name("name")
+            if pat is not None:
+                out.update(
+                    node_text(i, source) for i in _pattern_names(pat)
+                )
+    return out
+
+
+def _pattern_names(pat: Node) -> list[Node]:
+    if pat.type in ("identifier", "shorthand_property_identifier_pattern"):
+        return [pat]
+    out: list[Node] = []
+    for c in pat.named_children:
+        if c.type == "pair_pattern":
+            v = c.child_by_field_name("value")
+            out.extend(_pattern_names(v) if v is not None else [])
+        elif c.type in ("assignment_pattern", "object_assignment_pattern"):
+            left = c.child_by_field_name("left")
+            out.extend(_pattern_names(left) if left is not None else [])
+        elif c.type in ("identifier", "shorthand_property_identifier_pattern",
+                        "object_pattern", "array_pattern", "rest_pattern"):
+            out.extend(_pattern_names(c))
+    return out
+
+
+def _part_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """One part of a path expression folded through ``consts``; None for a name an enclosing
+    function binds (:func:`locally_bound`) — a parameter or local named like a repository
+    constant is not that constant."""
+    root = node
+    while root.type == "member_expression":
+        obj = root.child_by_field_name("object")
+        if obj is None:
+            break
+        root = obj
+    if root.type == "identifier" and locally_bound(node, node_text(root, source), source):
+        return None
+    return resolve_const_value(node, source, consts)
+
+
 def _path_parts(
     node: Node, source: bytes, consts: dict[str, str | None]
 ) -> list[tuple[str | None, str]]:
@@ -282,11 +381,21 @@ def _path_parts(
             elif c.type == "template_substitution":
                 inner = c.named_children[0] if c.named_children else None
                 parts.append((
-                    None if inner is None else resolve_const_value(inner, source, consts),
+                    None if inner is None else _part_value(inner, source, consts),
                     node_text(inner, source) if inner is not None else "",
                 ))
         return parts
-    return [(resolve_const_value(node, source, consts), node_text(node, source))]
+    return [(_part_value(node, source, consts), node_text(node, source))]
+
+
+def folded_path(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """A path expression whose every part folds to a constant, as its literal text
+    (``BASE + "/users/" + ID`` with ``BASE``/``ID`` constants → ``/api/users/7``); None when a part
+    is read at runtime (:func:`runtime_path_template` marks it) or there is no part at all."""
+    parts = _path_parts(node, source, consts)
+    if not parts or any(value is None for value, _ in parts):
+        return None
+    return "".join(value for value, _ in parts if value is not None)
 
 
 def runtime_path_template(
@@ -295,8 +404,9 @@ def runtime_path_template(
     """A path expression with a part read at runtime, as an address with that part marked
     (``addresses.py``): ``BASE + "/users"`` and `` `${BASE}/users` `` give ``${BASE}/users``. In a
     route path (``outbound`` False) every unresolved part is ``${name}``. In an outbound URL a
-    part before the first literal ``/`` is ``${name}`` (a base) and one after it is a request
-    value, ``{name}`` (``ctx + "/orders/" + id`` → ``${ctx}/orders/{id}``). None when every part
+    part before the first literal ``/``, ``?`` or ``#`` is ``${name}`` (a base) and one after it
+    is a request value, ``{name}`` (``ctx + "/orders/" + id`` → ``${ctx}/orders/{id}``,
+    ``"run.php?action=" + a`` → ``run.php?action={a}``). None when every part
     resolves (no runtime part) or no literal path part is known."""
     parts = _path_parts(node, source, consts)
     if all(value is not None for value, _ in parts):
@@ -306,7 +416,7 @@ def runtime_path_template(
     for value, text in parts:
         if value is not None:
             out.append(value)
-            in_base = in_base and "/" not in value
+            in_base = in_base and not any(c in value for c in "/?#")
         elif outbound and not in_base:
             out.append("{" + (_simple_name(text) or "param") + "}")
         else:

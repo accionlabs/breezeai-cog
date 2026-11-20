@@ -43,12 +43,14 @@ from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import (
     TsAliasIndex,
+    _collect_const_values,
     _is_fixture_path,
     _module_of,
     _string_literal,
+    folded_path,
     relative_requires,
     require_specifier,
-    resolve_const_value,
+    runtime_path_template,
 )
 from ..typescript.imports import _resolve as _resolve_module
 from ..typescript_express.mounts import mw_name
@@ -468,8 +470,9 @@ class _Analyzer:
 
     def prefix_token(self, opts: Node | None, scope: Scope) -> str | None:
         """The ``prefix`` a registration's options give: ``""`` none, a literal,
-        a ``${name}`` part for a ``prefix`` value that does not resolve (``config.base`` →
-        ``${base}``, see ``addresses``),
+        one folded from constants (``PREFIX``, ``API + "/v1"``), a ``${name}`` part for a value
+        read at runtime (``config.base`` → ``${base}``, ``config.base + "/v1"`` → ``${base}/v1``,
+        see ``addresses``),
         ``None`` when the options can't be read, :data:`FROM_OPTS` for the enclosing plugin's own
         options."""
         opts = _unwrap(opts)
@@ -493,13 +496,13 @@ class _Analyzer:
             value = _unwrap(value)
             if value is None:
                 return None
-            if value.type in ("string", "template_string"):
-                resolved = resolve_const_value(value, src, self.consts)
-                if resolved is not None:
-                    return resolved
+            resolved = folded_path(value, src, self.consts)
+            if resolved is not None:
+                return resolved
             # A prefix read at runtime (`prefix: config.base`): a `${base}` part of the routes'
-            # addresses.
-            return runtime_part(node_text(value, src))
+            # addresses, with the literal parts around it kept.
+            return runtime_path_template(value, src, self.consts) \
+                or runtime_part(node_text(value, src))
         spreads = _has_spread(opts)
         if not spreads:
             return ""
@@ -809,7 +812,9 @@ class _FileValue:
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileValue | None:
     if root is None or _is_fixture_path(rel):
         return None
-    info = analyze(root, source)
+    consts: dict[str, str | None] = {}
+    _collect_const_values(root, source, consts)  # this file's own: the repo's are not known yet
+    info = analyze(root, source, consts)
     if not (info.edges or info.autoloads or info.exports or info.config):
         return None
     repo = repo_root or Path(".")

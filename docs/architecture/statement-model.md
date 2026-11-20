@@ -439,8 +439,14 @@ Two further rules apply to detectors:
   are throwaway test set-ups: additive detectors with `Gate(skip_fixtures=True)`, parser-owned
   route code with `is_fixture_file`.
 - **Constants are folded** into `endpoint` when they are true compile-time constants (`ORDERS` →
-  `orders.created`). Otherwise the endpoint is left empty. See
+  `orders.created`; a route path `app.get(API + "/orders")` → `/api/orders`). See
   [Cross-file resolution](cross-file-resolution.md).
+- **A part read at runtime is marked `${…}`** where it stands, named after its source, never
+  guessed, and never written `{name}` (a path parameter): inbound
+  `router.get(pathPrefix + "/request")` → `endpoint: ${pathPrefix}/request`; outbound
+  `axios.post(config.contextRoot + "/orders/" + id)` → `endpoint: ${config.contextRoot}/orders/{id}`.
+  An address left with no named part (`${value}`, `{param}` only) is empty. The full rule is in the
+  [entry-point contract §6](entry-points.md#a-part-read-at-runtime-name).
 
 ---
 

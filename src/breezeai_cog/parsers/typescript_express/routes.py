@@ -28,7 +28,7 @@ from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
     _path_pieces, _resolve_pieces,
-    _module_of, _require_module, local_source, relative_requires, resolve_const_value,
+    _module_of, _require_module, folded_path, local_source, relative_requires,
     runtime_path_template,
 )
 from ..wiring import compose_guards
@@ -109,9 +109,10 @@ def _path_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str
     """Route-path argument as a string: a plain string literal verbatim, or a template literal
     whose every ``${…}`` resolves to a constant (``consts``: the repo's string constants). An
     unresolved part makes the whole path unknown → None — never a ``{name}`` placeholder or a
-    path with its base dropped (``${BASE}/users`` is not ``/users``)."""
-    if node.type == "template_string":
-        return resolve_const_value(node, source, consts)
+    path with its base dropped (``${BASE}/users`` is not ``/users``). A concatenation of
+    constants folds the same way (``BASE + "/users/:id"`` → ``/api/users/:id``)."""
+    if node.type in ("template_string", "binary_expression"):
+        return folded_path(node, source, consts)
     return _string_value(node, source)
 
 
