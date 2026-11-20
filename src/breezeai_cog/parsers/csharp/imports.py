@@ -620,16 +620,18 @@ def _file_scopes(root: Node, source: bytes) -> set[str]:
     return expanded
 
 
-def _referenced_types(root: Node, source: bytes) -> set[str]:
-    """Simple type names referenced in the file — the candidates we try to resolve to a
-    declaring file (base/implements, field/param/local types, ``new X()``, properties)."""
-    names: set[str] = set()
+def _referenced_types(root: Node, source: bytes) -> list[str]:
+    """Simple type names referenced in the file, each once, in the order the file first
+    references them — the candidates we try to resolve to a declaring file (base/implements,
+    field/param/local types, ``new X()``, properties). Source order, never a ``set``'s: the
+    order of ``importFiles`` must be the same on every run of the same commit."""
+    names: dict[str, None] = {}
 
     def add(node: Node | None) -> None:
         if node is not None:
             s = _simple(node_text(node, source))
             if s:
-                names.add(s)
+                names.setdefault(s, None)
 
     def walk(node: Node) -> None:
         for child in node.named_children:
@@ -647,7 +649,7 @@ def _referenced_types(root: Node, source: bytes) -> set[str]:
             walk(child)
 
     walk(root)
-    return names
+    return list(names)
 
 
 def _resolve(name: str, scopes: set[str], index: CSharpIndex | None, self_path: str) -> str | None:

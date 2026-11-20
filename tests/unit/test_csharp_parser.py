@@ -889,3 +889,13 @@ def test_global_usings_are_kept_per_project(tmp_path) -> None:
         assert index.usings_for("Shop/OrderService.cs") == {"Microsoft.EntityFrameworkCore"}
         assert index.usings_for("Web/Queries.cs") == set()
         assert index.global_usings == {"Microsoft.EntityFrameworkCore"}  # repo-wide union
+
+
+def test_import_files_follow_the_order_types_are_first_referenced(tmp_path) -> None:
+    # The same commit must give the same record on every run: not a set's (hash) order.
+    names = ["Zeta", "Alpha", "Mid", "Omega", "Beta", "Kappa"]
+    files = {f"Lib/{n}.cs": f"namespace Lib {{ public class {n} {{ }} }}\n" for n in names}
+    body = "".join(f"  {n} f{i} = new {n}();\n" for i, n in enumerate(names))
+    files["App/Use.cs"] = f"using Lib;\nnamespace App {{ public class Use {{\n{body}}} }}\n"
+    rec = _parse_repo(tmp_path, files, "App/Use.cs")
+    assert rec.importFiles == [f"Lib/{n}.cs" for n in names]
