@@ -12,12 +12,11 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
-from breezeai_cog.parsers.typescript_nextjs.routes import (
-    endpoint_from_path,
+from breezeai_cog.parsers.typescript_nextjs.routes import endpoint_from_path, pages_api_endpoint
+from breezeai_cog.parsers.typescript_nextjs_common import (
     is_app_router_route_file,
     is_pages_api_file,
     is_route_file,
-    pages_api_endpoint,
 )
 from breezeai_cog.schemas import FileRecord
 

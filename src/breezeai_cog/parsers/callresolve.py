@@ -34,6 +34,13 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
   only types in ``fieldless_types`` that are no repository class let the lookup continue, since
   any other type may declare a field of that name itself.
 
+* **Qualified type** (with ``declared_types``, Java only): ``x.m()`` where ``x`` is declared
+  ``Outer.Inner`` → ``Inner`` as declared in ``Outer``'s file (this file, an import or the same
+  package); declared ``com.acme.Outer.Inner`` or ``com.acme.Order`` → the class that package and
+  name give. The file declaring ``m`` on that class or its nearest in-repo ancestor. A name that
+  is no repository class (``java.util.Map.Entry``) gives ``None``: a class elsewhere that shares
+  its simple name is never it.
+
 * **Call receiver** (with ``declared_only``): ``x.m().n()`` / ``m().n()`` / ``Type.m().n()``
   → ``m``'s declared return type (``heritage`` ``returns``, from ``x``'s type, the enclosing
   class or ``Type``, ancestors included) → the file that declares ``n`` on that type. A longer
@@ -50,7 +57,7 @@ them behave exactly as the base tiers.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Container, Mapping
 from typing import Callable
 
 from .index_common import ClassHeritage, record_distinct, walk_heritage
@@ -150,6 +157,30 @@ def _base_type(t: str | None) -> str | None:
     return t.rsplit(".", 1)[-1] or None
 
 
+def _type_parts(t: str | None) -> list[str]:
+    """A written type's dotted segments, generics and array brackets dropped:
+    ``com.acme.Outer.Inner<T>[]`` → ``["com", "acme", "Outer", "Inner"]``."""
+    if not t:
+        return []
+    parts = t.split("<", 1)[0].strip().rstrip("[]").strip().split(".")
+    return parts if all(parts) else []
+
+
+def _is_array(t: str | None, generic: frozenset[str]) -> bool:
+    """Whether a written type is an array: ``Order[]``, ``(A | B)[]``, ``Array<Order>``,
+    ``readonly Order[]``."""
+    if not t:
+        return False
+    t = t.strip()
+    if t.startswith("readonly "):
+        t = t[len("readonly "):].strip()
+    return t.endswith("[]") or t.split("<", 1)[0].strip() in generic
+
+
+#: A receiver type written as a simple name: the qualified-type tier does not apply.
+_SIMPLE = ("", "")
+
+
 def make_resolver(
     bindings: dict[str, str],
     local_defs: set[str],
@@ -164,6 +195,9 @@ def make_resolver(
     unknown_methods: Mapping[tuple[str, str], frozenset[str] | None] | None = None,
     inherited_fields: bool = False,
     fieldless_types: frozenset[str] = frozenset(),
+    qualified_types: Mapping[str, str | None] | None = None,
+    declared_types: Container[tuple[str, str]] | None = None,
+    array_types: frozenset[str] = frozenset(),
 ) -> CallResolver:
     """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
     callee's qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -187,7 +221,16 @@ def make_resolver(
     tier models (Java) opts in, so no other language's calls change with the ``fields`` its
     classes' heritage may carry (Groovy reads the Java classes' heritage too).
     ``fieldless_types`` (simple names of library interfaces known to declare no fields) lets the
-    inherited-field tier see through an anonymous class of one of those types."""
+    inherited-field tier see through an anonymous class of one of those types.
+    ``declared_types`` (every repository class as ``(file, name below its package)``) turns on
+    the qualified-type tier: a receiver type written with a qualifier — ``Outer.Inner`` or
+    ``com.acme.Outer.Inner`` — is the class declared under that name, found through ``Outer``'s
+    file as this file binds it, or through ``qualified_types`` (top-level class FQCN → file) for
+    a package-qualified name; anything else gives ``None``. Java only: there a capitalised first
+    segment is a class, while in C# or TypeScript it may be a namespace.
+    ``array_types`` (the generic names of a language's array types: ``Array``, ``ReadonlyArray``)
+    turns on the array rule: a receiver typed ``T[]`` or ``Array<T>`` gives ``None`` for any
+    method — ``orders.find(…)`` is the array's method, never one of ``T``'s file."""
     types = types or {}
 
     def _type_of(key: str, scope: Mapping[str, str | None] | None) -> tuple[bool, str | None]:
@@ -260,6 +303,49 @@ def make_resolver(
             return resolved if declared is not None and name in declared else None
         return _lookup(typ, name, "methods")[1]
 
+    def _outer_file(outer: str) -> str | None:
+        """The file declaring class ``outer`` as this file sees it: a class of this file (which
+        hides an import of the same name), else an import or same-package binding. None for a
+        library class, or a bound name that is no repository class (a static import)."""
+        where = path if outer in local_defs else bindings.get(outer)
+        if where is None or (heritage is not None and outer not in heritage):
+            return None
+        return where
+
+    def _qualified(t: str | None) -> tuple[str, str] | None:
+        """``(file, class simple name)`` of a receiver type written with a qualifier, as the
+        class declared under that name — ``Outer.Inner`` inside ``Outer``'s file,
+        ``com.acme.Order`` in the file that package and name give. :data:`_SIMPLE` for a simple
+        name (the receiver-type tier decides); None when the qualified name is no repository
+        class (a library type): never a class of the same simple name elsewhere."""
+        parts = _type_parts(t)
+        if len(parts) < 2:
+            return _SIMPLE
+        where: str | None = None
+        below = ""
+        if parts[0][:1].isupper():  # `Outer.Inner`: Outer as this file binds it
+            where, below = _outer_file(parts[0]), ".".join(parts)
+        elif qualified_types is not None:  # `pkg.Outer.Inner`: the longest top-level class
+            for k in range(len(parts), 1, -1):
+                where = qualified_types.get(".".join(parts[:k]))
+                if where is not None:
+                    below = ".".join(parts[k - 1:])
+                    break
+        if where is None or declared_types is None or (where, below) not in declared_types:
+            return None
+        return where, parts[-1]
+
+    def _in_class(name: str, where: str, cls: str) -> str | None:
+        """``x.name()`` with ``x`` of the class ``cls`` declared in ``where``: the file declaring
+        ``name`` on it or its nearest in-repo ancestor. When two classes share ``cls``'s simple
+        name, only a method declared in ``where`` itself."""
+        if not declared_only or heritage is None:
+            return where
+        if heritage.get(cls) is None:  # two classes share the name: read the one in `where`
+            declared = unknown_methods.get((where, cls)) if unknown_methods is not None else None
+            return where if declared is not None and name in declared else None
+        return _lookup(cls, name, "methods")[1]
+
     def _imported(name: str, receiver: str, resolved: str) -> str | None:
         """``Name.name()`` on an imported name: the file declaring ``name`` when ``Name`` is a
         repo class (a method the language generates, such as an enum's ``valueOf``, is declared
@@ -297,7 +383,11 @@ def make_resolver(
         else:
             # a variable (even one of unknown type) hides a class of the same name
             known, typ = _type_of(qual, scope)
-            cls = _base_type(typ) if known else (qual if qual in heritage else None)
+            q = _qualified(typ) if known and declared_types is not None else _SIMPLE
+            if q is not _SIMPLE:  # `Outer.Inner` / `pkg.Type`: that class, or nothing
+                cls = q[1] if q is not None and heritage.get(q[1]) is not None else None
+            else:
+                cls = _base_type(typ) if known else (qual if qual in heritage else None)
         for method in methods:
             if cls is None:
                 return None
@@ -359,7 +449,13 @@ def make_resolver(
                 # receiver-type tier below decides, as it does for any such type.
                 if ftype is not None and heritage.get(ftype) is not None:
                     return _lookup(ftype, name, "methods")[1]
-            typ = _base_type(_type_of(receiver, scope)[1])
+            written = _type_of(receiver, scope)[1]
+            q = _qualified(written) if declared_types is not None else _SIMPLE
+            if q is not _SIMPLE:  # `Outer.Inner x` / `pkg.Type x`: never this file's own class
+                return _in_class(name, *q) if q is not None else None
+            if array_types and _is_array(written, array_types):
+                return None  # a method of the array, not of its element type
+            typ = _base_type(written)
             if typ:
                 resolved = bindings.get(typ) or (path if typ in local_defs else None)
                 if resolved is not None:

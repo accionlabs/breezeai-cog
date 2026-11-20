@@ -427,9 +427,10 @@ Which marker a part becomes:
 
 - in an **inbound** route path or an **event-bus address**, every part cog cannot read is `${…}`
   (a request value enters a route only through the framework's own parameter syntax);
-- in an **outbound** URL, a part in the base — before the path's first `/`, the scheme and host
-  included — is `${…}`; a later part is a request value, `{name}` — except a configuration entry
-  or environment variable, which is `${…}` wherever it stands.
+- in an **outbound** URL, a part in the base — before the path's first `/` (or the `?` / `#` of
+  a relative URL with no `/`), the scheme and host included — is `${…}`; a later part is a
+  request value, `{name}` (`"run.php?action=" + a` → `run.php?action={a}`) — except a
+  configuration entry or environment variable, which is `${…}` wherever it stands.
 
 An address made **only of named markers is kept**: it names where the address comes from, not the
 address (`${url}`, `${config:api-verticle.address}`, `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}`).

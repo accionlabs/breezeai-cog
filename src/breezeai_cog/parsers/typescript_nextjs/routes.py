@@ -49,7 +49,6 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-import re
 
 from ...emit import file_id, function_id, statement_id
 from ...schemas import FileRecord
@@ -57,10 +56,10 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import node_text
 from ..base_paths_common import app_base_path
+from ..typescript_nextjs_common import is_app_router_route_file, is_pages_api_file, is_route_file
 from .facts import next_base_paths, next_middlewares, page_extensions, page_stem
 
 _VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-_ROUTE_STEMS = {"route"}  # App Router API handler file; page/layout are UI, not verb handlers
 
 
 def _url_segments(segs: list[str]) -> str:
@@ -68,20 +67,6 @@ def _url_segments(segs: list[str]) -> str:
     ``@x`` (neither appears in the Next.js URL); dynamic segments are kept literal."""
     url = [s for s in segs if not (s.startswith("(") and s.endswith(")")) and not s.startswith("@")]
     return "/" + "/".join(url) if url else "/"
-
-
-def is_app_router_route_file(path: str) -> bool:
-    """A file that can hold App Router verb handlers: ``…/app/**/route.<ext>`` (the ext may be a
-    custom page extension, ``route.api.ts``; the app's ``pageExtensions`` decide later)."""
-    segs = path.replace("\\", "/").split("/")
-    stem = segs[-1].split(".", 1)[0]
-    return stem in _ROUTE_STEMS and "app" in segs[:-1]
-
-
-def is_pages_api_file(path: str) -> bool:
-    """A file that can hold a Pages Router API handler: ``…/pages/api/**`` (any stem)."""
-    segs = path.replace("\\", "/").split("/")[:-1]  # dirs only
-    return "pages" in segs and segs[segs.index("pages") + 1 : segs.index("pages") + 2] == ["api"]
 
 
 def endpoint_from_path(path: str) -> str:
@@ -376,25 +361,6 @@ def detect_nextjs_routes(
         ]
 
     return []
-
-
-# A verb handler in either accepted form: ``export … function GET`` / ``export const GET =``.
-_VERB_EXPORT_SIG = re.compile(
-    rb"export\s+(?:async\s+)?(?:function\s+|(?:const|let|var)\s+)"
-    rb"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b"
-)
-# A Pages Router handler is the file's default export (any shape).
-_DEFAULT_EXPORT_SIG = re.compile(rb"export\s+default\b")
-
-
-def is_route_file(path: str, source: bytes) -> bool:
-    """A file that may hold route handlers: an App Router ``route.*`` exporting a verb, or a
-    ``pages/api/**`` file with a default export (path first, then a cheap byte sniff)."""
-    if is_app_router_route_file(path):
-        return bool(_VERB_EXPORT_SIG.search(source))
-    if is_pages_api_file(path):
-        return bool(_DEFAULT_EXPORT_SIG.search(source))
-    return False
 
 
 def _detect(dc: DetectContext) -> Detection | None:

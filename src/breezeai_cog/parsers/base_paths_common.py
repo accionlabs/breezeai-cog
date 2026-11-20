@@ -18,7 +18,7 @@ index's constant map once it is complete.
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from tree_sitter import Node
@@ -26,7 +26,8 @@ from tree_sitter import Node
 from .addresses import runtime_part
 
 from .treesitter import node_text
-from .typescript.imports import _path_pieces
+from .typescript.imports import _path_pieces, piece_name, piece_value
+from .typescript.scopes import ConstView, collect_consts
 
 #: One file's base paths: (its directory, the path pieces of each ``basePath`` it sets —
 #: a dynamic value is one ``("rt", source text)`` piece; an empty list = a Next.js config that
@@ -36,12 +37,14 @@ BasePathRaw = tuple[str, list[list[tuple[str, str]]]]
 
 def collect_base_path(
     root: Node, source: bytes, rel: str, framework: Literal["nextjs", "loopback"],
+    repo_root: Path | None = None,
 ) -> BasePathRaw | None:
     """The base paths this file sets. Next.js: a ``basePath`` key in any object of a
     ``next.config.*`` file (``module.exports = {…}``, ``export default withX({…})``) — the caller
     passes only config files. LoopBack: a ``basePath`` key inside a ``rest: {…}`` options object,
     or an ``x.basePath('/api')`` call. None when a LoopBack file sets none."""
     found: list[list[tuple[str, str]]] = []
+    view = collect_consts(root, source, rel, repo_root)  # which constant each name reads here
 
     def walk(n: Node) -> None:
         if n.type == "pair":
@@ -52,14 +55,14 @@ def collect_base_path(
                 okey = outer.child_by_field_name("key") if outer is not None and outer.type == "pair" else None
                 if framework == "nextjs" or (
                         okey is not None and node_text(okey, source).strip("'\"") == "rest"):
-                    found.append(_pieces(value, source))
+                    found.append(_pieces(value, source, view))
         elif n.type == "call_expression" and framework == "loopback":
             fn = n.child_by_field_name("function")
             prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
             args = n.child_by_field_name("arguments")
             arg_nodes = list(args.named_children) if args is not None else []
             if prop is not None and node_text(prop, source) == "basePath" and len(arg_nodes) == 1:
-                found.append(_pieces(arg_nodes[0], source))
+                found.append(_pieces(arg_nodes[0], source, view))
         for c in n.named_children:
             walk(c)
 
@@ -93,10 +96,10 @@ def app_base_path(apps: dict[str, str | None], path: str) -> tuple[bool, str | N
     return True, apps[max(anchors, key=len)]
 
 
-def _pieces(node: Node, source: bytes) -> list[tuple[str, str]]:
+def _pieces(node: Node, source: bytes, view: ConstView) -> list[tuple[str, str]]:
     """A ``basePath`` value's pieces; a value with a dynamic piece (a call, a condition) is one
     ``("rt", source text)`` piece, named when the base is resolved."""
-    pieces = _path_pieces(node, source)
+    pieces = _path_pieces(node, source, view)
     return pieces if pieces is not None else [("rt", node_text(node, source))]
 
 
@@ -107,8 +110,8 @@ def _template(pieces: list[tuple[str, str]], consts: dict[str, str | None]) -> s
     for kind, text in pieces:
         if kind == "lit":
             out.append(text)
-        elif kind == "sym" and consts.get(text) is not None:
-            out.append(str(consts[text]))
+        elif (value := piece_value(kind, text, consts)) is not None:
+            out.append(value)
         else:
-            out.append(runtime_part(text))
+            out.append(runtime_part(piece_name(kind, text)))
     return "".join(out)

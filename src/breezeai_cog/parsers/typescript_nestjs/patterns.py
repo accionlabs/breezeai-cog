@@ -18,14 +18,14 @@ from typing import Any
 from tree_sitter import Node
 
 from ..treesitter import node_text
-from ..typescript.imports import resolve_const_value
+from ..typescript.imports import Consts, resolve_const_value
 
 _UNKNOWN = object()
 #: What the constant index holds for a number (``number_literal``): ``5000``, ``1.5``.
 _NUMERIC_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
-def _value(node: Node, source: bytes, consts: dict[str, str | None], nested: bool = False) -> Any:
+def _value(node: Node, source: bytes, consts: Consts, nested: bool = False) -> Any:
     t = node.type
     if t == "object":
         out: dict[str, Any] = {}
@@ -82,7 +82,7 @@ def _value(node: Node, source: bytes, consts: dict[str, str | None], nested: boo
     return _UNKNOWN
 
 
-def message_pattern(arg: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def message_pattern(arg: Node, source: bytes, consts: Consts) -> str | None:
     """The endpoint of a message pattern argument: the string for a string pattern, canonical
     JSON (keys sorted, no spaces) for an object pattern, ``None`` when any part is unknown."""
     v = _value(arg, source, consts)

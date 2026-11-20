@@ -118,6 +118,8 @@ def test_url_placeholder(expr, placeholder) -> None:
         ("{param}/{param}", None),
         ("/a/{config:v}", "/a/${config:v}"),  # a config entry is never a request value
         ("${ctx}/x", "${ctx}/x"),  # already marked
+        ("run.php?action={a}", "run.php?action={a}"),  # a query value, not a base
+        ("{base}?q={v}", "${base}?q={v}"),
     ],
 )
 def test_outbound_template(rendered, url) -> None:
@@ -639,3 +641,192 @@ fun Application.module(path: String, dao: Any) {
 )
 def test_braces_holding_code_are_no_address(address, kept) -> None:
     assert informative(address) == kept
+
+
+# ── the remaining cells per framework: a parameter only, a variable-only address, a resolved prefix
+def test_express_resolved_constant_prefix(analyze_files) -> None:
+    st = analyze_files(
+        {
+            SERVER: """const express = require('express');
+const app = express();
+const BASE = '/api';
+app.get(BASE + '/users/:id', getUser);
+app.get(`${BASE}/users`, getUser);
+function getUser(req, res) {}
+"""
+        }
+    )
+    assert _addr(_one(st, "route", SERVER, 4)) == "/api/users/:id"
+    assert _addr(_one(st, "route", SERVER, 5)) == "/api/users"
+
+
+def test_fastify_parameter_variable_and_constant_prefix(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "web/app.js": """const fastify = require('fastify')();
+const PREFIX = '/v2';
+fastify.register(require('./items'), { prefix: PREFIX });
+""",
+            "web/items.js": """module.exports = async function (fastify, opts) {
+  fastify.get('/items/:id', async () => []);
+  fastify.get(opts.path, async () => []);
+};
+""",
+        }
+    )
+    assert _addr(_one(st, "route", "web/items.js", 1)) == "/v2/items/:id"
+    assert [
+        s.endpoint
+        for s in st
+        if s.path == "web/items.js" and s.startLine == 3 and s.semanticType == "route"
+    ] in ([], [None])  # variable only: no address
+
+
+@pytest.mark.parametrize(
+    "top, main, expected",
+    [
+        ("", "", "/cats/:id"),  # a parameter only
+        ("const PREFIX = 'v1';", "app.setGlobalPrefix(PREFIX);", "/v1/cats/:id"),  # a constant
+        # a constant inside a function is not in the repository's constants: unread, so marked
+        ("", "const PREFIX = 'v1';\n  app.setGlobalPrefix(PREFIX);", "${PREFIX}/cats/:id"),
+    ],
+)
+def test_nest_parameter_and_constant_prefix(analyze_files, top, main, expected) -> None:
+    st = analyze_files(
+        {
+            **NEST,
+            "src/main.ts": f"""import {{ NestFactory }} from '@nestjs/core';
+{top}
+async function bootstrap() {{
+  const app = await NestFactory.create(AppModule);
+  {main}
+}}
+""",
+        }
+    )
+    assert _addr(_one(st, "route", "src/app.controller.ts")) == expected
+
+
+def test_fastapi_variable_only_and_constant_prefix(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "app/main.py": """from fastapi import FastAPI, APIRouter
+from .settings import settings
+API = "/api"
+app = FastAPI()
+router = APIRouter()
+@router.get("/items/{item_id}")
+def read_item(item_id: int):
+    return item_id
+@app.get(settings.HEALTH_PATH)
+def health():
+    return 1
+app.include_router(router, prefix=API)
+"""
+        }
+    )
+    assert _addr(_one(st, "route", "app/main.py", 6)) == "/api/items/{item_id}"
+    assert [
+        s.endpoint
+        for s in st
+        if s.path == "app/main.py" and s.startLine == 9 and s.semanticType == "route"
+    ] in ([], [None])  # variable only: no address
+
+
+def test_ktor_parameter_and_variable_only(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "src/App.kt": """import io.ktor.server.routing.*
+import io.ktor.server.application.*
+fun prefixFromEnv(): String = System.getenv("P")
+fun healthPath(): String = System.getenv("H")
+fun Application.module() {
+  routing {
+    route(prefixFromEnv()) {
+      get("/orders/{id}") { }
+    }
+    get("/plain/{id}") { }
+    get(healthPath()) { }
+  }
+}
+"""
+        }
+    )
+    assert _addr(_one(st, "route", "src/App.kt", 8)) == "${prefixFromEnv}/orders/{id}"
+    assert _addr(_one(st, "route", "src/App.kt", 10)) == "/plain/{id}"
+    assert [
+        s.endpoint
+        for s in st
+        if s.path == "src/App.kt" and s.startLine == 11 and s.semanticType == "route"
+    ] in ([], [None])  # variable only: no address
+
+
+@pytest.mark.parametrize(
+    "base, expected",
+    [
+        ("BASE_PATH", "${BASE_PATH}/ping/{id}"),  # a runtime prefix plus a parameter
+        ("'/v1'", "/v1/ping/{id}"),
+    ],
+)
+def test_loopback_prefix_and_parameter(analyze_files, base, expected) -> None:
+    src = (LB_CONTROLLER % base).replace("@get('/ping')", "@get('/ping/{id}')")
+    st = analyze_files({"src/controllers/ping.controller.ts": src})
+    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == expected
+
+
+def test_outbound_parameter_only_and_constant_base(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "web/page.js": """const API = '/api';
+$(function () {
+  $.ajax({ url: "/orders/" + id });
+  $.ajax({ url: API + "/orders" });
+});
+"""
+        }
+    )
+    assert _addr(_one(st, "api_call", "web/page.js", 3)) == "/orders/{id}"
+    # a constant is not folded in an outbound URL (axios / fetch do not fold it either)
+    assert _addr(_one(st, "api_call", "web/page.js", 4)) == "${API}/orders"
+
+
+def test_a_parameter_named_like_a_constant_is_read_at_runtime(analyze_files) -> None:
+    # `target` / `base` are parameters here, not the repository's constants of those names
+    st = analyze_files(
+        {
+            "web/consts.js": "export const target = '/elsewhere';\nexport const base = '/b';\n",
+            "web/page.js": """import $ from 'jquery';
+function go(target, base) {
+  $.ajax({ url: target });
+  $.ajax({ url: base + "/x" });
+  const { base: b2 } = opts;
+  $.ajax({ url: `${base}/y` });
+}
+""",
+            SERVER: """const express = require('express');
+const app = express();
+function mount(base) { app.get(base + '/users', h); }
+function mount2() { const base = read(); app.get(`${base}/v2`, h); }
+function h(req, res) {}
+""",
+        }
+    )
+    assert _addr(_one(st, "api_call", "web/page.js", 3)) == "${target}"  # the parameter, named
+    assert _addr(_one(st, "api_call", "web/page.js", 4)) == "${base}/x"
+    assert _addr(_one(st, "api_call", "web/page.js", 6)) == "${base}/y"
+    assert _addr(_one(st, "route", SERVER, 3)) == "${base}/users"
+    assert _addr(_one(st, "route", SERVER, 4)) == "${base}/v2"
+
+
+def test_a_query_value_of_a_relative_url_is_a_request_value(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "web/page.js": """$(function () {
+  $.ajax({ type: "POST", url: "execute.php?action=" + action });
+  $.ajax({ url: base + "?q=" + term });
+});
+"""
+        }
+    )
+    assert _addr(_one(st, "api_call", "web/page.js", 2)) == "execute.php?action={action}"
+    assert _addr(_one(st, "api_call", "web/page.js", 3)) == "${base}?q={term}"

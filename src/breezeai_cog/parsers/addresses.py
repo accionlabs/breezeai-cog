@@ -18,8 +18,9 @@ Which one a runtime part becomes:
 
 - in an **inbound** route path, every part cog cannot read is ``${name}`` (a request value enters
   a route only through its own parameter syntax, which is kept as written);
-- in an **outbound** URL, a part in the base (before the path's first ``/``, the scheme and
-  host included) is ``${name}``; a part after it is a request value, ``{name}``.
+- in an **outbound** URL, a part in the base (before the path's first ``/``, or the ``?`` /
+  ``#`` of a relative URL with no ``/``; the scheme and host included) is ``${name}``; a part
+  after it is a request value, ``{name}``.
 
 An address keeps every part, even when none is literal (``${path}``, ``${host}${path}``,
 ``${config:api-verticle.address}``): it then names where the address comes from, not the address.
@@ -222,17 +223,17 @@ def join_runtime(base: str, path: str) -> str:
 
 
 def outbound_template(url: str | None) -> str | None:
-    """A rendered outbound URL: each ``{name}`` in its base — up to the first ``/`` of the path,
-    the scheme and host included — becomes ``${name}``; the ones after it stay ``{name}``
-    (request values) — except a configuration entry or an environment variable, which is never
-    a request value (``{config:v}`` → ``${config:v}`` anywhere). None when it says nothing
-    (:func:`informative`)."""
+    """A rendered outbound URL: each ``{name}`` in its base — up to the first ``/``, ``?`` or
+    ``#`` after the scheme, the host included — becomes ``${name}``; the ones after it stay
+    ``{name}`` (request values) — except a configuration entry or an environment variable, which
+    is never a request value (``{config:v}`` → ``${config:v}`` anywhere). None when it says
+    nothing (:func:`informative`)."""
     if not url:
         return url
     start = url.find("://")
     start = start + 3 if start != -1 else 0
-    slash = url.find("/", start)
-    end = len(url) if slash == -1 else slash
+    ends = [i for i in (url.find(c, start) for c in "/?#") if i != -1]
+    end = min(ends) if ends else len(url)
     base = _PLACEHOLDER.sub(lambda m: runtime_part(m.group(1)), url[:end])
     rest = _PLACEHOLDER.sub(
         lambda m: runtime_part(m.group(1)) if _KINDED.fullmatch(m.group(1)) else m.group(0),
