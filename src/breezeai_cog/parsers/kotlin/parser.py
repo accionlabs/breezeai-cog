@@ -2,7 +2,7 @@
 
 Covers imports, classes/interfaces/enums/objects, functions/methods, annotations,
 and simple call extraction for .kt files. Uses tree-sitter-kotlin grammar via
-the shared parse_source() helper.
+parse_kotlin() (the shared parse_source() plus a one-line-body retry).
 """
 
 from __future__ import annotations
@@ -36,8 +36,9 @@ from ..statements_common import (
     end_datastore_vendor,
     set_datastore_vendor,
 )
-from ..treesitter import line_span, node_text, parse_source
+from ..treesitter import line_span, node_text
 from .functions import defined_names, type_map
+from .reparse import parse_kotlin
 from .imports import KotlinIndex, build_fqcn_index, extract_imports
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -235,7 +236,7 @@ class KotlinParser(BaseParser):
         return build_fqcn_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("kotlin", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_kotlin(ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
