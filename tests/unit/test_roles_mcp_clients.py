@@ -1691,3 +1691,53 @@ export async function run() {
     assert sorted(
         (s.endpoint, s.nodeType) for s in statements if s.semanticType == "mcp_call"
     ) == [("a", "expression_statement"), ("x", "expression_statement")]
+
+
+def test_kotlin_client_is_proven_only_in_its_own_class(analyze_files) -> None:
+    """A ``client`` another class inherits (its type unknown) is not the declared client, nor is
+    one declared in an outer class or at the top level."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.client.Client
+
+class A(private val client: Client) {
+    suspend fun run() { client.callTool(name = "real_tool", arguments = emptyMap()) }
+
+    class Nested : GameEngine() {
+        suspend fun tick() { client.callTool(name = "nested", arguments = emptyMap()) }
+    }
+}
+
+class B : GameEngine() {
+    suspend fun tick() { client.callTool(name = "not_mcp", arguments = emptyMap()) }
+    val handler = object : GameEngine() {
+        suspend fun tick() { this.client.callTool(name = "anonymous", arguments = emptyMap()) }
+    }
+}
+"""
+    assert _calls(analyze_files({"K.kt": src})) == [("TOOL", "real_tool", "kotlin-mcp")]
+
+
+def test_csharp_client_is_proven_only_in_its_own_class(analyze_files) -> None:
+    src = """
+using ModelContextProtocol.Client;
+
+public class A
+{
+    private readonly IMcpClient client;
+
+    public async Task RunAsync() { await client.CallToolAsync("real_tool"); }
+
+    public class Nested : GameEngine
+    {
+        public async Task TickAsync() { await client.CallToolAsync("nested"); }
+    }
+}
+
+public class B : GameEngine
+{
+    public async Task TickAsync() { await client.CallToolAsync("not_mcp"); }
+}
+"""
+    assert _calls(analyze_files({"C.cs": src})) == [("TOOL", "real_tool", "csharp-mcp")]

@@ -362,11 +362,14 @@ async with ClientSession(read, write) as session:
   server.
 - **A spread after the literal** (`client.callTool({ name: "x", ...req })`) may override it at
   runtime: no record. A spread before it is overridden by it and changes nothing.
-- **Java, Kotlin and C# clients are proven by name across the file.** A name declared once in
-  the file as a client (typed, or assigned the SDK's factory) is a client wherever that name is
-  called in the file, so a same-named variable reached another way in another class of the same
-  file (inherited, or a Kotlin `with` / scope-function receiver) can be taken for it. Python
-  and TypeScript resolve the call's nearest binding instead.
+- **Java, Kotlin and C# clients are proven by name within their class.** A name declared in a
+  class as a client (typed, or assigned the SDK's factory), and as nothing else in that class,
+  is a client wherever that name is called in the same class (the innermost `class`, `object`,
+  `struct`, `record` or `interface` around the call; the file's top level outside them). A
+  same-named `client` in another class — inherited from a base class, or declared in an outer
+  class — is not taken for it (no record). Within the class, a Kotlin `with` / scope-function
+  receiver with a member of the same name can still be taken for it. Python and TypeScript
+  resolve the call's nearest binding instead.
 - **Client detectors also run on fixture and test files**, unlike the server detectors (an
   `mcp_call` is outbound, not an entry point): a test that calls a tool through a real client
   records that call.

@@ -12,14 +12,17 @@
     val sync = McpClient.sync(transport).build()
     sync.callTool(McpSchema.CallToolRequest("add", mapOf()))         → mcp_call  java-mcp  TOOL  add
 
-* **Client receiver** — a name (or ``this.name``) every declaration of which in the file (a
-  loop's, a lambda's, a ``catch``, a ``when`` subject's or a destructuring variable of the same
-  name counts as a declaration, never a client) proves
-  a client of one framework: typed ``Client`` (with
-  the Kotlin SDK's ``Client`` imported) / ``McpSyncClient`` / ``McpAsyncClient``, or initialized by
-  ``Client(…)`` (that import) or a ``McpClient.sync(…)`` / ``.async(…)`` chain. A star import of
+* **Client receiver** — a name (or ``this.name``) every declaration of which in the call's own
+  class (a loop's, a lambda's, a ``catch``, a ``when`` subject's or a destructuring variable of
+  the same name counts as a declaration, never a client) proves a client of one framework: typed
+  ``Client`` (with the Kotlin SDK's ``Client`` imported) / ``McpSyncClient`` / ``McpAsyncClient``,
+  or initialized by ``Client(…)`` (that import) or a ``McpClient.sync(…)`` / ``.async(…)`` chain. A star import of
   the SDK's client package proves ``Client`` only when no other ``Client`` is imported by name
   (``import com.acme.Client``, ``… as Client``) or declared in the file: those win over it.
+  The class is the innermost ``class`` / ``object`` / ``companion object`` / ``object :``
+  expression around the call (the file's top level outside them): a name declared in another
+  class, an outer one included, proves nothing, so an inherited ``client`` of the same name is
+  not taken for it.
 * **Request** — the Kotlin SDK's ``callTool(name, …)`` (named or first), or a
   ``CallToolRequest`` / ``ReadResourceRequest`` / ``GetPromptRequest`` built with ``name =`` /
   ``uri =`` or its ``…Params(name = …)``; the Java SDK's request constructors as in Java. A
@@ -63,6 +66,10 @@ _OTHER_CLIENT = re.compile(
     re.MULTILINE,
 )
 _JAVA_TYPES = frozenset({"McpSyncClient", "McpAsyncClient"})
+#: The nodes whose members a client name is proven within (see :func:`_scope`).
+_SCOPES = frozenset(
+    {"class_declaration", "object_declaration", "companion_object", "object_literal"}
+)
 #: Client methods → (method, request type, the field naming what they reach).
 _CALLS = {
     "callTool": ("TOOL", "CallToolRequest", "name"),
@@ -99,9 +106,20 @@ def _built_java_client(value: Node | None, source: bytes) -> bool:
     return False
 
 
-def _clients(root: Node, source: bytes, kotlin_client: bool) -> dict[str, str]:
-    """Names every declaration of which in the file proves a client of one framework → it."""
-    declared: dict[str, list[str | None]] = {}
+def _scope(node: Node) -> int | None:
+    """The innermost class, object or object expression around ``node`` (its id), or None at
+    the file's top level: a name is proven a client only within the one it is declared in, as
+    another class may inherit a member of the same name."""
+    cur = node.parent
+    while cur is not None and cur.type not in _SCOPES:
+        cur = cur.parent
+    return cur.id if cur is not None else None
+
+
+def _clients(root: Node, source: bytes, kotlin_client: bool) -> dict[tuple[int | None, str], str]:
+    """(class, name) every declaration of which in that class proves a client of one framework
+    → it."""
+    declared: dict[tuple[int | None, str], list[str | None]] = {}
 
     def framework(type_node: Node | None, value: Node | None) -> str | None:
         type_name = node_text(type_node, source).split("<")[0].rstrip("?") if type_node else ""
@@ -136,26 +154,30 @@ def _clients(root: Node, source: bytes, kotlin_client: bool) -> dict[str, str]:
                     value = c
                     break
             if name is not None:
-                declared.setdefault(node_text(name, source), []).append(framework(type_node, value))
+                declared.setdefault((_scope(node), node_text(name, source)), []).append(
+                    framework(type_node, value)
+                )
         elif node.type == "variable_declaration" and (
             node.parent is None or node.parent.type != "property_declaration"
         ):
             # `for (client in …)`, `{ client -> … }`, a destructuring: never proven a client
             name = next((c for c in node.named_children if c.type == "simple_identifier"), None)
             if name is not None:
-                declared.setdefault(node_text(name, source), []).append(None)
+                declared.setdefault((_scope(node), node_text(name, source)), []).append(None)
         elif node.type == "catch_block":
             # `catch (client: Exception)`: never proven a client
             name = next((c for c in node.named_children if c.type == "simple_identifier"), None)
             if name is not None:
-                declared.setdefault(node_text(name, source), []).append(None)
+                declared.setdefault((_scope(node), node_text(name, source)), []).append(None)
         elif node.type in ("parameter", "class_parameter"):
             name = next((c for c in node.named_children if c.type == "simple_identifier"), None)
             type_node = next(
                 (c for c in node.named_children if c.type in ("user_type", "nullable_type")), None
             )
             if name is not None:
-                declared.setdefault(node_text(name, source), []).append(framework(type_node, None))
+                declared.setdefault((_scope(node), node_text(name, source)), []).append(
+                    framework(type_node, None)
+                )
     return {
         name: found[0]
         for name, found in declared.items()
@@ -235,7 +257,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             name = kotlin_suffix_name(receiver, source)
         else:
             continue
-        framework = clients.get(name)
+        framework = clients.get((_scope(call), name))
         if framework is None:
             continue
         args = kotlin_call_args(call, source)

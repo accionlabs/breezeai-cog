@@ -8,12 +8,15 @@
     await client.ReadResourceAsync("memo://insights")          → mcp_call  csharp-mcp  RESOURCE  memo://insights
     await client.GetPromptAsync("review", args)                → mcp_call  csharp-mcp  PROMPT    review
 
-* **Client receiver** — a name every declaration of which in the file (a ``foreach``, lambda,
-  ``catch``, tuple-deconstruction or query variable, ``out var`` / ``is var`` of the same name
-  counts as a declaration, never a client) is typed ``McpClient`` / ``IMcpClient`` (a field, a
+* **Client receiver** — a name every declaration of which in the call's own class (a
+  ``foreach``, lambda, ``catch``, tuple-deconstruction or query variable, ``out var`` / ``is var``
+  of the same name counts as a declaration, never a client) is typed ``McpClient`` / ``IMcpClient`` (a field, a
   local, a parameter, an ``out T x`` / ``is T x`` / ``case T x`` variable), or ``var``
   initialized by ``[await] McpClient.CreateAsync(…)`` / ``McpClientFactory.CreateAsync(…)``;
-  only in a file that uses the ``ModelContextProtocol`` package.
+  only in a file that uses the ``ModelContextProtocol`` package. The class is the innermost
+  ``class`` / ``struct`` / ``record`` / ``interface`` around the call (the file's top-level
+  statements outside them): a name declared in another class, an outer one included, proves
+  nothing, so an inherited ``client`` of the same name is not taken for it.
 * ``endpoint`` — the first argument (or ``toolName:`` / ``name:`` / ``uri:`` / ``uriTemplate:``),
   a string literal, or ``new Uri("…")`` of one for a resource; anything else → no record.
 * The record is the call's own statement, with no handler; a client-only file gets no file-level
@@ -32,6 +35,16 @@ from .tools import FRAMEWORK, _string, _walk
 
 CLIENT_TYPES = frozenset({"McpClient", "IMcpClient"})
 _FACTORIES = frozenset({"McpClient.CreateAsync", "McpClientFactory.CreateAsync"})
+#: The nodes whose members a client name is proven within (see :func:`_scope`).
+_SCOPES = frozenset(
+    {
+        "class_declaration",
+        "struct_declaration",
+        "record_declaration",
+        "record_struct_declaration",
+        "interface_declaration",
+    }
+)
 #: Client methods → (method, the names of the argument naming what they reach).
 _CALLS = {
     "CallToolAsync": ("TOOL", ("toolName", "name")),
@@ -55,8 +68,19 @@ def _simple(type_node: Node | None, source: bytes) -> str:
     return text.rstrip("?").split("<")[0].rsplit(".", 1)[-1]
 
 
-def _clients(root: Node, source: bytes) -> set[str]:
-    declared: dict[str, list[bool]] = {}
+def _scope(node: Node) -> int | None:
+    """The innermost type declaration around ``node`` (its id), or None outside any: a name is
+    proven a client only within the one it is declared in, as another class may inherit a
+    member of the same name."""
+    cur = node.parent
+    while cur is not None and cur.type not in _SCOPES:
+        cur = cur.parent
+    return cur.id if cur is not None else None
+
+
+def _clients(root: Node, source: bytes) -> set[tuple[int | None, str]]:
+    """(class, name) every declaration of which in that class is typed or created a client."""
+    declared: dict[tuple[int | None, str], list[bool]] = {}
     for node in _walk(root):
         if node.type == "variable_declaration":
             type_node = node.child_by_field_name("type")
@@ -72,12 +96,12 @@ def _clients(root: Node, source: bytes) -> set[str]:
                     and type_node.type == "implicit_type"
                     and _created(value, source)
                 )
-                declared.setdefault(node_text(name, source), []).append(proven)
+                declared.setdefault((_scope(name), node_text(name, source)), []).append(proven)
         elif node.type in ("foreach_statement", "implicit_parameter"):
             # `foreach (var client in …)`, `client => …`: never proven a client
             bound = node.child_by_field_name("left") if node.type == "foreach_statement" else node
             if bound is not None and bound.type in ("identifier", "implicit_parameter"):
-                declared.setdefault(node_text(bound, source), []).append(False)
+                declared.setdefault((_scope(bound), node_text(bound, source)), []).append(False)
         elif node.type in (
             "declaration_expression",
             "declaration_pattern",
@@ -88,20 +112,20 @@ def _clients(root: Node, source: bytes) -> set[str]:
             # its own type (`out var client` / `is var client` never proven)
             name = node.child_by_field_name("name")
             if name is not None and name.type == "identifier":
-                declared.setdefault(node_text(name, source), []).append(
+                declared.setdefault((_scope(name), node_text(name, source)), []).append(
                     _simple(node.child_by_field_name("type"), source) in CLIENT_TYPES
                 )
         elif node.type in ("tuple_pattern", "from_clause"):
             # `var (client, x) = …`, `foreach (var (client, x) in …)`, `from client in …`
             for name in node.children_by_field_name("name"):
                 if name.type == "identifier":
-                    declared.setdefault(node_text(name, source), []).append(False)
+                    declared.setdefault((_scope(name), node_text(name, source)), []).append(False)
         elif node.type == "query_expression":
             # `… into client select …`: a query continuation's name follows `into`
             kids = node.children
             for prev, cur in zip(kids, kids[1:]):
                 if prev.type == "into" and cur.type == "identifier":
-                    declared.setdefault(node_text(cur, source), []).append(False)
+                    declared.setdefault((_scope(cur), node_text(cur, source)), []).append(False)
         elif node.type in ("join_clause", "let_clause", "join_into_clause"):
             # `join client in …`, `let client = …`, `into client`: the name has no field; it is
             # the one before `in` / `=`, or the only one
@@ -109,7 +133,7 @@ def _clients(root: Node, source: bytes) -> set[str]:
             stop = next((i for i, c in enumerate(kids) if c.type in ("in", "=")), len(kids))
             names = [c for c in kids[:stop] if c.type == "identifier"]
             if names:
-                declared.setdefault(node_text(names[-1], source), []).append(False)
+                declared.setdefault((_scope(node), node_text(names[-1], source)), []).append(False)
         elif node.type == "invocation_expression" and (
             (fn := node.child_by_field_name("function")) is not None
             and fn.type in ("is_expression", "is_pattern_expression")
@@ -119,14 +143,14 @@ def _clients(root: Node, source: bytes) -> set[str]:
             args = node.child_by_field_name("arguments")
             for ident in _walk(args) if args is not None else ():
                 if ident.type == "identifier":
-                    declared.setdefault(node_text(ident, source), []).append(False)
+                    declared.setdefault((_scope(ident), node_text(ident, source)), []).append(False)
         elif node.type in ("parameter", "property_declaration"):
             name = node.child_by_field_name("name")
             if name is not None:
-                declared.setdefault(node_text(name, source), []).append(
+                declared.setdefault((_scope(name), node_text(name, source)), []).append(
                     _simple(node.child_by_field_name("type"), source) in CLIENT_TYPES
                 )
-    return {name for name, proofs in declared.items() if all(proofs)}
+    return {key for key, proofs in declared.items() if all(proofs)}
 
 
 def _endpoint(call: Node, keys: tuple[str, ...], resource: bool, source: bytes) -> str | None:
@@ -170,7 +194,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         kind = _CALLS.get(node_text(name, source)) if name is not None else None
         if kind is None or obj is None or obj.type != "identifier":
             continue
-        if node_text(obj, source) not in clients:
+        if (_scope(call), node_text(obj, source)) not in clients:
             continue
         endpoint = _endpoint(call, kind[1], kind[0] == "RESOURCE", source)
         if endpoint:

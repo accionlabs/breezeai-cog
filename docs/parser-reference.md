@@ -691,7 +691,7 @@ Code two packages share is in a common module next to them, not in either packag
 `mcp.servers` fact, for `python_fastmcp` and `python_mcp`), `jvm_mcp_common.py` (the
 `spring-ai.mcp-server` fact, the `jvm-mcp.mcp-server-types` fact — the `package.McpServer`
 types Java and Kotlin files declare, a Kotlin `typealias` included, each language reading the
-other's files — the JSON-schema text reader, the `McpServer` shortcut record and the
+other's index — the JSON-schema text reader, the `McpServer` shortcut record and the
 string-literal readers, for the four Java / Kotlin packages) and `go_mcp_common.py` (Go string
 literals, import names and the per-function bindings the client readers use, for `go_mcpgo` and
 `go_mcp`). The Python, Go, Java and Kotlin readers turn a JSON-schema literal into `params` with
