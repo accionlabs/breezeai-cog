@@ -19,6 +19,7 @@ from ..statements_common import (
     set_http_client_ids,
     url_placeholder,
 )
+from ..sql_variables import built_queries
 from ..treesitter import node_text
 from .attributes import extract_attributes
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -288,12 +289,14 @@ def _extract(body: Node, source: bytes, path: str, parent_id: str, limit: int,
              seen_ids: set[str], descend_all: bool,
              barriers: frozenset[tuple[int, int]]) -> list[Statement]:
     out: list[Statement] = []
+    queries = built_queries(body, source, "csharp")
     for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="csharp",
+                built_sql=queries,
                 decorators=_field_attributes(node, source),
             )
         )

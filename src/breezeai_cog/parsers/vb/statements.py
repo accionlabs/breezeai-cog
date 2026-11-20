@@ -11,6 +11,7 @@ from tree_sitter import Node
 
 from ...schemas import Statement
 from ..statements_common import classify_statement
+from ..sql_variables import built_queries
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -127,12 +128,14 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    queries = built_queries(body, source, "vb")
     for node in _iter_in_scope(body, descend_all):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="vb",
+                built_sql=queries,
             )
         )
     return out
