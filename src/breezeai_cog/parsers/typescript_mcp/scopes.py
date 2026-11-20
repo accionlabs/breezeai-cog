@@ -195,8 +195,14 @@ class Scopes:
     def binding(self, ident: Node) -> ScopeKey:
         """The scope whose declaration of ``ident``'s name is the one ``ident`` refers to: the
         nearest enclosing scope that declares it, else the module."""
-        name = node_text(ident, self.source)
-        frame = self._frame(ident)
+        return self._lookup(node_text(ident, self.source), self._frame(ident))
+
+    def outer_binding(self, name: str, scope: Node) -> ScopeKey:
+        """The scope whose declaration of ``name`` is seen just outside the scope node
+        ``scope`` (what a ``for (s of …)`` without ``let`` / ``const`` / ``var`` writes)."""
+        return self._lookup(name, self._outer.get(scope_key(scope)))
+
+    def _lookup(self, name: str, frame: ScopeKey | None) -> ScopeKey:
         while frame is not None:
             if name in self._names.get(frame, ()):
                 return frame
@@ -247,38 +253,94 @@ def proven_receivers(
     """The bindings proven to hold a server: a name declared or assigned ``built`` (``new
     X(…)``), a parameter ``typed`` as the server class, and a class field (``this.x``) given
     either. Each is the binding itself, so a same-named binding of another scope (a local, a
-    parameter, a field of another class) is not proven by it."""
+    parameter, a field of another class) is not proven by it.
+
+    A binding is proven only when every write to it is a proof: ``s = other``, ``s ||= x``,
+    ``s++``, a destructuring target (``[s] = xs``, ``({ s } = o)``), a ``for (s of …)`` or
+    another declaration of anything else, wherever the binding is seen, makes it unproven
+    (which object a call runs on is not read). A declaration without a value (``let s;``)
+    writes nothing."""
     out: set[Binding] = set()
+    #: Bindings written anything that is not a server.
+    spoiled: set[Binding] = set()
     for node in _walk(root):
-        if node.type == "new_expression" and built(node, source):
-            parent = node.parent
-            if parent is None:
-                continue
-            if parent.type == "variable_declarator":
-                name = parent.child_by_field_name("name")
-                if name is not None and name.type == "identifier":
-                    out.add((scopes.binding(name), node_text(name, source)))
-            elif parent.type == "assignment_expression":
-                left = parent.child_by_field_name("left")
-                bound = receiver_binding(left, source, scopes) if left is not None else None
-                if bound is not None:
-                    out.add(bound)
-            elif parent.type in ("public_field_definition", "field_definition"):
-                field = _field(parent, source, scopes)
-                if field is not None:
-                    out.add(field)
-        elif (
-            node.type in _PARAMETERS
-            and scope_key(node) in scopes.parameters
-            and typed(node, source)
-        ):
+        t = node.type
+        if t == "variable_declarator":
+            name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            if name is not None and value is not None:
+                proof = name.type == "identifier" and built(value, source)
+                (out if proof else spoiled).update(_written(name, source, scopes))
+        elif t == "assignment_expression":
+            left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+            if left is not None:
+                proof = left.type in ("identifier", "member_expression") and built(right, source)
+                (out if proof else spoiled).update(_written(left, source, scopes))
+        elif t == "augmented_assignment_expression":
+            left = node.child_by_field_name("left")
+            spoiled.update(_written(left, source, scopes) if left is not None else ())
+        elif t == "update_expression":
+            arg = node.child_by_field_name("argument")
+            spoiled.update(_written(arg, source, scopes) if arg is not None else ())
+        elif t == "for_in_statement":
+            # `for (s of xs)` declares nothing: it writes the `s` around the loop (a `var` one
+            # writes its function's, a `let` / `const` one a binding of the loop's own).
+            left = node.child_by_field_name("left")
+            loop = node if node.child_by_field_name("kind") is None else None
+            spoiled.update(_written(left, source, scopes, loop) if left is not None else ())
+        elif t in _PARAMETERS and scope_key(node) in scopes.parameters and typed(node, source):
             pattern = node.child_by_field_name("pattern")
             if pattern is not None and pattern.type == "identifier":
                 out.add((scopes.binding(pattern), node_text(pattern, source)))
-        elif node.type == "public_field_definition" and typed(node, source):
-            field = _field(node, source, scopes)
+        elif t in ("public_field_definition", "field_definition"):
+            value = node.child_by_field_name("value")
+            proof = (t == "public_field_definition" and typed(node, source)) or (
+                value is not None and built(value, source)
+            )
+            field = _field(node, source, scopes) if proof or value is not None else None
             if field is not None:
-                out.add(field)
+                (out if proof else spoiled).add(field)
+    return out - spoiled
+
+
+#: Destructuring and wrapper shapes of an assignment target that hold the written targets.
+_TARGET_GROUPS = (
+    "object_pattern",
+    "array_pattern",
+    "rest_pattern",
+    "parenthesized_expression",
+    "non_null_expression",
+    "as_expression",
+    "satisfies_expression",
+)
+
+
+def _written(
+    target: Node, source: bytes, scopes: Scopes, loop: Node | None = None
+) -> list[Binding]:
+    """The bindings an assignment target writes: a name, a member (``this.x``, ``a.b``), or each
+    of those in a destructuring. ``loop``: a ``for … of`` / ``in`` without a declaration, whose
+    names are looked up outside it."""
+    out: list[Binding] = []
+    stack = [target]
+    while stack:
+        node = stack.pop()
+        t = node.type
+        if t in ("identifier", "shorthand_property_identifier_pattern"):
+            name = node_text(node, source)
+            scope = scopes.outer_binding(name, loop) if loop is not None else scopes.binding(node)
+            out.append((scope, name))
+        elif t == "member_expression":
+            bound = receiver_binding(node, source, scopes)
+            if bound is not None:
+                out.append(bound)
+        elif t in ("assignment_pattern", "object_assignment_pattern"):
+            left = node.child_by_field_name("left")
+            stack.extend([left] if left is not None else [])
+        elif t == "pair_pattern":
+            value = node.child_by_field_name("value")
+            stack.extend([value] if value is not None else [])
+        elif t in _TARGET_GROUPS:
+            stack.extend(node.named_children)
     return out
 
 
