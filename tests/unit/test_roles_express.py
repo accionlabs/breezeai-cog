@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.contract import is_entry_point
 
 
@@ -218,6 +220,88 @@ def test_object_named_like_a_router_is_not_a_receiver(analyze_files) -> None:
                         "import express from 'express';\n"
                         "export function register(router) { router.get('/p', h); }\n"})
     assert [s.endpoint for s in _eps(st) if s.path == "src/routes.js"] == ["/p"]
+
+
+@pytest.mark.parametrize("body", [
+    "import axios from 'axios';\nconst api = axios.create();\napi.post('/y', data);\n",
+    "import http from 'http';\nconst server = http.createServer();\nserver.get('/s', h);\n",
+    "import * as http from 'node:http';\nconst server = http.createServer(app);\nserver.get('/s', h);\n",
+    "const got = require('got');\nconst api = got.extend({});\napi.get('/g', h);\n",
+    "import { Router } from 'other';\nconst unrelated = Router();\nunrelated.get('/not-express', h);\n"
+    "const otherRouter = Router();\notherRouter.get('/named-like-a-router', h);\n",
+    "import Router from '@koa/router';\nconst router = new Router();\nrouter.get('/koa', h);\n",
+])
+def test_value_of_a_non_express_package_is_not_a_receiver(analyze_files, body: str) -> None:
+    # Bound in this file to an HTTP client, a Node server or another package's Router: no route,
+    # whatever the variable's name (BREEZEAI-1489).
+    assert _eps(_app(analyze_files, body)) == []
+
+
+def test_http_client_named_like_a_router_stays_outbound(analyze_files) -> None:
+    st = _app(analyze_files, "import axios from 'axios';\nconst api = axios.create();\n"
+              "api.post('/y', data);\n")
+    assert [(s.semanticType, s.method, s.endpoint) for s in st if s.startLine == 5] == [
+        ("api_call", "POST", "/y")]
+
+
+def test_routers_of_express_and_its_drop_ins_keep_their_routes(analyze_files) -> None:
+    st = analyze_files({"package.json": PKG, "src/app.js":
+                        "import * as express from 'express';\n"
+                        "import PromiseRouter from 'express-promise-router';\n"
+                        "const router = PromiseRouter();\nrouter.get('/promise', h);\n"
+                        "const r = express.Router();\nr.get('/namespace', h);\n"
+                        "const legacy = require('express').Router();\nlegacy.get('/legacy', h);\n"})
+    assert sorted(s.endpoint for s in _eps(st)) == ["/legacy", "/namespace", "/promise"]
+
+
+def test_casts_and_awaits_are_seen_through(analyze_files) -> None:
+    st = analyze_files({"package.json": PKG, "src/server.ts":
+                        "import express, { Router } from 'express';\n"
+                        "import axios from 'axios';\nimport * as other from 'other';\n"
+                        "async function main() {\n"
+                        "  const api = (await axios.create()) as Client;\n  api.post('/y', d);\n"
+                        "  const otherRouter = other.Router() as any;\n"
+                        "  otherRouter.get('/other', h);\n"
+                        "  const router = Router() as express.Router;\n  router.get('/r', h);\n"
+                        "  const app = express()!;\n  app.get('/app', h);\n}\n"})
+    assert sorted(s.endpoint for s in _eps(st)) == ["/app", "/r"]
+
+
+@pytest.mark.parametrize("param", [
+    "function f(api) { api.get('/p', h); }",
+    "const f = api => api.get('/p', h);",
+    "function f({ api }) { api.get('/p', h); }",
+    "function f({ api = null }) { api.get('/p', h); }",
+    "function f({ x: api }) { api.get('/p', h); }",
+    "function f([api = null]) { api.get('/p', h); }",
+    "function f(...api) { api.get('/p', h); }",
+])
+def test_parameter_of_the_same_name_keeps_the_name_fallback(analyze_files, param: str) -> None:
+    # The parameter is another binding: whether it is a router is unknown, so its name decides.
+    st = _app(analyze_files, f"import axios from 'axios';\nconst api = axios.create();\n{param}\n")
+    assert [s.endpoint for s in _eps(st)] == ["/p"]
+
+
+def test_destructured_key_is_not_a_binding_of_that_name(analyze_files) -> None:
+    # ``{ api: other }`` binds ``other``, not ``api``: ``api`` is still only the HTTP client.
+    st = _app(analyze_files, "import axios from 'axios';\nconst api = axios.create();\n"
+              "function f({ api: other }) {}\napi.get('/p', h);\n")
+    assert _eps(st) == []
+
+
+def test_route_chain_on_a_non_express_value_is_not_a_route(analyze_files) -> None:
+    st = _app(analyze_files, "import axios from 'axios';\nconst api = axios.create();\n"
+              "api.route('/x').get(h);\n")
+    assert _eps(st) == []
+
+
+def test_route_chain_verbs_come_out_in_source_order(analyze_files) -> None:
+    # The first verb owns the statement's id; each later verb in the chain gets its own record.
+    st = _app(analyze_files, "app.route('/book')\n  .get(getBook)\n  .post(createBook)\n"
+              "  .delete(removeBook);\n")
+    got = [(s.method, s.handler, s.id.rsplit(":", 1)[-1]) for s in _eps(st)]
+    assert got == [("GET", "getBook", "0"), ("POST", "createBook", "0#2"),
+                   ("DELETE", "removeBook", "0#3")]
 
 
 def _chain(analyze_files, chain: str):
