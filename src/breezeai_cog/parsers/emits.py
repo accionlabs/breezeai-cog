@@ -61,6 +61,9 @@ class Emit:
     enrich: Enrich = "never"
     #: With ``unclassified``: semantic types that may also be overwritten (a known mis-tag).
     reclassify: frozenset[str] = frozenset()
+    #: Node types never enriched (a control-flow statement, whose span is its whole body): the
+    #: emit is appended as its own statement instead.
+    skip: frozenset[str] = frozenset()
     #: Overrides for an appended statement.
     parent: str | None = None
     text: str | None = None
@@ -81,6 +84,8 @@ class Emit:
 def _eligible(stmt: Statement, emit: Emit) -> bool:
     if emit.enrich in ("any", "same"):
         return True
+    if stmt.nodeType in emit.skip:
+        return False
     if emit.enrich == "own" and (stmt.startLine, stmt.endLine) != (emit.start_line, emit.last_line):
         return False
     if emit.enrich == "starts" and stmt.startLine != emit.start_line:

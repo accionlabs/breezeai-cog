@@ -1505,3 +1505,120 @@ fun run(transport: Any, clients: List<Any>) {
         ("TOOL", "built", "java-mcp"),
         ("PROMPT", "first", "java-mcp"),
     ]
+
+
+_HEADER_CALLS = {
+    "python": (
+        "c.py",
+        """
+from mcp import ClientSession
+
+
+async def run(session: ClientSession):
+    if (await session.call_tool("health")).isError:
+        print("down")
+    for c in (await session.read_resource("memo://x")).contents:
+        print(c)
+    while (await session.get_prompt("again")).messages:
+        break
+""",
+    ),
+    "python_one_line_with": (
+        "w.py",
+        """
+from mcp import ClientSession
+
+
+async def run(read, write):
+    async with ClientSession(read, write) as s: await s.call_tool("health")
+""",
+    ),
+    "typescript": (
+        "c.ts",
+        """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+const client = new Client({ name: "app", version: "1" });
+export async function run() {
+  for (const c of (await client.readResource({ uri: "memo://x" })).contents) {
+    console.log(c);
+  }
+  if ((await client.callTool({ name: "health" })).isError) {
+    console.log("down");
+  }
+}
+""",
+    ),
+    "java": (
+        "src/main/java/demo/Calls.java",
+        """
+package demo;
+
+import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.spec.McpSchema;
+import java.util.Map;
+
+public class Calls {
+    void run(McpClientTransport transport) {
+        var client = McpClient.sync(transport).build();
+        if (client.callTool(new McpSchema.CallToolRequest("health", Map.of())).isError()) {
+            System.out.println("down");
+        }
+    }
+}
+""",
+    ),
+    "csharp": (
+        "App.cs",
+        """
+using ModelContextProtocol.Client;
+
+public class App
+{
+    public async Task RunAsync(IClientTransport transport)
+    {
+        var client = await McpClient.CreateAsync(transport);
+        if ((await client.CallToolAsync("health", null)).IsError)
+        {
+            Console.WriteLine("down");
+        }
+    }
+}
+""",
+    ),
+    "go": (
+        "main.go",
+        """
+package main
+
+import (
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
+)
+
+func typed(c *client.Client) {
+	if c.CallTool(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "health"}}) == nil {
+		println("down")
+	}
+}
+""",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_HEADER_CALLS))
+def test_a_call_in_a_control_flow_header_is_its_own_record(analyze_files, case) -> None:
+    """An ``if`` / ``for`` / ``while`` / ``with`` statement spans its body and never carries a
+    semanticType (docs/architecture/statement-model.md): a call in its header is appended as its
+    own one-line ``mcp_call``, and the control-flow statement stays unclassified."""
+    from breezeai_cog.parsers.mcp_common import _CONTROL_FLOW
+
+    path, src = _HEADER_CALLS[case]
+    statements = analyze_files({path: src})
+    calls = [s for s in statements if s.semanticType == "mcp_call"]
+    assert calls
+    for c in calls:
+        assert c.nodeType not in _CONTROL_FLOW, (c.endpoint, c.nodeType)
+        assert c.endLine == c.startLine, (c.endpoint, c.startLine, c.endLine)
+        assert c.name is None
+    assert not [s for s in statements if s.nodeType in _CONTROL_FLOW and s.semanticType]

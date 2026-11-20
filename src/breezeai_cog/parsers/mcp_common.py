@@ -30,8 +30,14 @@ from tree_sitter import Node
 
 from ..errors import ParserTimeout
 from ..schemas import FileRecord, Parameter
+from .csharp.mappings import CONTROL_FLOW as _CSHARP_CONTROL_FLOW
 from .emits import Emit
+from .go.mappings import CONTROL_FLOW as _GO_CONTROL_FLOW
+from .java.mappings import CONTROL_FLOW as _JAVA_CONTROL_FLOW
+from .kotlin.mappings import CONTROL_FLOW as _KOTLIN_CONTROL_FLOW
+from .python.mappings import CONTROL_FLOW as _PYTHON_CONTROL_FLOW
 from .treesitter import first_line, node_text
+from .typescript.mappings import CONTROL_FLOW as _TYPESCRIPT_CONTROL_FLOW
 
 SEMANTIC_TYPE = "mcp_tool"
 METHOD = "TOOL"
@@ -284,6 +290,19 @@ def mcp_emit(
     )
 
 
+#: The statements an ``mcp_call`` never enriches, in every language a client is read in: an
+#: ``if`` / ``for`` / ``with`` / ``try`` … spans its body, so a call in its header is a record of
+#: its own (docs/architecture/statement-model.md).
+_CONTROL_FLOW = frozenset(
+    _CSHARP_CONTROL_FLOW
+    | _GO_CONTROL_FLOW
+    | _JAVA_CONTROL_FLOW
+    | _KOTLIN_CONTROL_FLOW
+    | _PYTHON_CONTROL_FLOW
+    | _TYPESCRIPT_CONTROL_FLOW
+)
+
+
 def call_emit(
     node: Node,
     source: bytes,
@@ -296,8 +315,9 @@ def call_emit(
     (``RESOURCE``) or gets a prompt (``PROMPT``) by the literal ``endpoint``. It enriches the
     unclassified statement that starts on the call's line, which keeps its ``name``; a call
     inside a statement that starts on an earlier line (an argument of a multi-line
-    ``gather(…)``, the second line of an ``if`` condition) is appended on its own line with no
-    ``name`` (as an ``api_call``)."""
+    ``gather(…)``, the second line of an ``if`` condition) or in a control-flow header (``if
+    (await s.call_tool("x")).isError:``) is appended on its own line with no ``name`` (as an
+    ``api_call``)."""
     return Emit(
         node,
         {
@@ -307,6 +327,7 @@ def call_emit(
             "framework": framework,
         },
         enrich="starts",
+        skip=_CONTROL_FLOW,
         node_type=node.type,
         text=first_line(node_text(node, source)),
     )
