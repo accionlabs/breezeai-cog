@@ -339,10 +339,15 @@ async with ClientSession(read, write) as session:
   (`MCPServerStdio.call_tool`, LlamaIndex `BasicMCPClient`, LangChain `MultiServerMCPClient`), the
   AI SDK's `experimental_createMCPClient`, an `aiohttp` `ClientSession`, a `pg` `Client`, and a
   client taken from a list (`clients.get(0).callTool(…)`) are not.
-- **The call's own statement.** The record enriches the unclassified statement that starts on
-  the call's line (keeping its `name`), so that line keeps one statement. A call inside a statement
-  that starts on an earlier line — an argument of a multi-line `gather(…)` / `Promise.all([…])`,
-  the second line of an `if` condition — gets a record of its own on its line instead.
+- **The call's own statement.** The record enriches the innermost captured statement that
+  contains the call when it is unclassified and starts on the call's line (keeping its `name`),
+  so that line keeps one statement. It is the statement the call is in, not just any statement
+  on its line: `x = 1; await s.call_tool("t")` enriches the call's statement, `async with
+  ClientSession(r, w) as s: await s.call_tool("x")` and `} catch (e) { await
+  client.callTool(…) }` enrich the body's statement and leave the `with` / `catch` unclassified.
+  A call inside a statement that starts on an earlier line — an argument of a multi-line
+  `gather(…)` / `Promise.all([…])`, the second line of an `if` condition — or in a control-flow
+  header (`if (await s.call_tool("x")).isError:`) gets a record of its own on its line instead.
 - **No file framework.** A file with only client calls keeps `framework` unset: it is not an MCP
   server.
 - **A spread after the literal** (`client.callTool({ name: "x", ...req })`) may override it at

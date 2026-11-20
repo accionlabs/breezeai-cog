@@ -1606,19 +1606,88 @@ func typed(c *client.Client) {
 }
 
 
+#: The endpoints each ``_HEADER_CALLS`` case records, one ``mcp_call`` each.
+_HEADER_ENDPOINTS = {
+    "python": {"health", "memo://x", "again"},
+    "python_one_line_with": {"health"},
+    "typescript": {"memo://x", "health"},
+    "java": {"health"},
+    "csharp": {"health"},
+    "go": {"health"},
+}
+
+
 @pytest.mark.parametrize("case", sorted(_HEADER_CALLS))
 def test_a_call_in_a_control_flow_header_is_its_own_record(analyze_files, case) -> None:
     """An ``if`` / ``for`` / ``while`` / ``with`` statement spans its body and never carries a
     semanticType (docs/architecture/statement-model.md): a call in its header is appended as its
-    own one-line ``mcp_call``, and the control-flow statement stays unclassified."""
+    own one-line ``mcp_call``, and the control-flow statement stays unclassified. A call in the
+    body of a one-line ``with`` enriches the body's own statement, not the ``with``."""
     from breezeai_cog.parsers.mcp_common import _CONTROL_FLOW
 
     path, src = _HEADER_CALLS[case]
     statements = analyze_files({path: src})
     calls = [s for s in statements if s.semanticType == "mcp_call"]
-    assert calls
+    assert sorted(c.endpoint for c in calls) == sorted(_HEADER_ENDPOINTS[case])
     for c in calls:
         assert c.nodeType not in _CONTROL_FLOW, (c.endpoint, c.nodeType)
         assert c.endLine == c.startLine, (c.endpoint, c.startLine, c.endLine)
         assert c.name is None
     assert not [s for s in statements if s.nodeType in _CONTROL_FLOW and s.semanticType]
+    # one record per call: no line carries two
+    lines = [c.startLine for c in calls]
+    assert len(lines) == len(set(lines))
+
+
+def test_a_call_in_a_one_line_with_body_enriches_the_body_statement(analyze_files) -> None:
+    path, src = _HEADER_CALLS["python_one_line_with"]
+    statements = analyze_files({path: src})
+    on_line = [s for s in statements if s.startLine == 6]
+    assert [(s.nodeType, s.semanticType, s.endpoint) for s in on_line] == [
+        ("with_statement", None, None),
+        ("await", "mcp_call", "health"),
+    ]
+
+
+def test_a_call_after_another_statement_on_its_line_enriches_its_own_statement(
+    analyze_files,
+) -> None:
+    """``x = 1; await s.call_tool("t")``: the call's statement is enriched, never ``x = 1``
+    (the earlier statement of the same one-line span)."""
+    src = """
+from mcp import ClientSession
+
+
+async def run(s: ClientSession):
+    x = 1; await s.call_tool("t")
+"""
+    statements = analyze_files({"t.py": src})
+    on_line = [s for s in statements if s.startLine == 6]
+    assert [(s.nodeType, s.semanticType, s.endpoint, s.text) for s in on_line] == [
+        ("assignment", None, None, "x = 1"),
+        ("await", "mcp_call", "t", 'await s.call_tool("t")'),
+    ]
+
+
+def test_a_call_in_a_one_line_catch_enriches_its_own_statement(analyze_files) -> None:
+    """``} catch (e) { await client.callTool(…) }``: the catch clause stays unclassified and the
+    call's statement in its body carries the ``mcp_call``; one record on the line."""
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+const client = new Client({ name: "app", version: "1" });
+export async function run() {
+  try {
+    await client.callTool({ name: "a" });
+  } catch (e) { await client.callTool({ name: "x" }) }
+}
+"""
+    statements = analyze_files({"c.ts": src})
+    on_line = [s for s in statements if s.startLine == 8]
+    assert [(s.nodeType, s.semanticType, s.endpoint) for s in on_line] == [
+        ("catch_clause", None, None),
+        ("expression_statement", "mcp_call", "x"),
+    ]
+    assert sorted(
+        (s.endpoint, s.nodeType) for s in statements if s.semanticType == "mcp_call"
+    ) == [("a", "expression_statement"), ("x", "expression_statement")]

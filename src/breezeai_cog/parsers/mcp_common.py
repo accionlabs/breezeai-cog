@@ -313,7 +313,9 @@ def call_emit(
 ) -> Emit:
     """An ``mcp_call`` (outbound): a proven client calls a tool (``TOOL``), reads a resource
     (``RESOURCE``) or gets a prompt (``PROMPT``) by the literal ``endpoint``. It enriches the
-    unclassified statement that starts on the call's line, which keeps its ``name``; a call
+    innermost captured statement containing the call when that one is unclassified and starts
+    on the call's line (``x = 1; await s.call_tool("t")`` → the call's statement, a one-line
+    ``with`` / ``catch`` → its body's), which keeps its ``name``; a call
     inside a statement that starts on an earlier line (an argument of a multi-line
     ``gather(…)``, the second line of an ``if`` condition) or in a control-flow header (``if
     (await s.call_tool("x")).isError:``) is appended on its own line with no ``name`` (as an
