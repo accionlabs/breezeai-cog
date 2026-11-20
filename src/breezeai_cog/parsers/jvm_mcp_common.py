@@ -191,10 +191,10 @@ _PACKAGE = re.compile(rb"^[ \t]*package[ \t]+([\w.]*\w)", re.MULTILINE)
 
 
 #: Fact: the ``package.McpServer`` names that Java and Kotlin files declare (a class,
-#: interface, object or ``typealias``, at any depth). Registered for both languages, each also
-#: reading the other's files, so a Java file sees a Kotlin ``McpServer`` of its package and a
-#: Kotlin file a Java one; a language's own ``package.Type`` index has no Kotlin typealias and
-#: none of the other language's types.
+#: interface, object or ``typealias``, at any depth). Registered for both languages, each on its
+#: own files (Kotlin also on ``.kts`` scripts): a Java file reads the Kotlin value from the Kotlin
+#: index the pipeline hands it (``related_languages``), and a Kotlin file the Java one, so no file
+#: is read twice; a language's own ``package.Type`` index has no Kotlin typealias.
 MCP_SERVER_TYPES = "jvm-mcp.mcp-server-types"
 
 
@@ -209,7 +209,7 @@ def _resolve_mcp_server_types(values: list[Any], index: object) -> frozenset[str
     return frozenset(values)
 
 
-for _language, _other in (("java", (".kt", ".kts")), ("kotlin", (".java",))):
+for _language, _other in (("java", ()), ("kotlin", (".kts",))):
     register_fact(
         FactSpec(
             name=MCP_SERVER_TYPES,
@@ -233,9 +233,10 @@ def index_types(ctx: Any) -> list[Any]:
         fqcn = idx if isinstance(idx, dict) else getattr(idx, "fqcn", None)
         if isinstance(fqcn, dict):
             out.append(fqcn)
-    declared = index_fact(ctx.resolution_index, MCP_SERVER_TYPES)
-    if declared is not None:
-        out.append(declared)
+    for idx in (ctx.resolution_index, *ctx.related_indexes.values()):
+        declared = index_fact(idx, MCP_SERVER_TYPES)
+        if declared is not None:
+            out.append(declared)
     return out
 
 

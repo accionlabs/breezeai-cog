@@ -419,3 +419,18 @@ public class App {
     tools = _tools(analyze_files({"src/main/java/demo/App.java": single}))
     got = {name: (t.handler, t.handlerLine) for name, t in tools.items()}
     assert got == {"remote": ("calc", None), "expr": ("calc", None), "named": ("calc", 7)}
+
+
+def test_mcp_server_types_fact_reads_no_other_languages_source() -> None:
+    """Each JVM language collects the ``McpServer`` fact from its own files (Kotlin also from
+    ``.kts`` scripts) and reads the other's value from the related index the pipeline hands it,
+    so a mixed Java/Kotlin repo never reads its ``.java`` or ``.kt`` sources twice."""
+    from breezeai_cog.parsers.additive import fact_sources
+    from breezeai_cog.parsers.java.parser import JavaParser
+    from breezeai_cog.parsers.kotlin.parser import KotlinParser
+
+    sources = fact_sources()
+    assert ".kt" not in sources.get("java", ())
+    assert ".java" not in sources.get("kotlin", ())
+    assert "kotlin" in JavaParser.related_languages
+    assert "java" in KotlinParser.related_languages

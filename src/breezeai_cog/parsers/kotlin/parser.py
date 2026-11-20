@@ -227,6 +227,7 @@ def _return_type(node: Node, source: bytes) -> str | None:
 class KotlinParser(BaseParser):
     name = "kotlin"
     extensions = (".kt",)
+    related_languages = ("java",)  # the MCP server types Java declares (jvm_mcp_common.index_types)
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
