@@ -275,6 +275,11 @@ def test_casts_and_awaits_are_seen_through(analyze_files) -> None:
     "function f({ x: api }) { api.get('/p', h); }",
     "function f([api = null]) { api.get('/p', h); }",
     "function f(...api) { api.get('/p', h); }",
+    "function f(deps) { const { api } = deps; api.get('/p', h); }",
+    "function f(apps) { const [api] = apps; api.get('/p', h); }",
+    "try {} catch (api) { api.get('/p', h); }",
+    "for (const api of apps) { api.get('/p', h); }",
+    "for (const { api } of apps) { api.get('/p', h); }",
 ])
 def test_parameter_of_the_same_name_keeps_the_name_fallback(analyze_files, param: str) -> None:
     # The parameter is another binding: whether it is a router is unknown, so its name decides.
@@ -282,10 +287,14 @@ def test_parameter_of_the_same_name_keeps_the_name_fallback(analyze_files, param
     assert [s.endpoint for s in _eps(st)] == ["/p"]
 
 
-def test_destructured_key_is_not_a_binding_of_that_name(analyze_files) -> None:
+@pytest.mark.parametrize("binding", [
+    "function f({ api: other }) {}",
+    "function f(deps) { const { api: other } = deps; }",
+])
+def test_destructured_key_is_not_a_binding_of_that_name(analyze_files, binding: str) -> None:
     # ``{ api: other }`` binds ``other``, not ``api``: ``api`` is still only the HTTP client.
     st = _app(analyze_files, "import axios from 'axios';\nconst api = axios.create();\n"
-              "function f({ api: other }) {}\napi.get('/p', h);\n")
+              f"{binding}\napi.get('/p', h);\n")
     assert _eps(st) == []
 
 

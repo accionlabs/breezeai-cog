@@ -163,8 +163,9 @@ def foreign_locals(
 ) -> frozenset[str]:
     """Names every binding of which in this file is a value that is certainly not Express: made
     from a :data:`_NON_EXPRESS_PACKAGES` package (``axios.create()``, ``http.createServer()``), or
-    a ``Router`` of a package other than Express (``import { Router } from 'other'``). A parameter
-    of the same name is another binding, so the name heuristic still decides there."""
+    a ``Router`` of a package other than Express (``import { Router } from 'other'``). A parameter,
+    a destructured variable, a ``catch`` or a ``for … of`` binding of the same name is another
+    binding, so the name heuristic still decides there."""
     kinds: dict[str, set[bool]] = {}
 
     def walk(node: Node) -> None:
@@ -176,15 +177,22 @@ def foreign_locals(
                     pkg.removeprefix("node:") in _NON_EXPRESS_PACKAGES
                     or (pkg not in EXPRESS_PACKAGES and _constructs_router(value, source)))
                 kinds.setdefault(node_text(name, source), set()).add(foreign)
+            elif name is not None and name.type != "identifier":  # ``const { api } = deps``
+                parameter(name)
         elif node.type in ("required_parameter", "optional_parameter"):
             parameter(node.child_by_field_name("pattern"))
         elif node.type == "arrow_function":  # a bare ``api => …`` parameter
             parameter(node.child_by_field_name("parameter"))
+        elif node.type == "catch_clause":
+            parameter(node.child_by_field_name("parameter"))
+        elif node.type == "for_in_statement":  # ``for (const api of apps)``
+            parameter(node.child_by_field_name("left"))
         for c in node.named_children:
             walk(c)
 
     def parameter(pattern: Node | None) -> None:
-        """Every name a parameter binds (``api``, ``{ api }``, ``[api]``) is another binding."""
+        """Every name a binding pattern binds (``api``, ``{ api }``, ``[api]``) is another
+        binding."""
         if pattern is None:
             return
         if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
