@@ -28,13 +28,14 @@ from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
     _path_pieces, _resolve_pieces,
-    Consts, _module_of, _require_module, folded_path, local_source, relative_requires,
+    Consts, folded_path, local_source, relative_requires,
     runtime_path_template,
 )
 from ..typescript.scopes import file_consts
+from ..typescript_http_common import mw_name, package_locals
 from ..wiring import compose_guards
 from .mounts import (
-    _PATH_EXPRESSIONS, _is_require_express, express_mounts, is_router_call, mw_name, router_locals,
+    _PATH_EXPRESSIONS, _is_require_express, express_mounts, is_router_call, router_locals,
 )
 
 # HTTP-verb methods that register a route handler on an app/router.
@@ -299,49 +300,6 @@ _SERVING_MIDDLEWARE: dict[tuple[str, str], str] = {
     ("express-graphql", "graphqlHTTP"): "graphql",
     ("graphql-http/lib/use/express", "createHandler"): "graphql",
 }
-
-
-def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
-    """Local name → (package, the export it binds; ``*`` for the default / namespace) for the
-    file's package imports and top-level ``require``s: ``import swaggerUi from
-    'swagger-ui-express'`` → ``swaggerUi: ('swagger-ui-express', '*')``; ``const { graphqlHTTP }
-    = require('express-graphql')`` → ``graphqlHTTP: ('express-graphql', 'graphqlHTTP')``.
-    Relative imports are left out (they are the repo's own code)."""
-    out: dict[str, tuple[str, str]] = {}
-    for node in root.named_children:
-        if node.type == "import_statement":
-            module = _module_of(node, source)
-            clause = next((c for c in node.named_children if c.type == "import_clause"), None)
-            if module is None or module.startswith(".") or clause is None:
-                continue
-            for c in clause.named_children:
-                if c.type == "identifier":
-                    out[node_text(c, source)] = (module, "*")
-                elif c.type == "namespace_import":
-                    ident = next((x for x in c.named_children if x.type == "identifier"), None)
-                    if ident is not None:
-                        out[node_text(ident, source)] = (module, "*")
-                elif c.type == "named_imports":
-                    for spec in c.named_children:
-                        idents = [x for x in spec.named_children if x.type == "identifier"]
-                        if spec.type == "import_specifier" and idents:
-                            out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
-        elif node.type in ("lexical_declaration", "variable_declaration"):
-            for d in node.named_children:
-                name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
-                value = d.child_by_field_name("value")
-                module = _require_module(value, source) \
-                    if name is not None and value is not None and value.type == "call_expression" \
-                    else None
-                if name is None or module is None or module.startswith("."):
-                    continue
-                if name.type == "identifier":
-                    out[node_text(name, source)] = (module, "*")
-                elif name.type == "object_pattern":
-                    for prop in name.named_children:
-                        if prop.type == "shorthand_property_identifier_pattern":
-                            out[node_text(prop, source)] = (module, node_text(prop, source))
-    return out
 
 
 #: express-jwt's factory: ``expressjwt`` (v7+) or the module itself (``require('express-jwt')``,

@@ -31,6 +31,7 @@ from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.scopes import collect_consts
+from ..typescript_http_common import mw_name
 from ..typescript.imports import (
     _is_fixture_path,
     _module_of,
@@ -134,16 +135,6 @@ class ExpressMounts:
     #: Mount site → the names of its arguments that are confirmed routers, for a site that is not
     #: served: its mount record names those routers, never as its guards.
     site_routers: dict[str, frozenset[str]] = field(default_factory=dict)
-
-
-def mw_name(node: Node, source: bytes) -> str | None:
-    """A middleware/handler arg's callable name — ``requireAuth`` from ``requireAuth()``,
-    ``Auth.check`` from the member call, ``rateLimit`` from a bare reference. An inline
-    (arrow/function) middleware has no name → None (honest-null, no fabricated name)."""
-    n = node.child_by_field_name("function") if node.type == "call_expression" else node
-    if n is not None and n.type in ("identifier", "member_expression"):
-        return node_text(n, source)
-    return None
 
 
 def _names(nodes: list[Node], source: bytes) -> tuple[str, ...]:

@@ -55,8 +55,7 @@ from ..typescript.imports import (
 )
 from ..typescript.imports import _resolve as _resolve_module
 from ..typescript.scopes import collect_consts, const_key
-from ..typescript_express.mounts import mw_name
-from ..typescript_express.routes import package_locals
+from ..typescript_http_common import mw_name, package_locals
 
 FACT = "fastify.plugin-prefixes"
 
