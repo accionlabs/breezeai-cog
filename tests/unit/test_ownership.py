@@ -297,3 +297,39 @@ def test_the_parse_timeout_reaches_only_indexes_that_take_it(tmp_path) -> None:
     entries = [ScanEntry("a.lo", "lower"), ScanEntry("b.up", "upper")]
     indexes = pipeline._build_indexes(repo, entries, parse_timeout_micros=1234)
     assert (indexes["lower"].name, indexes["upper"].name) == ("timeout=1234", "no timeout")
+
+
+class FailingLower(Lower):
+    def build_index(self, repo_root, files, jobs=1):
+        raise RuntimeError("index failed")
+
+
+class RelatedUpper(IndexedUpper):
+    def parse_file(self, ctx: ParseContext) -> FileRecord:
+        related = ",".join(
+            f"{k}={v.name if v is not None else None}"
+            for k, v in sorted(ctx.related_indexes.items())
+        )
+        return FileRecord(
+            id=ctx.path,
+            path=ctx.path,
+            type="code",
+            language=self.name,
+            loc=1,
+            externalImports=[related],
+        )
+
+
+def test_a_failed_related_index_is_there_as_none(tmp_path) -> None:
+    """A related language with files whose index failed is handed as None, so a parser can tell
+    it from a language the repo has no files of (absent)."""
+    from breezeai_cog import iter_file_records
+
+    registry.clear()
+    registry.register(FailingLower())
+    registry.register(RelatedUpper())
+    repo = _repo(tmp_path, {"a.up": "", "b.lo": ""})
+    records = {r.path: r for r in iter_file_records(repo)}
+    assert records["a.up"].externalImports == ["lower=None"]
+    records = {r.path: r for r in iter_file_records(_repo(tmp_path / "only", {"a.up": ""}))}
+    assert records["a.up"].externalImports == [""]

@@ -88,7 +88,9 @@ How it works (`core/pipeline.py::_build_indexes`):
   C index, C reads the C++ index
   ([shared extensions and related languages](shared-extensions-and-related-languages.md)).
 - If an index build fails, a warning (`build_index.failed`) is logged and that language runs
-  **without** an index: fewer links, never a crash.
+  **without** an index: fewer links, never a crash. A parser that lists it in
+  `related_languages` gets it in `ctx.related_indexes` as `None`, so a failed index can be told
+  apart from a language the repo has no files of (absent).
 
 What each index holds:
 
