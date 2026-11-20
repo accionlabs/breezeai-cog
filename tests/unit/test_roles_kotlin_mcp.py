@@ -755,3 +755,96 @@ fun build(transport: Any) {{
     path, other = other_file
     tools = _tools(analyze_files({"src/main/kotlin/demo/Build.kt": src, path: other}))
     assert set(tools) == expected
+
+
+def test_kotlin_java_sdk_tool_builder_with_a_schema(analyze_files) -> None:
+    """``Tool.builder(name, mapper, json)`` reads the JSON schema; ``Tool.builder(name, map)``
+    builds it in code → params unknown."""
+    src = '''
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+val json = McpServerFeatures.SyncToolSpecification(McpSchema.Tool.builder("json", mapper,
+    """{"type": "object", "properties": {"q": {"type": "string"}}}""").build()) { ex, req -> TODO() }
+val mapped = McpServerFeatures.SyncToolSpecification(
+    McpSchema.Tool.builder("mapped", schemaMap).build()) { ex, req -> TODO() }
+'''
+    tools = _tools(analyze_files({"Tools.kt": src}))
+    assert _params(tools["json"]) == [("q", "string", False, None, None)]
+    assert tools["mapped"].params is None
+
+
+def test_kotlin_prompt_arguments_not_read_whole_leave_params_unknown(analyze_files) -> None:
+    """Any prompt argument that is not read whole → the prompt's params are unknown (None),
+    never a partial list."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.types.PromptArgument
+import io.modelcontextprotocol.spec.McpSchema
+
+fun configure(server: Server) {
+    server.addPrompt(name = "ident", arguments = listOf(arg)) { TODO() }
+    server.addPrompt(name = "other_call", arguments = listOf(makeArg("a"))) { TODO() }
+    server.addPrompt(name = "four", arguments = listOf(PromptArgument("a", "T", "d", true))) { TODO() }
+    server.addPrompt(name = "flag", arguments = listOf(PromptArgument(name = "a", required = flag))) { TODO() }
+    server.addPrompt(name = "no_name", arguments = listOf(PromptArgument(name = n))) { TODO() }
+    server.addPrompt(name = "desc", arguments = listOf(PromptArgument(name = "a", description = d))) { TODO() }
+    server.addPrompt(name = "nameless_builder",
+        arguments = listOf(McpSchema.PromptArgument.builder().name("a").build())) { TODO() }
+    server.addPrompt(name = "other_builder",
+        arguments = listOf(McpSchema.Prompt.builder("a").build())) { TODO() }
+    server.addPrompt(name = "extra_step",
+        arguments = listOf(McpSchema.PromptArgument.builder("a").meta(m).build())) { TODO() }
+    server.addPrompt(name = "null_desc",
+        arguments = listOf(PromptArgument(name = "a", description = null, required = false))) { TODO() }
+    server.addPrompt(name = "no_handler")
+}
+"""
+    prompts = _of(analyze_files({"Prompts.kt": src}), "mcp_prompt")
+    assert "no_handler" not in prompts  # nothing serves it: no entry point
+    unknown = (
+        "ident",
+        "other_call",
+        "four",
+        "flag",
+        "no_name",
+        "desc",
+        "nameless_builder",
+        "other_builder",
+        "extra_step",
+    )
+    for name in unknown:
+        assert prompts[name].params is None, name
+    assert _params(prompts["null_desc"]) == [("a", None, False, None, None)]
+
+
+def test_kotlin_java_sdk_entries_not_read_whole_give_no_record(analyze_files) -> None:
+    """A Java SDK specification's entry: a ``val`` assigned once is followed; another entry
+    type, named arguments, an unknown arity, a computed entry → no record."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+val viaVal = McpSchema.Resource.builder("memo://val", "Val").build()
+val a = McpServerFeatures.SyncResourceSpecification(viaVal) { ex, req -> TODO() }
+val b = McpServerFeatures.SyncResourceSpecification(unknownEntry) { ex, req -> TODO() }
+val c = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Prompt.builder("wrong_builder").build()) { ex, req -> TODO() }
+val d = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Prompt("wrong_ctor", "d", null)) { ex, req -> TODO() }
+val e = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Resource(uri = "memo://named", name = "n")) { ex, req -> TODO() }
+val f = McpServerFeatures.SyncPromptSpecification(McpSchema.Prompt("two", "d")) { ex, req -> TODO() }
+val g = McpServerFeatures.SyncPromptSpecification(
+    McpSchema.Prompt.builder("twice").arguments(x, y).build()) { ex, req -> TODO() }
+val h = McpServerFeatures.SyncResourceSpecification("memo://string") { ex, req -> TODO() }
+"""
+    statements = analyze_files({"Specs.kt": src})
+    assert set(_of(statements, "mcp_resource")) == {"memo://val"}
+    assert not _of(statements, "mcp_prompt")

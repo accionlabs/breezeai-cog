@@ -909,6 +909,56 @@ def test_mcpgo_request_name_write_must_precede_the_call_unconditionally(
     assert _calls(analyze_files({"main.go": src})) == []
 
 
+
+_MCPGO_OK = 'mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "x"}}'
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # not a proven client: a copy of another value, a value-typed Client, two bindings
+        f"c := existing\n\tc.CallTool(ctx, {_MCPGO_OK})",
+        f"var c client.Client\n\tc.CallTool(ctx, {_MCPGO_OK})",
+        f'c, _ := client.NewStdioMCPClient("s", nil)\n\tif admin {{ c := other(); _ = c }}\n\t'
+        f"c.CallTool(ctx, {_MCPGO_OK})",
+        # not (ctx, request)
+        f'c, _ := client.NewStdioMCPClient("s", nil)\n\tc.CallTool({_MCPGO_OK})',
+        # a request literal of another package, unkeyed, or with a Params not read whole
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\t'
+        'c.CallTool(ctx, other.CallToolRequest{Params: mcp.CallToolParams{Name: "x"}})',
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\tc.CallTool(ctx, mcp.CallToolRequest{p})',
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\tc.CallTool(ctx, mcp.CallToolRequest{Params: p})',
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\t'
+        'c.CallTool(ctx, mcp.CallToolRequest{Params: mcp.GetPromptParams{Name: "x"}})',
+        # a request variable bound twice, built by a call, of another type
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\t'
+        f"req := {_MCPGO_OK}\n\tif admin {{ req := mcp.CallToolRequest{{}}; _ = req }}\n\t"
+        "c.CallTool(ctx, req)",
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\treq := build()\n\tc.CallTool(ctx, req)',
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\tvar req other.Request\n\tc.CallTool(ctx, req)',
+        # any other use of the request: read, aliased
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\t'
+        f"req := {_MCPGO_OK}\n\tlog(req.Params.Name)\n\tc.CallTool(ctx, req)",
+        'c, _ := client.NewStdioMCPClient("s", nil)\n\t'
+        f"req := {_MCPGO_OK}\n\talias := req\n\tc.CallTool(ctx, req)",
+    ],
+)
+def test_mcpgo_client_or_request_not_proven_gives_no_record(analyze_files, body: str) -> None:
+    src = _MCPGO_IMPORTS + "\nfunc f(admin bool) {\n\t" + body + "\n}\n"
+    assert _calls(analyze_files({"main.go": src})) == []
+
+
+def test_mcpgo_request_variable_with_params_is_read(analyze_files) -> None:
+    """The positive control of the cases above: a request variable used only by the call."""
+    src = (
+        _MCPGO_IMPORTS
+        + "\nfunc f() {\n\t"
+        + f'c, _ := client.NewStdioMCPClient("s", nil)\n\treq := {_MCPGO_OK}\n\t'
+        + "c.CallTool(ctx, req)\n}\n"
+    )
+    assert _calls(analyze_files({"main.go": src})) == [("TOOL", "x", "mcp-go")]
+
+
 def test_mcpgo_request_name_write_in_the_same_list_is_kept(analyze_files) -> None:
     src = (
         _MCPGO_IMPORTS
@@ -1429,4 +1479,29 @@ fun g(mixed: McpSyncClient) { mixed.callTool(McpSchema.CallToolRequest("g", mapO
     assert _calls(analyze_files({"K.kt": src})) == [
         ("TOOL", "a", "kotlin-mcp"),
         ("TOOL", "b", "kotlin-mcp"),
+    ]
+
+
+def test_kotlin_java_sdk_request_builders_and_non_requests(analyze_files) -> None:
+    """A Java SDK request builder names the call; a builder or constructor of another request,
+    a request held in a variable, a receiver that is not a name → no record."""
+    src = """
+package demo
+
+import io.modelcontextprotocol.client.McpClient
+import io.modelcontextprotocol.spec.McpSchema
+
+fun run(transport: Any, clients: List<Any>) {
+    val sync = McpClient.sync(transport).build()
+    sync.callTool(McpSchema.CallToolRequest.builder().name("built").arguments(mapOf()).build())
+    sync.getPrompt(McpSchema.GetPromptRequest.builder("first").build())
+    sync.callTool(McpSchema.GetPromptRequest.builder().name("other_builder").build())
+    sync.callTool(McpSchema.ReadResourceRequest("other_ctor"))
+    sync.callTool(request)
+    clients[0].callTool(McpSchema.CallToolRequest("indexed", mapOf()))
+}
+"""
+    assert _calls(analyze_files({"App.kt": src})) == [
+        ("TOOL", "built", "java-mcp"),
+        ("PROMPT", "first", "java-mcp"),
     ]
