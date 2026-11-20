@@ -53,6 +53,22 @@ FRAMEWORK = "go-mcp"
 _PACKAGE = "github.com/modelcontextprotocol/go-sdk/mcp"
 _SCOPES = ("function_declaration", "method_declaration", "func_literal")
 _DECLARATIONS = ("short_var_declaration", "var_spec", "assignment_statement", "range_clause")
+#: Implicit blocks besides ``{…}``: an ``if`` / ``for`` / ``switch`` (its init statement, a
+#: type-switch alias) and each ``case`` / ``default`` clause of a ``switch`` or ``select``.
+_BLOCKS = frozenset(
+    {
+        "block",
+        "if_statement",
+        "for_statement",
+        "expression_switch_statement",
+        "type_switch_statement",
+        "select_statement",
+        "expression_case",
+        "type_case",
+        "default_case",
+        "communication_case",
+    }
+)
 _TAG = re.compile(r'(\w+):"((?:[^"\\]|\\.)*)"')
 _INTEGERS = frozenset(
     {
@@ -88,11 +104,11 @@ def _scope_of(node: Node) -> Node | None:
 
 
 def _block_of(node: Node) -> Node | None:
-    """The innermost block or function enclosing ``node``, where a name it declares is bound;
-    None at package level."""
+    """The innermost block (an implicit one included) or function enclosing ``node``, where a
+    name it declares is bound; None at package level."""
     cur = node.parent
     while cur is not None:
-        if cur.type in _SCOPES or cur.type == "block":
+        if cur.type in _SCOPES or cur.type in _BLOCKS:
             return cur
         cur = cur.parent
     return None
@@ -125,6 +141,20 @@ def _callee(call: Node) -> Node | None:
 
 def _args(node: Node | None) -> list[Node]:
     return [a for a in (node.named_children if node is not None else []) if a.type != "comment"]
+
+
+def _declares(n: Node) -> bool:
+    """A ``range`` clause or ``select`` receive declares its names (``:=``) rather than
+    assigning existing ones (``=``)."""
+    return any(c.type == ":=" for c in n.children)
+
+
+def _receive_names(n: Node) -> list[Node]:
+    """The names a ``select`` receive (``case s := <-ch``) or a type-switch alias (``switch s
+    := v.(type)``) binds."""
+    left = n.child_by_field_name("left" if n.type == "receive_statement" else "alias")
+    targets = left.named_children if left is not None and left.type == "expression_list" else [left]
+    return [t for t in targets if t is not None and t.type == "identifier"]
 
 
 def _targets(n: Node) -> list[tuple[Node, Node | None]]:
@@ -316,13 +346,28 @@ def _detect(dc: DetectContext) -> Detection | None:
                 built = call is not None and _pkg_selector(_callee(call), source, pkgs, "NewServer")
                 block = _block_of(n)
                 bind(block, name, built)
-                if n.type == "assignment_statement" and not built:
+                assigns = n.type == "assignment_statement" or (
+                    n.type == "range_clause" and not _declares(n)
+                )
+                if assigns and not built:
                     # `x = other`: whichever enclosing declaration `x` is, it is not only a
                     # server any more.
                     while block is not None:
                         block = _block_of(block)
                         bind(block, name, False)
                 values.setdefault(_span(scope), {}).setdefault(name, []).append((ln, rv))
+        elif n.type in ("receive_statement", "type_switch_statement"):
+            # What a receive or a type-switch alias holds is never a proven server: the alias
+            # is bound in the switch, a `:=` receive in its `case`, a `=` one assigns the
+            # enclosing declaration.
+            for ln in _receive_names(n):
+                name = node_text(ln, source)
+                block = n if n.type == "type_switch_statement" else _block_of(n)
+                bind(block, name, False)
+                if n.type == "receive_statement" and not _declares(n):
+                    while block is not None:
+                        block = _block_of(block)
+                        bind(block, name, False)
         elif n.type == "identifier":
             uses.setdefault(node_text(n, source), []).append((n.start_byte, n))
         elif n.type == "parameter_declaration":
