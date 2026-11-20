@@ -26,7 +26,7 @@ from ..treesitter import node_text
 from ..typescript.imports import (
     _path_pieces, _resolve_pieces,
     _module_of, _require_module, relative_requires, resolve_const_value,
-    runtime_path_suffix,
+    runtime_path_template,
 )
 from ..wiring import compose_guards
 from .mounts import _PATH_EXPRESSIONS, express_mounts, is_router_call, mw_name, router_locals
@@ -394,7 +394,7 @@ def _classify(
     # rather than dropped.
     has_path = path is not None or (bool(arg_nodes) and (
         arg_nodes[0].type == "template_string"
-        or runtime_path_suffix(arg_nodes[0], source, consts or {}) is not None))
+        or runtime_path_template(arg_nodes[0], source, consts or {}) is not None))
     chain = arg_nodes[1:]  # everything after the path — the middleware + handler/router stack
 
     if method in _HTTP_VERBS:
@@ -501,7 +501,7 @@ def _classify_route_verb(
         return None
     path = _path_value(first, source, consts or {})
     if path is None and first.type != "template_string" \
-            and runtime_path_suffix(first, source, consts or {}) is None:
+            and runtime_path_template(first, source, consts or {}) is None:
         return None
     vargs = call.child_by_field_name("arguments")
     verb_args = list(vargs.named_children) if vargs is not None else []
@@ -798,6 +798,9 @@ def detect_express(
                 call, source, path, mounts.site_routers, routers, handler, handler_line, guards)
         receiver_of = _receiver(call, source)
         lost = receiver_of in unknown_receivers or (file_unknown and receiver_of not in receiver_base)
+        if endpoint is None and route_kind == "route":
+            # A path with a part read at runtime (`BASE + "/users"`): `${BASE}/users` (addresses.py)
+            endpoint = _own_template(call, source, consts)
         served = _apply_base(
             receiver_base.get(receiver_of, mount_base), framework, route_kind, endpoint, lost)
         # Only a route-level guard that certainly rejects an anonymous request asserts auth
@@ -817,8 +820,6 @@ def detect_express(
             chained = (_guard_names(_chain_middleware(call, route_call, source), source)
                        if route_call is not None else None)
             guards = compose_guards(mounted, outer, chained, guards)
-        suffix = _own_suffix(call, source, consts) \
-            if served is None and route_kind == "route" else None
         # Enrich the base statement on the call's line (a top-level route call); a second route in
         # one statement (route(path).get(a).post(b)) or one inside a handler/callback (the base
         # skips nested scopes) gets its own record.
@@ -827,20 +828,21 @@ def detect_express(
             {"semanticType": "route", "framework": framework, "routeKind": route_kind,
              "endpoint": served},
             fill={"method": method, "handler": handler, "handlerLine": handler_line,
-                  "guards": guards, "authRequired": auth_required, "endpointSuffix": suffix},
+                  "guards": guards, "authRequired": auth_required},
             enrich="any",
         ))
     return found
 
 
-def _own_suffix(call: Node, source: bytes, consts: dict[str, str | None] | None) -> str | None:
-    """The known tail of a route path that starts with a runtime value (``BASE + "/users"``),
-    from the verb call's path or, for ``route(path).get(h)``, the ``route(...)`` call's."""
+def _own_template(call: Node, source: bytes, consts: dict[str, str | None] | None) -> str | None:
+    """A route path with a part read at runtime as an address with that part marked
+    (``BASE + "/users"`` → ``${BASE}/users``), from the verb call's path or, for
+    ``route(path).get(h)``, the ``route(...)`` call's."""
     fn = call.child_by_field_name("function")
     route_call = _route_root(fn.child_by_field_name("object"), source) if fn is not None else None
     args = (route_call or call).child_by_field_name("arguments")
     first = args.named_children[0] if args is not None and args.named_children else None
-    return runtime_path_suffix(first, source, consts or {}) if first is not None else None
+    return runtime_path_template(first, source, consts or {}) if first is not None else None
 
 
 def _mount_routers(

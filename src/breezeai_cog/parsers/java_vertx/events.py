@@ -40,6 +40,7 @@ from .route_guards import library_handlers, pathless_middleware, route_guards
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
+from ..addresses import join_runtime
 from ..vertx_common import (
     vertx_emit,
     MOUNTED_FACTORIES,
@@ -56,11 +57,11 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
-    route_suffix,
+    route_template,
     router_vars,
     service_builder_vars,
     sub_router_bases,
-    unknown_prefix_mounts,
+    runtime_mount_prefixes,
 )
 
 
@@ -396,7 +397,7 @@ def detect_vertx(
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
     bases = sub_router_bases(mounts)
-    one_unknown_mount = unknown_prefix_mounts(mounts)
+    runtime_mounts = runtime_mount_prefixes(mounts)
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
@@ -431,7 +432,9 @@ def detect_vertx(
         semantic, method, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
-        own = endpoint  # the route's own path, before any mount prefix
+        if semantic == "route" and endpoint is None:
+            # A path with a part read at runtime (`pathPrefix + "/x"`): `${pathPrefix}/x`.
+            endpoint = route_template(_parts(call, source, consts)[1])
         unknown_base = False
         receiver = call.child_by_field_name("object")
         recv = router_name(_root_receiver(receiver, source)) if receiver is not None else ""
@@ -444,17 +447,14 @@ def detect_vertx(
                 mounted, prefix = factory_mount(index, cls, method_name)
                 if mounted:
                     base = prefix
-        if base is not _NOT_MOUNTED:
+        if semantic == "route" and recv in runtime_mounts and endpoint is not None:
+            # Mounted once, at a prefix read at runtime: `${prefix}/x` (addresses.py).
+            endpoint = join_runtime(runtime_mounts[recv], endpoint)
+        elif base is not _NOT_MOUNTED:
             if base is None or endpoint is None:
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(str(base), endpoint)
-        suffix: str | None = None
-        if semantic == "route" and endpoint is None:
-            # A runtime prefix (`pathPrefix + "/x"`, or a mount whose prefix is unknown): keep
-            # the known tail — never the prefix, never as a `{…}` parameter.
-            suffix = own if (recv in one_unknown_mount and own) \
-                else route_suffix(_parts(call, source, consts)[1])
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
@@ -499,8 +499,7 @@ def detect_vertx(
             if semantic == "route" else None
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
-                                handler_path=first_path, endpoint_suffix=suffix,
-                                guards=guards))
+                                handler_path=first_path, guards=guards))
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {

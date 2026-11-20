@@ -29,7 +29,7 @@ from ..emits import Emit
 from ..index_common import record_distinct
 from .cron_expressions import CRON_EXPRESSIONS
 from .patterns import message_pattern
-from .prefixes import RUNTIME_PREFIX, Versioning, Versions, nest_prefixes, version_values
+from .prefixes import Versioning, Versions, nest_prefixes, version_values
 from ..treesitter import node_text
 from ..typescript.imports import resolve_const_value
 
@@ -484,42 +484,39 @@ def _excluded(local: str, verb: str, exclude: tuple[tuple[str, str | None], ...]
 def _served(
     local: str, verb: str, class_name: str, path: str, index: object | None,
     version_segment: str | None = None,
-) -> tuple[str | None, str | None]:
+) -> str | None:
     """A NestJS HTTP route's full address: the app's ``setGlobalPrefix`` (unless excluded), then
     the URI version segment (``v2``), then its ``RouterModule`` path, then the controller and
     method paths (``local``). A prefix that is
     set but cannot be resolved — or a controller that cannot be tied to its app when one of the
     repo's apps sets a prefix — makes the address unknown → None (contract §8: never a partial
-    address). Returns ``(endpoint, endpointSuffix)``: a global prefix set from a runtime value
-    gives no endpoint and the address after the prefix as the suffix."""
+    address)."""
     prefixes = nest_prefixes(index)
     if prefixes is None:
-        return _join(version_segment, local) if version_segment else local, None
+        return _join(version_segment, local) if version_segment else local
     ctrl_prefixes = prefixes.controller_prefixes
     if class_name in ctrl_prefixes:
         mp = ctrl_prefixes[class_name]
         if mp is None:
-            return None, None
+            return None
         local = _join(mp, local)
     # The version segment follows the global prefix; the exclude list matches the path without it.
     versioned = _join(version_segment, local) if version_segment else local
     boots = prefixes.global_prefixes
     if not boots:
-        return versioned, None
+        return versioned
     anchors = [d for d in boots if d == "" or path.startswith(d + "/")]
     if not anchors:  # not under any app's bootstrap
-        return versioned if all(b == ("", ()) for b in boots.values()) else None, None
+        return versioned if all(b == ("", ()) for b in boots.values()) else None
     prefix, exclude = boots[max(anchors, key=len)]  # the deepest app above this controller
     if prefix == "":
-        return versioned, None
-    if prefix == RUNTIME_PREFIX:  # excluded or not, the route's address ends with this
-        return None, versioned
+        return versioned
     if prefix is None or exclude is None:
-        return None, None
+        return None
     hit = _excluded(local, verb, exclude)
     if hit is None:
-        return None, None
-    return versioned if hit else _join(prefix, versioned), None
+        return None
+    return versioned if hit else _join(prefix, versioned)
 
 
 def detect_nest_routes(
@@ -606,18 +603,16 @@ def detect_nest_routes(
                                 local = _join(b, sub) if b is not None and sub is not None \
                                     else None
                                 for version, segment, known in variants:
-                                    served, suffix = (
-                                        (None, None) if not known or local is None
-                                        else _served(local, verb, class_name, path, index,
-                                                     segment)
-                                        if framework == "nestjs"
-                                        else (local, None)
-                                    )
                                     routes.append(Emit(dec, dict(
                                         semanticType="route",
                                         method=verb,
-                                        endpoint=served,
-                                        endpointSuffix=suffix,
+                                        endpoint=(
+                                            None if not known or local is None
+                                            else _served(local, verb, class_name, path, index,
+                                                         segment)
+                                            if framework == "nestjs"
+                                            else local
+                                        ),
                                         routeKind="route",
                                         version=version,
                                         requestDTO=_request_dto(member, source),

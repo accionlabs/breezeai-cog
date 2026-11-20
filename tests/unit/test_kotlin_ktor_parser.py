@@ -192,12 +192,14 @@ fun Application.configureRouting() {
 '''
 
 
-def test_ktor_unresolved_path_leaves_endpoint_empty():
-    # Resolved constants (interpolated, qualified, concatenated) give the literal; a constant from
-    # elsewhere or an expression gives an empty endpoint, never a {NAME} placeholder (Q8).
+def test_ktor_unresolved_path_part_is_marked():
+    # Resolved constants (interpolated, qualified, concatenated) give the literal; a value that
+    # does not resolve is marked ${name}, never a {NAME} placeholder (that is a path parameter);
+    # a path with no literal part left (`Config.EXTERNAL`) stays empty.
     rec = _parse(_UNRESOLVED_SRC)
     endpoints = [s.endpoint for s in rec.statements if s.semanticType == "route"]
-    assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, None, None]
+    assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, "${base}/x",
+                         "${ELSEWHERE}/nested"]
 
 
 

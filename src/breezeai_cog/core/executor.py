@@ -106,7 +106,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         name: indexes[name]
         for name in getattr(base, "related_languages", ()) if name in indexes
     }
-    from ..parsers.addresses import apply_outbound
+    from ..parsers.addresses import normalize_addresses
     from ..parsers.statements_common import (
         begin_concat_tracking,
         set_concat_depth,
@@ -129,7 +129,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         )
         record = parser.parse_file(ctx)
         parser.link_handlers(record, ctx)
-        apply_outbound(record)  # a URL that starts with a runtime value: its known tail only
+        normalize_addresses(record)  # a part read at runtime: marked ${name} (addresses.py)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
             "parse.file.failed", path=path, parser=parser.name, error=str(exc)

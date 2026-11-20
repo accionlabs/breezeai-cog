@@ -18,6 +18,7 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ...utils.jsonc import load_json_object
+from ..addresses import runtime_part, with_literal
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
@@ -288,26 +289,29 @@ def _path_parts(
     return [(resolve_const_value(node, source, consts), node_text(node, source))]
 
 
-def runtime_path_suffix(
-    node: Node, source: bytes, consts: dict[str, str | None], *, params: bool = False
+def runtime_path_template(
+    node: Node, source: bytes, consts: dict[str, str | None], *, outbound: bool = False
 ) -> str | None:
-    """The known tail of a path whose leading part is a runtime value: ``BASE + "/users"`` and
-    `` `${BASE}/users` `` give ``/users``. None when the path does not start with a runtime value
-    or the tail is not a path (no leading ``/``). A runtime value after the literal tail makes
-    the rest unknown too (None) — unless ``params``: an outbound URL, where it is a request
-    parameter and renders as ``{name}`` (``ctx + "/orders/" + id`` → ``/orders/{id}``, as every
-    outbound URL does). See ``parsers.addresses``."""
+    """A path expression with a part read at runtime, as an address with that part marked
+    (``addresses.py``): ``BASE + "/users"`` and `` `${BASE}/users` `` give ``${BASE}/users``. In a
+    route path (``outbound`` False) every unresolved part is ``${name}``. In an outbound URL a
+    part before the first literal ``/`` is ``${name}`` (a base) and one after it is a request
+    value, ``{name}`` (``ctx + "/orders/" + id`` → ``${ctx}/orders/{id}``). None when every part
+    resolves (no runtime part) or no literal path part is known."""
     parts = _path_parts(node, source, consts)
-    if not parts or parts[0][0] is not None:
+    if all(value is not None for value, _ in parts):
         return None
-    rest = parts[next((i for i, p in enumerate(parts) if p[0] is not None), len(parts)):]
-    if not rest or (not params and any(value is None for value, _ in rest)):
-        return None
-    tail = "".join(
-        value if value is not None else "{" + (_simple_name(text) or "param") + "}"
-        for value, text in rest
-    )
-    return tail if tail.startswith("/") and tail.strip("/") else None
+    out: list[str] = []
+    in_base = True
+    for value, text in parts:
+        if value is not None:
+            out.append(value)
+            in_base = in_base and "/" not in value
+        elif outbound and not in_base:
+            out.append("{" + (_simple_name(text) or "param") + "}")
+        else:
+            out.append(runtime_part(text))
+    return with_literal("".join(out))
 
 
 def _simple_name(text: str) -> str | None:

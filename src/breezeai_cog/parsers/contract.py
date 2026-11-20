@@ -23,9 +23,9 @@ Rule            Severity Violation
 ``routeKind``   error    missing on a ``route``, or outside the value set for its semantic
                          type (§5)
 ``framework``   error    missing (§5)
-``endpoint``    error    an empty string instead of no value, or a code placeholder
-                         (``${…}``, ``#{…}``, a backtick) instead of a resolved address
-                         (§6, §8)
+``endpoint``    error    an empty string instead of no value, or source text instead of an
+                         address (``${a + b}``, ``#{…}``, a backtick); a value read at
+                         runtime written ``${name}`` is the contract's marker (§6), not one
 ``one-record``  error    two entry points with the same file, line, method, endpoint,
                          handler and version (§8); one address serving several handlers (a
                          Vert.x service proxy's methods) or several header-selected versions
@@ -48,6 +48,8 @@ Rule            Severity Violation
 """
 
 from __future__ import annotations
+
+import re
 
 from collections import Counter
 from dataclasses import dataclass
@@ -81,6 +83,8 @@ ROUTE_KINDS: dict[str, frozenset[str | None]] = {
 }
 
 _PLACEHOLDERS = ("${", "#{", "`")
+#: A part read at runtime, as the contract writes it (``${contextRoot}``; addresses.py).
+_RUNTIME_PART = re.compile(r"\$\{[\w.-]*\}")
 
 #: Rules whose violation is a missing value, not a wrong one.
 _GAPS = frozenset({"handler", "handlerLine"})
@@ -102,7 +106,7 @@ OUTBOUND_TYPES = frozenset({"api_call", "eventbus_send", "eventbus_publish"})
 def _bad_address(endpoint: str | None) -> str | None:
     if endpoint == "":
         return "empty string; an unresolved address has no value"
-    if endpoint is not None and any(p in endpoint for p in _PLACEHOLDERS):
+    if endpoint is not None and any(p in _RUNTIME_PART.sub("", endpoint) for p in _PLACEHOLDERS):
         return endpoint
     return None
 

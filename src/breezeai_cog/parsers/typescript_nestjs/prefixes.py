@@ -10,8 +10,8 @@ Two kinds of wiring put a prefix in front of a controller's routes, usually from
 
 * ``global_prefixes``: the directory of a bootstrap file (``NestFactory.create`` /
   ``app.setGlobalPrefix``) → (prefix, exclude). prefix ``""`` = the app sets none,
-  ``RUNTIME_PREFIX`` = set from a value that does not resolve (config / env), ``None`` = two
-  bootstraps in the directory disagree; exclude = ``((path, METHOD | None), …)``, ``None`` when it
+  a ``${name}`` part = set from a value that does not resolve (``setGlobalPrefix(config.x)`` →
+  ``${x}``, see ``addresses``), ``None`` = two bootstraps in the directory disagree; exclude = ``((path, METHOD | None), …)``, ``None`` when it
   cannot be read. A controller belongs to the deepest bootstrap directory above it.
 * ``controller_prefixes``: controller class name → its module's composed ``RouterModule`` path
   (``None`` when ambiguous or unresolvable). Only controllers of registered modules.
@@ -32,14 +32,12 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
+from ..addresses import runtime_part
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import _join_segments, _path_pieces, _resolve_pieces, _string_literal
 
 FACT = "nest.prefixes"
-#: A global prefix that is set from a runtime value (``setGlobalPrefix(config.x)``): the
-#: routes' address is unknown, but the part after the prefix is known (``endpointSuffix``).
-RUNTIME_PREFIX = "\0runtime"
 
 #: A NestJS ``setGlobalPrefix`` exclude list: ``((path, METHOD | None), …)``.
 NestExclude = tuple[tuple[str, str | None], ...]
@@ -221,7 +219,8 @@ def _collect_nest(root: Node, source: bytes) -> _NestRaw | None:
             args = n.child_by_field_name("arguments")
             arg_nodes = list(args.named_children) if args is not None else []
             if ftext.endswith(".setGlobalPrefix") and arg_nodes:
-                boot = (_path_pieces(arg_nodes[0], source),
+                boot = (_path_pieces(arg_nodes[0], source)
+                        or [("rt", node_text(arg_nodes[0], source))],
                         _nest_exclude(arg_nodes[1] if len(arg_nodes) > 1 else None, source))
             elif ftext.endswith(".enableVersioning"):
                 found = _versioning(arg_nodes[0] if arg_nodes else None, source)
@@ -271,8 +270,8 @@ def _nest_prefixes(
     for d, (pieces, exclude) in boots:
         calls.setdefault(d, set())
         if pieces != []:  # a setGlobalPrefix call ([] = NestFactory.create alone)
-            resolved = _resolve_pieces(pieces, const_values) if pieces else None
-            calls[d].add((RUNTIME_PREFIX if resolved is None else resolved, exclude))
+            calls[d].add((_prefix_template(pieces, const_values) if pieces is not None else None,
+                          exclude))
     by_dir: dict[str, tuple[str | None, NestExclude | None]] = {
         d: ("", ()) if not found else next(iter(found)) if len(found) == 1 else (None, None)
         for d, found in calls.items()
@@ -334,3 +333,17 @@ register_fact(FactSpec(
     name=FACT, language="typescript", gate=(*_NEST_BOOT, b"@Module"),
     collect=_collect, resolve=_resolve,
 ))
+
+
+def _prefix_template(pieces: list[tuple[str, str]], consts: dict[str, str | None]) -> str:
+    """A global prefix: literals as written, a constant by its value, a value read at runtime
+    as ``${name}`` (addresses.py)."""
+    out: list[str] = []
+    for kind, text in pieces:
+        if kind == "lit":
+            out.append(text)
+        elif kind == "sym" and consts.get(text) is not None:
+            out.append(str(consts[text]))
+        else:
+            out.append(runtime_part(text))
+    return "".join(out)

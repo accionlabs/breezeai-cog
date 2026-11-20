@@ -50,7 +50,7 @@ log = get_logger("breezeai_cog.emit.split")
 #: Optional single-hit classification fields — kept on part 1, cleared (→ null, dropped by
 #: ``exclude_none``) on continuation parts so a split never multiplies route/api/db/event nodes.
 _CONTINUATION_CLEARED: tuple[str, ...] = (
-    "semanticType", "name", "uiRole", "framework", "method", "endpoint", "endpointSuffix",
+    "semanticType", "name", "uiRole", "framework", "method", "endpoint",
     "handler", "handlerLine", "routeKind", "isRegex", "version", "authRequired",
     "guards", "requestDTO", "responseDTO", "dataLoaders", "dataAccessHint", "keyFields",
     "description", "params",

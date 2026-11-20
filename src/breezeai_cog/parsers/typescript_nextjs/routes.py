@@ -56,7 +56,6 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
-from ..addresses import RUNTIME_MARK
 from ..base_paths_common import app_base_path
 from .facts import next_base_paths, next_middlewares, page_extensions, page_stem
 
@@ -191,12 +190,13 @@ def _default_export_handler(
 
 def served(endpoint: str, path: str, index: object | None) -> str | None:
     """The route's address under its app's ``next.config`` ``basePath``: joined in front when it
-    is a literal; unknown (None) when it is set but cannot be resolved; unchanged when the app
-    sets none or no ``next.config`` was seen."""
+    is a literal or a template with a value read at runtime (``${BASE_PATH}/page``, see
+    ``addresses``); unknown (None) when the app's values disagree; unchanged when the app sets
+    none or no ``next.config`` was seen."""
     found, base = app_base_path(next_base_paths(index), path)
     if not found or base == "":
         return endpoint
-    if base is None or base == RUNTIME_MARK:
+    if base is None:
         return None
     parts = [p.strip("/") for p in (base, endpoint) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"

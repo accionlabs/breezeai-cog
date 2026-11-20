@@ -157,8 +157,9 @@ def test_unresolved_prefix_leaves_endpoint_empty(analyze_files) -> None:
         "@items.get('/')\ndef list_items():\n    pass\n"
         "app.include_router(orders, prefix=settings.API_V1_PREFIX)\n"
     ))
-    # a prefix that exists but has no value: the address is unknown — never a partial path
-    assert got == {"get_order": None, "list_items": None}
+    # a prefix read at runtime is marked `${name}`, never guessed; `${ITEMS}/` has no literal
+    # path part, so it says nothing and stays empty
+    assert got == {"get_order": "${API_V1_PREFIX}/orders/{oid}", "list_items": None}
 
 
 def test_router_included_twice_has_no_address_one_not_included_keeps_its_own(analyze_files) -> None:
@@ -277,8 +278,8 @@ def test_include_router_from_another_file(analyze_files) -> None:
            for s in st if s.semanticType == "route"}
     # imported constant + nested include across files; guards: app middleware, mount, own
     assert got["get_order"] == ("/api/v1/orders/{oid}", ["CORSMiddleware", "audit", "auth"], None)
-    # a settings attribute is not resolved (the environment can override it) → address unknown
-    assert got["list_users"] == (None, ["CORSMiddleware"], None)
+    # a settings attribute is not resolved (the environment can override it): marked `${…}`
+    assert got["list_users"] == ("${USERS_PREFIX}/users/", ["CORSMiddleware"], None)
 
 
 def test_router_included_twice_across_files_has_no_address(analyze_files) -> None:
