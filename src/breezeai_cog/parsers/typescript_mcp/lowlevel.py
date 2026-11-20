@@ -135,7 +135,8 @@ def _unparen(node: Node | None) -> Node | None:
 
 
 def _string(node: Node | None, source: bytes) -> str | None:
-    """A string literal, a template literal without substitutions, or a ``+`` of them."""
+    """A string literal, a template literal without substitutions, or a ``+`` of them; None
+    when any part has an escape sequence."""
     if node is None:
         return None
     if node.type == "binary_expression":
@@ -157,14 +158,15 @@ def _string(node: Node | None, source: bytes) -> str | None:
                 return None
             parts.append(value)
         return "".join(parts)
+    if node.type not in ("string", "template_string"):
+        return None
+    if any(c.type in ("escape_sequence", "template_substitution") for c in node.named_children):
+        return None  # an escape is not decoded here, so its text would be wrong
     if node.type == "string":
-        frags = [c for c in node.named_children if c.type in ("string_fragment", "escape_sequence")]
-        return "".join(node_text(f, source) for f in frags)
-    if node.type == "template_string":
-        if any(c.type == "template_substitution" for c in node.named_children):
-            return None
-        return node_text(node, source)[1:-1]
-    return None
+        return "".join(
+            node_text(c, source) for c in node.named_children if c.type == "string_fragment"
+        )
+    return node_text(node, source)[1:-1]
 
 
 def _pairs(obj: Node, source: bytes) -> dict[str, Node]:

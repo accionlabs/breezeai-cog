@@ -14,6 +14,7 @@ class around the call (:func:`proven_receivers`, :func:`receiver_binding`).
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable
 
 from tree_sitter import Node
@@ -84,8 +85,10 @@ _SCOPES = FUNCTION_SCOPES | {
     "catch_clause",
 }
 _CLASSES = ("class_declaration", "class", "abstract_class_declaration")
+#: Every node :class:`Scopes` records: a scope, or a class (where ``this`` is its instance).
+_FRAMES = _SCOPES | set(_CLASSES)
 #: Functions that give ``this`` a value of their own (an arrow keeps the enclosing one; a
-#: method's is its class's instance).
+#: class method's is its class's instance, an object literal's method has its own).
 _THIS_FUNCTIONS = FUNCTION_SCOPES - {"arrow_function", "method_definition"}
 
 
@@ -101,32 +104,60 @@ class Scopes:
     A ``var`` (``for (var … of …)`` included) belongs to its function, wherever in the body it
     is written; ``let`` / ``const`` and a ``function`` / ``class`` declaration to the block,
     ``switch`` or ``for`` that holds them; a parameter, and a function expression's own name, to
-    the function; a ``catch`` parameter to its clause."""
+    the function; a ``catch`` parameter to its clause. A parameter of a signature without a
+    body (an interface method, an overload, a function type) binds nothing.
+
+    The walk also keeps each scope's (and class's) enclosing one and their spans, so a lookup
+    finds the innermost one around a node by its position and follows the stored chain: a
+    tree-sitter ``.parent`` re-descends from the root, so walking up by it costs the depth
+    squared."""
 
     def __init__(self, root: Node, source: bytes) -> None:
         self.source = source
         self.root = scope_key(root)
         self._names: dict[ScopeKey, set[str]] = {}
-        stack: list[tuple[Node, set[str] | None, set[str] | None]] = [(root, None, None)]
+        #: Each frame (a scope or a class) → the frame around it (None for the module).
+        self._outer: dict[ScopeKey, ScopeKey | None] = {}
+        #: The frames that decide ``this``: a class (its key) or a function with its own (None).
+        self._this: dict[ScopeKey, ScopeKey | None] = {}
+        #: The parameters of a function scope (what a typed-parameter proof may bind).
+        self.parameters: set[ScopeKey] = set()
+        frames: list[tuple[int, int, int, ScopeKey]] = []
+        Item = tuple[Node, str, set[str] | None, set[str] | None, ScopeKey | None, int]
+        stack: list[Item] = [(root, "", None, None, None, 0)]
         while stack:
-            node, scope, fn = stack.pop()
+            node, parent_type, scope, fn, frame, depth = stack.pop()
+            kind = node.type
             if scope is not None and fn is not None:
-                if node.type in _DECLARED:
+                if kind in _DECLARED:
                     name = node.child_by_field_name("name")
                     if name is not None:
                         scope.add(node_text(name, source))
-                elif node.type == "variable_declarator":
-                    parent = node.parent
-                    var = parent is not None and parent.type == "variable_declaration"
+                elif kind == "variable_declarator":
+                    var = parent_type == "variable_declaration"
                     (fn if var else scope).update(
                         bound_names(node.child_by_field_name("name"), source)
                     )
-            if node.type in _SCOPES:
+            if kind in _FRAMES:
+                key = scope_key(node)
+                self._outer[key] = frame
+                frames.append((key[0], -key[1], depth, key))
+                frame = key
+                if kind in _CLASSES:
+                    self._this[key] = key
+                elif kind in _THIS_FUNCTIONS or (
+                    kind == "method_definition" and parent_type != "class_body"
+                ):
+                    self._this[key] = None
+            if kind in _SCOPES:
                 scope = self._names.setdefault(scope_key(node), set())
-                if node.type in FUNCTION_SCOPES or node.type in ("program", "class_static_block"):
+                if kind in FUNCTION_SCOPES or kind in ("program", "class_static_block"):
                     fn = scope
                 self._bind_own(node, scope, fn)
-            stack.extend((c, scope, fn) for c in node.named_children)
+            stack.extend((c, kind, scope, fn, frame, depth + 1) for c in node.named_children)
+        frames.sort()
+        self._starts = [f[0] for f in frames]
+        self._frames = [f[3] for f in frames]
 
     def _bind_own(self, node: Node, scope: set[str], fn: set[str] | None) -> None:
         """The names a scope node binds itself: parameters, a loop or ``catch`` variable."""
@@ -137,6 +168,7 @@ class Scopes:
             for p in params.named_children if params is not None else ():
                 pattern = p.child_by_field_name("pattern") if p.type in _PARAMETERS else p
                 scope.update(bound_names(pattern, source))
+                self.parameters.add(scope_key(p))
             if node.type in ("function_expression", "function", "generator_function"):
                 own = node.child_by_field_name("name")  # `function lookup() { … lookup … }`
                 if own is not None:
@@ -150,35 +182,41 @@ class Scopes:
         elif node.type == "catch_clause":
             scope.update(bound_names(node.child_by_field_name("parameter"), source))
 
+    def _frame(self, node: Node) -> ScopeKey | None:
+        """The innermost frame (scope or class) whose span holds ``node``. Spans nest, so it is
+        the last frame starting at or before the node, or one of the frames around that one."""
+        start, end = node.start_byte, node.end_byte
+        i = bisect_right(self._starts, start) - 1
+        frame = self._frames[i] if i >= 0 else None
+        while frame is not None and not (frame[0] <= start and end <= frame[1]):
+            frame = self._outer[frame]
+        return frame
+
     def binding(self, ident: Node) -> ScopeKey:
         """The scope whose declaration of ``ident``'s name is the one ``ident`` refers to: the
         nearest enclosing scope that declares it, else the module."""
         name = node_text(ident, self.source)
-        node = ident.parent
-        while node is not None:
-            if node.type in _SCOPES:
-                key = scope_key(node)
-                if name in self._names.get(key, ()):
-                    return key
-            node = node.parent
+        frame = self._frame(ident)
+        while frame is not None:
+            if name in self._names.get(frame, ()):
+                return frame
+            frame = self._outer[frame]
         return self.root
 
     def locally_bound(self, ident: Node) -> bool:
         """True when a scope enclosing ``ident`` (below the module) binds its name."""
         return self.binding(ident) != self.root
 
-
-def this_class(node: Node) -> ScopeKey | None:
-    """The class whose instance ``this`` is at ``node``: the class around it, through arrows
-    and methods; None outside a class or inside a ``function`` (it has a ``this`` of its own)."""
-    cur = node.parent
-    while cur is not None:
-        if cur.type in _CLASSES:
-            return scope_key(cur)
-        if cur.type in _THIS_FUNCTIONS:
-            return None
-        cur = cur.parent
-    return None
+    def this_class(self, node: Node) -> ScopeKey | None:
+        """The class whose instance ``this`` is at ``node``: the class around it, through
+        arrows and its own methods; None outside a class, or inside a ``function`` or an object
+        literal's method (each has a ``this`` of its own)."""
+        frame = self._frame(node)
+        while frame is not None:
+            if frame in self._this:
+                return self._this[frame]
+            frame = self._outer[frame]
+        return None
 
 
 def receiver_binding(node: Node, source: bytes, scopes: Scopes) -> Binding | None:
@@ -193,7 +231,7 @@ def receiver_binding(node: Node, source: bytes, scopes: Scopes) -> Binding | Non
     if obj is None:
         return None
     if obj.type == "this":
-        cls = this_class(node)
+        cls = scopes.this_class(node)
         return (cls, node_text(node, source)) if cls is not None else None
     base = receiver_binding(obj, source, scopes)
     return (base[0], node_text(node, source)) if base is not None else None
@@ -226,24 +264,28 @@ def proven_receivers(
                 if bound is not None:
                     out.add(bound)
             elif parent.type in ("public_field_definition", "field_definition"):
-                field = _field(parent, source)
+                field = _field(parent, source, scopes)
                 if field is not None:
                     out.add(field)
-        elif node.type in _PARAMETERS and typed(node, source):
+        elif (
+            node.type in _PARAMETERS
+            and scope_key(node) in scopes.parameters
+            and typed(node, source)
+        ):
             pattern = node.child_by_field_name("pattern")
             if pattern is not None and pattern.type == "identifier":
                 out.add((scopes.binding(pattern), node_text(pattern, source)))
         elif node.type == "public_field_definition" and typed(node, source):
-            field = _field(node, source)
+            field = _field(node, source, scopes)
             if field is not None:
                 out.add(field)
     return out
 
 
-def _field(definition: Node, source: bytes) -> Binding | None:
+def _field(definition: Node, source: bytes, scopes: Scopes) -> Binding | None:
     """A class field definition → the binding of its ``this.x``."""
     name = definition.child_by_field_name("name") or definition.child_by_field_name("property")
-    cls = this_class(definition) if name is not None else None
+    cls = scopes.this_class(definition) if name is not None else None
     return (cls, f"this.{node_text(name, source)}") if name is not None and cls else None
 
 

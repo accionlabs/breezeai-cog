@@ -822,3 +822,101 @@ this.server.tool("noClass", async () => ({ content: [] }));
     assert (tools["assigned"].handler, tools["assigned"].handlerLine) == ("lookup", 4)
     for name in ("pairPattern", "arrayDefault"):
         assert (tools[name].handler, tools[name].handlerLine) == ("lookup", None), name
+
+
+def test_typescript_parameter_of_a_signature_without_body_proves_no_server(analyze_files) -> None:
+    """A parameter typed ``Server`` / ``McpServer`` in a signature with no body (an interface
+    method, an overload, an abstract method, a function or constructor type, a call or construct
+    signature) declares nothing a call can refer to: a module-level name of the same spelling
+    (here an import) is not proven by it."""
+    lowlevel = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { server } from "./bus";
+
+export type Wire = (server: Server) => void;
+export type Make = new (server: Server) => object;
+interface Plugin { install(server: Server): void; (server: Server): void; new (server: Server): Plugin }
+declare function overload(server: Server): void;
+abstract class Base { abstract wire(server: Server): void; }
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [{ name: "busTool", inputSchema: { type: "object" } }],
+}));
+"""
+    mcp = """
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { server } from "./agent-registry";
+
+export interface Plugin {
+  install(server: McpServer): void;
+}
+export function register(server: McpServer): void;
+export function register(server: unknown) {}
+abstract class Base { abstract wire(server: McpServer): void; }
+
+server.tool("notAnMcpTool", async () => "x");
+"""
+    files = {"src/low.ts": lowlevel, "src/mcp.ts": mcp}
+    assert _tools(analyze_files(files)) == {}
+
+
+def test_typescript_this_in_an_object_literal_method_is_not_the_class(analyze_files) -> None:
+    """An object literal's method (a getter or setter too) has its own ``this``: ``this.server``
+    there is the literal's property, not the field of the class around it. The class's own
+    method and an arrow inside it still see the class's field."""
+    src = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+export class Host {
+  server = new Server({ name: "x", version: "1" }, { capabilities: { tools: {} } });
+  mcp = new McpServer({ name: "y", version: "1" });
+  wire(other: any) {
+    const plugin = {
+      server: other,
+      mcp: other,
+      install() {
+        this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: [{ name: "pluginTool", inputSchema: { type: "object" } }],
+        }));
+        this.mcp.tool("pluginMcpTool", async () => ({ content: [] }));
+      },
+      get wired() {
+        this.mcp.tool("getterTool", async () => ({ content: [] }));
+        return true;
+      },
+      set wired(v) {
+        this.mcp.tool("setterTool", async () => ({ content: [] }));
+      },
+    };
+    const arrow = () => this.mcp.tool("classTool", async () => ({ content: [] }));
+    plugin.install();
+  }
+}
+"""
+    assert set(_tools(analyze_files({"src/host.ts": src}))) == {"classTool"}
+
+
+def test_typescript_lowlevel_string_with_an_escape_is_not_read(analyze_files) -> None:
+    """An escape sequence is not decoded, so a name or description holding one is not read
+    (``"a\\x62c"`` is ``abc``, not ``a\\x62c``); a plain string next to it still is."""
+    src = r"""
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+const server = new Server({ name: "x", version: "1" }, {});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    { name: "a\x62c" },
+    { name: "q\"t" },
+    { name: `x\ty` },
+    { name: "pre" + "\x41" },
+    { name: "plain", description: "line\nbreak" },
+    { name: `tmpl`, description: 'it\'s' },
+  ],
+}));
+"""
+    tools = _tools(analyze_files({"src/esc.ts": src}))
+    assert set(tools) == {"plain", "tmpl"}
+    assert tools["plain"].description is None and tools["tmpl"].description is None

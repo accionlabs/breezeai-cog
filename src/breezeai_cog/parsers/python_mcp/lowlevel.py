@@ -196,7 +196,8 @@ def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
     """The ``heads`` the module binds other than by importing the SDK's ``Server`` (or, for
     ``mcp.server.lowlevel.Server``, any ``mcp`` package): a ``def`` / ``class``, an assignment, a
     loop or ``with`` target, or an import of anything else. Function and class bodies are not
-    read (only the module scope)."""
+    read (only the module scope). A walrus, a ``case`` capture or a ``del`` of a head binds it
+    too."""
     out: set[str] = set()
 
     def bind(name: str) -> None:
@@ -214,7 +215,11 @@ def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
             continue  # its body is another scope
         if t == "lambda":
             continue
-        if t in ("assignment", "augmented_assignment", "for_statement"):
+        rebound = _rebound_names(node, source)
+        if rebound is not None:
+            for name in rebound:
+                bind(name)
+        elif t in ("assignment", "augmented_assignment", "for_statement"):
             left = node.child_by_field_name("left")
             for name in _pattern_names(left, source) if left is not None else []:
                 bind(name)
@@ -282,13 +287,61 @@ def _scope_key(scope: Node | None) -> tuple[int, int]:
     return (scope.start_byte, scope.end_byte) if scope is not None else (-1, -1)
 
 
+#: Target shapes that hold more names (``a, b``, ``[a, *b]``, ``(a, b)``).
+_TARGET_GROUPS = (
+    "pattern_list",
+    "tuple_pattern",
+    "list_pattern",
+    "list_splat_pattern",
+    "tuple",
+    "list",
+    "expression_list",
+    "parenthesized_expression",
+    "list_splat",
+)
+
+
 def _pattern_names(node: Node, source: bytes) -> list[str]:
-    """The names a binding target declares (``a``, ``a, b``, ``[a, *b]``)."""
+    """The names a binding target declares (``a``, ``a, b``, ``[a, *b]``, ``(a, b)``)."""
     if node.type == "identifier":
         return [node_text(node, source)]
-    if node.type in ("pattern_list", "tuple_pattern", "list_pattern", "list_splat_pattern"):
+    if node.type in _TARGET_GROUPS:
         return [n for c in node.named_children for n in _pattern_names(c, source)]
     return []
+
+
+def _case_captures(clause: Node, source: bytes) -> list[str]:
+    """The names a ``case`` pattern captures: a bare name (``case server:``, ``{"s": server}``,
+    ``[server, *rest]``, ``Foo(a=server)``), a ``*rest`` / ``**rest`` and an ``as`` alias. A
+    class name (``Foo(…)``) and a dotted value (``Color.RED``) capture nothing."""
+    out: list[str] = []
+    stack = [(c, "case_clause") for c in clause.named_children if c.type == "case_pattern"]
+    while stack:
+        node, parent = stack.pop()
+        if node.type == "dotted_name":
+            if parent in ("case_pattern", "keyword_pattern") and node.named_child_count == 1:
+                out.append(node_text(node, source))
+            continue
+        if node.type == "identifier":
+            if parent in ("splat_pattern", "as_pattern"):
+                out.append(node_text(node, source))
+            continue
+        stack.extend((c, node.type) for c in node.named_children)
+    return out
+
+
+def _rebound_names(node: Node, source: bytes) -> list[str] | None:
+    """The names a walrus (``(server := x)``), a ``case`` pattern or a ``del`` rebinds (none of
+    them a server); None for any other node."""
+    t = node.type
+    if t == "named_expression":
+        name = node.child_by_field_name("name")
+        return [node_text(name, source)] if name is not None and name.type == "identifier" else []
+    if t == "case_clause":
+        return _case_captures(node, source)
+    if t == "delete_statement":
+        return [n for c in node.named_children for n in _pattern_names(c, source)]
+    return None
 
 
 #: Per scope: name → True when every binding of it there is a low-level server, else False.
@@ -303,8 +356,9 @@ def _bindings(
 ) -> _Bindings:
     """Every name each scope binds, and whether it is a low-level server there: assigned
     ``Server(…)`` or a parameter annotated ``Server``. Any other binding (an assignment of
-    something else, an untyped parameter, an import, a loop or ``with`` target, a ``def`` or
-    ``class``) makes the name not a server in that scope. ``only_imported`` receives the names
+    something else, an untyped parameter, an import, a loop or ``with`` target, a walrus, a
+    ``case`` capture, a ``del``, a ``def`` or ``class``) makes the name not a server in that
+    scope. ``only_imported`` receives the names
     the module binds by one ``from … import`` and nothing else (the ones the cross-file fact
     may prove)."""
     out: _Bindings = {}
@@ -341,7 +395,12 @@ def _bindings(
 
     for node in _walk(root):
         t = node.type
-        if t in ("global_statement", "nonlocal_statement"):
+        other_names = _rebound_names(node, source)
+        if other_names:
+            scope = _scope_of(node)
+            for name in other_names:
+                bind(scope, name, False)
+        elif t in ("global_statement", "nonlocal_statement"):
             scope = _scope_of(node)
             for ident in node.named_children:
                 if ident.type == "identifier" and scope is not None:
