@@ -36,7 +36,7 @@ from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, 
 from .forwarders import forwarder_sites
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
-from .route_chains import GroupKey, group_key, groupable, merge_chains, pathless_middleware
+from .route_guards import library_handlers, pathless_middleware, route_guards
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
@@ -411,8 +411,12 @@ def detect_vertx(
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
                                      index, suppress, built_by)
     found.extend(sites)
-    chained: list[tuple[GroupKey, int, Node]] = []  # route registrations of a handler chain
-    failures: list[tuple[GroupKey, Node]] = []  # failure-handler-only registrations
+    # Middleware for the routes' `guards` (route_guards.py): path-less registrations, and the
+    # Vert.x library handlers chained ahead of a route's own handler.
+    middleware = pathless_middleware(calls, source, routers) if b"handler(" in source else []
+    singles, wildcards, package = imports_and_package(root, source)
+    is_library = library_handlers(singles, wildcards, package,
+                                  {c.name for c in record.classes}, index)
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # a table loop's own registration
@@ -425,8 +429,8 @@ def detect_vertx(
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
-        # `router.get(p).failureHandler(h)`: error wiring, no request lands here (no record).
-        failure_only = semantic == "route" and failure_handler_only(_chained(call, source))
+        if semantic == "route" and failure_handler_only(_chained(call, source)):
+            continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
         own = endpoint  # the route's own path, before any mount prefix
         unknown_base = False
         receiver = call.child_by_field_name("object")
@@ -445,9 +449,6 @@ def detect_vertx(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(str(base), endpoint)
-        if failure_only:  # it still belongs to its endpoint's registrations (their span)
-            failures.append((group_key(call, source, method, endpoint), call))
-            continue
         suffix: str | None = None
         if semantic == "route" and endpoint is None:
             # A runtime prefix (`pathPrefix + "/x"`, or a mount whose prefix is unknown): keep
@@ -494,11 +495,12 @@ def detect_vertx(
             handler_line, first_path = site(handler)
         else:
             first_path = None
-        if semantic == "route" and groupable(call, source):
-            chained.append((group_key(call, source, method, endpoint), len(found), call))
+        guards = route_guards(call, recv, method, middleware, is_library, source) \
+            if semantic == "route" else None
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
-                                handler_path=first_path, endpoint_suffix=suffix))
+                                handler_path=first_path, endpoint_suffix=suffix,
+                                guards=guards))
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {
@@ -507,7 +509,4 @@ def detect_vertx(
                 "handlerLine": line, "handlerPath": extra_path,
             }))
 
-    if chained:  # one endpoint over several statements: one record, earlier handlers as guards
-        found = merge_chains(found, chained, pathless_middleware(calls, source, routers),
-                             failures, source)
     return found
