@@ -481,3 +481,165 @@ def test_vue_style_route_array_without_react_is_not_a_react_route(analyze_files)
         ),
     })
     assert all(s.framework != "react" for s in st if s.semanticType == "route")
+
+
+# ---- router keys written as methods or shorthand; the react-router gate; absolute and
+# ---- non-literal paths
+
+RR = "import { createBrowserRouter } from 'react-router-dom';\n"
+
+
+def _react_routes(analyze_files, src: str, name: str = "src/router.tsx"):
+    st = analyze_files({name: src})
+    return [(s.endpoint, s.handler) for s in st
+            if s.semanticType == "route" and s.framework == "react" and s.path == name]
+
+
+def test_route_with_a_method_router_key_is_a_route(analyze_files) -> None:
+    for key in ("loader() { return null; }", "Component() { return null; }",
+                "async lazy() { return {}; }", "'loader'() { return null; }"):
+        src = RR + f"export const r = createBrowserRouter([ {{ path: '/m', {key} }} ]);\n"
+        # an inline component has no name to read: honest-null handler
+        assert _react_routes(analyze_files, src) == [("/m", None)], key
+
+
+def test_route_with_a_shorthand_router_key_is_a_route(analyze_files) -> None:
+    src = RR + ("import { loader } from './shared';\n"
+                "export const r = createBrowserRouter([ { path: '/s1', loader } ]);\n")
+    assert _react_routes(analyze_files, src) == [("/s1", None)]
+
+
+def test_shorthand_path_is_an_unknown_endpoint(analyze_files) -> None:
+    src = RR + ("const path = '/s2'; function Component() { return null; }\n"
+                "export const r = createBrowserRouter([ { path, Component } ]);\n")
+    assert _react_routes(analyze_files, src) == [(None, None)]
+
+
+def test_computed_method_key_is_not_a_router_key(analyze_files) -> None:
+    src = RR + ("const k = 'loader';\n"
+                "export const r = createBrowserRouter([ { path: '/c', [k]() { return null; } } ]);\n")
+    assert _react_routes(analyze_files, src) == []
+
+
+def test_real_data_router_with_method_keys(analyze_files) -> None:
+    # The react-router repo's playground/data/src/main.tsx shape.
+    src = (
+        "import * as React from 'react';\n"
+        "import { createBrowserRouter } from 'react-router';\n"
+        "const router = createBrowserRouter([\n"
+        "  { id: 'index', path: '/', loader() { return { message: 'hi' }; },\n"
+        "    Component() { return <p>hi</p>; } },\n"
+        "]);\n"
+    )
+    assert _react_routes(analyze_files, src, "src/main.tsx") == [("/", None)]
+
+
+def test_shorthand_index_child_fills_the_outlet(analyze_files) -> None:
+    src = RR + ("const index = true;\n"
+                "export const r = createBrowserRouter([ { path: '/lay', element: <Lay />, children: [\n"
+                "  { index, element: <Idx /> }, { path: 'a', element: <A /> } ] } ]);\n")
+    # the layout is wiring: no record of its own
+    assert sorted(_react_routes(analyze_files, src)) == [("/lay", "Idx"), ("/lay/a", "A")]
+
+
+def test_react_only_file_has_no_routes(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react": "18", "react-router-dom": "6"}}',
+        "src/Tabs.tsx": (
+            "import React from 'react';\n"
+            "export const tabs = [ { path: '/t1', component: T1 }, { path: '/t2', component: T2 } ];\n"
+            "export default function A() { return null; }\n"
+        ),
+    })
+    assert [s for s in st if s.semanticType == "route" and s.routeKind == "page"] == []
+
+
+def test_vue_router_holding_the_text_react_has_no_react_routes(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"vue": "3", "vue-router": "4"}}',
+        "src/router.ts": (
+            "import { createRouter, createWebHistory } from 'vue-router';\n"
+            "const frameworks = ['react', 'vue'];\n"
+            "export default createRouter({ history: createWebHistory(), routes: [\n"
+            "  { path: '/vh', component: Home }, { path: '/va', component: About } ] });\n"
+        ),
+    })
+    got = sorted((s.endpoint, s.framework) for s in st if s.semanticType == "route")
+    assert got == [("/va", "vue"), ("/vh", "vue")]
+
+
+def test_absolute_child_path_is_not_joined_onto_its_parent(analyze_files) -> None:
+    src = RR + (
+        "export const r = createBrowserRouter([ { path: '/p', element: <A />, children: [\n"
+        "  { path: '/p/kid', element: <B /> }, { path: 'rel', element: <C /> } ] } ]);\n"
+    )
+    assert sorted(_react_routes(analyze_files, src)) == [
+        ("/p", "A"), ("/p/kid", "B"), ("/p/rel", "C")]
+
+
+def test_absolute_jsx_child_path_is_not_joined_onto_its_parent(analyze_files) -> None:
+    src = (
+        "import { Routes, Route } from 'react-router-dom';\n"
+        "export function App() { return (<Routes>\n"
+        "  <Route path='/jp' element={<JP/>}><Route path='/jp/kid' element={<JK/>} /></Route>\n"
+        "</Routes>); }\n"
+    )
+    assert sorted(_react_routes(analyze_files, src, "src/App.tsx")) == [
+        ("/jp", "JP"), ("/jp/kid", "JK")]
+
+
+def test_non_literal_path_is_an_unknown_endpoint(analyze_files) -> None:
+    src = RR + (
+        "export const r = createBrowserRouter([\n"
+        "  { path: '/ok', element: <Ok /> }, { path: `/tpl`, element: <T /> },\n"
+        "  { path: undefined, element: <U /> }, { path: null, element: <N /> },\n"
+        "  { path: PATHS.home, element: <H /> }, { path: '/pre/' + x, element: <C /> },\n"
+        "  { path: `/t/${id}`, element: <S /> } ]);\n"
+    )
+    got = dict((h, e) for e, h in _react_routes(analyze_files, src))
+    assert got == {"Ok": "/ok", "T": "/tpl", "U": None, "N": None, "H": None, "C": None,
+                   "S": None}
+
+
+def test_children_of_an_unknown_path_are_unknown_unless_absolute(analyze_files) -> None:
+    src = RR + (
+        "export const r = createBrowserRouter([ { path: PATHS.admin, element: <Adm />, children: [\n"
+        "  { path: 'users', element: <U /> }, { index: true, element: <I /> },\n"
+        "  { path: '/abs/x', element: <X /> } ] } ]);\n"
+    )
+    # never `/users`: a relative child of an unknown parent has no known address; the parent is
+    # a layout (its index child fills the outlet), so it has no record of its own
+    assert sorted(_react_routes(analyze_files, src), key=str) == sorted(
+        [(None, "U"), (None, "I"), ("/abs/x", "X")], key=str)
+
+
+def test_jsx_path_in_braces_is_read_as_its_literal(analyze_files) -> None:
+    src = (
+        "import { Routes, Route } from 'react-router-dom';\n"
+        "export function App() { return (<Routes>\n"
+        "  <Route path={'/j1'} element={<J1/>} />\n"
+        "  <Route path={`/j2`} element={<J2/>} />\n"
+        "  <Route path={P.x} element={<J3/>} />\n"
+        "  <Route path element={<J4/>} />\n"
+        "</Routes>); }\n"
+    )
+    got = dict((h, e) for e, h in _react_routes(analyze_files, src, "src/App.tsx"))
+    assert got == {"J1": "/j1", "J2": "/j2", "J3": None, "J4": None}
+
+
+def test_jsx_empty_path_in_braces_fills_the_outlet(analyze_files) -> None:
+    src = (
+        "import { Routes, Route } from 'react-router-dom';\n"
+        "export function App() { return (<Routes>\n"
+        "  <Route path='/l' element={<L/>}><Route path={''} element={<E/>} /></Route>\n"
+        "</Routes>); }\n"
+    )
+    assert _react_routes(analyze_files, src, "src/App.tsx") == [("/l", "E")]
+
+
+def test_v7_prefix_still_joins_a_leading_slash_route(analyze_files) -> None:
+    src = (
+        "import { prefix, route } from '@react-router/dev/routes';\n"
+        "export default [ ...prefix('/t', [ route('/new', 'routes/new.tsx') ]) ];\n"
+    )
+    assert [e for e, _ in _react_routes(analyze_files, src, "app/routes.ts")] == ["/t/new"]
