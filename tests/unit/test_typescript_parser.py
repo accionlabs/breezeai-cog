@@ -591,7 +591,8 @@ def test_endpoint_verb_first_arg(tmp_path) -> None:
     # #3: request('GET', url) — verb is the method, URL is the 2nd arg (not the verb).
     assert _api(tmp_path, "function f(){ http.request('GET', '/orders'); }") == [("GET", "/orders")]
     # unresolvable URL (an identifier) yields no endpoint rather than the verb string
-    assert _api(tmp_path, "function f(u){ http.request('GET', u); }") == [("GET", None)]
+    # the URL argument, a variable: one placeholder (the executor marks it ${u})
+    assert _api(tmp_path, "function f(u){ http.request('GET', u); }") == [("GET", "{u}")]
 
 
 # --- inherited base-class call resolution (this.M() → base file) ----------------------

@@ -175,6 +175,8 @@ def extract_imports(
     internal: dict[str, None] = {}
     external: dict[str, None] = {}
     bindings: dict[str, str] = {}  # simple class/member name → in-repo file (calls[].path)
+    imported: set[str] = set()  # simple names an in-repo import binds
+    shadowed: set[str] = set()  # simple names a library single-type import binds
 
     for node in root.named_children:
         if node.type != "import_declaration":
@@ -192,6 +194,14 @@ def extract_imports(
         (internal if resolved else external).setdefault(resolved or fqcn, None)
         if resolved:  # `import a.b.Foo` → receiver "Foo"; `import static a.b.U.f` → "f"
             bindings[fqcn.rsplit(".", 1)[-1]] = resolved
+            imported.add(fqcn.rsplit(".", 1)[-1])
+        elif not is_static:
+            shadowed.add(fqcn.rsplit(".", 1)[-1])
 
     seed_same_package(bindings, _package_of(root, source), index)  # same-package: no import needed
+    # A single-type import of a library class hides a same-package class of that name, as
+    # in Java: `import org.lib.Report;` means org.lib.Report, never this package's Report.
+    for name in shadowed:
+        if bindings.get(name) is not None and name not in imported:
+            del bindings[name]
     return list(internal), list(external), [], bindings  # Java has no explicit exports

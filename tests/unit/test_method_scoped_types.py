@@ -24,6 +24,11 @@ _TYPES = {
 }
 
 
+def _new(lang: str, cls: str, ext: str) -> dict[str, str | None]:
+    """The call a Java ``new Cls()`` adds (its constructor, in the class's file); none in Groovy."""
+    return {cls: f"{cls}.{ext}"} if lang == "java" else {}
+
+
 def _calls(tmp_path: Path, lang: str, service: str) -> dict[str, dict[str, str | None]]:
     parser_cls, root, ext, semi = _LANGS[lang]
     for name, body in _TYPES.items():
@@ -66,8 +71,9 @@ def test_a_local_hiding_a_field_leaves_the_call_empty(tmp_path: Path, lang: str)
 }
 """)
     ext = _LANGS[lang][2]
-    assert calls == {"third": {"save": None}, "fourth": {"save": f"Repo.{ext}"},
-                     "fifth": {"save": f"Repo.{ext}"}}
+    new = _new(lang, "Audit", ext)  # Java: `new Audit()` calls its constructor
+    assert calls == {"third": {**new, "save": None}, "fourth": {"save": f"Repo.{ext}"},
+                     "fifth": {**new, "save": f"Repo.{ext}"}}
 
 
 @pytest.mark.parametrize("lang", sorted(_LANGS))
@@ -91,7 +97,8 @@ def test_a_name_declared_with_two_types_in_one_method_leaves_the_call_empty(
     }
 }
 """)
-    assert calls == {"run": {"ship": None}}
+    ext = _LANGS[lang][2]
+    assert calls == {"run": {**_new(lang, "Order", ext), "ship": None, **_new(lang, "Customer", ext)}}
 
 
 @pytest.mark.parametrize("lang", sorted(_LANGS))
@@ -141,7 +148,8 @@ def test_a_local_created_with_new_has_that_type(tmp_path: Path, lang: str) -> No
     public void other(Repo a) {{ }}
 }}
 """)
-    assert calls["run"] == {"save": f"Audit.{_LANGS[lang][2]}"}
+    ext = _LANGS[lang][2]
+    assert calls["run"] == {**_new(lang, "Audit", ext), "save": f"Audit.{ext}"}
 
 
 def test_groovy_an_untyped_local_or_closure_parameter_hides_a_field(tmp_path: Path) -> None:

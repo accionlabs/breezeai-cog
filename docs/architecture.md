@@ -663,6 +663,9 @@ the file:
   │                  33   apollo           typescript_apollo/calls.py                │
   │                  34   aws-sdk-calls    typescript_aws/sdk_calls.py               │
   │                  35   jquery-calls     typescript_jquery/calls.py                │
+  │                  36   axios-calls      typescript_axios/calls.py                 │
+  │                  37   fetch-calls      typescript_fetch/calls.py                 │
+  │                  38   angular-http…    typescript_angular/http_client.py         │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
@@ -966,12 +969,14 @@ Other places that resolve values:
 - **Constant folding** (`parsers/constfold.py`): a route path or event address written as a
   constant is replaced by its value, but only for true compile-time constants (e.g. Java
   `static final String`). A runtime value stays unresolved.
-- **Parts read at runtime** (`parsers/addresses.py`): a value cog cannot read in an HTTP address
-  (a context root, base path or prefix from config, env or a variable) is marked `${name}` where
-  it stands — `${contextRoot}/orders/{id}` — never guessed, dropped or written `{name}` (a path
-  parameter). Detectors mark it in route paths and prefixes; after `link_handlers`, the executor
-  runs `normalize_addresses` once per file, for every language, to mark a runtime base in outbound
-  URLs and tidy route templates. See
+- **Parts read at runtime** (`parsers/addresses.py`): a value cog cannot read in an HTTP or
+  event-bus address (a context root, base path, prefix or whole URL from config, env, a variable or
+  a call) is marked `${…}` where it stands, named after its source — `${config.contextRoot}/orders/{id}`,
+  `${config:api-verticle.address}`, `${env:BASE_PATH}/users` — never guessed, dropped or written
+  `{name}` (a path parameter). An address of named markers only is kept (it names its source); one
+  whose parts have no name is empty. Detectors mark it in route paths, prefixes and event-bus
+  addresses; after `link_handlers`, the executor runs `normalize_addresses` once per file, for
+  every language, to mark a runtime base in outbound URLs and tidy route templates. See
   [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name).
 - **Inheritance** (`parsers/index_common.py`): base classes in other files, e.g. routes
   inherited from a base controller.

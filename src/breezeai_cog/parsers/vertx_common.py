@@ -26,7 +26,7 @@ from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
 from .index_common import record_distinct
-from .addresses import inbound_template, mark_runtime, runtime_name, runtime_part
+from .addresses import inbound_template, informative, mark_runtime, runtime_name, runtime_part
 from .statements_common import render_concat
 from .treesitter import node_text
 
@@ -148,8 +148,9 @@ def classify_call(
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call
-                  (event-bus addresses never fall back to it: unresolved → empty).
+    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call,
+                  and what an event-bus address on the bus itself is named after when it does
+                  not render (``${config:a}``, ``${address}``; :func:`event_template`).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``service_vars`` variable → service-proxy builder type (:func:`service_builder_vars`), so a
                   ``setAddress`` on a builder held in a variable still finds its side.
@@ -172,9 +173,13 @@ def classify_call(
         is_router = bool(path) and "/" in (path or "")
 
     if method in EVENTBUS and is_bus_receiver(obj):
-        # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
-        # consumer and its senders on the same unresolved symbol both stay empty.
-        return EVENTBUS[method], None, _known_path(path) if path else None, None
+        # The address as written: its value when it folds, else each part read at runtime
+        # marked ${…} where it stands (addresses.py) — the source of the address, never a
+        # value it is joined on.
+        # a bare argument is named only on the event bus itself: a wrapper whose name merely
+        # holds "bus" (`EventBusUtil.send(container, …)`) takes other arguments first
+        named = first_arg if _EVENT_BUS_ITSELF.search(obj) else None
+        return EVENTBUS[method], None, event_template(path, named), None
     if method in TIMERS:
         delay = (first_arg or "").replace("_", "").rstrip("lL")
         return "timer", TIMERS[method], delay if delay.isdigit() else None, None
@@ -184,7 +189,8 @@ def classify_call(
         side = _service_side(obj, service_vars)
         if side is None:
             return None
-        return side, None, _known_path(path) if path else None, None
+        # the service's event-bus address: its one argument (`setAddress(addr)`)
+        return side, None, event_template(path, first_arg), None
     if method in HTTP_VERBS and path and (is_router or route_scope):
         return "route", method.upper(), _known_path(path), "route"
     if method == "route" and path and is_router:
@@ -199,12 +205,88 @@ def _known_path(path: str) -> str | None:
     return None if "{" in path else path
 
 
+#: A receiver that is the event bus itself: ``vertx.eventBus()``, ``eb``, ``bus``, ``eventBus``.
+_EVENT_BUS_ITSELF = re.compile(r"(?:^|\.)\s*(?:eventBus\s*\(\s*\)|eventBus|eb|bus)\s*$", re.IGNORECASE)
+
+
+def event_template(path: str | None, first_arg: str | None) -> str | None:
+    """An event-bus address: the rendered ``path`` with its ``{name}`` parts marked ``${name}``,
+    or, when the argument does not render (a bare variable or lookup), ``${…}`` named after
+    its text (``first_arg``); None when it says nothing (:func:`addresses.informative`)."""
+    if path is None and first_arg:
+        path = "{" + runtime_name(first_arg) + "}"
+    return informative(mark_runtime(path)) if path else None
+
+
 def route_template(path: str | None) -> str | None:
     """A rendered route path with parts read at runtime, those parts marked ``${name}``
     (``{pathPrefix}/request`` → ``${pathPrefix}/request``, addresses.py). Vert.x path
     parameters are ``:id``, so every ``{…}`` of a rendered path is such a part. None when no
     literal path part is known."""
     return inbound_template(path)
+
+
+#: The ``String.format`` conversions an address is rendered through: ``%s``, ``%d``, ``%%``.
+_FORMAT_SPEC = re.compile(r"%[sd%]")
+
+
+def _format_call(node: Node, source: bytes) -> tuple[Node, list[Node]] | None:
+    """(format, arguments) of ``String.format(fmt, a, …)`` / ``fmt.formatted(a, …)``, else None."""
+    if node.type != "method_invocation":
+        return None
+    name, obj = node.child_by_field_name("name"), node.child_by_field_name("object")
+    args = node.child_by_field_name("arguments")
+    named = list(args.named_children) if args is not None else []
+    method = node_text(name, source) if name is not None else ""
+    if method == "format" and obj is not None \
+            and node_text(obj, source) in ("String", "java.lang.String") and named:
+        return named[0], named[1:]
+    if method == "formatted" and obj is not None:
+        return obj, named
+    return None
+
+
+def _render_format(
+    node: Node, source: bytes, consts: dict[str, str], string_render: StringRender
+) -> str | None:
+    """``String.format("%s/notice", prefix)`` → ``{prefix}/notice``: the format folded to its
+    text (a literal or a constant), each ``%s`` / ``%d`` filled with its argument as a
+    concatenation part is (:func:`_addr_leaf`). None when the format does not fold, holds any
+    other conversion (``%07d``, ``%x``, ``%1$s``) or the arguments do not match its slots."""
+    call = _format_call(node, source)
+    if call is None:
+        return None
+    fmt_node, args = call
+    tokens = init_tokens(fmt_node, source)
+    fmt = resolve_tokens(tokens, consts) if tokens is not None else None
+    if fmt is None:
+        return None
+    out: list[str] = []
+    at = slot = 0
+    for m in _FORMAT_SPEC.finditer(fmt):
+        literal = fmt[at:m.start()]
+        if "%" in literal:
+            return None
+        out.append(literal)
+        at = m.end()
+        if m.group() == "%%":
+            out.append("%")
+            continue
+        if slot >= len(args):
+            return None
+        arg = args[slot]
+        slot += 1
+        if arg.type in ("decimal_integer_literal", "hex_integer_literal"):
+            out.append(node_text(arg, source))
+            continue
+        part = _addr_leaf(arg, source, consts, string_render)
+        if part is None:
+            return None
+        out.append(part)
+    tail = fmt[at:]
+    if "%" in tail or slot != len(args):
+        return None
+    return "".join(out) + tail
 
 
 def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:
@@ -216,6 +298,9 @@ def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render:
         return string_render(node, source)
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
+    formatted = _render_format(node, source, consts, string_render)
+    if formatted is not None:
+        return formatted
     text = node_text(node, source)
     value = consts.get(text)
     return value if value is not None else "{" + runtime_name(text) + "}"
@@ -238,7 +323,7 @@ def render_address(
         return string_render(node, source)
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
-    return None
+    return _render_format(node, source, consts, string_render)
 
 
 # ── Sub-routers ─────────────────────────────────────────────────────────────────────────────

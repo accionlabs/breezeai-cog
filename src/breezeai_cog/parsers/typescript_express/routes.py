@@ -20,16 +20,21 @@ from tree_sitter import Node
 
 from ...emit import file_id
 from ...schemas import FileRecord
+from ..addresses import (
+    has_literal, informative, join_runtime, mark_runtime, runtime_name, source_kind,
+)
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
     _path_pieces, _resolve_pieces,
-    _module_of, _require_module, relative_requires, resolve_const_value,
+    _module_of, _require_module, local_source, relative_requires, resolve_const_value,
     runtime_path_template,
 )
 from ..wiring import compose_guards
-from .mounts import _PATH_EXPRESSIONS, express_mounts, is_router_call, mw_name, router_locals
+from .mounts import (
+    _PATH_EXPRESSIONS, _is_require_express, express_mounts, is_router_call, mw_name, router_locals,
+)
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -111,6 +116,64 @@ def _path_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str
 
 
 _FUNCTIONS = ("arrow_function", "function_expression", "function")
+
+#: TypeScript types of an Express app or router: a parameter annotated with one is a receiver.
+_APP_TYPES = frozenset({"Express", "Application", "Router", "express.Express",
+                        "express.Application", "express.Router", "IRouter", "express.IRouter"})
+
+
+def app_locals(root: Node, source: bytes) -> frozenset[str]:
+    """Names certainly bound to an Express app or router in this file: a variable bound to
+    ``express()`` / ``require('express')()`` / a ``Router()``, or a parameter typed as one
+    (``app: Express``, ``router: express.Router``)."""
+    out: set[str] = set()
+
+    def walk(node: Node) -> None:
+        if node.type == "variable_declarator":
+            name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            if name is not None and name.type == "identifier" and value is not None and (
+                    is_router_call(value, source) or _is_express_app(value, source)):
+                out.add(node_text(name, source))
+        elif node.type in ("required_parameter", "optional_parameter"):
+            pattern, typ = node.child_by_field_name("pattern"), node.child_by_field_name("type")
+            if pattern is not None and pattern.type == "identifier" and typ is not None \
+                    and node_text(typ, source).lstrip(":").strip() in _APP_TYPES:
+                out.add(node_text(pattern, source))
+        for c in node.named_children:
+            walk(c)
+
+    walk(root)
+    return frozenset(out)
+
+
+def _is_express_app(node: Node, source: bytes) -> bool:
+    """``express()`` / ``require('express')()``."""
+    if node.type != "call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    return fn is not None and (node_text(fn, source) == "express"
+                               or _is_require_express(fn, source))
+
+
+def _whole_value(
+    node: Node, source: bytes, method: str, routers: frozenset[str],
+    decl_lines: dict[str, int | None],
+) -> str | None:
+    """A route or mount path that is one value cog cannot read, named after its source
+    (``addresses.py``): ``ordersPath`` → ``${ordersPath}``, ``process.env.X`` → ``${env:X}``, a
+    variable bound once to such a read → that read. A verb takes a name, a member path or a
+    configuration / environment read; a mount (``use``) only a configuration / environment read,
+    since its first argument is as often a middleware. None for anything else (a function or a
+    router of this file, another call)."""
+    named = local_source(node, source)
+    text = node_text(named, source)
+    if source_kind(text) is None:
+        if method == "use" or node.type not in ("identifier", "member_expression"):
+            return None
+        if node.type == "identifier" and (text in routers or text in decl_lines):
+            return None
+    return informative(mark_runtime("{" + runtime_name(text) + "}"))
+
 
 
 def _handler(
@@ -362,6 +425,7 @@ def _classify(
     consts: dict[str, str | None] | None = None,
     packages: dict[str, tuple[str, str]] | None = None,
     plain: frozenset[str] | None = None,
+    apps: frozenset[str] = frozenset(),
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
     a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
@@ -394,8 +458,17 @@ def _classify(
     # rather than dropped.
     has_path = path is not None or (bool(arg_nodes) and (
         arg_nodes[0].type == "template_string"
-        or runtime_path_template(arg_nodes[0], source, consts or {}) is not None))
+        or has_literal(runtime_path_template(arg_nodes[0], source, consts or {}))))
     chain = arg_nodes[1:]  # everything after the path — the middleware + handler/router stack
+    if not has_path and len(arg_nodes) >= 2 and (obj_text in apps or obj_text in routers):
+        # A path that is one value cog cannot read (`app.get(ordersPath, list)`), on an app or
+        # router this file certainly holds, with a handler or a router of this file after it.
+        path = _whole_value(arg_nodes[0], source, method, routers, decl_lines or {})
+        has_path = path is not None and (
+            method in _HTTP_VERBS and _handler(arg_nodes, source, decl_lines or {}) != (None, None)
+            or method == "use" and any(a.type == "identifier" and node_text(a, source) in routers
+                                       for a in chain))
+        path = path if has_path else None
 
     if method in _HTTP_VERBS:
         # A verb call is a route only with a path arg + a handler arg — this rules out
@@ -416,7 +489,7 @@ def _classify(
             if endpoint is None and arg0 is not None and arg0.type == "identifier":
                 endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
             return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
-        if has_path and (path is None or path.startswith("/")):
+        if has_path and (path is None or path.startswith(("/", "${"))):
             # Framework middleware that serves requests itself (Swagger UI, static files, a
             # GraphQL HTTP handler) is a route at the path, every verb, no handler of ours.
             serving = _serving_middleware(chain, source, packages or {})
@@ -501,7 +574,7 @@ def _classify_route_verb(
         return None
     path = _path_value(first, source, consts or {})
     if path is None and first.type != "template_string" \
-            and runtime_path_template(first, source, consts or {}) is None:
+            and not has_literal(runtime_path_template(first, source, consts or {})):
         return None
     vargs = call.child_by_field_name("arguments")
     verb_args = list(vargs.named_children) if vargs is not None else []
@@ -556,7 +629,24 @@ def _apply_base(
         return None
     if base is None or endpoint is None:
         return endpoint
-    return _join_base(base, endpoint)
+    return _join(base, endpoint)
+
+
+def _runtime_base(first: Node, source: bytes, consts: dict[str, str | None],
+                  routers: set[str]) -> str | None:
+    """A mount base read at runtime, marked (``addresses.py``): a path with a literal part
+    (``BASE + "/api"`` → ``${BASE}/api``) or one configuration / environment read
+    (``process.env.API``, a variable bound once to it → ``${env:API}``); None otherwise."""
+    template = runtime_path_template(first, source, consts)
+    if has_literal(template):
+        return template
+    return _whole_value(first, source, "use", frozenset(routers), {})
+
+
+def _join(base: str, local: str) -> str:
+    """A mount base joined with a router-local path: a base read at runtime keeps its marker
+    first (``${env:API}`` + ``/x`` → ``${env:API}/x``, :func:`addresses.join_runtime`)."""
+    return join_runtime(base, local) if base.startswith("${") else _join_base(base, local)
 
 
 def _receiver_bases(
@@ -598,6 +688,9 @@ def _receiver_bases(
             pieces = _path_pieces(first, source)
             folded = _resolve_pieces(pieces, consts or {}) if pieces is not None else None
             path = folded if folded is not None and folded.startswith("/") else None
+            if folded is None:
+                # a base read at runtime is kept marked (`${env:API}`, `${BASE}/api`)
+                path = _runtime_base(first, source, consts or {}, routers)
         else:
             continue
         receiver = _receiver(call, source)
@@ -630,11 +723,13 @@ def _receiver_bases(
                 if receiver in lost:
                     lost.add(router)
                 return None
-            return _join_base(parent, path)
+            return _join(parent, path)
         if file_unknown:
             lost.add(router)
             return None
-        return _join_base(imported.get(receiver) or file_base or "/", path)
+        outer = imported.get(receiver) or file_base
+        return _join(outer, path) if outer else path if path.startswith("${") \
+            else _join_base("/", path)
 
     for router in local:
         if (base := resolve(router, frozenset())) is not None:
@@ -783,10 +878,12 @@ def detect_express(
     packages = package_locals(root, source)
     auth = certain_auth(root, source, packages) if _JWT_PACKAGE.encode() in source else frozenset()
     plain = plain_locals(root, source)
+    apps = app_locals(root, source)
     # Routers mounted in this file whose base resolved: their routes carry the mount's prefix.
     local_served = {r for r in routers if r in receiver_base and r not in imported}
     for call in _invocations(root):
-        info = _classify(call, source, root, binds, routers, decl_lines, consts, packages, plain)
+        info = _classify(call, source, root, binds, routers, decl_lines, consts, packages, plain,
+                         apps)
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind = info

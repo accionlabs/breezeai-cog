@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, resolve_endpoint
+from ..statements_common import classify_statement, resolve_endpoint, url_first
 from ..php_route_common import string_value
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -93,7 +93,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         callee = callee.replace("::", ".").replace("->", ".")
     args_node = call.child_by_field_name("arguments")
     args = [_unwrap(arg) for arg in args_node.named_children] if args_node is not None else []
-    endpoint, override = resolve_endpoint(args, source, string_value)
+    endpoint, override = resolve_endpoint(args, source, string_value, method=url_first(callee, method))
     return callee, override or method, endpoint
 
 

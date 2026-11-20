@@ -1,7 +1,10 @@
 """One notation for an address with a part read at runtime (``parsers.addresses``): the part is
 marked ``${name}`` where it stands, for every framework and both directions. ``{name}`` stays a
-path parameter (one segment); an address with no literal part, and a router mounted at two
-places, stay empty; a resolved prefix is unchanged."""
+path parameter (one segment); both name a value by its whole member path (``config.contextRoot``,
+``user.id``), less ``this.`` / ``self.``, and a configuration entry or environment variable by its
+kind and key (``config:a.b``, ``env:X``). An address of named parts only is kept (it names its
+source); one whose parts have no name, and a router mounted at two places, stay empty; a resolved
+prefix is unchanged."""
 
 from __future__ import annotations
 
@@ -11,8 +14,10 @@ from breezeai_cog.parsers.addresses import (
     inbound_template,
     outbound_template,
     runtime_name,
-    with_literal,
+    value_path,
+    informative,
 )
+from breezeai_cog.parsers.statements_common import url_placeholder
 
 
 def _one(stmts, semantic: str, path: str, line: int | None = None):
@@ -33,10 +38,27 @@ def _addr(stmt) -> str | None:
 @pytest.mark.parametrize(
     "expr, name",
     [
-        ("config.contextRoot", "contextRoot"),
+        ("config.contextRoot", "config.contextRoot"),
+        ("config . contextRoot", "config.contextRoot"),
         ("this.prefix", "prefix"),
-        ('config().getString("pathPrefix")', "pathPrefix"),
-        ("os.getenv('BASE')", "BASE"),
+        ("self.settings.base", "settings.base"),
+        ("$scope.base", "$scope.base"),
+        ('config().getString("pathPrefix")', "config:pathPrefix"),
+        ('container.config().getObject("api-verticle").getString("address")', "config:api-verticle.address"),
+        ('config().getJsonObject("a").getString("b", "dflt")', "config:a.b"),
+        ('env.getProperty("app.base")', "config:app.base"),
+        ('config.get("base")', "config:base"),
+        ("os.getenv('BASE')", "env:BASE"),
+        ('os.environ.get("BASE", "/")', "env:BASE"),
+        ('os.environ["BASE"]', "env:BASE"),
+        ("process.env.BASE_PATH", "env:BASE_PATH"),
+        ("process.env['BASE_PATH']", "env:BASE_PATH"),
+        ('System.getenv("BUS")', "env:BUS"),
+        ('Environment.GetEnvironmentVariable("HOST")', "env:HOST"),
+        ('ENV["ROOT"]', "env:ROOT"),
+        ("config:a.b", "config:a.b"),  # already named: unchanged
+        ("config().getString(key)", "getString"),  # a computed key is no config entry
+        ('map.get("k")', "k"),  # another lookup by a literal key: the key
         ("prefixFromEnv()", "prefixFromEnv"),
         ("a ? b : c", "value"),
         ("", "value"),
@@ -44,6 +66,40 @@ def _addr(stmt) -> str | None:
 )
 def test_runtime_name(expr, name) -> None:
     assert runtime_name(expr) == name
+
+
+@pytest.mark.parametrize(
+    "expr, path",
+    [
+        ("id", "id"),
+        ("user.id", "user.id"),
+        ("req.params.user.id", "req.params.user.id"),
+        ("this.userId", "userId"),
+        ("self.base_url", "base_url"),
+        ("this", "this"),  # nothing after it: kept
+        ("getId()", None),
+        ("user.getId()", None),
+        ('row["id"]', None),
+        ("a + b", None),
+    ],
+)
+def test_value_path(expr, path) -> None:
+    assert value_path(expr) == path
+
+
+@pytest.mark.parametrize(
+    "expr, placeholder",
+    [
+        ("user.id", "{user.id}"),  # two values never share a name: {user.id} / {order.id}
+        ("order.id", "{order.id}"),
+        ("this.userId", "{userId}"),
+        ("encodeURIComponent(id)", "{param}"),  # a call is not a name
+        ("@user.id", "{id}"),  # not a plain path: its last part, as before
+        ("$user->id", "{param}"),
+    ],
+)
+def test_url_placeholder(expr, placeholder) -> None:
+    assert url_placeholder(expr) == placeholder
 
 
 @pytest.mark.parametrize(
@@ -55,9 +111,12 @@ def test_runtime_name(expr, name) -> None:
         ("{scheme}://{host}/x/{id}", "${scheme}://${host}/x/{id}"),
         ("https://{host}/x", "https://${host}/x"),
         ("/api/{id}", "/api/{id}"),  # no runtime part in the base: unchanged
-        ("{base}", None),  # nothing literal
-        ("{base}{path}", None),
-        ("{base}/", None),
+        ("{base}", "${base}"),  # no literal part: still names where the URL comes from
+        ("{base}{path}", "${base}${path}"),
+        ("{base}/", "${base}/"),
+        ("{value}", None),  # no name: says nothing
+        ("{param}/{param}", None),
+        ("/a/{config:v}", "/a/${config:v}"),  # a config entry is never a request value
         ("${ctx}/x", "${ctx}/x"),  # already marked
     ],
 )
@@ -67,10 +126,13 @@ def test_outbound_template(rendered, url) -> None:
 
 def test_inbound_template_and_with_literal() -> None:
     assert inbound_template("{pathPrefix}/request") == "${pathPrefix}/request"
-    assert inbound_template("/api/{config.version}/orders/:id") == "/api/${version}/orders/:id"
-    assert inbound_template("{a}/{b}") is None
-    assert with_literal("${base}/x") == "${base}/x"
-    assert with_literal("${base}/") is None
+    assert inbound_template("/api/{config.version}/orders/:id") == "/api/${config.version}/orders/:id"
+    assert inbound_template("{a}/{b}") == "${a}/${b}"
+    assert inbound_template("{value}") is None
+    assert informative("${base}/x") == "${base}/x"
+    assert informative("${base}/") == "${base}/"
+    assert informative("${value}/{param}") is None
+    assert informative("/") == "/"  # a literal address is never cleared
 
 
 # ── outbound: axios / fetch (shared URL rendering, every language) ───────────
@@ -92,10 +154,10 @@ export function go(id, url) {
 """,
         }
     )
-    assert _addr(_one(st, "api_call", CLIENT, 3)) == "${contextRoot}/orders/confirm"
-    assert _addr(_one(st, "api_call", CLIENT, 4)) == "${contextRoot}/orders/{id}"  # concat = template
+    assert _addr(_one(st, "api_call", CLIENT, 3)) == "${config.contextRoot}/orders/confirm"
+    assert _addr(_one(st, "api_call", CLIENT, 4)) == "${config.contextRoot}/orders/{id}"  # concat = template
     assert _addr(_one(st, "api_call", CLIENT, 5)) == "/api/orders/{id}"  # a parameter
-    assert _addr(_one(st, "api_call", CLIENT, 6)) is None  # variable only
+    assert _addr(_one(st, "api_call", CLIENT, 6)) == "${url}"  # variable only: named
     assert _addr(_one(st, "api_call", CLIENT, 7)) == "/api/plain"
 
 
@@ -109,8 +171,8 @@ def go(settings, oid):
 """
         }
     )
-    assert _addr(_one(st, "api_call", "app/client.py", 3)) == "${BASE}/orders/{oid}"
-    assert _addr(_one(st, "api_call", "app/client.py", 4)) == "${BASE}/orders"
+    assert _addr(_one(st, "api_call", "app/client.py", 3)) == "${settings.BASE}/orders/{oid}"
+    assert _addr(_one(st, "api_call", "app/client.py", 4)) == "${settings.BASE}/orders"
 
 
 def test_outbound_jquery(analyze_files) -> None:
@@ -124,9 +186,9 @@ def test_outbound_jquery(analyze_files) -> None:
 """
         }
     )
-    assert _addr(_one(st, "api_call", "web/page.js", 2)) == "${contextRoot}/orders/confirm"
+    assert _addr(_one(st, "api_call", "web/page.js", 2)) == "${config.contextRoot}/orders/confirm"
     assert _addr(_one(st, "api_call", "web/page.js", 3)) == "/orders/list"
-    assert _addr(_one(st, "api_call", "web/page.js", 4)) is None
+    assert _addr(_one(st, "api_call", "web/page.js", 4)) == "${target}"
 
 
 # ── inbound: Vert.x (Java and Groovy) ────────────────────────────────────────
@@ -161,9 +223,8 @@ public class Main extends AbstractVerticle {
     assert _addr(_one(st, "route", VERTX, 11)) == "/plain/:id"
     assert _addr(_one(st, "route", VERTX, 13)) == "/api/x"  # resolved constant
     assert _addr(_one(st, "route", VERTX, 14)) == "${pathPrefix}/a/${pathPrefix}"  # each marked
-    assert [
-        s for s in st if s.path == VERTX and s.startLine == 12 and s.semanticType == "route"
-    ] == []  # variable only: not a route, as before
+    # the whole path a local read once from configuration: named after that read
+    assert _addr(_one(st, "route", VERTX, 12)) == "${config:p}"
 
 
 def test_vertx_route_under_a_mount_with_unknown_prefix(analyze_files) -> None:
@@ -184,7 +245,7 @@ public class Main extends AbstractVerticle {
 """
         }
     )
-    assert _addr(_one(st, "route", VERTX, 8)) == "${p}/users"
+    assert _addr(_one(st, "route", VERTX, 8)) == "${config:p}/users"
 
 
 # ── inbound: Express ─────────────────────────────────────────────────────────
@@ -208,7 +269,7 @@ function getUser(req, res) {}
     assert _addr(_one(st, "route", SERVER, 4)) == "${BASE}/users"
     assert _addr(_one(st, "route", SERVER, 5)) == "${BASE}/users/:id"  # concat = template
     assert _addr(_one(st, "route", SERVER, 6)) == "/plain/:id"
-    assert _addr(_one(st, "route", SERVER, 7)) is None  # variable only
+    assert _addr(_one(st, "route", SERVER, 7)) == "${BASE}"  # variable only: named
 
 
 # ── inbound: Fastify ─────────────────────────────────────────────────────────
@@ -230,7 +291,7 @@ fastify.register(require('./users'), { prefix: '/users' });
 """,
         }
     )
-    assert _addr(_one(st, "route", "web/items.js")) == "${base}/items/:id"
+    assert _addr(_one(st, "route", "web/items.js")) == "${config.base}/items/:id"
     assert _addr(_one(st, "route", "web/users.js")) == "/users"
 
 
@@ -265,7 +326,7 @@ export class CatsController {
 @pytest.mark.parametrize(
     "prefix, expected",
     [
-        ("config.x", "${x}/cats/:id"),
+        ("config.x", "${config.x}/cats/:id"),
         ("'api'", "/api/cats/:id"),
     ],
 )
@@ -288,7 +349,7 @@ async function bootstrap() {{
 @pytest.mark.parametrize(
     "include, expected",
     [
-        ("app.include_router(router, prefix=settings.API_PREFIX)", "${API_PREFIX}/items/{item_id}"),
+        ("app.include_router(router, prefix=settings.API_PREFIX)", "${settings.API_PREFIX}/items/{item_id}"),
         ('app.include_router(router, prefix="/v1")', "/v1/items/{item_id}"),
         (
             'app.include_router(router, prefix="/a")\napp.include_router(router, prefix="/b")',
@@ -377,7 +438,7 @@ export class App extends RestApplication {
             "src/controllers/ping.controller.ts": LB_CONTROLLER % "'/v1'",
         }
     )
-    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == "${BASE_PATH}/v1/ping"
+    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == "${env:BASE_PATH}/v1/ping"
 
 
 def test_vertx_sub_router_mounted_at_two_places_has_no_address(analyze_files) -> None:
@@ -415,4 +476,166 @@ function go(ctx, order) {
         }
     )
     jq, ax = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
-    assert _addr(jq) == _addr(ax) == "${ctx}/orders/{id}"
+    assert _addr(jq) == _addr(ax) == "${ctx}/orders/{order.id}"
+
+
+# ── jQuery: a URL built from strings and values reads as axios reads it ──────
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ('config.contextRoot + "/orders/confirm"', "${config.contextRoot}/orders/confirm"),
+        ('"/api/users/" + id', "/api/users/{id}"),
+        ('"/api/users/" + user.id + "/roles"', "/api/users/{user.id}/roles"),
+        ("`${base}/api/items`", "${base}/api/items"),
+        ("`/api/users/${id}`", "/api/users/{id}"),
+        ('"/a/" + id + ".json"', "/a/{id}.json"),
+        ('"/a?q=" + q', "/a?q={q}"),
+        ('"http://" + host + "/x"', "http://${host}/x"),
+        ('"/api/a"', "/api/a"),
+        ("u", "${u}"),  # only a variable: named
+        ("base + suffix", "${base}${suffix}"),  # no literal part: each value named
+        ('base + "/"', "${base}/"),
+        ("`${host}${path}`", "${host}${path}"),
+        ("process.env.API + '/x'", "${env:API}/x"),
+        ("buildUrl(a, b) || fallback", None),  # no name: says nothing
+    ],
+)
+def test_jquery_built_url_equals_axios(analyze_files, url, expected) -> None:
+    st = analyze_files(
+        {
+            "package.json": '{"dependencies": {"axios": "1", "jquery": "3"}}',
+            "web/page.js": f"""import axios from 'axios';
+import $ from 'jquery';
+axios.get({url});
+$.get({url});
+$.post({url}, data);
+$.getJSON({url});
+$.ajax({{ url: {url}, type: "post" }});
+""",
+        }
+    )
+    calls = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
+    assert [s.startLine for s in calls] == [3, 4, 5, 6, 7]
+    assert {_addr(s) for s in calls} == {expected}
+
+
+def test_kotlin_string_template_names_a_member_path(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "src/Client.kt": """import io.ktor.client.HttpClient
+class Client(private val httpClient: HttpClient) {
+  fun a(user: User, id: String) {
+    httpClient.get("/api/users/${user.id}/roles")
+    httpClient.get("/api/users/$id")
+    httpClient.get("/api/users/${user.getId()}")
+  }
+}
+"""
+        }
+    )
+    calls = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
+    assert [_addr(s) for s in calls] == [
+        "/api/users/{user.id}/roles",
+        "/api/users/{id}",
+        "/api/users/{param}",  # a call is not a name
+    ]
+
+
+# ── an address of named parts only: event bus, config, env, wrappers ────────────────────────
+def test_event_bus_addresses_name_their_source(analyze_files) -> None:
+    st = analyze_files({VERTX: """package a;
+import io.vertx.core.AbstractVerticle;
+public class Main extends AbstractVerticle {
+  public void start() {
+    String address = config().getJsonObject("api-verticle").getString("address");
+    vertx.eventBus().send(address, "x");
+    vertx.eventBus().consumer(config().getString("address"), this::a);
+    vertx.eventBus().send(System.getenv("BUS") + ".orders", "y");
+    vertx.eventBus().send("orders.create", "z");
+  }
+  void a(Object o) {}
+}
+"""})
+    assert _addr(_one(st, "eventbus_send", VERTX, 6)) == "${config:api-verticle.address}"
+    assert _addr(_one(st, "eventbus_consumer", VERTX, 7)) == "${config:address}"
+    assert _addr(_one(st, "eventbus_send", VERTX, 8)) == "${env:BUS}.orders"
+    assert _addr(_one(st, "eventbus_send", VERTX, 9)) == "orders.create"  # literal: unchanged
+
+
+def test_a_wrapper_named_like_a_bus_does_not_take_its_first_argument(analyze_files) -> None:
+    # `EventBusUtil.send(container, …)` holds "Bus" in its name; its first argument is no address
+    st = analyze_files({VERTX: """package a;
+import org.vertx.java.platform.Verticle;
+public class Main extends Verticle {
+  public void start() { EventBusUtil.send(container, vertx, "x"); }
+}
+"""})
+    assert all(s.endpoint is None for s in st if s.semanticType == "eventbus_send")
+
+
+def test_values_only_url_names_each_value(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/FileApi.java": """package a;
+import org.apache.http.client.methods.HttpPost;
+public class FileApi {
+  String fileApiPrefix, fileApiHost, filePort, fileApiPath;
+  void up() {
+    new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + fileApiPath);
+    new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + "/file/upload");
+    new HttpPost((fileApiPrefix + fileApiHost) + "/x");
+  }
+}
+"""})
+    path = "src/main/java/a/FileApi.java"
+    assert _addr(_one(st, "api_call", path, 6)) == "${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}"
+    assert _addr(_one(st, "api_call", path, 7)) == "${fileApiPrefix}${fileApiHost}:${filePort}/file/upload"
+    assert _addr(_one(st, "api_call", path, 8)) == "${param}/x"  # parenthesised: one value
+
+
+def test_a_bare_middleware_is_still_no_mount(analyze_files) -> None:
+    st = analyze_files({SERVER: """const express = require('express');
+const app = express();
+app.use(loggerMiddleware);
+app.use('/api', apiRouter);
+"""})
+    assert [(s.startLine, s.endpoint) for s in st if s.semanticType == "route"] == [(4, "/api")]
+
+
+def test_a_verb_on_a_request_builder_takes_the_body(analyze_files) -> None:
+    st = analyze_files({"app/Calls.scala": """package example
+import play.api.libs.ws.WSClient
+class Calls(ws: WSClient) {
+  def run(uri: String, body: String): Unit = {
+    ws.url(uri).post(body)
+  }
+}
+"""})
+    assert [s.endpoint for s in st if s.semanticType == "api_call"] == ["${uri}"]
+
+
+def test_ktor_value_only_path_needs_a_route_block(analyze_files) -> None:
+    st = analyze_files({"src/App.kt": """import io.ktor.server.routing.*
+import io.ktor.server.websocket.*
+fun Route.delete(dao: Any, hash: (String) -> String) { }
+fun Application.module(path: String, dao: Any) {
+  routing {
+    webSocket(path) { }
+    delete(dao, { it })
+  }
+}
+"""})
+    eps = {s.text.split("(")[0].strip(): s.endpoint for s in st if s.semanticType == "route"}
+    assert eps.get("webSocket") == "${path}"  # a route block: its path named
+    assert eps.get("delete") is None  # the repo's own `delete(dao, …)`: no path named after `dao`
+
+
+@pytest.mark.parametrize(
+    "address, kept",
+    [
+        ("/api/{id?}", "/api/{id?}"),  # a framework's own parameter forms stay
+        ("/files/{*path}", "/files/{*path}"),
+        ("/x/{id:int}", "/x/{id:int}"),
+        ("/{\n anz: `${base}/a`,\n asia: `/b`\n}", None),  # an object written where a path goes
+    ],
+)
+def test_braces_holding_code_are_no_address(address, kept) -> None:
+    assert informative(address) == kept

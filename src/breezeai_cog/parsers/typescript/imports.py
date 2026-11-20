@@ -18,7 +18,7 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ...utils.jsonc import load_json_object
-from ..addresses import runtime_part, with_literal
+from ..addresses import informative, runtime_part, source_kind, value_path
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
@@ -311,13 +311,58 @@ def runtime_path_template(
             out.append("{" + (_simple_name(text) or "param") + "}")
         else:
             out.append(runtime_part(text))
-    return with_literal("".join(out))
+    return informative("".join(out))
+
+
+def local_source(node: Node, source: bytes) -> Node:
+    """What names a value (``addresses.py``): a variable bound once in this file, never
+    reassigned, to a configuration or environment read is named after that read
+    (``const p = process.env.ORDERS_PATH; … app.get(p, h)`` → ``env:ORDERS_PATH``); any other
+    node names itself."""
+    if node.type != "identifier":
+        return node
+    name = node_text(node, source)
+    values: list[Node | None] = []
+    root = node
+    while root.parent is not None:
+        root = root.parent
+
+    def walk(n: Node) -> None:
+        if n.type == "variable_declarator":
+            nm = n.child_by_field_name("name")
+            if nm is not None and node_text(nm, source) == name:
+                values.append(n.child_by_field_name("value"))
+        elif n.type in ("assignment_expression", "augmented_assignment_expression"):
+            left = n.child_by_field_name("left")
+            if left is not None and node_text(left, source) == name:
+                values.append(None)
+        elif n.type == "formal_parameters" and any(  # a parameter of that name shadows it
+                node_text(p, source) == name for p in _parameter_names(n)):
+            values.append(None)
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    value = values[0] if len(values) == 1 else None
+    if value is not None and source_kind(node_text(value, source)) is not None:
+        return value
+    return node
+
+
+def _parameter_names(params: Node) -> Iterator[Node]:
+    """The identifiers a parameter list binds (``a``, ``a = 1``, ``a: T``, ``...a``)."""
+    for p in params.named_children:
+        target = p.child_by_field_name("pattern") or p.child_by_field_name("left") or p
+        if target.type == "rest_pattern" and target.named_children:
+            target = target.named_children[0]
+        if target.type == "identifier":
+            yield target
 
 
 def _simple_name(text: str) -> str | None:
-    """``order.id`` → ``id``; None for anything that is not a plain name."""
-    name = text.rsplit(".", 1)[-1].strip()
-    return name if name and name.replace("_", "").isalnum() else None
+    """``order.id`` → ``order.id`` (``addresses.value_path``); None for anything that is not a
+    name or member path."""
+    return value_path(text)
 
 
 def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:

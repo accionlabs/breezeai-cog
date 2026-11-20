@@ -15,7 +15,7 @@ from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import extract_params, payload_type, return_dto
 from ..emits import Emit
 from ..treesitter import node_text
-from ..addresses import runtime_part, with_literal
+from ..addresses import runtime_part, informative
 from ..base_paths_common import app_base_path
 from .facts import loopback_base_paths
 
@@ -44,7 +44,7 @@ def _served(base: str, sub: str | None, found: bool, app_base: str | None) -> st
     if sub is None or (found and app_base is None):
         return None
     local = _join(base, sub)
-    return with_literal(_join(app_base, local) if found and app_base else local)
+    return informative(_join(app_base, local) if found and app_base else local)
 
 
 def _api_base_path(decorators: list[Node], source: bytes) -> str:

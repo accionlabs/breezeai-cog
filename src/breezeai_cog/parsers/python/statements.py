@@ -17,6 +17,7 @@ from ..statements_common import (
     render_concat,
     resolve_endpoint,
     url_placeholder,
+    url_first,
 )
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -61,7 +62,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     method = callee.rsplit(".", 1)[-1]
     args = call.child_by_field_name("arguments")
     named = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(named, source, _render_url)
+    endpoint, override = resolve_endpoint(named, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

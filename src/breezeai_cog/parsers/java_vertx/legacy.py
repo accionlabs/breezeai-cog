@@ -33,7 +33,8 @@ from ..java_variables_common import typed_vars
 from ..treesitter import node_text
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
 from .handler_factories import FactoryCalls
-from .java_syntax import (anonymous_handle, arguments, handle_location, handler_class, known_address, local_value,
+from .java_syntax import (anonymous_handle, arguments, event_address, handle_location, handler_class, known_address,
+                          local_value, request_address,
                           name_of, plain)
 
 _CONSUMERS = frozenset(m for m, s in EVENTBUS.items() if s == "eventbus_consumer")
@@ -111,7 +112,7 @@ def registration_tables(
             anon_line = None if impl else anonymous_handle(value, source)
             if anon_line is not None:  # an anonymous handler class: its own `handle`, this file
                 line, handler_path = anon_line, None
-            found.append(vertx_emit(put, "eventbus_consumer", None, known_address(key, source, consts),
+            found.append(vertx_emit(put, "eventbus_consumer", None, event_address(key, source, consts),
                                     None, "handle" if impl or anon_line is not None else None, line,
                                     handler_path=handler_path))
     return found, replaced
@@ -174,6 +175,6 @@ def http_client_calls(
             verb, uri = _HTTP_CLIENT[method], args[0]
         found.append(Emit(call, {
             "semanticType": "api_call", "framework": "vertx", "method": verb,
-            "endpoint": known_address(uri, source, consts),
+            "endpoint": request_address(uri, source, consts),
         }, enrich="unclassified", reclassify=frozenset({"api_call", "db_method_call"})))
     return found

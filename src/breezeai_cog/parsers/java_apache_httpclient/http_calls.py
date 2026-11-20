@@ -21,6 +21,7 @@ from tree_sitter import Node
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..java.statements import render_url
+from ..statements_common import url_or_value
 from ..treesitter import first_line, node_text
 
 #: The packages a request class is imported from.
@@ -61,7 +62,7 @@ def _verb(node: Node, source: bytes, imported: set[str]) -> str | None:
 def _endpoint(node: Node, source: bytes) -> str | None:
     args = node.child_by_field_name("arguments")
     first = args.named_children[0] if args is not None and args.named_children else None
-    return render_url(first, source) if first is not None else None
+    return url_or_value(first, source, render_url) if first is not None else None
 
 
 def _walk(node: Node) -> Iterator[Node]:

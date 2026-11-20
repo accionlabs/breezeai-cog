@@ -11,6 +11,8 @@ A reader / writer chain is recorded as ``db_method_call`` + ``dataAccessHint="sp
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...schemas import FileRecord
@@ -31,6 +33,9 @@ _SPARK_OPS: dict[str, tuple[SemanticType, str, str]] = {
 _READ_METHODS = frozenset({"load", "csv", "parquet", "json", "orc", "table", "text", "textfile"})
 _WRITE_METHODS = frozenset({"save", "csv", "parquet", "json", "orc", "saveastable", "insertinto", "text"})
 
+
+#: An argument that is one value, not a path (``read.csv(path)`` → ``{path}``).
+_WHOLE_VALUE = re.compile(r"\{[^{}]*\}")
 
 def _spark_receiver(callee: str, operation: str) -> str | None:
     marker = f".{operation}"
@@ -127,6 +132,8 @@ def detect_spark_calls(
             details = _call_details(node, source)
             if details is not None:
                 callee, method, endpoint = details
+                if endpoint is not None and _WHOLE_VALUE.fullmatch(endpoint):
+                    endpoint = None  # a path held in a variable: not a data location
                 op = _spark_op_for_call(callee, method, spark_types)
                 if op is not None:
                     sem_type, hint, op_method = _SPARK_OPS[op]

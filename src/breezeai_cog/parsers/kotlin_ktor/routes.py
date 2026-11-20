@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 
 from tree_sitter import Node
 
-from ..addresses import join_runtime, runtime_part, with_literal
+from ..addresses import has_literal, informative, join_runtime, runtime_part
 from ..emits import Emit
 from ..kotlin.constants import PATH_EXPRS, ConstantScope, resolve_expr, string_constants
 from ..treesitter import node_text
@@ -227,7 +227,12 @@ def _collect_routes(
         elif arg is _UNKNOWN:
             # A path with a part read at runtime: marked `${name}` (addresses.py); none literal
             # left (`get(Config.EXTERNAL)`) → unknown.
-            full_endpoint = with_literal(prefix + _path_template(child, source, consts))
+            # A path of unknown values only is kept on a route block (`webSocket(path) { … }`);
+            # without a trailing lambda the call is another function of that name
+            # (`delete(dao, hash)`, an extension the repo declares), so it names nothing.
+            template = prefix + _path_template(child, source, consts)
+            full_endpoint = informative(template) \
+                if has_literal(template) or _lambda_body(child) is not None else None
         else:
             full_endpoint = prefix + str(arg)
 
