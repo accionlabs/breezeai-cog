@@ -62,6 +62,11 @@ class TsAliasIndex:
     #: resolves through the nearest folder only when every config there resolves it to the same
     #: file; a config that can't be read counts with no patterns (see :func:`_vite_agreed`).
     vite_scopes: tuple[tuple[str, tuple[dict[str, list[str]], ...]], ...] = ()
+    #: A tsconfig ``baseUrl`` folder (absolute) → the names at its top (``src``, ``config`` for
+    #: ``config.ts``). Its scope holds the pattern ``"*"`` (TypeScript's lookup of a non-relative
+    #: import under ``baseUrl``, tried after ``paths``); an import whose first segment is none of
+    #: these names (a package: ``@nestjs/common``, ``lodash``) is not looked for on disk.
+    base_url_names: dict[str, frozenset[str]] = field(default_factory=dict)
     const_values: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
     #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
@@ -142,6 +147,47 @@ def _collect_tsconfig_paths(cfg: Path, seen: set[Path], out: dict[str, list[str]
             _collect_tsconfig_paths(base_cfg, seen, out)
 
 
+def _tsconfig_base_url(cfg: Path, seen: set[Path]) -> Path | None:
+    """The absolute ``compilerOptions.baseUrl`` folder a tsconfig sets, or inherits through a
+    **local** ``extends`` (relative to the config that sets it); None when none does."""
+    if cfg in seen:
+        return None
+    seen.add(cfg)
+    data = _load_jsonc(cfg)
+    if data is None:
+        return None
+    base = (data.get("compilerOptions") or {}).get("baseUrl")
+    if isinstance(base, str):
+        return (cfg.parent / base).resolve()
+    ext = data.get("extends")
+    for e in (ext if isinstance(ext, list) else [ext]):
+        if isinstance(e, str) and (e.startswith(".") or e.startswith("/")):
+            base_cfg = (cfg.parent / e).resolve()
+            if base_cfg.suffix != ".json":
+                base_cfg = base_cfg / "tsconfig.json"
+            found = _tsconfig_base_url(base_cfg, seen)
+            if found is not None:
+                return found
+    return None
+
+
+def _top_names(folder: Path) -> frozenset[str]:
+    """The names an import may start with under ``folder``: each entry, and a file's name up to
+    its first dot (``config`` for ``config.ts``). Dependency and build folders are left out."""
+    try:
+        entries = sorted(os.listdir(folder))
+    except OSError:
+        return frozenset()
+    out: set[str] = set()
+    for name in entries:
+        if name in _PRUNE_DIRS:
+            continue
+        out.add(name)
+        out.add(name.partition(".")[0])
+    out.discard("")
+    return frozenset(out)
+
+
 def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
     """Collect path aliases from **every** tsconfig and Vite config in the tree (not just the
     root), each scope carrying absolute targets so an app's ``@/*`` resolves against its own
@@ -152,6 +198,8 @@ def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
 
     scopes: list[tuple[str, dict[str, list[str]]]] = []
     vite: dict[str, list[dict[str, list[str]]]] = {}
+    base_names: dict[str, frozenset[str]] = {}
+    root = repo_root.resolve()
     for cfg in _iter_alias_configs(repo_root):
         if _is_vite_config(cfg.name):
             vite.setdefault(str(cfg.parent.resolve()), []).append(
@@ -160,6 +208,11 @@ def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
             continue
         paths: dict[str, list[str]] = {}
         _collect_tsconfig_paths(cfg, set(), paths)  # fresh cycle-guard per config
+        base = _tsconfig_base_url(cfg, set())
+        if base is not None and base.is_dir() and base.is_relative_to(root) \
+                and "*" not in paths:  # after `paths`, as TypeScript looks
+            paths["*"] = [str(base) + "/*"]
+            base_names.setdefault(str(base), _top_names(base))
         if paths:
             scopes.append((str(cfg.parent.resolve()), paths))
     vite_scopes = (
@@ -171,7 +224,8 @@ def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
     scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
     vite_scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
     return TsAliasIndex(
-        base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes), vite_scopes=tuple(vite_scopes)
+        base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes), vite_scopes=tuple(vite_scopes),
+        base_url_names=base_names,
     )
 
 
@@ -760,6 +814,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         paths=alias.paths if alias else {},
         alias_scopes=alias.alias_scopes if alias else (),
         vite_scopes=alias.vite_scopes if alias else (),
+        base_url_names=alias.base_url_names if alias else {},
         const_values=const_values,
         class_heritage=class_heritage,
     )
@@ -807,15 +862,25 @@ def _try_paths(target: Path, repo_root: Path) -> str | None:
 
 
 def _match_alias(
-    module: str, paths: dict[str, list[str]], repo_root: Path, base: Path | None
+    module: str, paths: dict[str, list[str]], repo_root: Path, base: Path | None,
+    base_url_names: dict[str, frozenset[str]] | None = None,
 ) -> str | None:
     """Resolve ``module`` against one alias map. ``base`` joins **relative** targets (legacy
-    single-config); ``None`` means targets are already absolute (per-scope index)."""
+    single-config); ``None`` means targets are already absolute (per-scope index). The pattern
+    ``"*"`` is a ``baseUrl`` folder: tried only when ``module`` starts with a name there."""
     def loc(tgt: str) -> Path:
         return base / tgt if base is not None else Path(tgt)
 
     for pattern, targets in paths.items():
-        if pattern.endswith("/*"):
+        if pattern == "*":  # `baseUrl`: `src/x` → <baseUrl>/src/x, never a package
+            first = module.split("/", 1)[0]
+            for tgt in targets:
+                names = (base_url_names or {}).get(tgt[:-2])
+                if names is not None and first in names:
+                    resolved = _try_paths(loc(tgt[:-1] + module), repo_root)
+                    if resolved:
+                        return resolved
+        elif pattern.endswith("/*"):
             prefix = pattern[:-1]  # "@app/"
             if module.startswith(prefix):
                 rest = module[len(prefix):]
@@ -867,7 +932,7 @@ def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path, file_path:
             if resolved:
                 return resolved
             vite = None
-        resolved = _match_alias(module, paths, repo_root, None)
+        resolved = _match_alias(module, paths, repo_root, None, index.base_url_names)
         if resolved:
             return resolved
     return _vite_agreed(module, vite[1], repo_root) if vite is not None else None
