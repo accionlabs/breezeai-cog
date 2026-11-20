@@ -454,7 +454,6 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
                 handler_line=handler_line,
                 description=description,
                 params=params,
-                node_type=None,
             )
         )
     return found
@@ -654,7 +653,6 @@ def _kotlin_sdk_tool(
         handler_line=handler_line,
         description=description,
         params=params,
-        node_type=None,
     )
 
 
@@ -1378,7 +1376,6 @@ def _entries(dc: DetectContext) -> list[Emit]:
                 handler_line=handler_line,
                 description=description,
                 params=params,
-                node_type=None,
                 name=declared,
             )
         )

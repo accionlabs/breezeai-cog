@@ -488,6 +488,5 @@ def _entry(
         handler_line=handler[1],
         description=_string(fields.get("description"), source),
         params=params,
-        node_type=None,
         name=declared,
     )

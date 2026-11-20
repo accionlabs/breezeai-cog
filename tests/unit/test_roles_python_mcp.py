@@ -1054,3 +1054,37 @@ async def list_tools():
         "client",
         "fastmcp",
     }
+
+
+def test_decorated_records_keep_the_decorator_node_type(analyze_files) -> None:
+    """A tool, resource or prompt is read from its decorator, a real node: never ``synthetic``."""
+    src = """
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("demo")
+
+
+@mcp.tool()
+def echo(text: str) -> str:
+    return text
+
+
+@mcp.resource("greeting://{name}")
+def get_greeting(name: str) -> str:
+    return name
+
+
+@mcp.prompt()
+def review(code: str) -> str:
+    return code
+"""
+    records = {
+        s.semanticType: s.nodeType
+        for s in analyze_files({"srv.py": src})
+        if s.semanticType in ("mcp_tool", "mcp_resource", "mcp_prompt")
+    }
+    assert records == {
+        "mcp_tool": "decorator",
+        "mcp_resource": "decorator",
+        "mcp_prompt": "decorator",
+    }

@@ -583,7 +583,6 @@ def _detect(dc: DetectContext) -> Detection | None:
                 handler_line=handler_line,
                 description=description,
                 params=params,
-                node_type=None,
                 name=declared,
             )
         )

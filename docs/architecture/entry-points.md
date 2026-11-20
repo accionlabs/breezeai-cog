@@ -253,6 +253,7 @@ A tool an MCP server exposes is an entry point an AI client calls by name. Every
 | `handler` / `handlerLine` | The function that runs the tool; a lambda gives only its line ([above](#anonymous-handlers)) |
 | `description` | The description the server gives the client, when it is a literal |
 | `params` | The input parameters, in the shape of a function's `params`: `[{name, type, default, decorators, required, description}]` |
+| `nodeType` | The construct's own node: `decorator` (Python), `attribute` (C#), `annotation` / `marker_annotation` (Spring AI), otherwise the call or object that declares it. Never `synthetic`: the construct is a real node. The same holds for `mcp_resource` and `mcp_prompt` |
 
 - **Only on a proven MCP server.** A tool counts only when the code shows that the object it is
   declared on is an MCP server: a server object of the SDK, the SDK's own annotation or

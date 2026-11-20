@@ -310,7 +310,6 @@ def shortcut_emit(
         handler_line=handler[1],
         description=description,
         params=params,
-        node_type=None,
     )
     emit.line = name_node.start_point[0] + 1
     emit.col = name_node.start_point[1]

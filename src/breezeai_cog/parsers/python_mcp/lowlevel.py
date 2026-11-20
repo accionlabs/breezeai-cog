@@ -732,7 +732,6 @@ def _entry_emit(
         handler_line=handler[1] if handler else None,
         description=description,
         params=params,
-        node_type=None,
         name=declared,
     )
 

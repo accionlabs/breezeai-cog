@@ -459,7 +459,6 @@ def _sdk_entries(dc: DetectContext) -> list[Emit]:
                 handler_line=handler_line,
                 description=description,
                 params=params,
-                node_type=None,
                 name=declared,
             )
         )
@@ -545,7 +544,6 @@ def _sdk_tools(dc: DetectContext) -> list[Emit]:
                 handler_line=handler_line,
                 description=description,
                 params=params,
-                node_type=None,
             )
         )
     return found

@@ -169,3 +169,41 @@ def test_csharp_resources_and_prompts_with_no_tool(analyze_files) -> None:
         ("temperature", None, True, None, "Temperature"),
         ("style", None, False, None, None),
     ]
+
+
+def test_attributed_records_keep_the_attribute_node_type(analyze_files) -> None:
+    """A tool, resource or prompt is read from its attribute, a real node: never ``synthetic``."""
+    src = """
+using ModelContextProtocol.Server;
+
+[McpServerToolType]
+public static class Tools
+{
+    [McpServerTool(Name = "echo")]
+    public static string Echo(string message) => message;
+}
+
+[McpServerResourceType]
+public static class Resources
+{
+    [McpServerResource(UriTemplate = "memo://x", Name = "Memo")]
+    public static string Memo() => "x";
+}
+
+[McpServerPromptType]
+public static class Prompts
+{
+    [McpServerPrompt(Name = "review")]
+    public static string Review(string code) => code;
+}
+"""
+    records = {
+        s.semanticType: s.nodeType
+        for s in analyze_files({"Server.cs": src})
+        if s.semanticType in ("mcp_tool", "mcp_resource", "mcp_prompt")
+    }
+    assert records == {
+        "mcp_tool": "attribute",
+        "mcp_resource": "attribute",
+        "mcp_prompt": "attribute",
+    }

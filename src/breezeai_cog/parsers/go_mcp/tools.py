@@ -629,7 +629,6 @@ def _detect(dc: DetectContext) -> Detection | None:
                 handler_line=handler_line,
                 description=go_string(fields.get("Description"), source),
                 params=params,
-                node_type=None,
                 name=go_string(fields.get("Name"), source) if kind == RESOURCE else None,
             )
         )

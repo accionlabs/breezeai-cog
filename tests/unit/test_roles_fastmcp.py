@@ -69,7 +69,7 @@ def test_fastmcp_module_server(analyze_files) -> None:
 
     add = tools["add"]
     assert (add.framework, add.handler, add.handlerLine) == ("fastmcp", "add", 10)
-    assert add.startLine == 9 and add.nodeType == "synthetic"
+    assert add.startLine == 9 and add.nodeType == "decorator"
     assert add.description == "Add two numbers.\n\nReturns the sum."
     assert _params(add) == [("a", "int", True, None, None), ("b", "int", False, "2", None)]
 
@@ -697,7 +697,7 @@ def test_resources_in_a_file_with_no_tool(analyze_files) -> None:
         "config",
         8,
     )
-    assert config.params == [] and config.nodeType == "synthetic" and config.startLine == 7
+    assert config.params == [] and config.nodeType == "decorator" and config.startLine == 7
     profile = resources["users://{user_id}/profile"]
     assert profile.description == "A user's profile."  # the docstring, as for a tool
     assert _params(profile) == [("user_id", "string", True, None, None)]

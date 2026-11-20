@@ -231,7 +231,6 @@ def tool_emit(
     description: str | None,
     params: list[Parameter] | None,
     parent: str | None = None,
-    node_type: str | None = "synthetic",
     extra: dict[str, Any] | None = None,
 ) -> Emit:
     """An ``mcp_tool`` (:func:`mcp_emit` with ``TOOL``)."""
@@ -246,7 +245,6 @@ def tool_emit(
         description=description,
         params=params,
         parent=parent,
-        node_type=node_type,
         extra=extra,
     )
 
@@ -263,7 +261,6 @@ def mcp_emit(
     description: str | None,
     params: list[Parameter] | None,
     parent: str | None = None,
-    node_type: str | None = "synthetic",
     extra: dict[str, Any] | None = None,
     name: str | None = None,
 ) -> Emit:
@@ -289,7 +286,6 @@ def mcp_emit(
         node,
         fields,
         parent=parent,
-        node_type=node_type,
         text=first_line(node_text(node, source)),
     )
 
