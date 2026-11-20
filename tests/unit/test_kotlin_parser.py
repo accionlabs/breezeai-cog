@@ -273,3 +273,54 @@ def test_property_annotations_captured_on_statements(tmp_path) -> None:
     rec = KotlinParser().parse_file(ctx)
     prop = next(s for s in rec.statements if s.name == "repo")
     assert [(d.name, d.args) for d in prop.decorators] == [("Autowired", [])]
+
+
+def _parse_src(tmp_path, src: bytes) -> FileRecord:
+    p = tmp_path / "One.kt"
+    p.write_bytes(src)
+    ctx = ParseContext(path="One.kt", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    return KotlinParser().parse_file(ctx)
+
+
+def test_inline_companion_object_class_and_members_are_captured(tmp_path) -> None:
+    # The grammar ends a declaration only at a newline or `;`, so a class written on one line
+    # with a companion object parsed as an ERROR node that swallowed the class.
+    src = (b"package demo\n"
+           b"class Config { companion object { const val RETRIES = 3 } val limit = 10 }\n"
+           b"class Two { val a = 1 }\n")
+    rec = _parse_src(tmp_path, src)
+    assert {c.name for c in rec.classes} >= {"Config", "Two"}
+    parent = {s.name: s.parentId for s in rec.statements if s.name}
+    assert parent["limit"] == "One.kt#Config"
+    assert parent["RETRIES"] == "One.kt#Config"
+    assert parent["a"] == "One.kt#Two"
+    # The text is read from the original source, not the `;`-rewritten one.
+    text = {s.name: s.text for s in rec.statements if s.name}
+    assert text["RETRIES"] == "const val RETRIES = 3"
+    assert text["limit"] == "val limit = 10"
+
+
+def test_one_line_nested_bodies_and_members_are_captured(tmp_path) -> None:
+    src = (b"class C { object O { val r = 3 } class N { fun f() { g() } } fun h() {} }\n"
+           b"class D { val x = 1 }\n")
+    rec = _parse_src(tmp_path, src)
+    assert {"C", "D"} <= {c.name for c in rec.classes}
+    assert {"f", "h"} <= {f.name for f in rec.functions}
+
+
+def test_multiline_companion_object_is_unchanged(tmp_path) -> None:
+    src = (b"class Config {\n    companion object {\n        const val RETRIES = 3\n    }\n"
+           b"    val limit = 10\n}\n")
+    rec = _parse_src(tmp_path, src)
+    assert [c.name for c in rec.classes][0] == "Config"
+    parent = {s.name: s.parentId for s in rec.statements if s.name}
+    assert parent["RETRIES"] == parent["limit"] == "One.kt#Config"
+
+
+def test_string_holding_a_brace_is_not_altered(tmp_path) -> None:
+    src = b'class C { val s = "a }" }\nclass D { val t = "x } y" }\n'
+    rec = _parse_src(tmp_path, src)
+    text = {s.name: s.text for s in rec.statements if s.name}
+    assert text["s"] == 'val s = "a }"'
+    assert text["t"] == 'val t = "x } y"'

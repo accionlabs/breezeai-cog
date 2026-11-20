@@ -13,7 +13,8 @@ from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
 from ..index_common import parallel_map, record_distinct, seed_same_package
-from ..treesitter import node_text, parse_source
+from ..treesitter import node_text
+from .reparse import parse_kotlin
 
 _TYPE_DECLS = ("class_declaration", "object_declaration")
 FqcnIndex = dict[str, str | None]
@@ -41,7 +42,7 @@ def _fqcn_index_one(
     except OSError:
         return None
     try:
-        root = parse_source("kotlin", source, 0).root_node
+        root = parse_kotlin(source, 0).root_node
         package = ""
         for node in root.named_children:
             if node.type == "package_header":
