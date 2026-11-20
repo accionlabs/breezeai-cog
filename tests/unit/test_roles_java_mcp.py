@@ -257,7 +257,9 @@ public class App {
 def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
     found = [s for s in statements if s.semanticType == semantic_type]
     for s in found:
-        assert s.name == s.endpoint and s.framework == "java-mcp"
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "java-mcp"
     return {s.endpoint: s for s in found}
 
 
@@ -309,6 +311,52 @@ def test_java_resources_with_no_tool(analyze_files) -> None:
     assert (user.description, user.handler, user.handlerLine) == ("A user", "readUser", 29)
     assert _params(user) == [("id", "string", True, None, None)]
     assert resources["file:///{literal}"].params == []  # a fixed URI has no variables
+    # the declared name: the second constructor / builder argument, or `.name(…)`
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://insights": "Insights",
+        "users://{id}": "User",
+        "file:///{literal}": "x",
+    }
+
+
+def test_java_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+package demo;
+
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class Names {
+    static final String NAME = "Named";
+
+    Object a() {
+        return new McpServerFeatures.SyncResourceSpecification(
+            new McpSchema.Resource("memo://a", NAME, null, null, null, null, null, null), (e, r) -> null);
+    }
+
+    Object b(String n) {
+        return new McpServerFeatures.SyncResourceSpecification(
+            McpSchema.Resource.builder().uri("memo://b").name(n).build(), (e, r) -> null);
+    }
+
+    Object c() {
+        return new McpServerFeatures.SyncResourceSpecification(
+            McpSchema.Resource.builder("memo://c", "First").name("Last").build(), (e, r) -> null);
+    }
+
+    Object d() {
+        return new McpServerFeatures.SyncResourceSpecification(
+            McpSchema.Resource.builder().uri("memo://d").build(), (e, r) -> null);
+    }
+}
+"""
+    resources = _of(analyze_files({"Names.java": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://a": "memo://a",  # a constant: not a literal
+        "memo://b": "memo://b",  # a parameter
+        "memo://c": "Last",  # `.name(…)` overrides the builder's argument
+        "memo://d": "memo://d",  # no name
+    }
 
 
 JAVA_PROMPTS = """

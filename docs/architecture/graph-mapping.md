@@ -173,8 +173,8 @@ Further points:
   value works at once and can be filtered on.
 - **Entry points are Statements told by `semanticType`:** `route`, `eventbus_consumer`, `timer`,
   and what an MCP server exposes: `mcp_tool` (`method` `TOOL`, `endpoint` = the tool name),
-  `mcp_resource` (`RESOURCE`, `endpoint` = the URI or URI template, `params` = the template's
-  variables) and `mcp_prompt` (`PROMPT`, `endpoint` = the prompt name, `params` = its arguments),
+  `mcp_resource` (`RESOURCE`, `endpoint` = the URI or URI template, `name` = its declared literal
+  name, else the URI, `params` = the template's variables) and `mcp_prompt` (`PROMPT`, `endpoint` = the prompt name, `params` = its arguments),
   each with `description` and `params`. See the [entry-point contract](entry-points.md).
 - **`mcp_call` is outbound:** an MCP client calling a tool, reading a resource or getting a prompt
   (`method` `TOOL` / `RESOURCE` / `PROMPT`, `endpoint` = the literal name or URI, `framework` =

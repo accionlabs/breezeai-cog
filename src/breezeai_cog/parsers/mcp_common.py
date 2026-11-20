@@ -6,6 +6,7 @@ Each detector emits one statement per tool, resource or prompt an MCP **server**
     semanticType="mcp_resource"  method="RESOURCE"  endpoint=<URI or URI template>
     semanticType="mcp_prompt"    method="PROMPT"    endpoint=<prompt name>
     framework=<SDK>  handler / handlerLine  description  params=[Parameter…]
+    name=<endpoint>; a resource's declared literal name (``"Profile"``) when the SDK gives one
 
 and one ``mcp_call`` (outbound) per literal call of a proven MCP **client**::
 
@@ -264,9 +265,12 @@ def mcp_emit(
     parent: str | None = None,
     node_type: str | None = "synthetic",
     extra: dict[str, Any] | None = None,
+    name: str | None = None,
 ) -> Emit:
     """A server statement: ``kind`` is :data:`TOOL`, :data:`RESOURCE` or :data:`PROMPT`
-    (``(semanticType, method)``); ``name`` = ``endpoint``."""
+    (``(semanticType, method)``). ``name`` is a resource's declared literal name (the SDK's
+    ``name`` beside its URI); without one (a tool or prompt, whose name is its ``endpoint``, or
+    a resource with no literal name) it is ``endpoint``."""
     semantic_type, method = kind
     fields: dict[str, Any] = {
         "semanticType": semantic_type,
@@ -277,7 +281,7 @@ def mcp_emit(
         "handlerLine": handler_line,
         "description": clean_doc(description),
         "params": fit_params(params),
-        "name": endpoint,
+        "name": name or endpoint,
     }
     if extra:
         fields.update(extra)

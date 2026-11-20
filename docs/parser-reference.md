@@ -646,7 +646,8 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
 
 ### MCP detectors (one package per framework)
 What an MCP server exposes is an entry point — a tool (`semanticType: mcp_tool`, `method: TOOL`,
-`endpoint` = the tool name), a resource (`mcp_resource`, `RESOURCE`, the URI or URI template) or
+`endpoint` = the tool name), a resource (`mcp_resource`, `RESOURCE`, the URI or URI template;
+`name` = its declared literal name, else the URI) or
 a prompt (`mcp_prompt`, `PROMPT`, the prompt name) — recorded by additive detectors under the
 [entry-point contract](architecture/entry-points.md#mcp-tools), which has the rules every MCP
 framework shares; the per-construct rules are in each framework's table in

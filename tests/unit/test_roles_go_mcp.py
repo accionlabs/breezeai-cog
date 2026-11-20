@@ -374,7 +374,9 @@ func main() {
 def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
     found = [s for s in statements if s.semanticType == semantic_type]
     for s in found:
-        assert s.name == s.endpoint and s.framework == "go-mcp"
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "go-mcp"
     return {s.endpoint: s for s in found}
 
 
@@ -411,6 +413,30 @@ def test_go_sdk_resources_with_no_tool(analyze_files) -> None:
     user = resources["users://{id}"]
     assert user.handler == "readUser" and _params(user) == [("id", "string", True, None, None)]
     assert resources["http://x/~{+path}"].params is None
+    # `Name` when a string literal, else the URI
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "embedded:info": "info",
+        "users://{id}": "user",
+        "http://x/~{+path}": "http://x/~{+path}",
+    }
+
+
+def test_go_sdk_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+package main
+
+import "github.com/modelcontextprotocol/go-sdk/mcp"
+
+const infoName = "Info"
+
+func run(server *mcp.Server) {
+	server.AddResource(&mcp.Resource{Name: infoName, URI: "embedded:const"}, h)
+}
+
+func h() {}
+"""
+    resources = _of(analyze_files({"main.go": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {"embedded:const": "embedded:const"}
 
 
 GO_SDK_PROMPTS = """

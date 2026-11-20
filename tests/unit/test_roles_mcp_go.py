@@ -241,7 +241,9 @@ func inlineHandler(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolRes
 def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
     found = [s for s in statements if s.semanticType == semantic_type]
     for s in found:
-        assert s.name == s.endpoint and s.framework == "mcp-go"
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "mcp-go"
     return {s.endpoint: s for s in found}
 
 
@@ -292,6 +294,39 @@ def test_mcpgo_resources_with_no_tool(analyze_files) -> None:
     assert _params(user) == [("id", "string", True, None, None)]
     assert resources["odd://{literal}"].params == []  # a fixed URI has no variables
     assert resources["cfg://app"].handler == "cfgHandler"
+    # the declared name: `NewResource` / `NewResourceTemplate`'s second argument
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "docs://readme": "README",
+        "users://{id}/profile": "User",
+        "odd://{literal}": "Odd",
+        "cfg://app": "Cfg",
+    }
+
+
+def test_mcpgo_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+const name = "Named"
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddResource(mcp.NewResource("docs://const", name), h)
+    s.AddResource(mcp.NewResource("docs://raw", `Raw`), h)
+}
+
+func h() {}
+"""
+    resources = _of(analyze_files({"main.go": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "docs://const": "docs://const",
+        "docs://raw": "Raw",
+    }
 
 
 MCPGO_PROMPTS = """

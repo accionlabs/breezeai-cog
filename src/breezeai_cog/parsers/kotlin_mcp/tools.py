@@ -61,6 +61,8 @@ Resources and prompts, of either SDK::
   handler, only in a file importing the SDK's server package.
 * Java SDK — the ``Sync…`` / ``Async…`` ``ResourceSpecification`` /
   ``ResourceTemplateSpecification`` / ``PromptSpecification``, read as in Java (``java_mcp``).
+* ``name`` — a resource's declared name (``name =``, the second positional argument, or the
+  Java SDK's second constructor / builder argument or ``.name(…)``) when a literal; else the URI.
 * ``endpoint`` — the URI / URI template / prompt name, a literal; else no record. ``params`` —
   a template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a fixed
   resource; a prompt's ``listOf(PromptArgument(…))``, ``[]`` without, None when not a literal.
@@ -1207,18 +1209,22 @@ def _entry_result(
     arguments: Node | None,
     source: bytes,
     aliases: dict[str, str],
-) -> tuple[str, str | None, list[Parameter] | None] | None:
+    name_node: Node | None = None,
+) -> tuple[str, str | None, list[Parameter] | None, str | None] | None:
+    """``(endpoint, description, params, declared name)``; the declared name is a resource's
+    literal ``name`` (``name_node``), None for a prompt (its name is its endpoint)."""
     if not endpoint:
         return None
     if entry == "Prompt":
-        return endpoint, description, _prompt_arguments(arguments, source, aliases)
+        return endpoint, description, _prompt_arguments(arguments, source, aliases), None
     # A fixed resource's URI is literal, braces and all: it has no variables.
-    return endpoint, description, uri_template_params(endpoint) if entry != "Resource" else []
+    params = uri_template_params(endpoint) if entry != "Resource" else []
+    return endpoint, description, params, kotlin_string(name_node, source)
 
 
 def _named_entry(
     args: list[tuple[str | None, Node]], entry: str, source: bytes, aliases: dict[str, str]
-) -> tuple[str, str | None, list[Parameter] | None] | None:
+) -> tuple[str, str | None, list[Parameter] | None, str | None] | None:
     """The official Kotlin SDK's order: ``Resource(uri, name, description, mimeType)``,
     ``ResourceTemplate(uriTemplate, name, description, mimeType)``, ``Prompt(name, description,
     arguments)`` — named arguments, or positional when none is named."""
@@ -1231,8 +1237,9 @@ def _named_entry(
         pos[desc_index] if len(pos) > desc_index and not named else None
     )
     arguments = _named(args, "arguments") or (pos[2] if len(pos) > 2 and not named else None)
+    name_node = _named(args, "name") or (pos[1] if len(pos) > 1 and not named else None)
     return _entry_result(
-        entry, endpoint, kotlin_string(desc_node, source), arguments, source, aliases
+        entry, endpoint, kotlin_string(desc_node, source), arguments, source, aliases, name_node
     )
 
 
@@ -1242,7 +1249,7 @@ def _java_entry_fields(
     variables: dict[str, Node | None],
     entry: str,
     aliases: dict[str, str],
-) -> tuple[str, str | None, list[Parameter] | None] | None:
+) -> tuple[str, str | None, list[Parameter] | None, str | None] | None:
     """A Java SDK ``Resource`` / ``ResourceTemplate`` / ``Prompt`` built in Kotlin: a
     constructor (positions as in Java), a builder, or a ``val`` assigned one once."""
     if node is not None and node.type == "simple_identifier":
@@ -1262,11 +1269,21 @@ def _java_entry_fields(
         endpoint = kotlin_string(key_args[0], source) if len(key_args) == 1 else None
         desc_args = calls.get("description") or []
         description = kotlin_string(desc_args[0], source) if len(desc_args) == 1 else None
+        # ``.name(…)`` (the last one) sets the name over the builder's second argument
+        name_args = calls.get("name") or (builder_args[1:] if len(builder_args) == 2 else [])
         if entry == "Prompt" and "arguments" in calls:
             if len(calls["arguments"]) != 1:
                 return None
             arguments = calls["arguments"][0]
-        return _entry_result(entry, endpoint, description, arguments, source, aliases)
+        return _entry_result(
+            entry,
+            endpoint,
+            description,
+            arguments,
+            source,
+            aliases,
+            name_args[0] if len(name_args) == 1 else None,
+        )
     if _type_callee(node, source, aliases) != entry:
         return None
     args = kotlin_call_args(node, source)
@@ -1285,7 +1302,9 @@ def _java_entry_fields(
         description = kotlin_string(pos[2], source)
     elif len(pos) >= 7:
         description = kotlin_string(pos[3], source)
-    return _entry_result(entry, endpoint, description, arguments, source, aliases)
+    return _entry_result(
+        entry, endpoint, description, arguments, source, aliases, pos[1] if len(pos) > 1 else None
+    )
 
 
 def _entries(dc: DetectContext) -> list[Emit]:
@@ -1305,7 +1324,7 @@ def _entries(dc: DetectContext) -> list[Emit]:
     for node in walk(dc.root):
         if node.type != "call_expression":
             continue
-        fields: tuple[str, str | None, list[Parameter] | None] | None = None
+        fields: tuple[str, str | None, list[Parameter] | None, str | None] | None = None
         handler: Node | None = None
         framework = JAVA_MCP
         entry = _SPECIFICATIONS.get(_type_callee(node, source, aliases)) if java else None
@@ -1345,7 +1364,7 @@ def _entries(dc: DetectContext) -> list[Emit]:
                 continue
         if fields is None:
             continue
-        endpoint, description, params = fields
+        endpoint, description, params, declared = fields
         handler_name, handler_line = _handler(handler, source, sites)
         assert entry is not None
         found.append(
@@ -1360,6 +1379,7 @@ def _entries(dc: DetectContext) -> list[Emit]:
                 description=description,
                 params=params,
                 node_type=None,
+                name=declared,
             )
         )
     return found

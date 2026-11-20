@@ -608,6 +608,37 @@ def test_lowlevel_resources_with_no_tool(analyze_files) -> None:
     template = resources["users://{id}"]
     assert template.handler == "read_resource"  # templates are read by the same dispatcher
     assert _params(template) == [("id", "string", True, None, None)]
+    # the declared `name=`
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://insights": "Insights",
+        "file:///logs/app.log": "Log",
+        "users://{id}": "User",
+    }
+
+
+def test_lowlevel_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+from mcp.server.lowlevel import Server
+import mcp.types as types
+
+server = Server("res")
+NAME = "Named"
+
+
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    return [
+        types.Resource(uri="memo://const", name=NAME),
+        types.Resource(uri="memo://fstring", name=f"x{NAME}"),
+        types.Resource(uri="memo://none"),
+    ]
+"""
+    resources = _of(analyze_files({"srv.py": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://const": "memo://const",
+        "memo://fstring": "memo://fstring",
+        "memo://none": "memo://none",
+    }
 
 
 LOWLEVEL_PROMPTS = """

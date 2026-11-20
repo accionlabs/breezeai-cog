@@ -47,7 +47,8 @@ Resources and prompts are read the same way, from their own list handlers::
     server.setRequestHandler(GetPromptRequestSchema, getPrompt);              handler
 
 * ``mcp_resource`` — ``uri`` (a template: ``uriTemplate``), a string literal; anything else → no
-  record. ``params`` are a template's simple ``{variables}`` (None with an RFC 6570 operator);
+  record. ``name`` is the entry's ``name`` when it is a string literal and no spread in the
+  object could override it; else the URI. ``params`` are a template's simple ``{variables}`` (None with an RFC 6570 operator);
   ``[]`` for a fixed ``uri``.
 * ``mcp_prompt`` — ``name``, a string literal; ``params`` from a literal ``arguments`` array of
   ``{ name, description, required }`` objects (``required`` false unless ``true``); no
@@ -458,7 +459,10 @@ def _entry(
     """One tool / resource / prompt object of a list handler's returned array."""
     fields = _pairs(obj, source)
     params: list[Parameter] | None
+    declared: str | None = None
     if kind == RESOURCE:
+        if not any(c.type == "spread_element" for c in obj.named_children):
+            declared = _literal_string(fields.get("name"), source) or None
         template = array_key == "resourceTemplates"
         name = _literal_string(fields.get("uriTemplate" if template else "uri"), source)
         # A fixed resource's URI is literal, braces and all: it has no variables.
@@ -485,4 +489,5 @@ def _entry(
         description=_string(fields.get("description"), source),
         params=params,
         node_type=None,
+        name=declared,
     )

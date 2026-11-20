@@ -295,6 +295,7 @@ entry points held to the tool rules above (a proven server, a literal address, r
 |---|---|---|
 | `method` | `RESOURCE` | `PROMPT` |
 | `endpoint` | The URI (`config://app`) or URI template (`users://{id}/profile`), as written | The prompt name |
+| `name` | The resource's declared name when the SDK gives one as a literal (`"Profile"` beside its URI); otherwise (no name, or one that is not a literal) the URI | The prompt name (= `endpoint`) |
 | `handler` / `handlerLine` | The function that reads it | The function that renders it |
 | `description` | The description the server gives the client, when it is a literal | Same |
 | `params` | A template's variables: each simple `{name}` → `{name, type: "string", required: true}`; `[]` for a fixed URI; unset when the template uses an RFC 6570 operator (`{?q}`, `{+path}`, `{#f}`, `{/s}`, `{.x}`, `{;x}`, `{&x}`), an explode (`{x*}`), a prefix (`{x:3}`) or several variables in one expression | Its arguments: `{name, required, description}`, never a `type` or `default` (an MCP prompt argument is a string), for every SDK; where the SDK builds them from a function's parameters (FastMCP, C#), those parameters' names, required (no default) and descriptions |
@@ -312,6 +313,15 @@ def review_code(code: str) -> str: ...
   handlers) gives one record per literal entry of the returned list; its handler is the server's
   single `read_resource` / `get_prompt` dispatcher in the same file (none, or several → unset).
 - A fixed resource's URI is literal even with braces in it: `params` is `[]`.
+- A resource's `name` is the name the code gives it — TypeScript `server.resource("Profile", uri,
+  …)` / `registerResource("Profile", …)` and a low-level list entry's `name`, Python
+  `types.Resource(name="Profile", …)` / `ResourceTemplate(name=…)` and FastMCP
+  `@mcp.resource(uri, name="Profile")`, Spring AI `@McpResource(name = "Profile")`, the Java SDK's
+  second `Resource` / `ResourceTemplate` constructor or builder argument (or `.name(…)`), the
+  Kotlin SDK's `addResource(uri, name, …)`, C# `[McpServerResource(Name = "Profile")]`, mcp-go
+  `NewResource(uri, "Profile")` and the Go SDK's `&mcp.Resource{Name: "Profile"}` — only when it
+  is a literal; a name the SDK would derive (a FastMCP or C# method name) is not read, and the
+  record keeps the URI as its `name`. A tool's and a prompt's `name` is their `endpoint`.
 - A URI the SDK derives from a method (C# `[McpServerResource]` without `UriTemplate`) is not read:
   no record.
 

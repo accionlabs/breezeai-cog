@@ -46,6 +46,8 @@ Resources and prompts are read from their specifications the same way::
 * ``endpoint`` — the URI / URI template / prompt name: the first constructor argument, the
   builder's first argument, or ``.uri(…)`` / ``.uriTemplate(…)`` / ``.name(…)``; a literal, else
   no record. The stateless server's specifications (same names) are read alike.
+* ``name`` — a resource's declared name: the second constructor argument, the builder's second
+  argument, or ``.name(…)``, when a literal; else the URI.
 * ``description`` — ``.description(…)``, or the constructor argument whose position the SDK
   fixes for that overload (``Prompt(name, description, arguments)``, ``Prompt(name, title,
   description, arguments)``, ``ResourceTemplate(uriTemplate, name, description, mimeType,
@@ -364,9 +366,11 @@ def _prompt_arguments(node: Node | None, source: bytes) -> list[Parameter] | Non
 
 def _entry_fields(
     node: Node | None, source: bytes, variables: dict[str, Node | None], entry: str
-) -> tuple[str, str | None, list[Parameter] | None] | None:
-    """``(endpoint, description, params)`` of a ``Resource`` / ``ResourceTemplate`` / ``Prompt``
-    expression (``entry``): a constructor, a builder, or a local variable assigned one once."""
+) -> tuple[str, str | None, list[Parameter] | None, str | None] | None:
+    """``(endpoint, description, params, declared name)`` of a ``Resource`` /
+    ``ResourceTemplate`` / ``Prompt`` expression (``entry``): a constructor, a builder, or a
+    local variable assigned one once. The declared name is a resource's literal ``name`` (None
+    for a prompt, whose name is its endpoint)."""
     if node is not None and node.type == "identifier":
         node = variables.get(node_text(node, source))
     if node is None:
@@ -374,9 +378,11 @@ def _entry_fields(
     kind, key = _ENTRIES[entry]
     description: str | None = None
     arguments: Node | None = None
+    name_node: Node | None = None  # a resource's ``name``
     if node.type == "object_creation_expression" and _type_name(node, source) == entry:
         args = _args(node)
         endpoint = java_string(args[0], source) if args else None
+        name_node = args[1] if len(args) > 1 else None
         if entry == "Prompt":
             # Prompt(name, description, arguments) / (name, title, description, arguments[, …])
             if len(args) == 3:
@@ -399,6 +405,9 @@ def _entry_fields(
         endpoint = java_string(key_args[0], source) if len(key_args) == 1 else None
         desc_args = calls.get("description") or []
         description = java_string(desc_args[0], source) if len(desc_args) == 1 else None
+        # ``.name(…)`` (the last one) sets the name over the builder's second argument
+        name_args = calls.get("name") or (builder_args[1:] if len(builder_args) == 2 else [])
+        name_node = name_args[0] if len(name_args) == 1 else None
         arg_calls = calls.get("arguments")
         if entry == "Prompt" and arg_calls is not None:
             if len(arg_calls) != 1:
@@ -407,9 +416,10 @@ def _entry_fields(
     if not endpoint:
         return None
     if kind == PROMPT:
-        return endpoint, description, _prompt_arguments(arguments, source)
+        return endpoint, description, _prompt_arguments(arguments, source), None
     # A fixed resource's URI is literal, braces and all: it has no variables.
-    return endpoint, description, uri_template_params(endpoint) if entry != "Resource" else []
+    params = uri_template_params(endpoint) if entry != "Resource" else []
+    return endpoint, description, params, java_string(name_node, source)
 
 
 def _sdk_entries(dc: DetectContext) -> list[Emit]:
@@ -436,7 +446,7 @@ def _sdk_entries(dc: DetectContext) -> list[Emit]:
         if fields is None:
             continue
         handler = next((a for a in reversed(args[1:]) if a.type != "null_literal"), None)
-        endpoint, description, params = fields
+        endpoint, description, params, declared = fields
         handler_name, handler_line = _sdk_handler(handler, source, sites)
         found.append(
             mcp_emit(
@@ -450,6 +460,7 @@ def _sdk_entries(dc: DetectContext) -> list[Emit]:
                 description=description,
                 params=params,
                 node_type=None,
+                name=declared,
             )
         )
     return found

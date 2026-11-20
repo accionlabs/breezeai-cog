@@ -648,7 +648,9 @@ def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Sta
     found = [s for s in statements if s.semanticType == semantic_type]
     method = {"mcp_resource": "RESOURCE", "mcp_prompt": "PROMPT"}[semantic_type]
     for s in found:
-        assert s.method == method and s.name == s.endpoint and s.routeKind is None
+        assert s.method == method and s.routeKind is None
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
     return {s.endpoint: s for s in found}
 
 
@@ -663,13 +665,13 @@ def config() -> str:
     return "{}"
 
 
-@mcp.resource(uri="users://{user_id}/profile")
+@mcp.resource(uri="users://{user_id}/profile", name="Profile")
 def profile(user_id: str) -> str:
     """A user's profile."""
     return user_id
 
 
-@mcp.resource("search://{?q}")
+@mcp.resource("search://{?q}", name=SEARCH_NAME)
 def search(q: str) -> str:
     return q
 
@@ -701,6 +703,12 @@ def test_resources_in_a_file_with_no_tool(analyze_files) -> None:
     assert _params(profile) == [("user_id", "string", True, None, None)]
     # An RFC 6570 operator: what the template accepts is not a list of required strings.
     assert resources["search://{?q}"].params is None
+    # `name=` when a literal; else (none, or a name held in a variable) the URI
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "config://app": "config://app",
+        "users://{user_id}/profile": "Profile",
+        "search://{?q}": "search://{?q}",
+    }
 
 
 

@@ -83,7 +83,9 @@ public class Tools
 def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
     found = [s for s in statements if s.semanticType == semantic_type]
     for s in found:
-        assert s.name == s.endpoint and s.framework == "csharp-mcp"
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "csharp-mcp"
     return {s.endpoint: s for s in found}
 
 
@@ -102,6 +104,17 @@ public static class Resources
 
     [McpServerResource, Description("Derived URI")]
     public static string Derived() => "x";
+
+    const string NameConst = "Named";
+
+    [McpServerResource(UriTemplate = "memo://const", Name = NameConst)]
+    public static string Const() => "x";
+
+    [McpServerResource(UriTemplate = "memo://unnamed")]
+    public static string Unnamed() => "x";
+
+    [McpServerResource(UriTemplate = "memo://verbatim", Name = @"Verbatim")]
+    public static string Verbatim() => "x";
 }
 
 [McpServerPromptType]
@@ -119,7 +132,22 @@ public static class Prompts
 def test_csharp_resources_and_prompts_with_no_tool(analyze_files) -> None:
     statements = analyze_files({"Entries.cs": CSHARP_ENTRIES})
     resources = _of(statements, "mcp_resource")
-    assert set(resources) == {"test://direct/text", "users://{id}"}  # a derived URI is not read
+    # a derived URI is not read
+    assert set(resources) == {
+        "test://direct/text",
+        "users://{id}",
+        "memo://const",
+        "memo://unnamed",
+        "memo://verbatim",
+    }
+    # `Name =` when a literal, else the URI
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "test://direct/text": "Direct",
+        "users://{id}": "User",
+        "memo://const": "memo://const",
+        "memo://unnamed": "memo://unnamed",
+        "memo://verbatim": "Verbatim",
+    }
     direct = resources["test://direct/text"]
     assert (direct.method, direct.description, direct.handler, direct.params) == (
         "RESOURCE",

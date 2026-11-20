@@ -382,7 +382,9 @@ function other(SHADOWED: unknown) { return SHADOWED; }
 def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
     found = [s for s in statements if s.semanticType == semantic_type]
     for s in found:
-        assert s.name == s.endpoint and s.framework == "typescript-mcp"
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "typescript-mcp"
     return {s.endpoint: s for s in found}
 
 
@@ -429,6 +431,45 @@ def test_typescript_resources_with_no_tool(analyze_files) -> None:
     assert _params(user) == [("id", "string", True, None, None)]
     assert resources["file:///logs/app.log"].description == "App log"
     assert resources["search://{?q}"].params is None
+    # the declared name: the literal first argument
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "config://app": "config",
+        "users://{id}": "user",
+        "file:///logs/app.log": "logs",
+        "search://{?q}": "search",
+    }
+
+
+def test_typescript_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListResourcesRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+const NAME = "Named";
+const server = new McpServer({ name: "res", version: "1.0.0" });
+server.resource(NAME, "memo://const", async () => ({ contents: [] }));
+server.registerResource(`t-${NAME}`, "memo://template", {}, async () => ({ contents: [] }));
+server.registerResource(`plain`, "memo://plain", {}, async () => ({ contents: [] }));
+
+const low = new Server({ name: "x", version: "1" }, { capabilities: {} });
+low.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [
+    { uri: "low://spread", name: "Spread", ...base },
+    { uri: "low://const", name: NAME },
+    { uri: "low://none" },
+  ],
+}));
+"""
+    resources = _of(analyze_files({"srv.ts": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://const": "memo://const",
+        "memo://template": "memo://template",
+        "memo://plain": "plain",  # a template literal without substitutions is a literal
+        "low://spread": "low://spread",  # a spread may override it
+        "low://const": "low://const",
+        "low://none": "low://none",
+    }
 
 
 TS_PROMPTS = """
@@ -548,6 +589,11 @@ def test_typescript_lowlevel_resources_and_prompts_with_no_tool(analyze_files) -
     )
     assert _params(resources["test://static/{id}"]) == [("id", "string", True, None, None)]
     assert resources["test://static/{id}"].handler == "readResource"
+    # the entry's literal `name`
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "console://logs": "Logs",
+        "test://static/{id}": "Static",
+    }
     prompts = _of(statements, "mcp_prompt")
     assert set(prompts) == {"simple", "complex", "dynamic"}
     assert prompts["simple"].params == [] and prompts["simple"].handlerLine == 35

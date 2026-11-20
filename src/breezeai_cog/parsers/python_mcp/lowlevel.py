@@ -66,7 +66,7 @@ Resources and prompts are read the same way, from their own list functions::
 * ``mcp_resource`` — ``uri=`` (``ResourceTemplate``: ``uriTemplate=``) a string literal, or
   ``AnyUrl("…")`` / ``FileUrl("…")`` of one; anything else → no record. ``params`` are a
   template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a ``Resource``,
-  whose URI is fixed.
+  whose URI is fixed. ``name`` is ``name=`` when it is a string literal, else the URI.
 * ``mcp_prompt`` — ``name=`` a string literal; ``params`` from a literal ``arguments=[…]`` of
   ``PromptArgument(name=…, description=…, required=…)`` (``required`` defaults to false, as in
   the SDK); no ``arguments`` → ``[]``; anything else → None (unknown).
@@ -674,7 +674,9 @@ def _entry_emit(
     arguments: set[str],
 ) -> Emit | None:
     params: list[Parameter] | None
+    declared: str | None = None  # a resource's own literal ``name=``
     if kind.entry == "Resource" or kind.entry == "ResourceTemplate":
+        declared = _string(_kwarg(call, "name", source), source)
         fixed = kind.entry == "Resource"
         name = _url(_kwarg(call, "uri" if fixed else "uriTemplate", source), source)
         # A fixed resource's URI is literal, braces and all: it has no variables.
@@ -708,6 +710,7 @@ def _entry_emit(
         description=description,
         params=params,
         node_type=None,
+        name=declared,
     )
 
 

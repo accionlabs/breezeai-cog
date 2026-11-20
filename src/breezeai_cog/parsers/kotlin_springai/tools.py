@@ -22,8 +22,9 @@
   (``import com.acme.Tool as Tool``) hides the name instead.
 
 ``@McpResource`` / ``@McpPrompt`` (with ``@McpArg`` parameters) are read by the Java detector's
-rules (``java_springai``): ``uri =`` a literal (params: the template's simple ``{variables}``);
-``name =`` else the function name, the parameters as the prompt's arguments (None when an
+rules (``java_springai``): ``uri =`` a literal (params: the template's simple ``{variables}``;
+a resource's ``name =`` when a literal, else the URI); a prompt's ``name =`` else the function
+name, the parameters as the prompt's arguments (None when an
 ``@McpArg`` ``name =`` / ``required =`` is not a literal). The annotation must be the
 annotations library's: imported from its package (by name, ``*`` or an alias) or written fully
 qualified.
@@ -278,9 +279,11 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
             ann = anns.get(key)
             if ann is None or not _library_annotation(ann, key, source, imported[key], aliases):
                 continue
+            declared: str | None = None  # a resource's own literal ``name``
             if kind == RESOURCE:
                 endpoint = kotlin_string(_element(ann, "uri", source), source)
                 params = uri_template_params(endpoint) if endpoint else None
+                declared = kotlin_string(_element(ann, "name", source), source)
             else:
                 named = _element(ann, "name", source)
                 endpoint = kotlin_string(named, source) if named is not None else function_name
@@ -299,6 +302,7 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
                     description=kotlin_string(_element(ann, "description", source), source),
                     params=params,
                     parent=owner.id if owner is not None else None,
+                    name=declared,
                 )
             )
     return found

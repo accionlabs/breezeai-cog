@@ -35,7 +35,7 @@
 Resources and prompts of the same ``McpServer``::
 
     server.resource("config", "config://app", { description: "Config" }, cb)
-                                                    → mcp_resource  typescript-mcp  RESOURCE  config://app
+                                                    → mcp_resource  typescript-mcp  RESOURCE  config://app  name config
     server.registerResource("user", new ResourceTemplate("users://{id}", { list: undefined }),
                             { description: "A user" }, cb)
                                                     → mcp_resource  …  users://{id}   params id
@@ -44,7 +44,8 @@ Resources and prompts of the same ``McpServer``::
     server.registerPrompt("explain", { description: "Explain", argsSchema: { topic: z.string() } }, cb)
 
 * ``resource(name, uriOrTemplate, [metadata], cb)`` / ``registerResource(name, uriOrTemplate,
-  config, cb)`` — ``endpoint`` is the URI, a string literal, or the first argument of
+  config, cb)`` — ``name`` is the first argument when it is a string literal (else the URI);
+  ``endpoint`` is the URI, a string literal, or the first argument of
   ``new ResourceTemplate("…", …)`` with ``ResourceTemplate`` imported from
   ``@modelcontextprotocol/sdk/server/mcp.js``; anything else → no record. ``description`` from
   the metadata / config literal; ``params`` are the template's simple ``{variables}`` (None with
@@ -443,9 +444,11 @@ def _registration(
     source: bytes,
     zod: set[str],
     templates: Callable[[], set[str]],
-) -> tuple[str, str | None, list[Parameter] | None] | None:
-    """``(endpoint, description, params)`` of one ``tool`` / ``resource`` / ``prompt`` call (or
-    its ``register…`` form); None when it is not one or its name / URI is not a literal."""
+) -> tuple[str, str | None, list[Parameter] | None, str | None] | None:
+    """``(endpoint, description, params, declared name)`` of one ``tool`` / ``resource`` /
+    ``prompt`` call (or its ``register…`` form); None when it is not one or its name / URI is
+    not a literal. The declared name is a resource's literal first argument (None otherwise: a
+    tool's or prompt's name is its endpoint)."""
     middle = args[1:-1]
     description: str | None = None
     params: list[Parameter] | None = []
@@ -459,7 +462,8 @@ def _registration(
         if meta and meta[0].type == "object":
             description = _string(_pairs(meta[0], source).get("description"), source)
         # A fixed resource's URI is literal, braces and all: it has no variables.
-        return uri, description, uri_template_params(uri) if template else []
+        params = uri_template_params(uri) if template else []
+        return uri, description, params, _string(args[0], source) or None
     name = _string(args[0], source)
     if not name:
         return None
@@ -477,15 +481,15 @@ def _registration(
             )
         elif not _literal_object(middle[0], source):
             params = None  # `{ ...base }` may carry the schema
-        return name, description, params
+        return name, description, params, None
     if middle and middle[0].type in ("string", "template_string"):
         description = _string(middle[0], source)
         middle = middle[1:]
     if method == "prompt":
         if len(middle) > 1:
             return None
-        return name, description, _prompt_params(middle[0] if middle else None, source, zod)
-    return name, description, _tool_params(middle, source, zod)
+        return name, description, _prompt_params(middle[0] if middle else None, source, zod), None
+    return name, description, _tool_params(middle, source, zod), None
 
 
 _TOP_LEVEL_FUNCTIONS = (
@@ -566,7 +570,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         )
         if read is None:
             continue
-        endpoint, description, params = read
+        endpoint, description, params, declared = read
         handler, handler_line = _handler(callback, source, functions, scopes)
         found.append(
             mcp_emit(
@@ -580,6 +584,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 description=description,
                 params=params,
                 node_type=None,
+                name=declared,
             )
         )
     if not found:

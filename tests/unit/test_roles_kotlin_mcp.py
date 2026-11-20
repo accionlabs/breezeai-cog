@@ -355,7 +355,8 @@ def test_kotlin_mcp_server_shortcut(analyze_files) -> None:
 def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
     found = [s for s in statements if s.semanticType == semantic_type]
     for s in found:
-        assert s.name == s.endpoint
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
     return {s.endpoint: s for s in found}
 
 
@@ -399,6 +400,12 @@ def test_kotlin_sdk_resources_and_prompts_with_no_tool(analyze_files) -> None:
     assert resources["file:///{literal}"].description == "A file"
     assert resources["file:///{literal}"].params == []
     assert _params(resources["users://{id}"]) == [("id", "string", True, None, None)]
+    # the declared name: `name =`, or the second positional argument
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "docs://readme": "README",
+        "file:///{literal}": "Literal",
+        "users://{id}": "User",
+    }
     prompts = _of(statements, "mcp_prompt")
     assert set(prompts) == {"review", "dyn"}
     review = prompts["review"]
@@ -437,10 +444,43 @@ def test_kotlin_java_sdk_resources_and_prompts(analyze_files) -> None:
         [],
         8,
     )
+    assert memo.name == "Insights"  # the builder's second argument
     review = _of(statements, "mcp_prompt")["review"]
     assert review.framework == "java-mcp" and review.description == "Review"
     assert _params(review) == [("code", None, True, None, "The code")]
     assert _tools(statements)["named"].params == []  # the SDK 1.0 builder names the tool
+
+
+def test_kotlin_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+package demo
+
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+
+const val NAME = "Named"
+
+val built = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Resource.builder("memo://built", "First").name("Last").build()) { ex, req -> TODO() }
+val bare = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Resource.builder().uri("memo://bare").build()) { ex, req -> TODO() }
+val ctor = McpServerFeatures.SyncResourceSpecification(
+    McpSchema.Resource("memo://ctor", NAME, null, null, null, null, null, null)) { ex, req -> TODO() }
+
+fun configure(server: Server, n: String) {
+    server.addResource(uri = "docs://named", name = n, description = "d") { request -> TODO() }
+    server.addResource(uri = "docs://template", name = "x$n", description = "d") { request -> TODO() }
+}
+"""
+    resources = _of(analyze_files({"Names.kt": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://built": "Last",  # `.name(…)` overrides the builder's argument
+        "memo://bare": "memo://bare",  # no name
+        "memo://ctor": "memo://ctor",  # a constant: not a literal
+        "docs://named": "docs://named",  # a parameter
+        "docs://template": "docs://template",  # a string template
+    }
 
 
 def test_kotlin_resource_look_alikes(analyze_files) -> None:
@@ -496,6 +536,11 @@ fun configure(server: Server) {
     assert _params(resources["files://{path}"]) == [("path", "string", True, None, None)]
     assert resources["memo://a"].description == "Memo A" and resources["memo://a"].params == []
     assert resources["users://{id}"].framework == "kotlin-mcp"
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "files://{path}": "Files",
+        "memo://a": "A",
+        "users://{id}": "User",
+    }
     prompts = _of(statements, "mcp_prompt")
     assert prompts["titled"].description == "Described"
     assert _params(prompts["titled"]) == [("q", None, True, None, "Query")]

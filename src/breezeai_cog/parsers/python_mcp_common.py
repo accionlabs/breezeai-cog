@@ -48,7 +48,7 @@ Resources and prompts, on a server proven as above::
     def review_code(code: str, focus: str = "bugs") -> str: …    params code, focus
 
 * ``mcp_resource`` — ``endpoint`` is the URI (``uri=`` or the first positional argument), a
-  literal; anything else → no record. ``params`` are the template's simple ``{variables}``
+  literal; anything else → no record. ``name`` is ``name=`` when it is a literal, else the URI. ``params`` are the template's simple ``{variables}``
   (``[]`` for a fixed URI; None when the template uses an RFC 6570 operator).
   ``description`` as for a tool.
 * ``mcp_prompt`` — ``endpoint`` is ``name=`` (or the first positional string), else the function
@@ -856,4 +856,5 @@ def _resource(
         description=description,
         params=uri_template_params(uri),
         parent=owner.id if owner is not None else None,
+        name=_literal(_kwarg(call, "name", source), source),
     )

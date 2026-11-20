@@ -31,7 +31,8 @@ Resources and prompts, the same way::
 
 * ``mcp_resource`` — ``UriTemplate =`` a literal; without it the SDK derives the URI from the name
   and the parameters, which is not read → no record. ``params`` are the template's simple
-  ``{variables}`` (``[]`` for a fixed URI; None with an RFC 6570 operator).
+  ``{variables}`` (``[]`` for a fixed URI; None with an RFC 6570 operator). ``name`` is
+  ``Name =`` when a literal, else the URI.
 * ``mcp_prompt`` — ``Name =`` when a literal, else the name derived as for a tool; ``params`` are
   the method's parameters, read as for a tool (the SDK builds the prompt's arguments from them)
   but with name, required and description only: a prompt argument has no type or default.
@@ -237,8 +238,10 @@ def _entry(
     """The record ``attr`` (``[McpServerTool]`` / ``Resource`` / ``Prompt``) declares on
     ``method``; None for a computed name or URI."""
     params: list[Parameter] | None
+    declared: str | None = None  # a resource's own literal ``Name =``
     if kind == RESOURCE:
         endpoint = _string(_named_arg(attr, "UriTemplate", source), source)
+        declared = _string(_named_arg(attr, "Name", source), source)
         params = uri_template_params(endpoint) if endpoint else None
     else:
         named = _named_arg(attr, "Name", source)
@@ -268,6 +271,7 @@ def _entry(
         description=description,
         params=params,
         parent=owner.id if owner is not None else None,
+        name=declared,
     )
 
 

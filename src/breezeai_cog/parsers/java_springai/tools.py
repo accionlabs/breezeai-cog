@@ -34,6 +34,7 @@ Resources and prompts (Spring AI MCP annotations)::
   read.
 * ``mcp_resource`` — ``uri =`` a non-empty literal, else no record. ``params`` are the URI
   template's simple ``{variables}`` (``[]`` for a fixed URI; None with an RFC 6570 operator).
+  ``name`` is ``name =`` when a literal, else the URI.
 * ``mcp_prompt`` — ``name =`` when a literal, else the method name. ``params`` are the method's
   parameters, as the annotations library lists them: ``@McpArg`` ``name`` (else the parameter's
   name), ``description``, ``required`` (false by default); a parameter without ``@McpArg`` is an
@@ -223,9 +224,11 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
             ann = anns.get(key)
             if ann is None or not _library_annotation(ann, key, source, imported[key]):
                 continue
+            declared: str | None = None  # a resource's own literal ``name``
             if kind == RESOURCE:
                 endpoint = java_string(_element(ann, "uri", source), source)
                 params = uri_template_params(endpoint) if endpoint else None
+                declared = java_string(_element(ann, "name", source), source)
             else:
                 named = _element(ann, "name", source)
                 endpoint = java_string(named, source) if named is not None else method_name
@@ -244,6 +247,7 @@ def _annotated_entries(dc: DetectContext) -> list[Emit]:
                     description=java_string(_element(ann, "description", source), source),
                     params=params,
                     parent=owner.id if owner is not None else None,
+                    name=declared,
                 )
             )
     return found

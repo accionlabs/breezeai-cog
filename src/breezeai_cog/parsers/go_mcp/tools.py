@@ -47,6 +47,7 @@ Resources and prompts, registered on the same proven server::
 * Only ``<server>.AddResource`` / ``AddResourceTemplate`` / ``AddPrompt`` on a proven server (as
   for ``<server>.AddTool``), with the literal inline or held by a variable as for a tool.
 * ``endpoint`` — ``URI`` / ``URITemplate`` / ``Name``, a string literal; anything else → no record.
+  A resource's ``name`` is its ``Name`` when a string literal, else the URI.
 * ``params`` — a template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a
   ``Resource``, whose URI is fixed; a prompt's literal ``Arguments`` (``Name``, ``Description``,
   ``Required``), ``[]`` without, None when not a literal.
@@ -629,6 +630,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 description=go_string(fields.get("Description"), source),
                 params=params,
                 node_type=None,
+                name=go_string(fields.get("Name"), source) if kind == RESOURCE else None,
             )
         )
     if not found:

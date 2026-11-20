@@ -33,6 +33,8 @@ Resources and prompts are read the same way, each at its constructor::
     ), reviewHandler)
 
 * ``endpoint`` — the URI / URI template / prompt name, a literal; anything else → no record.
+* ``name`` — a resource's name (``NewResource`` / ``NewResourceTemplate``'s second argument) when
+  a literal, else the URI.
 * ``description`` — ``WithResourceDescription`` / ``WithTemplateDescription`` /
   ``WithPromptDescription``.
 * ``params`` — a template's simple ``{variables}`` (None with an RFC 6570 operator); ``[]`` for a
@@ -438,6 +440,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         name = _string(call[1][0], source)
         if not name:
             continue
+        resource_name: str | None = None  # a resource's own literal name
         if ctor == "NewTool":
             description, params = _params(call[1][1:], source, pkgs)
         elif ctor == "NewPrompt":
@@ -446,6 +449,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             # `NewResource(uri, name, opts…)`: a fixed URI, braces and all, has no variables.
             description = _resource_description(call[1][2:], source, pkgs)
             params = uri_template_params(name) if ctor == "NewResourceTemplate" else []
+            resource_name = _string(call[1][1], source) if len(call[1]) > 1 else None
         var = assigned.get(n.start_byte)
         h = handler_of(n, ctor, var) if var is not None else inline.get(n.start_byte)
         h = _unwrap(h, source, wrapper_pkgs)
@@ -469,6 +473,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 description=description,
                 params=params,
                 node_type=None,
+                name=resource_name,
             )
         )
     if not found:
