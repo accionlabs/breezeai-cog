@@ -218,8 +218,23 @@ Vite configs of the **nearest folder that has any** decide together:
 ## 5. Call resolution
 
 Each function's `calls[]` lists the names it calls. `parsers/callresolve.py` fills
-`calls[].path` with the file that defines the callee, when that can be proven. Resolution stops
-at the first certain answer:
+`calls[].path` with the file that defines the callee, when that can be proven.
+
+In Java a name appears once per function, in order of first appearance, and its `path` comes
+from the first of its calls that resolves:
+
+```java
+void load(JsonObject o) {
+    String a = container.config().getString("a");  // a library call: no file
+    String b = JsonUtil.getString(o, "b");          // a repository class
+}
+// calls: [..., { name: "getString", path: ".../JsonUtil.java" }]
+```
+
+A call in a field initializer (`static final String BUS = Constant.of("ORDERS");`) belongs to no
+function, so it is in no `calls[]`.
+
+Resolution stops at the first certain answer:
 
 ```mermaid
 flowchart TD
@@ -281,7 +296,9 @@ different types:
 | A name declared two ways in one method, or untyped (`var x = f()`, `def x`, `x -> …`) → unknown | `x -> x.ship()` | null |
 | `var x = new T(…)` / `def x = new T(…)` is a `T` | `var a = new Audit(); a.save()` | `Audit` |
 | A field of the class and of its enclosing classes; not of another class in the file | inner class using an outer field | the field's type |
-| A name the method and its classes never declare (an inherited field) takes the file's type for that name, only while every typed declaration of it in the file agrees | constructor `Service(Repo repo) { super(repo) }`, `run() { repo.save() }` | `Repo` |
+| Java: a name the method and its classes never declare is a field an in-repo ancestor declares (any but `private`), its type read where that ancestor is declared; the nearest class declaring it decides, and one that gives it a library type, or a type name two repository classes share, adds nothing (the next row applies). The field's type replaces what another method's same-named variable would have suggested | `Base` declares `protected Helper helper`; `Child extends Base` calls `helper.run()` | `Helper` |
+| A name no in-repo ancestor declares (a field of a library base) takes the file's type for that name, only while every typed declaration of it in the file agrees | constructor `Service(Repo repo) { super(repo) }`, `run() { repo.save() }` | `Repo` |
+| Java, inside an anonymous class body: a bare name is an outer (or inherited outer) field only when the anonymous class's type is a JDK interface that declares no fields (`Runnable`, `Callable`); `this.name` there is the anonymous class's own | `new Runnable() { public void run() { helper.run(); } }` | `Helper`; under a framework's handler (`new Handler<Message>() { … }`) or `new org.lib.Task() { … }` the other rules apply |
 
 **Which languages use which steps:**
 
@@ -322,7 +339,9 @@ decorators/attributes and, where supported, its methods. It is used for two thin
 |---|---|---|
 | **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++, Java | `calls[].path` → the base class's file |
 | **Declared methods on a typed receiver** (Java) — `param.getActor()` where `param` is an `OrderParam` | Java | `calls[].path` → the file that declares `getActor`: `OrderParam`'s own, else its nearest in-repo ancestor's; neither (a method from a library base, or a variable that has another type in this method) → null. A type whose simple name two repository classes share → the file its import (or package) names, only when the class of that name in that file declares the method itself; else null. The repository's Groovy classes count too (Java reads the Groovy index after its own), with the methods a Groovy class has without writing them (generated property accessors, trait methods), and a Java class extending a Groovy class continues its chain into the Groovy classes. A simple name a Java and a Groovy class share means the Java class, unless the file's import or package binds it to the Groovy one: then only the methods that Groovy class declares in its own file resolve |
-| **A bare or `this.` call** (Java) — `alert()` where the file also has a nested or anonymous class declaring `alert` | Java | `calls[].path` → this file only when the calling class (or a class enclosing it) declares `alert`; else the inherited method's file. A call written inside an anonymous or local class body keeps the file-wide answer, and its `this.m()` is not resolved through the outer class's bases |
+| **A bare or `this.` call** (Java) — `alert()` where the file also has a nested or anonymous class declaring `alert` | Java | `calls[].path` → this file only when the calling class (or a class enclosing it) declares `alert`; else the inherited method's file. A call written inside an anonymous or local class body keeps the file-wide answer, and its `this.m()` is not resolved through the outer class's bases. A call in an anonymous class's method is that method's (the anonymous class is a `Class` of its own), never the enclosing method's |
+| **`Outer.this.m()`** (Java) — inside an anonymous handler or an inner class | Java | `this.m()` written in `Outer`: `Outer`'s file when it (or a class enclosing it) declares `m`, else the nearest in-repo ancestor's; a method of a library base → null |
+| **A call on an inherited field** (Java) — `helper.run()` where `helper` is a field of an in-repo base class | Java | the file that declares `run` on the field's type (the field's type as the base's file names it); a `private` field, a field typed with a library class, or a base outside the repository → null |
 | **A call on an imported name** (Java) — `Mode.of(k)`, `Mode.valueOf(k)`, `NS.equals(x)` with `import static …Constants.NS` | Java | `calls[].path` → the file that declares the method: the class's own, else its nearest in-repo ancestor's; a method Java generates (an enum's `values` / `valueOf`), or a call on a statically imported member (a constant, not a class) → null. A class whose simple name two repository classes share → the import's file only when the class of that name there declares the method; else null |
 | **Declared methods in Groovy** — `context.getJobName()`, `context.stamp()`, `Book.findByTitle(…)` | Groovy | the same rule as Java for a typed receiver, an imported name (an `import … as Alias` is looked up as its class; the Groovy parser does this itself, and it belongs in the shared resolver once a second language needs it) and a call on a call. A property counts as declaring the accessors Groovy generates for it: `String jobName` → `getJobName` / `setJobName`, a `final` one only the getter, a primitive `boolean` also `isJobName`; a `private`, `protected`, `public` or `@PackageScope` field none. A method of an in-repo trait the class implements resolves to the trait's file, after the class's own methods (for an interface: of the in-repo interfaces it extends); one that two of its traits declare → null. A class whose body has a parse error anywhere may have lost members to it (an error inside one method can drop the methods after it), and so has a class with a constructor not named after it (a method the grammar read as a field and a constructor, such as an interface's `default String b()`); a call on such a class, or on one whose in-repo parent chain reaches it, resolves to the type's file only when that class declares the method among the members the parse kept (a method the grammar read as a constructor counts); else null, since an inherited method's file is not known. A method added at runtime (GORM's `save`, dynamic finders) or by an AST transformation → null. The repository's Java classes count too (Groovy reads the Java index after its own): a call on a Java type resolves to the Java file declaring the method, and a Groovy class extending a Java class continues its chain into the Java classes. A simple name a Groovy and a Java class share means the Groovy class, unless the file's import or package binds it to the Java one: then only the methods that Java class declares in its own file resolve. A bare call whose name the class declares and also imports statically → null (Groovy picks between them by the arguments) |
 | **A call on a call** (Java) — `builder.dataApi().get(…)`, `Factory.create().run()`, `own().save()` | Java | `calls[].path` → the file that declares the method on the first call's declared return type (that type or its in-repo ancestors); one call deep; a return type that is a library class, or whose simple name two repository classes share → null |

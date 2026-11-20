@@ -17,6 +17,7 @@ from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
+from .anonymous import type_kinds
 from .classes import build_class
 from .functions import class_method_names, defined_names, type_map
 from .imports import JavaIndex, build_fqcn_index, extract_imports
@@ -26,6 +27,31 @@ from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "interface_declaration", "enum_declaration", "record_declaration")
+
+#: JDK interfaces that declare no fields. Inside an anonymous class of one of these
+#: (`new Runnable() { … }`), a bare name the class does not declare is a field of the enclosing
+#: class — inherited ones included — exactly as outside it. Any other anonymous type (a
+#: framework's handler interface included) may declare a field of that name itself, so the call
+#: is left to the other rules there.
+_FIELDLESS_INTERFACES = frozenset({
+    "java.lang.Runnable",
+    "java.util.concurrent.Callable",
+})
+
+
+def fieldless_types(external: list[str]) -> frozenset[str]:
+    """The simple names that mean a field-less interface in a file with these external imports:
+    a single-type import of it, its package imported on demand, or ``java.lang`` — unless a
+    single-type import binds the simple name to another class."""
+    single = {imp.rsplit(".", 1)[-1]: imp for imp in external if not imp.endswith(".*")}
+    out: set[str] = set()
+    for fqcn in _FIELDLESS_INTERFACES:
+        package, simple = fqcn.rsplit(".", 1)
+        bound = single.get(simple)
+        if bound == fqcn or (bound is None and (package == "java.lang"
+                                                or f"{package}.*" in external)):
+            out.add(simple)
+    return frozenset(out)
 
 
 class JavaParser(BaseParser):
@@ -74,16 +100,20 @@ class JavaParser(BaseParser):
             declared_only=True,
             owner_defs=class_method_names(root, source),
             unknown_methods=view.unknown_methods if view is not None else None,
+            inherited_fields=True,
+            fieldless_types=fieldless_types(external),
         )
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
+        kind_of = type_kinds(root, source, idx.type_kinds if isinstance(idx, JavaIndex) else None)
 
         for child in root.named_children:
             if child.type in _CLASS_TYPES:
                 cls_list, methods, cls_statements = build_class(
                     child, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    kind_of=kind_of,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)

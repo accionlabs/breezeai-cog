@@ -168,6 +168,12 @@ A function is **named** when the source gives it a name: a declaration (`functio
 method, or a function assigned to a variable or property (`const getUser = async () => …`). Only
 a function with none of these is anonymous.
 
+A Java **anonymous class** passed as the handler (`new Handler<Message>() { public void handle(…)
+{ … } }`) is a `Class` of its own, and its method is a named `Function` (`Svc$1#handle`). Where
+the framework's handler type has one method, that method is the handler: Vert.x gives `handler` =
+`handle` and the `handlerLine` of that Function (no `handlerPath`: same file). A body with no such
+method, or two overloads of it, keeps the inline line only.
+
 **Wrappers are not handlers.** When the handler argument is a wrapper call around a function
 (`asyncHandler(async (req, res) => { … })`), the handler is the **innermost function**. When a page
 is wrapped in elements (`<Suspense><Dashboard/></Suspense>`), the handler is the **page
