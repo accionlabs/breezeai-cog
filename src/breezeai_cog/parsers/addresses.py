@@ -165,6 +165,12 @@ def has_runtime(address: str | None) -> bool:
 #: Names a value gets when nothing names it.
 _UNNAMED = frozenset({"value", "param", ""})
 _ANY_MARKER = re.compile(r"\$?\{([^{}]*)\}")
+#: A marker's name that names something: an identifier or member path, a ``config:`` / ``env:``
+#: key — never a code fragment (``{ anz: `…` }``, an object written where a path goes).
+_NAME = re.compile(r"(?:(?:config|env):)?[\w$][\w$.:-]*")
+#: What only code has inside braces (``{ anz: `…`, asia: … }``): never a framework's own
+#: parameter (``{id}``, ``{id?}``, ``{*path}``, ``{id:int}``).
+_CODE = re.compile(r"""[\s`'",;]""")
 
 
 def informative(address: str | None) -> str | None:
@@ -177,10 +183,13 @@ def informative(address: str | None) -> str | None:
     names = _ANY_MARKER.findall(address)
     if not names:
         return address
-    rest = _PLACEHOLDER.sub("", _RUNTIME_PART.sub("", address))
+    runtime_free = _RUNTIME_PART.sub("", address)
+    if any(_CODE.search(n) for n in _PLACEHOLDER.findall(runtime_free)):
+        return None  # a code fragment in braces (an object written as a path): no address
+    rest = _PLACEHOLDER.sub("", runtime_free)
     if rest.strip("/:.?&=# "):
         return address
-    return address if any(n not in _UNNAMED for n in names) else None
+    return address if any(n not in _UNNAMED and _NAME.fullmatch(n) for n in names) else None
 
 
 def has_literal(address: str | None) -> bool:

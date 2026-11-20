@@ -627,3 +627,16 @@ fun Application.module(path: String, dao: Any) {
     eps = {s.text.split("(")[0].strip(): s.endpoint for s in st if s.semanticType == "route"}
     assert eps.get("webSocket") == "${path}"  # a route block: its path named
     assert eps.get("delete") is None  # the repo's own `delete(dao, …)`: no path named after `dao`
+
+
+@pytest.mark.parametrize(
+    "address, kept",
+    [
+        ("/api/{id?}", "/api/{id?}"),  # a framework's own parameter forms stay
+        ("/files/{*path}", "/files/{*path}"),
+        ("/x/{id:int}", "/x/{id:int}"),
+        ("/{\n anz: `${base}/a`,\n asia: `/b`\n}", None),  # an object written where a path goes
+    ],
+)
+def test_braces_holding_code_are_no_address(address, kept) -> None:
+    assert informative(address) == kept
