@@ -344,3 +344,76 @@ public class Child extends Base {
     assert calls["first"] == {"only": _f("Other.java")}
     assert calls["second"] == {"inst": _f("Helper.java")}
     assert calls["third"] == {"only": None}  # Helper declares no `only`
+
+
+# --- a variable typed `Outer.Inner` is that nested class, never this file's `Inner` -----------
+
+_GETTER = """package com.acme;
+public class Getter {
+    public static class Context { public void setAppId(String id) {} }
+    public static class Box<T> { public void put(T v) {} }
+}
+"""
+_HANDLER = """package com.acme;
+public class Handler {
+    static class Context { Context(Object body) {} void own() {} }
+    void qualified() { Getter.Context c = new Getter.Context(); c.setAppId("A1"); }
+    void simple() { Context c = new Context(null); c.own(); }
+    void undeclared() { Getter.Context c = new Getter.Context(); c.own(); }
+    void generic() { Getter.Box<String> b = new Getter.Box<>(); b.put("x"); }
+    void ownOuter() { Handler.Context c = new Handler.Context(null); c.own(); }
+}
+"""
+
+
+def test_a_qualified_nested_type_resolves_through_its_outer_class(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {"Getter.java": _GETTER, "Handler.java": _HANDLER}, "Handler.java")
+    assert calls["qualified"] == {"setAppId": _f("Getter.java")}  # same package, no import
+    assert calls["generic"] == {"put": _f("Getter.java")}
+    assert calls["ownOuter"] == {"own": _f("Handler.java")}  # `Handler.Context` is this file's
+    assert calls["simple"] == {"own": _f("Handler.java")}  # a simple name keeps today's rule
+
+
+def test_a_method_the_nested_class_does_not_declare_has_no_path(tmp_path: Path) -> None:
+    # Getter.Context declares no `own`; this file's Context does, but is another class.
+    calls = _calls(tmp_path, {"Getter.java": _GETTER, "Handler.java": _HANDLER}, "Handler.java")
+    assert calls["undeclared"] == {"own": None}
+
+
+def test_an_imported_outer_class_gives_its_file(tmp_path: Path) -> None:
+    getter = _GETTER.replace("package com.acme;", "package com.acme.api;")
+    handler = _HANDLER.replace("package com.acme;", "package com.acme;\nimport com.acme.api.Getter;")
+    calls = _calls(tmp_path, {"api/Getter.java": getter, "Handler.java": handler}, "Handler.java")
+    assert calls["qualified"] == {"setAppId": _f("api/Getter.java")}
+
+
+def test_a_library_outer_class_never_gives_this_file(tmp_path: Path) -> None:
+    # this file's own Context declares `setAppId`, but `Getter.Context` is the library's
+    handler = """package com.acme;
+import org.lib.Getter;
+import java.util.Map;
+public class Handler {
+    static class Context { void setAppId(String s) {} }
+    static class Entry { Object getKey() { return null; } }
+    void run(Map.Entry<String, String> e) {
+        Getter.Context c = new Getter.Context();
+        c.setAppId("A1");
+        e.getKey();
+    }
+}
+"""
+    calls = _calls(tmp_path, {"Handler.java": handler}, "Handler.java")
+    assert calls["run"] == {"setAppId": None, "getKey": None}
+
+
+def test_a_call_on_a_qualified_nested_receivers_call_needs_its_outer_class(tmp_path: Path) -> None:
+    # `c.self()` returns a Context: only the library's Getter.Context could say what that is
+    handler = """package com.acme;
+import org.lib.Getter;
+public class Handler {
+    static class Context { Context self() { return this; } void setAppId(String s) {} }
+    void run() { Getter.Context c = new Getter.Context(); c.self().setAppId("A1"); }
+}
+"""
+    calls = _calls(tmp_path, {"Handler.java": handler}, "Handler.java")
+    assert calls["run"] == {"self": None, "setAppId": None}

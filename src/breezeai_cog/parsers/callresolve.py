@@ -34,6 +34,11 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
   only types in ``fieldless_types`` that are no repository class let the lookup continue, since
   any other type may declare a field of that name itself.
 
+* **Nested type** (with ``nested_types``, Java only): ``x.m()`` where ``x`` is declared
+  ``Outer.Inner`` → ``Inner`` as declared in ``Outer``'s file (this file, an import or the same
+  package), and only when that class or an in-repo ancestor declares ``m``. ``Outer`` outside the
+  repository gives ``None``: a class of this file that shares ``Inner``'s simple name is never it.
+
 * **Call receiver** (with ``declared_only``): ``x.m().n()`` / ``m().n()`` / ``Type.m().n()``
   → ``m``'s declared return type (``heritage`` ``returns``, from ``x``'s type, the enclosing
   class or ``Type``, ancestors included) → the file that declares ``n`` on that type. A longer
@@ -150,6 +155,18 @@ def _base_type(t: str | None) -> str | None:
     return t.rsplit(".", 1)[-1] or None
 
 
+def _nested_name(t: str | None) -> tuple[str, str] | None:
+    """``(Outer, Inner)`` for a type written through its enclosing class — ``Outer.Inner``,
+    ``Outer.Mid.Inner<T>[]`` — else None: a simple name, or a package-qualified one
+    (``com.acme.Foo``, first segment not capitalised)."""
+    if not t:
+        return None
+    parts = t.split("<", 1)[0].strip().rstrip("[]").strip().split(".")
+    if len(parts) < 2 or not all(parts) or not parts[0][:1].isupper():
+        return None
+    return parts[0], parts[-1]
+
+
 def make_resolver(
     bindings: dict[str, str],
     local_defs: set[str],
@@ -164,6 +181,7 @@ def make_resolver(
     unknown_methods: Mapping[tuple[str, str], frozenset[str] | None] | None = None,
     inherited_fields: bool = False,
     fieldless_types: frozenset[str] = frozenset(),
+    nested_types: bool = False,
 ) -> CallResolver:
     """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
     callee's qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -187,7 +205,9 @@ def make_resolver(
     tier models (Java) opts in, so no other language's calls change with the ``fields`` its
     classes' heritage may carry (Groovy reads the Java classes' heritage too).
     ``fieldless_types`` (simple names of library interfaces known to declare no fields) lets the
-    inherited-field tier see through an anonymous class of one of those types."""
+    inherited-field tier see through an anonymous class of one of those types.
+    ``nested_types`` reads a receiver type written ``Outer.Inner`` as that nested class (Java,
+    where a capitalised first segment is a class; in C# or TypeScript it may be a namespace)."""
     types = types or {}
 
     def _type_of(key: str, scope: Mapping[str, str | None] | None) -> tuple[bool, str | None]:
@@ -260,6 +280,35 @@ def make_resolver(
             return resolved if declared is not None and name in declared else None
         return _lookup(typ, name, "methods")[1]
 
+    def _outer_file(outer: str) -> str | None:
+        """The file declaring class ``outer`` as this file sees it: a class of this file (which
+        hides an import of the same name), else an import or same-package binding. None for a
+        library class, or a bound name that is no repository class (a static import)."""
+        where = path if outer in local_defs else bindings.get(outer)
+        if where is None or (heritage is not None and outer not in heritage):
+            return None
+        return where
+
+    def _placed(inner: str, where: str) -> bool:
+        """Whether the one repository class named ``inner`` is declared in ``where``: one of its
+        own methods is. A class with no method of its own cannot be placed, so it is not."""
+        own = heritage.get(inner) if heritage is not None else None
+        return own is not None and where in own.methods.values()
+
+    def _nested(name: str, outer: str, inner: str) -> str | None:
+        """``x.name()`` with ``x`` declared ``Outer.Inner``: the class ``inner`` inside ``outer``'s
+        file decides, never a class of the same simple name elsewhere (this file's own
+        ``Inner``). The method must be declared there or by an in-repo ancestor."""
+        where = _outer_file(outer)
+        if where is None:
+            return None
+        if not declared_only or heritage is None:
+            return where
+        if heritage.get(inner) is None:  # two classes share the name: read the one in `where`
+            declared = unknown_methods.get((where, inner)) if unknown_methods is not None else None
+            return where if declared is not None and name in declared else None
+        return _lookup(inner, name, "methods")[1] if _placed(inner, where) else None
+
     def _imported(name: str, receiver: str, resolved: str) -> str | None:
         """``Name.name()`` on an imported name: the file declaring ``name`` when ``Name`` is a
         repo class (a method the language generates, such as an enum's ``valueOf``, is declared
@@ -297,7 +346,12 @@ def make_resolver(
         else:
             # a variable (even one of unknown type) hides a class of the same name
             known, typ = _type_of(qual, scope)
-            cls = _base_type(typ) if known else (qual if qual in heritage else None)
+            nested = _nested_name(typ) if known and nested_types else None
+            if nested is not None:  # `Outer.Inner` is the class inside Outer's file, or nothing
+                where = _outer_file(nested[0])
+                cls = nested[1] if where is not None and _placed(nested[1], where) else None
+            else:
+                cls = _base_type(typ) if known else (qual if qual in heritage else None)
         for method in methods:
             if cls is None:
                 return None
@@ -359,7 +413,11 @@ def make_resolver(
                 # receiver-type tier below decides, as it does for any such type.
                 if ftype is not None and heritage.get(ftype) is not None:
                     return _lookup(ftype, name, "methods")[1]
-            typ = _base_type(_type_of(receiver, scope)[1])
+            written = _type_of(receiver, scope)[1]
+            nested = _nested_name(written) if nested_types else None
+            if nested is not None:  # `Outer.Inner x`: never this file's own `Inner`
+                return _nested(name, *nested)
+            typ = _base_type(written)
             if typ:
                 resolved = bindings.get(typ) or (path if typ in local_defs else None)
                 if resolved is not None:
