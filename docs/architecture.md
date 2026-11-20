@@ -1109,7 +1109,8 @@ src/breezeai_cog/
 │  ├─ detection/                   shared api / db / query classifiers
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
 │  │  java_spring_config.py, java_web_guards.py, java_security_guards.py, java_variables_common.py,
-│  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
+│  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py,
+│  │  typescript_http_common.py, typescript_nextjs_common.py, aws_sdk_common.py,
 │  │  php_route_common.py, php_data_access_common.py, php_http_common.py,
 │  │  python_common.py, django_common.py
 │  │                               helpers shared by several frameworks or libraries
