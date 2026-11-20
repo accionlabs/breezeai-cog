@@ -38,6 +38,7 @@ from ..treesitter import node_text
 from ..typescript.imports import (
     _CLASS_NODES, _join_segments, _path_pieces, _resolve_pieces, _try_paths,
 )
+from ..typescript.scopes import ConstView, collect_consts
 
 FACT = "angular.route-mounts"
 
@@ -84,6 +85,14 @@ def _collect_route_mounts(root: Node, source: bytes, rel: str,
     loadChildren }] }`` → ``a`` / ``b``), as unresolved pieces (None if dynamic)."""
     classes: list[str] = []
     mounts: list[_MountRaw] = []
+    views: list[ConstView] = []
+
+    def pieces(node: Node | None) -> list[tuple[str, str]] | None:
+        """A route path's pieces, each name bound to the constant it reads here."""
+        if node is not None and node.type != "string" and not views:
+            views.append(collect_consts(root, source, rel, repo_root))
+        return _path_pieces(node, source, views[0] if views else None)
+
 
     def walk(node: Node, outer: tuple[_Pieces, ...]) -> None:
         if node.type in _CLASS_NODES:
@@ -104,10 +113,10 @@ def _collect_route_mounts(root: Node, source: bytes, rel: str,
                 targets = _targets(lc, source, rel, repo_root)
                 if targets:
                     mounts.append(((node.start_point[0] + 1, node.start_point[1]), targets,
-                                   (*outer, _path_pieces(pairs["path"], source))))
+                                   (*outer, pieces(pairs["path"]))))
             if "path" in pairs and pairs.get("children") is not None:
                 children_value = pairs["children"]
-                inner = (*outer, _path_pieces(pairs["path"], source))
+                inner = (*outer, pieces(pairs["path"]))
         for c in node.named_children:
             if children_value is not None and c.type == "pair" \
                     and c.child_by_field_name("value") == children_value:

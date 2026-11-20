@@ -77,6 +77,21 @@ def _ts_express_aws(n: int) -> str:
     )
 
 
+def _ts_express_locals(n: int) -> str:
+    """Routes built from names inside one function: each name is looked up as a local or a
+    constant of the file (``typescript/scopes.py``), never by rescanning the function per name."""
+    body = "".join(
+        f"  const p{i} = read({i});\n"
+        f"  app.get(p{i} + '/r{i}', h);\n"
+        f"  app.get(`${{BASE}}/x{i}`, h);\n"
+        for i in range(n)
+    )
+    return (
+        "const express = require('express');\nconst app = express();\n"
+        f"const BASE = '/api';\nfunction mount() {{\n{body}}}\nfunction h(req, res) {{}}\n"
+    )
+
+
 def _python(n: int) -> str:
     return "".join(
         f"# helper {i}\n"
@@ -707,6 +722,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
     "typescript-express-aws": ("app.ts", _ts_express_aws),
+    "typescript-express-locals": ("app.js", _ts_express_locals),
     "typescript-backbone": ("app.ts", _ts_backbone),
     "python": ("mod.py", _python),
     "python-flask": ("app.py", _python_flask),

@@ -31,7 +31,8 @@ from .cron_expressions import CRON_EXPRESSIONS
 from .patterns import message_pattern
 from .prefixes import Versioning, Versions, nest_prefixes, version_values
 from ..treesitter import node_text
-from ..typescript.imports import resolve_const_value
+from ..typescript.imports import Consts, resolve_const_value
+from ..typescript.scopes import file_consts
 
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
@@ -103,7 +104,7 @@ def _decorator_args(dec: Node) -> list[Node]:
     return [c for c in args.named_children if c.type != "comment"] if args is not None else []
 
 
-def _paths(arg: Node | None, source: bytes, consts: dict[str, str | None]) -> list[str | None]:
+def _paths(arg: Node | None, source: bytes, consts: Consts) -> list[str | None]:
     """A route path argument as the paths it declares: none → ``[""]``; ``'users'`` → one; an
     array ``[':id', ':slug']`` → one per element (Nest serves each). A constant or a template is
     folded through the repo's constants (``BASE`` → ``'base'``); a path that does not resolve (an
@@ -116,7 +117,7 @@ def _paths(arg: Node | None, source: bytes, consts: dict[str, str | None]) -> li
     return [resolve_const_value(arg, source, consts)]
 
 
-def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def _pattern(dec: Node, source: bytes, consts: Consts) -> str | None:
     """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``: the string, or
     canonical JSON for an object pattern (:func:`.patterns.message_pattern`, shared with the
     ``ClientProxy`` sender so the two match); unresolved → None."""
@@ -127,7 +128,7 @@ def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | N
 
 
 def _gateway_namespace(
-    decs: list[Node], source: bytes, consts: dict[str, str | None],
+    decs: list[Node], source: bytes, consts: Consts,
 ) -> str | None:
     """The socket.io namespace of a ``@WebSocketGateway([port,] { namespace })`` class, written
     as a client writes it in ``io('http://host/chat')``: ``'chat'`` → ``/chat``. No namespace
@@ -155,7 +156,7 @@ def _gateway_namespace(
     return ""
 
 
-def _schedule(dec: Node, name: str, source: bytes, consts: dict[str, str | None]) -> str | None:
+def _schedule(dec: Node, name: str, source: bytes, consts: Consts) -> str | None:
     """Schedule of ``@Cron(expr)`` (the first argument) or ``@Interval([name,] ms)`` /
     ``@Timeout([name,] ms)`` (the last): a literal, a constant or a ``CronExpression`` member
     (its value is fixed by the library); anything else (a runtime value) → None."""
@@ -359,7 +360,7 @@ _CONTROLLER_DECORATORS = {"Controller", "JsonController"}  # NestJS + routing-co
 
 
 def _controller_bases(
-    decorators: list[Node], source: bytes, consts: dict[str, str | None],
+    decorators: list[Node], source: bytes, consts: Consts,
 ) -> list[str | None] | None:
     """The class paths of a ``@Controller`` / ``@JsonController`` class (see :func:`_paths`):
     ``@Controller('x')``, ``@Controller(['x', 'y'])``, ``@Controller(BASE)`` and the object form
@@ -526,8 +527,7 @@ def detect_nest_routes(
     """The bindings of this file's controllers and resolvers, for :func:`~..emits.apply`.
     ``index`` is the repo's ``TsAliasIndex``: its ``nest.prefixes`` fact gives the global prefix
     of each app and the ``RouterModule`` path of each registered controller (NestJS only)."""
-    index_consts = getattr(index, "const_values", None)
-    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    consts: Consts = file_consts(index, root, source, path)
     routes: list[Emit] = []
     schedules = framework == "nestjs" and b"@nestjs/schedule" in source
     stub_parents: dict[str, str] = index_fact(index, STUB_PARENTS) or {}

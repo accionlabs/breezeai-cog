@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Sequence, Union
 
 from tree_sitter import Node
 
@@ -24,6 +24,10 @@ from ..additive import (
 )
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
+from .scopes import ConstView, const_key
+
+#: What a fold reads: a file's view of the repository's constants, or one file's own (by name).
+Consts = Union[ConstView, dict[str, str | None]]
 
 # `.vue` is appended LAST so an extensionless import next to both `Foo.ts` and `Foo.vue`
 # still resolves to the JS/TS file (matching bundler resolution order). Only `.vue` is added
@@ -37,12 +41,13 @@ _INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
 class TsAliasIndex:
     """Repo-wide TS resolution index (picklable — crosses the process boundary).
 
-    Holds tsconfig path aliases plus a **constant value map**: repo-wide
-    ``symbol → literal`` for top-level ``const``s, ``enum`` members with an initializer, and
-    ``static readonly`` class fields (keyed ``NAME`` or ``Type.MEMBER``) whose value is a string
-    or a number (as JavaScript writes it in a string: ``5_000`` → ``5000``). A symbol
-    declared with differing literals in >1 place maps to ``None`` (ambiguous → do not
-    resolve through it — precision-first, mirroring the C# type index)."""
+    Holds tsconfig path aliases plus a **constant value map**: ``file::symbol → literal`` for
+    each file's top-level ``const``s, ``enum`` members with an initializer, and ``static readonly``
+    class fields (symbol ``NAME`` or ``Type.MEMBER``) whose value is a string or a number (as
+    JavaScript writes it in a string: ``5_000`` → ``5000``). Keyed by file, because a name means
+    a constant only where a file declares or imports it: read it through a file's
+    :class:`~.scopes.ConstView`, never by bare name. A symbol a file declares with differing
+    literals maps to ``None`` (ambiguous → do not resolve through it)."""
 
     base_dir: str  # absolute baseUrl directory (legacy single-config resolution)
     paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]} — relative to base_dir (legacy)
@@ -195,10 +200,13 @@ def number_literal(node: Node | None, source: bytes) -> str | None:
 
 
 def _literal(node: Node | None, source: bytes, *, constant: bool) -> str | None:
-    """A string literal's value, or a number literal's (see :func:`number_literal`) when the
-    declaration is ``constant`` (``const`` / ``readonly``): a ``let`` number is often a counter."""
+    """A string or number literal's value (see :func:`number_literal`), only when the
+    declaration is ``constant`` (``const`` / ``readonly`` / an enum member): a ``let`` or ``var``
+    can be reassigned, so its first value is no constant."""
+    if not constant:
+        return None
     if node is not None and node.type == "number":
-        return number_literal(node, source) if constant else None
+        return number_literal(node, source)
     return _string_literal(node, source)
 
 
@@ -245,121 +253,28 @@ def _pair_key_name(key: Node | None, source: bytes) -> str | None:
     return None  # computed key [x] → skip
 
 
-def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def resolve_const_value(node: Node, source: bytes, consts: Consts) -> str | None:
     """A value node → its literal string via ``consts``: a string literal, a template whose every
     ``${…}`` resolves, or a member/identifier reference. None if not fully resolvable (honest-null).
-    The call site every detector uses to fold a const-built address into its literal."""
+    The call site every detector uses to fold a const-built address into its literal. Detectors
+    pass the file's :class:`~.scopes.ConstView` (the repository's constants are keyed by file);
+    a plain ``dict`` is one file's own constants, keyed by name."""
     if node.type == "string":
         return _string_literal(node, source)
     if node.type == "template_string":
         return _resolve_template(node, source, consts)
     if node.type in ("identifier", "member_expression"):
         key = member_path(node, source)
-        return consts.get(key) if key is not None else None
+        if key is None:
+            return None
+        if isinstance(consts, ConstView):  # a local of that name hides the constant
+            return consts.value(key, node)
+        return consts.get(key)
     return None
 
 
-_SCOPES = frozenset({
-    "function_declaration", "function_expression", "function", "arrow_function",
-    "method_definition", "generator_function", "generator_function_declaration",
-})
-
-
-def _binds(pattern: Node | None, name: str, source: bytes) -> bool:
-    """Whether the binding pattern ``pattern`` (a name, a destructuring, a typed parameter)
-    declares ``name``."""
-    if pattern is None:
-        return False
-    if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
-        return node_text(pattern, source) == name
-    if pattern.type in ("required_parameter", "optional_parameter"):
-        return _binds(pattern.child_by_field_name("pattern"), name, source)
-    if pattern.type in ("assignment_pattern", "object_assignment_pattern"):
-        return _binds(pattern.child_by_field_name("left"), name, source)
-    if pattern.type == "pair_pattern":
-        return _binds(pattern.child_by_field_name("value"), name, source)
-    if pattern.type in ("object_pattern", "array_pattern", "rest_pattern"):
-        return any(_binds(c, name, source) for c in pattern.named_children)
-    return False
-
-
-def locally_bound(node: Node, name: str, source: bytes) -> bool:
-    """Whether ``name``, read at ``node``, is a binding of an enclosing function: one of its
-    parameters, or a ``const`` / ``let`` / ``var`` of a block inside it (a ``for`` or ``catch``
-    binding included). Such a value is read at runtime even when the repository has a top-level
-    constant of the same name, which the constants table (keyed by name) would otherwise give."""
-    n: Node | None = node.parent
-    while n is not None:
-        if n.type in _SCOPES:
-            single = n.child_by_field_name("parameter")  # `base => …`
-            params = n.child_by_field_name("parameters")
-            if _binds(single, name, source) or any(
-                _binds(p, name, source) for p in (params.named_children if params else ())
-            ):
-                return True
-        elif n.type in ("for_in_statement", "for_statement"):
-            init = n.child_by_field_name("left") or n.child_by_field_name("initializer")
-            if init is not None and name in _declared(init, source):
-                return True
-        elif n.type == "catch_clause" and _binds(n.child_by_field_name("parameter"), name, source):
-            return True
-        elif n.type == "statement_block":  # a module-level name is the constant itself
-            if any(name in _declared(c, source) for c in n.named_children):
-                return True
-        n = n.parent
-    return False
-
-
-def _declared(stmt: Node, source: bytes) -> set[str]:
-    """The names a ``const`` / ``let`` / ``var`` declaration (or a ``for`` head's bare pattern)
-    declares."""
-    if stmt.type not in ("lexical_declaration", "variable_declaration"):
-        return {node_text(stmt, source)} if stmt.type == "identifier" else set()
-    out: set[str] = set()
-    for decl in stmt.named_children:
-        if decl.type == "variable_declarator":
-            pat = decl.child_by_field_name("name")
-            if pat is not None:
-                out.update(
-                    node_text(i, source) for i in _pattern_names(pat)
-                )
-    return out
-
-
-def _pattern_names(pat: Node) -> list[Node]:
-    if pat.type in ("identifier", "shorthand_property_identifier_pattern"):
-        return [pat]
-    out: list[Node] = []
-    for c in pat.named_children:
-        if c.type == "pair_pattern":
-            v = c.child_by_field_name("value")
-            out.extend(_pattern_names(v) if v is not None else [])
-        elif c.type in ("assignment_pattern", "object_assignment_pattern"):
-            left = c.child_by_field_name("left")
-            out.extend(_pattern_names(left) if left is not None else [])
-        elif c.type in ("identifier", "shorthand_property_identifier_pattern",
-                        "object_pattern", "array_pattern", "rest_pattern"):
-            out.extend(_pattern_names(c))
-    return out
-
-
-def _part_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
-    """One part of a path expression folded through ``consts``; None for a name an enclosing
-    function binds (:func:`locally_bound`) — a parameter or local named like a repository
-    constant is not that constant."""
-    root = node
-    while root.type == "member_expression":
-        obj = root.child_by_field_name("object")
-        if obj is None:
-            break
-        root = obj
-    if root.type == "identifier" and locally_bound(node, node_text(root, source), source):
-        return None
-    return resolve_const_value(node, source, consts)
-
-
 def _path_parts(
-    node: Node, source: bytes, consts: dict[str, str | None]
+    node: Node, source: bytes, consts: Consts
 ) -> list[tuple[str | None, str]]:
     """A path expression as parts ``(value, source text)``: the literal text, or None for a
     runtime value (one that does not fold to a constant). ``a + "/x"`` and ``${a}/x`` both give
@@ -381,14 +296,14 @@ def _path_parts(
             elif c.type == "template_substitution":
                 inner = c.named_children[0] if c.named_children else None
                 parts.append((
-                    None if inner is None else _part_value(inner, source, consts),
+                    None if inner is None else resolve_const_value(inner, source, consts),
                     node_text(inner, source) if inner is not None else "",
                 ))
         return parts
-    return [(_part_value(node, source, consts), node_text(node, source))]
+    return [(resolve_const_value(node, source, consts), node_text(node, source))]
 
 
-def folded_path(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def folded_path(node: Node, source: bytes, consts: Consts) -> str | None:
     """A path expression whose every part folds to a constant, as its literal text
     (``BASE + "/users/" + ID`` with ``BASE``/``ID`` constants → ``/api/users/7``); None when a part
     is read at runtime (:func:`runtime_path_template` marks it) or there is no part at all."""
@@ -399,7 +314,7 @@ def folded_path(node: Node, source: bytes, consts: dict[str, str | None]) -> str
 
 
 def runtime_path_template(
-    node: Node, source: bytes, consts: dict[str, str | None], *, outbound: bool = False
+    node: Node, source: bytes, consts: Consts, *, outbound: bool = False
 ) -> str | None:
     """A path expression with a part read at runtime, as an address with that part marked
     (``addresses.py``): ``BASE + "/users"`` and `` `${BASE}/users` `` give ``${BASE}/users``. In a
@@ -475,7 +390,7 @@ def _simple_name(text: str) -> str | None:
     return value_path(text)
 
 
-def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def _resolve_template(node: Node, source: bytes, consts: Consts) -> str | None:
     out: list[str] = []
     for c in node.children:
         if c.type == "string_fragment":
@@ -540,9 +455,9 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
     """Record ``symbol → literal`` from one file's top-level constants: ``const NAME = 'x'``,
     ``enum E { M = 'x' }`` (→ ``E.M``), ``static readonly M = 'x'`` (→ ``C.M``), and the leaves of
     a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Values
-    other than a string or a number are skipped, and a number only counts when declared constant
-    (``const`` / ``readonly`` / an enum member); a symbol seen with >1 distinct literal collapses
-    to ``None`` (honest-null)."""
+    other than a string or a number are skipped, and both only count when declared constant
+    (``const`` / ``readonly`` / an enum member: a ``let`` / ``var`` may be reassigned); a symbol
+    seen with >1 distinct literal collapses to ``None`` (honest-null)."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
             record_distinct(const_values, sym, val)
@@ -564,7 +479,7 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                     if nm is not None and nm.type == "identifier":
                         value = _unwrap_const_expr(d.child_by_field_name("value"))
                         add(node_text(nm, source), _literal(value, source, constant=constant))
-                        if value is not None and value.type == "object":
+                        if constant and value is not None and value.type == "object":
                             obj_consts[node_text(nm, source)] = value
         elif node.type == "enum_declaration":
             ename = next((c for c in node.named_children if c.type in ("identifier", "type_identifier")), None)
@@ -628,23 +543,37 @@ def _collect_heritage(root: Node, source: bytes, rel: str) -> dict[str, ClassHer
     return out
 
 
-def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | None:
-    """A route ``path`` value → ordered resolvable pieces, or None if any piece is dynamic
-    (a call, a template substitution that isn't a plain member/identifier). The pieces resolve
-    later against ``const_values``, once every file's constants are known."""
+#: A ``("ref", …)`` piece: the constants-table key, then the name as written (for a marker).
+_REF_SEP = "\x1f"
+
+
+def _path_pieces(
+    node: Node | None, source: bytes, view: Consts | None = None,
+) -> list[tuple[str, str]] | None:
+    """A route ``path`` value → ordered pieces, or None if any piece is dynamic (a call, a
+    template substitution that isn't a plain member/identifier). The pieces resolve later, once
+    every file's constants are known (:func:`resolve_pieces`):
+
+    * ``("lit", text)`` — literal text;
+    * ``("ref", key + name)`` — a name ``view`` (this file's) binds to a constant: its table key
+      and the name as written (:func:`piece_name`);
+    * ``("sym", name)`` — a name that reads no constant here (a local, an unknown global), or
+      any name when no ``view`` is given: it never resolves, and is marked by its name."""
     if node is None:
         return None
     if node.type == "string":
         frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
         return [("lit", node_text(frag, source) if frag is not None else "")]
     if node.type in ("member_expression", "identifier"):
-        return [("sym", node_text(node, source))]
+        text = node_text(node, source)
+        key = view.key(text, node) if isinstance(view, ConstView) else None
+        return [("ref", key + _REF_SEP + text)] if key is not None else [("sym", text)]
     if node.type == "binary_expression":
         op = node.child_by_field_name("operator")
         if op is None or node_text(op, source) != "+":
             return None
-        left = _path_pieces(node.child_by_field_name("left"), source)
-        right = _path_pieces(node.child_by_field_name("right"), source)
+        left = _path_pieces(node.child_by_field_name("left"), source, view)
+        right = _path_pieces(node.child_by_field_name("right"), source, view)
         return (left + right) if (left is not None and right is not None) else None
     if node.type == "template_string":
         pieces: list[tuple[str, str]] = []
@@ -653,7 +582,7 @@ def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | No
                 pieces.append(("lit", node_text(child, source)))
             elif child.type == "template_substitution":
                 inner = next((c for c in child.named_children), None)
-                sub = _path_pieces(inner, source)
+                sub = _path_pieces(inner, source, view)
                 if sub is None:
                     return None
                 pieces.extend(sub)
@@ -661,6 +590,22 @@ def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | No
                 return None
         return pieces
     return None
+
+
+def piece_value(kind: str, text: str, const_values: Consts) -> str | None:
+    """A piece's text when it is known: a literal, or the constant a ``ref`` piece reads (its
+    key is the table's own, so a view is read through its table)."""
+    if kind == "lit":
+        return text
+    if kind == "ref":
+        table = const_values.table if isinstance(const_values, ConstView) else const_values
+        return table.get(text.split(_REF_SEP, 1)[0])
+    return None
+
+
+def piece_name(kind: str, text: str) -> str:
+    """The name a piece is written with — what a ``${name}`` marker shows."""
+    return text.split(_REF_SEP, 1)[-1] if kind == "ref" else text
 
 
 # Filename infixes / dirs whose mounts are test scaffolding, not the wired app (mirrors
@@ -768,18 +713,16 @@ def _ts_index_one(
         return None
 
 
-def _resolve_pieces(pieces: list[tuple[str, str]], const_values: dict[str, str | None]) -> str | None:
-    """Join a path's resolvable pieces to a literal, or None if any const piece is unresolved
-    (missing from the index, or ambiguous → None there). Honest-null: never a guessed segment."""
+def _resolve_pieces(pieces: list[tuple[str, str]], const_values: Consts) -> str | None:
+    """Join a path's pieces to a literal, or None if any piece is unknown: a name that reads no
+    constant, or a constant missing from the index (or ambiguous → None there). Honest-null:
+    never a guessed segment."""
     out: list[str] = []
     for kind, text in pieces:
-        if kind == "lit":
-            out.append(text)
-        else:  # "sym" — a const/enum/static-field reference resolved cross-file
-            val = const_values.get(text)
-            if val is None:
-                return None
-            out.append(val)
+        val = piece_value(kind, text, const_values)
+        if val is None:
+            return None
+        out.append(val)
     return "".join(out)
 
 
@@ -801,14 +744,14 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("typescript", fact_files, repo_root, jobs)
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
-    for frag in parallel_map(args, _ts_index_one, jobs):
+    for (_, rel, _), frag in zip(args, parallel_map(args, _ts_index_one, jobs)):
         if not frag:
             continue
         (cv, heritage, facts) = frag
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
-        for sym, literal in cv.items():
-            record_distinct(const_values, sym, literal)
+        for sym, literal in cv.items():  # keyed by file: a name means nothing on its own
+            record_distinct(const_values, const_key(rel, sym), literal)
         for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
             record_distinct(class_heritage, cname, ch, same=lambda a, b: False)
 

@@ -42,6 +42,7 @@ from ..addresses import runtime_part
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import (
+    Consts,
     TsAliasIndex,
     _collect_const_values,
     _is_fixture_path,
@@ -53,6 +54,7 @@ from ..typescript.imports import (
     runtime_path_template,
 )
 from ..typescript.imports import _resolve as _resolve_module
+from ..typescript.scopes import collect_consts, const_key
 from ..typescript_express.mounts import mw_name
 from ..typescript_express.routes import package_locals
 
@@ -233,7 +235,7 @@ def guard_names(value: Node | None, source: bytes) -> list[str]:
 
 
 class _Analyzer:
-    def __init__(self, root: Node, source: bytes, consts: dict[str, str | None] | None) -> None:
+    def __init__(self, root: Node, source: bytes, consts: Consts | None) -> None:
         self.root = root
         self.source = source
         self.consts = consts or {}
@@ -759,12 +761,12 @@ def _filter_value(node: Node, source: bytes) -> tuple[str, str] | str:
     return ("str", text) if text is not None else "unknown"
 
 
-def analyze(root: Node, source: bytes, consts: dict[str, str | None] | None = None) -> FileFastify:
+def analyze(root: Node, source: bytes, consts: Consts | None = None) -> FileFastify:
     """The Fastify instances, registrations and plugin exports of one file."""
     return _Analyzer(root, source, consts).run()
 
 
-def analyzer(root: Node, source: bytes, consts: dict[str, str | None] | None = None) -> _Analyzer:
+def analyzer(root: Node, source: bytes, consts: Consts | None = None) -> _Analyzer:
     """:func:`analyze`, keeping the analyzer for :meth:`_Analyzer.lookup` (which scope a call's
     receiver is bound in)."""
     a = _Analyzer(root, source, consts)
@@ -812,8 +814,10 @@ class _FileValue:
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileValue | None:
     if root is None or _is_fixture_path(rel):
         return None
-    consts: dict[str, str | None] = {}
-    _collect_const_values(root, source, consts)  # this file's own: the repo's are not known yet
+    own: dict[str, str | None] = {}
+    _collect_const_values(root, source, own)  # this file's own: the repo's are not known yet
+    consts = collect_consts(root, source, rel, repo_root,
+                            {const_key(rel, k): v for k, v in own.items()})
     info = analyze(root, source, consts)
     if not (info.edges or info.autoloads or info.exports or info.config):
         return None

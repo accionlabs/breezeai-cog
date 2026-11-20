@@ -348,9 +348,10 @@ def test_constant_paths_resolve_through_the_repo_constants(analyze_files) -> Non
 
 
 def test_unresolved_paths_leave_the_endpoint_empty(analyze_files) -> None:
-    # A constant cog cannot read (imported from a package, two different values in the repo, a
-    # call, a spread object) leaves `endpoint` empty: never the constant's name, never a route
-    # that silently lost its prefix.
+    # A constant cog cannot read (imported from a package, a call, a spread object) leaves
+    # `endpoint` empty: never the constant's name, never a route that silently lost its prefix.
+    # A constant imported from a file reads that file's value, even when another file declares
+    # the same name differently (`DUP` from `./a` is 'one', not ambiguous with `./b`'s 'two').
     src = (
         COMMON
         + "import { EXT } from 'some-package';\n"
@@ -370,8 +371,8 @@ def test_unresolved_paths_leave_the_endpoint_empty(analyze_files) -> None:
     })
     assert _routes(st) == [
         ("GET", "/ok/x", "f"),
+        ("GET", "/one/k", "b"),
         ("GET", None, "a"),
-        ("GET", None, "b"),
         ("GET", None, "c"),
         ("GET", None, "d"),
         ("GET", None, "e"),

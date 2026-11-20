@@ -37,7 +37,8 @@ from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
-from ..typescript.imports import resolve_const_value
+from ..typescript.imports import Consts, resolve_const_value
+from ..typescript.scopes import file_consts
 
 
 def _join(base: str, sub: str) -> str:
@@ -338,9 +339,9 @@ def _emit_v7(call: Node, kind: str, endpoint: str, handler_arg: Node | None,
         text=node_text(call, source).split("\n", 1)[0][:120]))
 
 
-def _path_arg(node: Node | None, source: bytes, const_values: dict[str, str | None] | None) -> str:
+def _path_arg(node: Node | None, source: bytes, const_values: Consts | None) -> str:
     """A route/prefix path argument → its resolved string. Folds a constant (``paths.discover.root``
-    / a `${…}` template of consts) via the repo-wide ``const_values``; falls back to the raw text
+    / a `${…}` template of consts) via the constants this file sees (``typescript.scopes``); falls back to the raw text
     when it doesn't fully resolve — so an unresolved path is no worse than today, never a *different*
     wrong URL (honest-null)."""
     if node is not None and const_values:
@@ -352,7 +353,7 @@ def _path_arg(node: Node | None, source: bytes, const_values: dict[str, str | No
 
 def _process_v7(node: Node, prefix: str, source: bytes, path: str,
                 routes: list[Emit], consts: dict[str, Node],
-                guard: frozenset[str], const_values: dict[str, str | None] | None) -> None:
+                guard: frozenset[str], const_values: Consts | None) -> None:
     """Recursively resolve a v7 route node under the accumulated ``prefix``. Handles the
     array / spread / const-identifier / helper-call forms; ``guard`` breaks const cycles.
     ``const_values`` folds a path built from a ``{…} as const`` object into its literal URL."""
@@ -409,7 +410,7 @@ def _v7_entry(root: Node, source: bytes) -> Node | None:
 
 
 def _detect_v7(root: Node, source: bytes, path: str, routes: list[Emit],
-               const_values: dict[str, str | None] | None) -> None:
+               const_values: Consts | None) -> None:
     # Gate: the route/index/layout/prefix call helpers exist only in v7 framework mode.
     # Keying on the import keeps this inert on v5/v6 (react-router-dom) code.
     if b"@react-router/dev" not in source:
@@ -421,7 +422,7 @@ def _detect_v7(root: Node, source: bytes, path: str, routes: list[Emit],
 
 
 def detect_react_routes(root: Node, source: bytes, path: str, *,
-                        const_values: dict[str, str | None] | None = None) -> list[Emit]:
+                        const_values: Consts | None = None) -> list[Emit]:
     """This file's React Router page routes (JSX, config objects, v7 route modules), for
     :func:`~..emits.apply`."""
     routes: list[Emit] = []
@@ -455,7 +456,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         return None  # a Vue / Angular `{ path, component }` array is not a React route
     routes = detect_react_routes(
         dc.root, dc.source, dc.path,
-        const_values=getattr(dc.ctx.resolution_index, "const_values", None),
+        const_values=file_consts(dc.ctx.resolution_index, dc.root, dc.source, dc.path),
     )
     return Detection(routes, label="react") if routes else None
 

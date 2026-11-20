@@ -30,6 +30,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
 from ..treesitter import node_text
+from ..typescript.scopes import collect_consts
 from ..typescript.imports import (
     _is_fixture_path,
     _module_of,
@@ -330,6 +331,7 @@ def _collect_express_mounts(
     exports_of = _relative_import_exports(root, source)
     own_routers = router_locals(root, source) if b"Router" in source else set()
     mount_dir = (repo_root / rel).parent
+    view = collect_consts(root, source, rel, repo_root)  # which constant each name reads here
     out: list[_FactoryMount] = []
     instances: list[_InstanceMount] = []
 
@@ -343,7 +345,7 @@ def _collect_express_mounts(
                         and obj is not None and _mount_receiver_ok(node_text(obj, source))):
                     args = node.child_by_field_name("arguments")
                     arg_nodes = list(args.named_children) if args is not None else []
-                    pieces = _path_pieces(arg_nodes[0], source) if arg_nodes else None
+                    pieces = _path_pieces(arg_nodes[0], source, view) if arg_nodes else None
                     literal = "".join(t for _, t in pieces) \
                         if pieces is not None and all(k == "lit" for k, _ in pieces) else None
                     # a path: a literal starting with "/", or anything else that may fold to one

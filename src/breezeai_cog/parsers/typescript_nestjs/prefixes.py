@@ -26,7 +26,7 @@ map once it is complete.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from tree_sitter import Node
@@ -35,7 +35,10 @@ from ..additive import FactSpec, index_fact, register_fact
 from ..addresses import runtime_part
 from ..index_common import record_distinct
 from ..treesitter import node_text
-from ..typescript.imports import _join_segments, _path_pieces, _resolve_pieces, _string_literal
+from ..typescript.imports import (
+    _join_segments, _path_pieces, _resolve_pieces, _string_literal, piece_name, piece_value,
+)
+from ..typescript.scopes import ConstView, collect_consts
 
 FACT = "nest.prefixes"
 
@@ -181,7 +184,7 @@ def _nest_exclude(opts: Node | None, source: bytes) -> NestExclude | None:
     return ()
 
 
-def _collect_nest(root: Node, source: bytes) -> _NestRaw | None:
+def _collect_nest(root: Node, source: bytes, view: ConstView | None = None) -> _NestRaw | None:
     """This file's NestJS wiring: a bootstrap (``NestFactory.create`` and/or
     ``app.setGlobalPrefix(prefix, {exclude})``), ``@Module({controllers: [...]})`` classes, and
     ``RouterModule.register([{path, module, children}])`` entries. None when there is none."""
@@ -206,7 +209,7 @@ def _collect_nest(root: Node, source: bytes) -> _NestRaw | None:
             if name is not None:
                 path_v = pairs.get("path")  # optional: a path-less entry only groups children
                 register.append((name, parent,
-                                 _path_pieces(path_v, source) if path_v is not None else [("lit", "")]))
+                                 _path_pieces(path_v, source, view) if path_v is not None else [("lit", "")]))
             kids = pairs.get("children")
             if kids is not None and kids.type == "array":
                 entries(kids, name)
@@ -219,7 +222,7 @@ def _collect_nest(root: Node, source: bytes) -> _NestRaw | None:
             args = n.child_by_field_name("arguments")
             arg_nodes = list(args.named_children) if args is not None else []
             if ftext.endswith(".setGlobalPrefix") and arg_nodes:
-                boot = (_path_pieces(arg_nodes[0], source)
+                boot = (_path_pieces(arg_nodes[0], source, view)
                         or [("rt", node_text(arg_nodes[0], source))],
                         _nest_exclude(arg_nodes[1] if len(arg_nodes) > 1 else None, source))
             elif ftext.endswith(".enableVersioning"):
@@ -302,7 +305,10 @@ def _nest_prefixes(
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: object) -> tuple[str, _NestRaw] | None:
     """(this file's directory, its NestJS wiring)."""
-    nest = _collect_nest(root, source)
+    if not any(m in source for m in _NEST_BOOT) and b"@Module" not in source:
+        return None
+    view = collect_consts(root, source, rel, repo_root if isinstance(repo_root, Path) else None)
+    nest = _collect_nest(root, source, view)
     if nest is None:
         return None
     anchor = PurePosixPath(rel).parent.as_posix()
@@ -342,8 +348,8 @@ def _prefix_template(pieces: list[tuple[str, str]], consts: dict[str, str | None
     for kind, text in pieces:
         if kind == "lit":
             out.append(text)
-        elif kind == "sym" and consts.get(text) is not None:
-            out.append(str(consts[text]))
+        elif (value := piece_value(kind, text, consts)) is not None:
+            out.append(value)
         else:
-            out.append(runtime_part(text))
+            out.append(runtime_part(piece_name(kind, text)))
     return "".join(out)

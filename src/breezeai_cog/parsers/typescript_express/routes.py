@@ -28,9 +28,10 @@ from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
     _path_pieces, _resolve_pieces,
-    _module_of, _require_module, folded_path, local_source, relative_requires,
+    Consts, _module_of, _require_module, folded_path, local_source, relative_requires,
     runtime_path_template,
 )
+from ..typescript.scopes import file_consts
 from ..wiring import compose_guards
 from .mounts import (
     _PATH_EXPRESSIONS, _is_require_express, express_mounts, is_router_call, mw_name, router_locals,
@@ -105,7 +106,7 @@ def _string_value(node: Node, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
-def _path_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def _path_value(node: Node, source: bytes, consts: Consts) -> str | None:
     """Route-path argument as a string: a plain string literal verbatim, or a template literal
     whose every ``${…}`` resolves to a constant (``consts``: the repo's string constants). An
     unresolved part makes the whole path unknown → None — never a ``{name}`` placeholder or a
@@ -423,7 +424,7 @@ def _serving_middleware(chain: list[Node], source: bytes,
 def _classify(
     call: Node, source: bytes, root: Node, bindings: dict[str, str],
     routers: frozenset[str] = frozenset(), decl_lines: dict[str, int | None] | None = None,
-    consts: dict[str, str | None] | None = None,
+    consts: Consts | None = None,
     packages: dict[str, tuple[str, str]] | None = None,
     plain: frozenset[str] | None = None,
     apps: frozenset[str] = frozenset(),
@@ -553,7 +554,7 @@ def _chain_middleware(call: Node, route_call: Node, source: bytes) -> list[Node]
 
 def _classify_route_verb(
     call: Node, route_call: Node, method: str, source: bytes, routers: frozenset[str],
-    decl_lines: dict[str, int | None] | None, consts: dict[str, str | None] | None,
+    decl_lines: dict[str, int | None] | None, consts: Consts | None,
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """One verb of an ``X.route(path).get(...)`` chain → a route at ``path`` with the verb's
     handler (last argument) and guards (the arguments before it). An ``.all(...)`` followed by
@@ -633,7 +634,7 @@ def _apply_base(
     return _join(base, endpoint)
 
 
-def _runtime_base(first: Node, source: bytes, consts: dict[str, str | None],
+def _runtime_base(first: Node, source: bytes, consts: Consts,
                   routers: set[str]) -> str | None:
     """A mount base read at runtime, marked (``addresses.py``): a path with a literal part
     (``BASE + "/api"`` → ``${BASE}/api``) or one configuration / environment read
@@ -652,7 +653,7 @@ def _join(base: str, local: str) -> str:
 
 def _receiver_bases(
     root: Node, source: bytes, file_base: str | None, imported: dict[str, str],
-    consts: dict[str, str | None] | None = None, unknown: frozenset[str] = frozenset(),
+    consts: Consts | None = None, unknown: frozenset[str] = frozenset(),
     file_unknown: bool = False,
 ) -> tuple[dict[str, str], set[str]]:
     """(router variable → the base its routes are served under, routers served somewhere
@@ -686,7 +687,7 @@ def _receiver_bases(
             if not literal.startswith("/"):
                 continue  # not a mount path
         elif first.type in _PATH_EXPRESSIONS:
-            pieces = _path_pieces(first, source)
+            pieces = _path_pieces(first, source, consts)
             folded = _resolve_pieces(pieces, consts or {}) if pieces is not None else None
             path = folded if folded is not None and folded.startswith("/") else None
             if folded is None:
@@ -854,8 +855,7 @@ def detect_express(
     # (an exported Router()), else the whole file (a router factory).
     mount_guards = mounts.router_guards.get(path, {})
     file_mount_guards = list(mounts.factory_guards.get(path, ()))
-    index_consts = getattr(index, "const_values", None)
-    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    consts: Consts = file_consts(index, root, source, path)
     # A factory mounted at a base that does not resolve, or at two: every route of the file is
     # served somewhere unknown.
     file_unknown = path in mounts.unknown_factories
@@ -932,7 +932,7 @@ def detect_express(
     return found
 
 
-def _own_template(call: Node, source: bytes, consts: dict[str, str | None] | None) -> str | None:
+def _own_template(call: Node, source: bytes, consts: Consts | None) -> str | None:
     """A route path with a part read at runtime as an address with that part marked
     (``BASE + "/users"`` → ``${BASE}/users``), from the verb call's path or, for
     ``route(path).get(h)``, the ``route(...)`` call's."""
