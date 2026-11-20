@@ -90,7 +90,8 @@ def build_class(
         (c for c in node.named_children if c.type == "parameter_list"), None)
     if param_list is not None:
         ctor_params = [ConstructorParam(name=p.name, type=p.type)
-                       for p in extract_params(param_list, source)]
+                       for p in extract_params(param_list, source)
+                       if p.type is not None]
 
     body = node.child_by_field_name("body")
     if body is not None:
@@ -111,6 +112,7 @@ def build_class(
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
+                        if p.type is not None
                     ]
             elif member.type in _NESTED_CLASS_TYPES:
                 # Member (nested) class / struct / record / interface / enum — its own Class

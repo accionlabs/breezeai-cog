@@ -22,7 +22,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 
 | Language | Extensions | Framework / detector support |
 |---|---|---|
-| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, AngularJS 1.x (ngRoute and ui-router routes, controller/component/directive registrations, `$resource`; additive), Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
+| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, AngularJS 1.x (ngRoute and ui-router routes, controller/component/directive registrations, `$resource`; additive), Express, React, Vue, Next.js (App + Pages Router API routes and pages, `.mdx` pages), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI; Django (`urlpatterns` → one route per view and verb, class-based views and their bases followed across files, `include()` chains from `ROOT_URLCONF`, auth decorators / mixins and agreed `MIDDLEWARE` as guards); Django REST framework (router registrations → one route per viewset action and `@action`, generic API views, `@api_view`, `permission_classes` as guards, `serializer_class` as DTOs); Flask (additive — routes, `add_url_rule`, `MethodView`, blueprint prefixes followed across files, `before_request` hooks and Flask-Login as guards) |
 | PHP | `.php .phtml` | Laravel, CodeIgniter 4, Slim, Symfony; WordPress hooks, Laravel Event/Bus and Symfony EventDispatcher/Messenger (additive) |
 | Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
@@ -38,15 +38,18 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | CUDA | `.cu .cuh` | — ; kernels and `__device__` functions are functions, a `<<<…>>>` launch is a call; calls into C and C++ resolve |
 | JSP | `.jsp .jspx .jspf .tag .tagx` ‡ | JSP 1.0 – Jakarta Pages 4.0, standard and XML syntax: directly served pages as `page` routes, links and Struts tags as navigation; directives, standard actions, JSTL / custom tags, EL and deferred EL; `<%! %>` methods as Functions and scriptlet code as Java statements (JDBC in a scriptlet is a db call); includes, preludes / codas, tag files, `.tld` descriptors and `page import` classes as `importFiles`; declared legacy encodings decoded |
 | Groovy † | `.groovy` | Vert.x |
-| HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
+| HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx request attributes (`hx-get` …) captured as `api_call` |
 | GraphQL | `.graphql .gql .graphqls` | Schema-first SDL — types, fields, operations and resolvers |
 | HCL / Terraform | `.tf .tfvars .hcl` | HCL (HashiCorp Configuration Language) — top-level blocks as statements; `module` blocks as Classes (with `constructorParams` for input variables); module and provider sources as `externalImports`; Terraform-specific detection via `hcl_terraform` |
 | Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
 | XSD | `.xsd` | XML Schema — global `element` / `complexType` → `data_model` entity (`endpoint`/`framework` set, full body on `text`); `simpleType` / `group` / `attributeGroup` captured the same way but structural-only (reusable fragments, not entities); `import` / `include` recorded; a relative `schemaLocation` in the repo → `importFiles`, a URL → `externalImports` |
 | WSDL | `.wsdl` | WSDL 1.1 (SOAP) — `message` → `data_model` entity; every `portType` operation → a plain statement with its `PortType/Operation` address and DTOs (wiring, not an entry point: the implementing code is the binding), independent of whether a `binding` implements it; `wsdl:import` / embedded-schema locations → `importFiles` / `externalImports`; reuses the XSD walker for embedded `<types>` schemas |
+| MDX | `.mdx` | Markdown with JSX — block structure by a scanner (no MDX grammar); the top-level `import` / `export` blocks are parsed (`tsx` grammar) for `importFiles` / `externalImports` / `exports`, resolved like TypeScript (tsconfig aliases); `loc` counts only those lines, not the prose; the prose is captured as a Markdown document (front matter, title, headings, `doc` statement); Next.js MDX pages (additive) |
 | JSLT | `.jslt` | JSON query/transform language — hand-rolled structural scan (no tree-sitter grammar): `def` → `Function` (untyped params, same-file `calls[]` resolved), `import` / `let` declarations plus the trailing module expression |
 | Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
-| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
+| Markdown / docs | `.md .mdc`, `README.rst`, `.cursorrules` | One whole-file statement per file (`nodeType: synthetic`, secrets masked; a long one is split into ordered parts like any other statement), with `semanticType` `skill` (`SKILL.md`), `agent`, `command`, `agent_instructions` (`CLAUDE.md`, `AGENTS.md`, Cursor / Copilot rules) or `doc` (`File.metadata.kind` tells a `readme`, an `adr` and a `changelog` apart); front-matter `name` / `description` on the statement; title + heading outline on the File. Not code: no language, no LOC. |
+| MCP servers | (additive, across languages) | Every tool an MCP server declares → `mcp_tool` (`method: TOOL`, `endpoint` = tool name, `description`, `params`): Python FastMCP (`fastmcp`) and the official SDK's `mcp.server.fastmcp` (`python-mcp`), TypeScript `@modelcontextprotocol/sdk` `tool` / `registerTool` (`typescript-mcp`), Java / Kotlin Spring AI `@McpTool` / `@Tool` in an MCP server (`spring-ai-mcp`), the MCP Java SDK tool specifications (`java-mcp`), the Kotlin SDK `addTool` (`kotlin-mcp`), C# `[McpServerTool]` (`csharp-mcp`), Go `mark3labs/mcp-go` (`mcp-go`). See the MCP tables in `docs/entry-point-roles/` |
+| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle[.kts]`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
 ‡ **Markup/view files are skipped by default.** `.html .htm .cshtml .razor .aspx .ascx .master
 .vue .jsp .jspx .jspf .tag .tagx` are gated behind `--capture-templates`, because markup produces a large number of low-value
@@ -64,11 +67,10 @@ shapes still give a wrong statement record:
 
 | Code | What is captured |
 |---|---|
-| `// note` then `String name = load()` | two statements, `String` and `name = load()`; the `load` call is kept |
 | `Map<String, Object> errors` (generic or array type, no initializer) | one declaration statement that also holds the next line |
-| `(long) (y)` | the cast is read as a call, and the statement can run on into the next line |
 | `A { … },` (an enum constant with a body) | the constants after it are lost; they can surface as a field |
-| `println name`, `log.info "x"` (a call without parentheses) | no call; the line becomes separate statements. Only a bare name with literal or closure arguments (`println "x"`) parses as a call, and cog does not record it yet |
+| `println name`, `log.info "x"`, `log.info "a", name` (a call without parentheses whose argument is a name, or whose receiver is qualified) | no call; the line becomes separate statements. A bare name with literal, closure or named arguments (`println "x"`, `render view: 'show'`) is a call |
+| `for (var k : keys)` | the loop does not parse; the methods after it in the class can be lost |
 
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external

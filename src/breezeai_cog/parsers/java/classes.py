@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
@@ -9,7 +11,16 @@ from ...schemas import Class, ConstructorParam, Function, Statement
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
-from .functions import build_method, class_members, extract_annotations, extract_params, modifiers_node
+from .anonymous import KindOf, anonymous_classes
+from .functions import (
+    build_method,
+    class_fields,
+    declarations,
+    class_members,
+    extract_annotations,
+    extract_params,
+    modifiers_node,
+)
 from .statements import extract_statements
 
 _TYPE = {
@@ -47,10 +58,15 @@ def build_class(
     limit: int,
     resolve: CallResolver = noop_resolver,
     owner: str | None = None,
+    outer_fields: Mapping[str, str | None] | None = None,
+    kind_of: KindOf | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     """Return (classes, methods, statements) — all flat, linked by parentId. The
     class list is this class plus any nested (inner) member types, each parented to
-    its enclosing class."""
+    its enclosing class. ``outer_fields`` are the enclosing classes' fields, which an inner
+    class's methods also see (its own fields hide them). Each anonymous class in its body is a
+    Class of its own (``anonymous.py``); ``kind_of`` tells it what the type it instantiates is
+    declared as (``anonymous.type_kinds``)."""
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
     qualified = f"{owner}.{name}" if owner else name
@@ -74,16 +90,22 @@ def build_class(
     ctor_params: list[ConstructorParam] = []
 
     body = node.child_by_field_name("body")
+    fields = dict(outer_fields or {})
+    components = node.child_by_field_name("parameters") if node.type == "record_declaration" else None
+    for comp in components.named_children if components is not None else ():
+        fields.update(declarations(comp, source))  # `record R(Repo repo)` — a field `repo`
+    fields.update(class_fields(body, source))
     if body is not None:
         statements.extend(
-            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
+            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids,
+                               skip_anonymous=True)
         )
         for member in class_members(body):
             if member.type in ("method_declaration", "constructor_declaration"):
                 fn, fn_statements = build_method(
                     member, source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve,
+                    resolve=resolve, fields=fields, own_anonymous=True,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
@@ -91,6 +113,7 @@ def build_class(
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
+                        if p.type is not None
                     ]
             elif member.type in _NESTED_CLASS_TYPES:
                 # Member (inner) class / interface / enum / record — extracted as its
@@ -98,11 +121,20 @@ def build_class(
                 sub_classes, sub_methods, sub_statements = build_class(
                     member, source, path,
                     parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, owner=qualified,
+                    resolve=resolve, owner=qualified, outer_fields=fields, kind_of=kind_of,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
                 statements.extend(sub_statements)
+        anon_classes, anon_methods, anon_statements = anonymous_classes(
+            body, source, path,
+            qualified=qualified, owner_class=name, parent_id=parent_id, seen_ids=seen_ids,
+            capture=capture, limit=limit, resolve=resolve, fields=fields, kind_of=kind_of,
+            build_type=build_class,
+        )
+        nested_classes.extend(anon_classes)
+        methods.extend(anon_methods)
+        statements.extend(anon_statements)
 
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable). `NAME("value")` (constructor syntax) carries its value in the text;

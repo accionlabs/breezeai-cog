@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .base import SUPPORTED_PROVIDERS, RepoRef
@@ -36,24 +37,78 @@ def _gitlab_segments(path: str) -> list[str]:
     return [s for s in _strip_git(raw).split("/") if s]
 
 
-def _two_segment(provider: str, host: str, path: str) -> RepoRef | None:
+def _two_segment(provider: str, origin: "_Origin", path: str) -> RepoRef | None:
     """``<owner>/<repo>[.git][/…]`` grammar shared by GitHub and Bitbucket."""
     segments = [s for s in path.split("?")[0].split("#")[0].strip("/").split("/") if s]
     if len(segments) < 2:
         return None
-    return RepoRef(provider=provider, owner=segments[0], repo=_strip_git(segments[1]), host=host)
+    return RepoRef(
+        provider=provider, owner=segments[0], repo=_strip_git(segments[1]), host=origin.host, scheme=origin.scheme, port=origin.port,
+    )
 
 
-def _gitlab(host: str, path: str) -> RepoRef | None:
+def _gitlab(origin: "_Origin", path: str) -> RepoRef | None:
     segments = _gitlab_segments(path)
     if len(segments) < 2:
         return None
     return RepoRef(
-        provider="gitlab", owner="/".join(segments[:-1]), repo=segments[-1], host=host
+        provider="gitlab", owner="/".join(segments[:-1]), repo=segments[-1], host=origin.host, scheme=origin.scheme, port=origin.port,
     )
 
 
-def _azure_devops(host: str, path: str) -> RepoRef | None:
+def _bitbucket_server(origin: "_Origin", path: str) -> RepoRef | None:
+    """Bitbucket Data Center, anchored on keywords rather than segment positions.
+
+    An instance may be served under a context path (``/stash`` on installs carried over
+    from Stash), which shifts every index, so the project key and slug are located by the
+    ``projects``/``repos`` or ``scm`` anchor and everything before it becomes
+    ``context_path``. Three URL shapes reach us::
+
+        /{ctx}/projects/{KEY}/repos/{slug}/…     the browse / pull-request URL
+        /{ctx}/users/{name}/repos/{slug}/…       a personal repository
+        /{ctx}/scm/{KEY}/{slug}.git              the clone URL
+
+    ``projects``/``users`` is tried **before** ``scm`` because a browsed file path may
+    itself contain a directory called ``scm``
+    (``/projects/P3/repos/app/browse/scm/dir/f.py``); matching ``scm`` first would read
+    that directory as the project key.
+
+    Data Center serves a personal repository under both ``/users/{name}`` and
+    ``/projects/~{name}`` but its REST API accepts only the ``~`` form, so the ``users``
+    spelling is normalised to it.
+    """
+    segments = [s for s in path.split("?")[0].split("#")[0].strip("/").split("/") if s]
+
+    def ref(prefix: list[str], key: str, slug: str) -> RepoRef | None:
+        if not key or not slug:
+            return None
+        return RepoRef(
+            provider="bitbucket_server",
+            owner=key,
+            repo=_strip_git(slug),
+            context_path=("/" + "/".join(prefix)) if prefix else "",
+            host=origin.host, scheme=origin.scheme, port=origin.port,
+        )
+
+    for i, segment in enumerate(segments):
+        if segment not in ("projects", "users") or i + 3 >= len(segments):
+            continue
+        if segments[i + 2] != "repos":
+            continue
+        key = segments[i + 1]
+        if segment == "users" and not key.startswith("~"):
+            key = f"~{key}"
+        return ref(segments[:i], key, segments[i + 3])
+
+    # /scm/{KEY}/{slug}.git — requiring exactly two trailing segments is what keeps a
+    # context path that is itself named "scm" from matching first.
+    for i, segment in enumerate(segments):
+        if segment == "scm" and len(segments) - i - 1 == 2:
+            return ref(segments[:i], segments[i + 1], segments[i + 2])
+    return None
+
+
+def _azure_devops(origin: "_Origin", path: str) -> RepoRef | None:
     """``<org>/<project>/_git/<repo>``. Azure DevOps Server adds a collection segment
     first; the last three segments carry the meaning either way."""
     segments = [s for s in path.split("?")[0].split("#")[0].strip("/").split("/") if s]
@@ -64,7 +119,7 @@ def _azure_devops(host: str, path: str) -> RepoRef | None:
         owner=segments[-4],
         project=segments[-3],
         repo=_strip_git(segments[-1]),
-        host=host,
+        host=origin.host, scheme=origin.scheme, port=origin.port,
     )
 
 
@@ -77,7 +132,7 @@ def _public(repo_url: str) -> RepoRef | None:
         return RepoRef("bitbucket", bb.group(1), bb.group(2), host="bitbucket.org")
     gl = _GITLAB.search(repo_url)
     if gl:
-        return _gitlab("gitlab.com", gl.group(1))
+        return _gitlab(_Origin("gitlab.com"), gl.group(1))
     az = _AZURE_DEVOPS.search(repo_url)
     if az:
         if az.group(1):  # dev.azure.com/<org>/<project>/_git/<repo>
@@ -93,19 +148,58 @@ def _public(repo_url: str) -> RepoRef | None:
     return None
 
 
-def _host_of(repo_url: str) -> str:
-    """Lower-cased host without userinfo or port; ``""`` when the URL has none."""
+@dataclass(frozen=True, slots=True)
+class _Origin:
+    """Scheme, host and explicit port of a repository URL.
+
+    Carried into every ``RepoRef`` so the REST base, clone URL and web URL all address
+    the instance the request actually named. Dropping the port sends a stock Bitbucket
+    Data Center install (7990, or 8443 behind a proxy) to 443, where nothing answers.
+    """
+
+    host: str
+    scheme: str = "https"
+    port: int | None = None
+
+
+def _origin_of(repo_url: str) -> _Origin | None:
+    """Parse scheme / host / port; ``None`` when the URL names no host.
+
+    A URL with no scheme is assumed HTTPS, which is what the old behaviour did. A port
+    that equals the scheme default is normalised away so ``https://h:443`` and
+    ``https://h`` produce the same reference.
+    """
     candidate = repo_url if "://" in repo_url else f"https://{repo_url}"
     try:
-        return (urlsplit(candidate).hostname or "").lower()
+        parts = urlsplit(candidate)
+        host = (parts.hostname or "").lower()
+        port = parts.port
     except ValueError:
-        return ""
+        return None
+    if not host:
+        return None
+    scheme = (parts.scheme or "https").lower()
+    if scheme not in ("http", "https"):
+        return None
+    if port is not None and port == (443 if scheme == "https" else 80):
+        port = None
+    return _Origin(host=host, scheme=scheme, port=port)
+
+
+def _host_of(repo_url: str) -> str:
+    """Lower-cased host without userinfo or port; ``""`` when the URL has none.
+
+    Hostname only: ``scm_instances`` and ``scm_instance_base_url_mapping`` are keyed by
+    host, not by host:port.
+    """
+    origin = _origin_of(repo_url)
+    return origin.host if origin else ""
 
 
 def _instance(repo_url: str, instances: Mapping[str, str]) -> RepoRef | None:
-    host = _host_of(repo_url)
-    provider = instances.get(host) if host else None
-    if not provider:
+    origin = _origin_of(repo_url)
+    provider = instances.get(origin.host) if origin else None
+    if not origin or not provider:
         return None
     provider = provider.lower().strip()
     if provider not in SUPPORTED_PROVIDERS:
@@ -113,10 +207,32 @@ def _instance(repo_url: str, instances: Mapping[str, str]) -> RepoRef | None:
     candidate = repo_url if "://" in repo_url else f"https://{repo_url}"
     path = urlsplit(candidate).path
     if provider in ("github", "bitbucket"):
-        return _two_segment(provider, host, path)
+        return _two_segment(provider, origin, path)
+    if provider == "bitbucket_server":
+        return _bitbucket_server(origin, path)
     if provider == "gitlab":
-        return _gitlab(host, path)
-    return _azure_devops(host, path)
+        return _gitlab(origin, path)
+    return _azure_devops(origin, path)
+
+
+def parse_bitbucket_server_url(repo_url: str) -> RepoRef | None:
+    """Parse a Bitbucket Data Center URL on **any** host, with no ``instances`` entry.
+
+    Used when the caller names the provider explicitly (``gitProvider:
+    "bitbucket_server"`` on an ``/api/git/*`` request). Data Center has no public-cloud
+    pattern to recognise, so the caller's slug is the only thing that can identify the
+    grammar for a host nobody pre-registered. Every other provider still goes through
+    ``parse_repo_url``'s host detection.
+
+    Returns:
+        The reference, or ``None`` when the URL has no host or no addressable
+        ``scm`` / ``projects``+``repos`` anchor.
+    """
+    origin = _origin_of(repo_url)
+    if origin is None:
+        return None
+    candidate = repo_url if "://" in repo_url else f"https://{repo_url}"
+    return _bitbucket_server(origin, urlsplit(candidate).path)
 
 
 def parse_repo_url(repo_url: str, instances: Mapping[str, str] | None = None) -> RepoRef | None:
@@ -140,4 +256,4 @@ def parse_repo_url(repo_url: str, instances: Mapping[str, str] | None = None) ->
     return None
 
 
-__all__ = ["parse_repo_url"]
+__all__ = ["parse_bitbucket_server_url", "parse_repo_url"]

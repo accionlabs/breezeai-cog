@@ -33,6 +33,7 @@ import re
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..base import ParseContext
 from ..dotnet_common import named_arg
+from ..dotnet_hosts import host_files
 from ..emits import apply
 from ..vb.parser import VbParser
 from ..vb.source import parse_vb
@@ -74,12 +75,13 @@ class VbWcfParser(VbParser):
         record = self.extract(root, ctx)  # inherited VB extraction (one parse)
         if ctx.capture_statements:
             members = interface_members(ctx.resolution_index)
+            hosts = host_files(ctx.resolution_index)
 
             def host(cls: Class) -> str | None:
                 if cls.type != "interface":
-                    return svc_host(cls.path or record.path, ctx.repo_root, cls.name)
+                    return svc_host(cls.path or record.path, hosts, cls.name)
                 impl = members.implementer(cls.name)
-                return svc_host(impl[1], ctx.repo_root, impl[0]) if impl is not None else None
+                return svc_host(impl[1], hosts, impl[0]) if impl is not None else None
 
             def implementer(iface: str, fn: Function) -> Handler | None:
                 hit = members.member(iface, fn.name)
@@ -89,8 +91,8 @@ class VbWcfParser(VbParser):
 
             lookups = WcfLookups(host=host, uri_template=lambda fn, web: _uri_template(web),
                                  implementer=implementer)
-            routes = detect_wcf_services(record, root, lookups, ctx.repo_root) \
-                or detect_asmx_services(record, root, ctx.repo_root)
+            routes = detect_wcf_services(record, root, lookups, hosts) \
+                or detect_asmx_services(record, root, hosts)
             if routes:
                 apply(record, routes, ctx.source, ctx.path)
                 record.framework = routes[0].fields["framework"]  # "wcf" or "asmx"

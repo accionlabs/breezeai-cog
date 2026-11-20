@@ -264,7 +264,11 @@ Additive detectors can add their own facts to it by registering them (`register_
 A parser reads its own language's index, and after it the indexes of the languages it lists in
 `related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
 resolves, and C reads the C++ index for the functions defined in `extern "C"`. CUDA reads the
-C++ and C indexes, so a `.cu` file's includes and calls resolve into both.
+C++ and C indexes, so a `.cu` file's includes and calls resolve into both. Groovy and Java read
+each other's index, so a file's imports of, calls on and subclasses of the repository's classes
+in the other language resolve into that language's files. MDX reads the TypeScript index: an
+`.mdx` file's imports resolve through the tsconfig aliases, and the Next.js MDX page detector
+reads the `next.*` facts the `.tsx` pages use, so no `next.config` is read twice.
 
 > **Decision —** a parser reads related languages' indexes only after its own, and binds a name
 > from them only when they agree on one file.
@@ -349,7 +353,10 @@ copying code.
 > even for code that doesn't compile, and it needs no toolchain. **Cost:** a syntax tree only,
 > no type information, so type-dependent facts (which overload is called, the type of a
 > variable from another file) are limited. Where a packaged grammar is unusable, a separate
-> grammar is pinned (e.g. Groovy).
+> grammar is pinned (e.g. Groovy). Where no grammar fits the format, the block structure is
+> found by a scanner and only the code inside is parsed: MDX (no MDX grammar exists, and
+> tree-sitter-markdown is CommonMark, with no JSX) has its fences, JSX and `{…}` expressions
+> scanned by hand, and its ESM `import` / `export` blocks parsed with `tsx`.
 
 > **Decision —** every parse has a time limit (`BREEZEAI_COG_PARSE_TIMEOUT`, default 10 s).
 > **Why:** a single pathological file (generated or minified code) must not stall the run. The
@@ -547,7 +554,9 @@ classDiagram
 > **Decision —** a detector or fact lives with what it detects. If that is the language itself,
 > or a framework that has its own parser package, it lives in that package. If it is a separate
 > library or SDK, it lives in a detector-only package `parsers/<lang>_<library>/` (an
-> `__init__.py` with an empty `PARSERS` list, e.g. `csharp_hangfire/`, `go_kafka/`). Code shared
+> `__init__.py` with an empty `PARSERS` list, e.g. `csharp_hangfire/`, `go_kafka/`). A framework
+> that serves another language's files keeps that language's detector in its own package (the
+> Next.js MDX page detector, `Gate("mdx", …)`, lives in `typescript_nextjs/`). Code shared
 > across frameworks or languages is a top-level module (`quartz_common.py`, `aws_deploy.py`);
 > `parsers/detection/` holds only the shared text-level classifiers.
 > **Why:** the base language package is inherited by every framework parser of the language, so
@@ -576,7 +585,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, config, C++, C#, Go, GraphQL, Groovy, Java, Kotlin, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -811,7 +820,9 @@ become statements (`EMIT_TYPES`: declarations, control flow, jumps). It also lis
 (`NESTED_SCOPES`: nested classes, methods, lambdas…) that are extracted as their own
 `Class`/`Function`. At file and class level the extractor stops at those scopes. Inside a function
 body it walks into inline lambdas and gives their statements to the function, as in the
-[worked example](#5-worked-example-one-file-start-to-finish).
+[worked example](#5-worked-example-one-file-start-to-finish). A function stored in a variable
+(`const save = (x) => …`) is one `Function` and its declaration is not emitted again as a
+statement ([statement model §2](architecture/statement-model.md#2-which-statements-are-emitted)).
 
 **Enrich or append.** A detector that matches a call first looks for an existing statement on
 the same span:
@@ -856,6 +867,7 @@ Every record gets an id from the helpers in `emit/ids.py`:
 |---|---|---|
 | File | `path` | `src/com/acme/OrderVerticle.java` |
 | Class | `path#Class` (nested: `path#Outer.Inner`) | `…OrderVerticle.java#OrderVerticle` |
+| Class (Java anonymous, `isAnonymous`) | stored in a field: `path#Outer.field`; else `path#Outer$1` in source order within the named class (`Outer$1$1` nested) | `…OrderVerticle.java#OrderVerticle.onError`, `…#OrderVerticle$1` |
 | Function | `path#[Class#]name@startLine` | `…#OrderVerticle#start@9` |
 | Statement | `path:startLine:startCol` | `…OrderVerticle.java:12:4` |
 | Statement part | `…#part{i}of{n}` | `…:12:4#part1of3` |
@@ -898,11 +910,12 @@ flowchart LR
 | `extends` | `EXTENDS` edges to classes with that name in the repository |
 | `id` of Class / Function / Statement | The `captureId` property (the statement's unique key) |
 
-> **Decision —** `File` and `Class` are **open** nodes; `Function` and `Statement` are **allow-listed**.
-> **Why:** files and classes need room for parser-specific attributes (config metadata, UI
-> roles). Functions and statements are the most numerous nodes, so their shape is kept fixed.
-> **Cost:** a new field on `Function` or `Statement` is **silently dropped** at ingest unless the
-> backend's allow-list is updated in the same change.
+> **Decision —** `File` is an **open** node; `Class`, `Function` and `Statement` are
+> **allow-listed** by the backend.
+> **Why:** files need room for parser-specific attributes (config metadata, UI roles). Functions
+> and statements are the most numerous nodes, so their shape is kept fixed.
+> **Cost:** a new field on `Class`, `Function` or `Statement` is **silently dropped** at ingest
+> unless the backend's allow-list is updated in the same change.
 
 > **Decision —** fields a parser did not fill are left out of the output (`exclude_none`).
 > **Why:** a missing field means "not known", which is different from an empty or false value,
@@ -974,7 +987,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation or attribute macro before a function's name, `void DEPRECATED(…) f(…);`, `void * __attribute__((…)) f(…)`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo; and a VB file that declares a type inside another type is parsed once per nesting level (the grammar has no nested-type rule): the outer types with the nested ones blanked, then each level on its own — in practice a few files per VB repo. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. Exceptions: TypeScript's `handler_locator` re-parses a file only when a record names a handler with no location — in practice a few route files per repo; a C, C++ or CUDA file whose class is hidden by a macro between `class` and its name (`class API Model { … }`) (or a declaration wrapped in a macro, `DEPRECATED(int f(void), "…");`, or a macro line standing for class members, `OPENVINO_RTTI("…")`, or an attribute macro after a prototype, `int f(void) WARN_UNUSED_RESULT;`, or a macro before a C struct return type, `API struct X *f(…)`, or a qualifier macro that made a C++ definition read as a variable, `void f(T * RESTRICT p) {…}`, or an attribute before an initializer, `float buf[8] __attribute__((aligned(16))) = {0};`, or a deprecation or attribute macro before a function's name, `void DEPRECATED(…) f(…);`, `void * __attribute__((…)) f(…)`, or a `#define` a `/* … */ \` line ended early, or a deprecation macro on an enum member), or whose parse collapsed around an `extern "C"` guard, is parsed a second time with the macro blanked or the guard resolved as the compiler would — in practice the public headers of a library that exports classes, deprecates functions or declares members through macros; and one where a function body, a file-scope error or the whole file's parse error holds a preprocessor conditional is parsed a second time with each conditional resolved to its first branch — in practice a few dozen files per large C repo; and a VB file that declares a type inside another type is parsed once per nesting level (the grammar has no nested-type rule): the outer types with the nested ones blanked, then each level on its own — in practice a few files per VB repo; and an MDX file parses each paragraph that starts with `import` / `export` on its own (plus up to 20 following paragraphs when the block continues past a blank line) to tell an ESM block from prose that starts with the same word, then parses the shadow of its ESM blocks once — twice more when a block in it still has errors. The block parses are capped at 1,000 per file (`MAX_PARSES_PER_FILE`, logged when reached) and each continuation at a byte limit; measured worst case (thousands of `import`-led prose paragraphs) about 0.7 s per file, flat once the cap is reached. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |
@@ -1048,6 +1061,7 @@ Details: [Developer Guide — object storage and git providers](DEVELOPER_GUIDE.
 | Situation | What happens | Where you see it |
 |---|---|---|
 | A file fails to parse or times out | It is skipped; the run continues | `parse.file.failed` in the log; `failed` count in the summary |
+| An MDX parse times out | The File record is kept: a block timeout leaves the rest of the file's imports and its headings out, a whole-file timeout leaves every import out | `mdx.parse_timeout` warning (`stage`: `block` / `file`) |
 | A language's `build_index` fails | That language runs without an index (fewer links), never a crash | `build_index.failed` warning |
 | A file is skipped by the scan | Recorded with its reason | `<repo>-skipped-report.json`, detail log |
 | A statement is too large | Split into parts; if a parts cap is set and exceeded, the tail is dropped with a visible marker | `statement.parts_capped` warning |

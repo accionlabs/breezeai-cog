@@ -36,13 +36,12 @@ DECLARATIONS = {
 
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
 
-# Scopes extracted as their own Function. A function body still walks into ``func_literal``
-# (``descend_all=True``), attributing closure statements to the enclosing function like the
-# other languages; the file-level pass stops at all three.
+# Scopes extracted as their own Function. A function literal is one only when it is stored in
+# a variable (``var notify = func…``); an inline literal is walked, its statements belonging to
+# the enclosing function, or to the file at package level.
 NESTED_SCOPES = {
     "function_declaration",
     "method_declaration",
-    "func_literal",
 }
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)

@@ -183,7 +183,7 @@ def _collection_name_from_filename(name: str) -> str:
     return base or "collection"
 
 
-def _infer_value_type(value: Any) -> tuple[str, dict | None]:
+def _infer_value_type(value: Any) -> tuple[str, dict[str, Any] | None]:
     """Return (dataType, nested_object_or_None) for one document value."""
     if value is None:
         return "Null", None
@@ -223,7 +223,7 @@ def _infer_fields_from_documents(docs: list[Any]) -> tuple[list[dict[str, Any]],
     order: list[str] = []
     sampled = 0
 
-    def visit(obj: dict, prefix: str, parent: str | None, depth: int) -> None:
+    def visit(obj: dict[str, Any], prefix: str, parent: str | None, depth: int) -> None:
         for key, value in obj.items():
             full = f"{prefix}{key}"
             rec = acc.get(full)

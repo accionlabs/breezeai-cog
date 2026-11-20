@@ -13,7 +13,7 @@ from __future__ import annotations
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Hashable, Mapping, Sequence, TypeVar
+from typing import Callable, Hashable, Iterable, Mapping, Sequence, TypeVar
 
 from ..schemas import Decorator
 
@@ -84,6 +84,23 @@ def record_distinct(
         mapping[key] = None
 
 
+def methods_where_unknown(
+    classes: Iterable[tuple[str, str, Iterable[str]]],
+    heritage: Mapping[str, "ClassHeritage | None"],
+) -> dict[tuple[str, str], frozenset[str] | None]:
+    """``(file, class simple name)`` → the methods that class declares in that file, for each
+    class ``heritage`` cannot describe (``None``: two repository classes share its simple name,
+    or its methods are not all known). ``classes`` is every ``(file, simple name, methods)`` the
+    pre-pass read. A call on such a type keeps the file the import or package names only when
+    that class there declares the method (``callresolve.py``). Two classes of one simple name in
+    one file (nested in different classes) → ``None``: the file cannot tell them apart either."""
+    out: dict[tuple[str, str], frozenset[str] | None] = {}
+    for rel, simple, methods in classes:
+        if simple in heritage and heritage[simple] is None:
+            record_distinct(out, (rel, simple), frozenset(methods), same=lambda a, b: False)
+    return out
+
+
 @dataclass
 class ClassHeritage:
     """One class's heritage for cross-file resolution — its base *class* (simple name), the
@@ -104,12 +121,18 @@ class ClassHeritage:
     ``returns`` maps method name → the simple name of its declared return type, or ``None``
     when overloads disagree; void and primitive returns are left out. It lets a call on a call
     (``builder.dataApi().get()``) resolve through the first call's type. Empty for builders
-    that don't record it."""
+    that don't record it.
+
+    ``fields`` maps each field a subclass inherits (not ``private``) → the simple name of its
+    declared type when that type is a repository class as the declaring file sees it (its
+    imports and package), else ``None``. It lets ``helper.run()`` in a subclass resolve through
+    a ``helper`` field its in-repo base class declares. Empty for builders that don't record it."""
 
     extends: str | None
     decorators: list[Decorator]
     methods: dict[str, str | None] = field(default_factory=dict)
     returns: dict[str, str | None] = field(default_factory=dict)
+    fields: dict[str, str | None] = field(default_factory=dict)
 
 
 def record_heritage(

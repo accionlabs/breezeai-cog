@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from .base import DEFAULT_HOSTS, RepoRef
 from .factory import resolve_api_base_url
-from .repository import parse_repo_url
+from .repository import parse_bitbucket_server_url, parse_repo_url
 
 if TYPE_CHECKING:
     from ...config import Settings
@@ -60,6 +60,11 @@ def repo_api_url(ref: RepoRef, settings: Settings) -> str:
         return f"{(base or settings.gitlab_api_base_url).rstrip('/')}/projects/{path}"
     if ref.provider == "bitbucket":
         return f"{(base or settings.bitbucket_api_base_url).rstrip('/')}/repositories/{ref.owner}/{ref.repo}"
+    if ref.provider == "bitbucket_server":
+        # `base` is never None here: resolve_api_base_url derives the Data Center base
+        # from the host and context path when nothing is mapped.
+        key, slug = quote(ref.owner, safe="~"), quote(ref.repo, safe="")
+        return f"{(base or '').rstrip('/')}/projects/{key}/repos/{slug}"
     return (
         f"{(base or settings.azure_devops_api_base_url).rstrip('/')}/{quote(ref.owner, safe='')}"
         f"/{quote(ref.project, safe='')}/_apis/git/repositories/{quote(ref.repo, safe='')}"
@@ -68,6 +73,9 @@ def repo_api_url(ref: RepoRef, settings: Settings) -> str:
 
 def repo_web_url(ref: RepoRef) -> str:
     """The repository's canonical browser URL — the form ``codeOntology.repoUrl`` stores."""
+    if ref.provider == "bitbucket_server":
+        key, slug = quote(ref.owner, safe="~"), quote(ref.repo, safe="")
+        return f"{ref.origin}{ref.context_path}/projects/{key}/repos/{slug}"
     host = ref.host or DEFAULT_HOSTS[ref.provider]
     if ref.provider != "azure_devops":
         return f"https://{host}/{ref.owner}/{ref.repo}"
@@ -76,9 +84,22 @@ def repo_web_url(ref: RepoRef) -> str:
     return f"https://{host}/{ref.owner}/{ref.project}/_git/{ref.repo}"
 
 
-def parse_pr_url(pr_url: str, settings: Settings) -> PrUrlInfo | None:
-    """``None`` when the host is not a known provider or no PR number can be found."""
-    ref = parse_repo_url(pr_url, settings.scm_instances)
+def parse_pr_url(
+    pr_url: str, settings: Settings, provider: str | None = None
+) -> PrUrlInfo | None:
+    """``None`` when the host is not a known provider or no PR number can be found.
+
+    Args:
+        pr_url: The pasted pull / merge request URL.
+        settings: Supplies ``scm_instances`` and the per-instance REST bases.
+        provider: The caller's explicit slug. Only ``"bitbucket_server"`` is acted on —
+            Data Center has no public-cloud pattern to recognise; anything else falls
+            through to host detection.
+    """
+    if (provider or "").strip().lower() == "bitbucket_server":
+        ref = parse_bitbucket_server_url(pr_url)
+    else:
+        ref = parse_repo_url(pr_url, settings.scm_instances)
     if ref is None:
         return None
     m = _PR_ID.search(pr_url) or _TRAILING_ID.search(pr_url)
@@ -93,6 +114,13 @@ def parse_pr_url(pr_url: str, settings: Settings) -> PrUrlInfo | None:
         links = PrLinks(
             web, f"{api}/merge_requests/{pr_id}/changes", f"{api}/merge_requests/{pr_id}/notes",
             f"{api}/merge_requests/{pr_id}",
+        )
+    elif ref.provider == "bitbucket_server":
+        # Data Center's decline endpoint also needs the PR's current `version` as a query
+        # parameter; the caller that declines supplies it, so the link is the bare path.
+        links = PrLinks(
+            web, f"{api}/pull-requests/{pr_id}/diff", f"{api}/pull-requests/{pr_id}/comments",
+            f"{api}/pull-requests/{pr_id}/decline",
         )
     elif ref.provider == "bitbucket":
         links = PrLinks(

@@ -110,6 +110,43 @@ scopes depends on where it is:
 | The file root or a class body | **Stops** at them | They are extracted as their own `Class` / `Function`, with their own statements. |
 | A function body | **Walks into inline lambdas** and gives their statements to the function | A lambda is not a `Function` record, so its statements belong to the enclosing function. |
 
+**Functions without a name of their own.** Each piece of code is recorded once:
+
+- An **inline** function (a callback argument, a `go`/`defer` literal, an array value) is never
+  a `Function`. Its statements belong to the enclosing function. In Go and PHP, an inline
+  function at the file root gives its statements to the file
+  (Laravel `Route::get('/health', function () { return …; })`).
+- A function **stored in a variable or class field** (`const save = (x) => …`,
+  `var notify = func(msg string) {…}`, `$notify = function ($msg) {…};`,
+  `handle = () => {…}`) is one `Function`, named after the variable (`type`
+  `arrow_function` or `function_expression`). The declaration that stores it is not emitted
+  as a statement, because its text is that Function's code. A declaration that also stores
+  something else (`const a = 1, f = () => go();`) is still emitted.
+- An arrow function with an **expression body** (`const save = (x) => db.insert(x)`) gets
+  that expression as its one statement, with the expression's own `nodeType`
+  (`call_expression`), so the call is recorded under the Function.
+
+**Java anonymous classes** (`new T(…) { … }`) are a `Class` each (`isAnonymous: true`), with
+their methods as `Function`s; the enclosing method keeps only its own statements and calls.
+
+- **Stored in a field** as its whole initializer (`ResponseHandler onError = new ResponseHandler()
+  { … };`): named after the field (`Svc.onError`). The `Class` spans the declaration and carries
+  its annotations, so the declaration is not also a statement. A declaration that also stores
+  something else (`Runnable c = new Runnable() { … }, d = null;`) is still emitted, with the body
+  shown as `{ … }`.
+- **Anywhere else** (an argument, a `return`, a local variable, part of a larger expression):
+  numbered in source order within the named class, `Svc$1`, `Svc$2` (`Svc$1$1` nested). The
+  statement that creates it keeps its head, the body shown as `{ … }`.
+- The type after `new` is `extends` when it is certainly a class (constructor arguments, or a
+  class of this file, the repository or a known JDK type) and `implements` when it is certainly
+  an interface; a library type gives neither.
+
+| Code | `Function` | Statements |
+|---|---|---|
+| `func Run() { r.GET("/x", func(c *gin.Context) { c.JSON(200, list()) }) }` | `Run` | `r.GET(…)` and `c.JSON(200, list())`, both under `Run` |
+| `var notify = func(msg string) { send(msg) }` | `notify` (`function_expression`) | `send(msg)` under `notify`; no `var_declaration` statement |
+| `const save = (x: string) => db.insert(x);` | `save` (`arrow_function`) | `db.insert(x)` (`call_expression`) under `save`; no `lexical_declaration` statement |
+
 **Example** (Java)
 
 ```java

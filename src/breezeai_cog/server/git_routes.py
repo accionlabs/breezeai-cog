@@ -14,11 +14,16 @@ ingress and is called server-to-server.
 |---|---|---|
 | ``/api/git/check-update`` | ``repoUrl``, ``gitBranch``, ``gitToken?``, ``currentCommitId?`` | the backend's check-update shape (``change``, ``latestCommitId``, ``currentCommitId``, ``fileUpdatedCount``, ``fileDeletedCount``) plus ``latestCommit`` and the file lists |
 | ``/api/git/latest-commit`` | ``repoUrl``, ``gitBranch``, ``gitToken?`` | ``{sha, message, author, date}`` |
-| ``/api/git/compare`` | ``repoUrl``, ``baseCommitId``, ``headCommitId``, ``gitToken?`` | the backend's ``GitDiffResult``: ``{baseSha, headSha, totalFiles, files: [{filename, status, additions, deletions, patch?}]}`` |
+| ``/api/git/compare`` | ``repoUrl``, ``baseCommitId``, ``headCommitId``, ``gitToken?``, ``relationOnly?`` | the backend's ``GitDiffResult``: ``{baseSha, headSha, totalFiles, files: [{filename, status, additions, deletions, patch?}], relation?, mergeBaseSha?}`` |
 | ``/api/git/tree`` | ``repoUrl``, ``commitId``, ``gitToken?`` | ``{files, count}`` |
 | ``/api/git/pull-request`` | ``repoUrl``, ``pullRequestId``, ``gitToken?`` | ``{number, title, state, baseBranch, headBranch, baseCommitId, headCommitId, url}`` |
 | ``/api/git/pr-comment`` | ``repoUrl``, ``pullRequestId``, ``body``, ``gitToken?`` | ``{id, url}`` — **the one write**; not retried |
 | ``/api/git/parse-pr-url`` | ``prUrl`` | ``{source, repoUrl, prId, prLinks: {repo, diff, comment, decline}}`` — no provider call |
+
+Every route also accepts an optional ``gitProvider``. Only ``"bitbucket_server"`` is acted on:
+Bitbucket Data Center has no public-cloud URL pattern, so without the slug its host must be listed
+in ``BREEZEAI_COG_SCM_INSTANCES``. Any other value is ignored and the provider is taken from the
+URL, as before.
 """
 
 from __future__ import annotations
@@ -33,10 +38,9 @@ from starlette.concurrency import run_in_threadpool
 from ..config import Settings
 from ..integrations.scm import AbstractSCMClient, RepoRef, SCMError
 from ..integrations.scm.pr_url import parse_pr_url
-from ..integrations.scm.repository import parse_repo_url
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import INVALID_REPO_URL_MESSAGE
+from .git import INVALID_REPO_URL_MESSAGE, provider_override, resolve_repo_ref
 
 router = APIRouter(prefix="/api/git")
 
@@ -54,7 +58,9 @@ def _require(body: dict[str, Any], *fields: str) -> None:
 
 
 def _ref(settings: Settings, body: dict[str, Any]) -> RepoRef:
-    ref = parse_repo_url(str(body["repoUrl"]), settings.scm_instances)
+    """``body["repoUrl"]`` → ``RepoRef`` via the resolver ``/api/analyze-diff`` also
+    uses, so an explicit ``gitProvider`` means the same thing on every endpoint."""
+    ref = resolve_repo_ref(body, settings.scm_instances)
     if ref is None:
         raise ApiError(INVALID_REPO_URL_MESSAGE, 400)
     return ref
@@ -72,7 +78,9 @@ def _with_client(
         with deps.open_scm(ref, settings, token) as client:
             return fn(client, ref)
     except SCMError as exc:
-        raise ApiError(str(exc), exc.status_code) from None
+        raise ApiError(
+            str(exc), exc.status_code, provider_status=getattr(exc, "http_status", None)
+        ) from None
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -91,7 +99,9 @@ async def parse_pr_url_route(request: Request) -> dict[str, Any]:
     settings: Settings = request.app.state.settings
     body = await _body(request)
     _require(body, "prUrl")
-    info = parse_pr_url(str(body["prUrl"]), settings)
+    info = parse_pr_url(
+        str(body["prUrl"]), settings, provider=provider_override(body)
+    )
     if info is None:
         raise ApiError(
             "Invalid pull request URL: expected a supported host and a PR / MR number in the path",
@@ -130,21 +140,32 @@ async def compare(request: Request) -> dict[str, Any]:
     ``filename`` (the new path for a rename), ``status`` (``added`` / ``modified`` /
     ``removed`` / ``renamed``), ``additions``, ``deletions`` and ``patch`` where the
     provider reports them (GitHub: all; GitLab: patch + counts derived from it;
-    Bitbucket: counts only; Azure DevOps: status only)."""
+    Bitbucket: counts only; Azure DevOps: status only). On GitHub the result also carries
+    ``relation`` (``identical`` / ``ahead`` / ``behind`` / ``diverged``: how ``headCommitId``
+    relates to ``baseCommitId``) and ``mergeBaseSha``; other providers omit both. With
+    ``relationOnly: true`` the file list is not fetched and ``totalFiles`` / ``files`` are
+    omitted (a branch-membership check needs only the relation; GitHub answers in one request)."""
     deps: ServerDeps = request.app.state.deps
     settings: Settings = request.app.state.settings
     body = await _body(request)
     _require(body, "repoUrl", "baseCommitId", "headCommitId")
     base, head = str(body["baseCommitId"]), str(body["headCommitId"])
+    relation_only = body.get("relationOnly") is True
     diff = await run_in_threadpool(
-        _with_client, deps, settings, body, lambda c, ref: c.compare(ref, base, head),
+        _with_client, deps, settings, body, lambda c, ref: (
+            c.compare_relation(ref, base, head) if relation_only else c.compare(ref, base, head)
+        ),
     )
-    return {
-        "baseSha": base,
-        "headSha": head,
-        "totalFiles": len(diff.files),
-        "files": [f.as_dict() for f in diff.files],
-    }
+    out: dict[str, Any] = {"baseSha": base, "headSha": head}
+    if not relation_only:
+        out["totalFiles"] = len(diff.files)
+        out["files"] = [f.as_dict() for f in diff.files]
+    # How head relates to base (GitHub only); omitted when the provider does not say.
+    if diff.relation is not None:
+        out["relation"] = diff.relation
+    if diff.merge_base_sha is not None:
+        out["mergeBaseSha"] = diff.merge_base_sha
+    return out
 
 
 @router.post("/tree")

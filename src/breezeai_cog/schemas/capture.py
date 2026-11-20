@@ -40,10 +40,18 @@ class Decorator(BaseModel):
 
 
 class Parameter(BaseModel):
+    """One parameter of a function (``Function.params``) or one input parameter of an
+    ``mcp_tool`` statement (``Statement.params``, read from the tool's input schema)."""
+
     name: str
-    type: str
+    type: str | None = None  # as written in the signature / schema; None when not declared
     decorators: list[Decorator] = Field(default_factory=list)
     default: str | None = None  # default-value expr, e.g. FastAPI `Depends(get_db)`
+    #: Whether a caller must pass it. None = not known (never read as optional).
+    required: bool | None = None
+    #: What the parameter is for, from the schema or annotation; for a Python tool it falls
+    #: back to the param's entry in the docstring's ``Args:`` / ``Parameters`` / ``:param``.
+    description: str | None = None
 
 
 class ConstructorParam(BaseModel):
@@ -109,6 +117,11 @@ class Statement(BaseModel):
     keyFields: list[str] | None = None
     # iac-only: cloud provider inferred from resource type prefix or provider name
     platform: str | None = None
+    # Human description: the front-matter ``description`` of a skill / agent /
+    # command document, or the tool description / docstring of an ``mcp_tool``.
+    description: str | None = None
+    # mcp_tool-only: the tool's input parameters.
+    params: list[Parameter] | None = None
 
 
 class Function(BaseModel):
@@ -158,6 +171,9 @@ class Class(BaseModel):
     # closed hierarchy — Kotlin `sealed` (C#/Java `sealed` are the analogue).
     # Sibling of isAbstract; present (True) only when sealed.
     isSealed: bool | None = None
+    # A class with no name in the source: a Java anonymous class (`new T(…) { … }`). Its `name`
+    # is cog's (`Outer$1`, or the field it is stored in). Present (True) only when anonymous.
+    isAnonymous: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
     # The type's other name, given in the same declaration: the tag of a C/C++
@@ -248,6 +264,11 @@ class ProjectMetaData(BaseModel):
         # file types — an empty ``{}`` is a JSON file but captures nothing, so it does not
         # count. Format-neutral: covers every full-capture parser, not just JSON.
         if (cfg.get("capturedDataDocuments") or 0) > 0:
+            return True
+        # A typed AI document (skill, agent, command, agent instructions — parsers/markdown)
+        # is content an agent uses, even in a repo with no code. Plain docs (a README, a
+        # changelog, a decision record, prose) alone are not.
+        if (cfg.get("capturedAgentDocuments") or 0) > 0:
             return True
         # IaC repos (Terraform, etc.) have no code language or functions but are real
         # content — detected via the "iac" category set in FileRecord.metadata.

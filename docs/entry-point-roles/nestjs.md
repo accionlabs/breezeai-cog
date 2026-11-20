@@ -6,11 +6,12 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 |---|---|---|---|
 | `@Get(path)` / `@Post` / `@Put` / `@Patch` / `@Delete` / `@All` … on a controller method | Binding | `route`, HTTP verb, `routeKind: route`, full path as `endpoint`, `handler` = method, `handlerLine` = its declaration | One handler, inbound API |
 | `@Get([':id', ':slug'])` — an array of paths (method or `@Controller`) | Binding, one per path | as above, one record per controller path × method path, same handler; an element that is not a string literal → that record's `endpoint` empty | Nest serves the handler at each path |
+| A path written as a constant or template — `@Controller(BASE)`, `@Controller({ path: BASE })`, `@Controller({ path: ['a', 'b'] })`, `@Get(PATHS.one)` | Binding | as above, with the constant's value from the repo's constants (`BASE = 'base'` → `/base/...`); a constant that does not resolve (from a package, two different values in the repo), a call or a spread object → `endpoint` empty, never the constant's name | A wrong address is worse than none |
 | `@Sse(path)` on a controller method | Binding | `route`, `GET`, `routeKind: route`, addressed like `@Get` | Server-sent events travel as a GET |
 | `@Controller(path)` / `@JsonController(path)` on a class | Wiring | — (prefix for the class's bindings) | Container, no handler |
 | `app.setGlobalPrefix(prefix)` in the bootstrap | Wiring | — (prefix for every HTTP binding) | Applies to all handlers |
 | `RouterModule.register([{ path, module }])` | Wiring | — (prefix for the module's controllers) | Points at a module |
-| `@Version(v)` on a method or controller | Wiring | — (`version` on the bindings; part of the path under URI versioning) | Adds to other bindings |
+| `@Version(v)` on a method or controller, `@Controller({ version })`, `app.enableVersioning({ defaultVersion })` | Wiring | — (under URI versioning the version is in `endpoint` — `/api/v2/orders`, one binding per version; under header / media-type / custom versioning, or when the app's setting can't be read, `endpoint` stays unversioned and `version` holds it; `VERSION_NEUTRAL` adds no version) | Adds to other bindings |
 | `@UseGuards(...)` / `@Authorized()` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@UseInterceptors(...)` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@WebSocketGateway([port,] { namespace })` on a class | Wiring | — (namespace for the class's message handlers; the port and the engine `path` are connection settings) | Container, no handler |

@@ -97,9 +97,19 @@ def build_class(
         # a field typed as Repository/DataSource/EntityManager/etc. — not stateManager,
         # itemsCollection, or other non-DB names that happen to have a DB-suffix.
         typed_db_ids = collect_typed_db_receivers(body, source)
+        # Function-valued fields (`handle = () => {}`) are each extracted as a Function below,
+        # so their field statement would repeat it.
+        field_functions = frozenset(
+            (value.start_byte, value.end_byte)
+            for child in body.named_children
+            if child.type in ("public_field_definition", "field_definition")
+            and (value := child.child_by_field_name("value")) is not None
+            and value.type in NESTED_FN_VALUE_TYPES
+        )
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit,
-                               seen_ids=seen_ids, typed_db_ids=typed_db_ids)
+                               seen_ids=seen_ids, built=field_functions,
+                               typed_db_ids=typed_db_ids)
         )
         pending: list[Node] = []
         for child in body.named_children:
@@ -123,6 +133,7 @@ def build_class(
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(child.child_by_field_name("parameters"), source)
+                        if p.type is not None
                     ]
             elif child.type in ("public_field_definition", "field_definition"):
                 # Arrow/function class field: `handleClick = () => {}` (React handler idiom).

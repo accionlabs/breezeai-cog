@@ -34,13 +34,13 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 from .facts import next_apps, page_extensions, page_stem, router_root
-from .routes import _middleware_guards, _served, _url_segments
+from .routes import middleware_guards, served, _url_segments
 
 _PAGE_EXTS = (".tsx", ".jsx", ".ts", ".js")
 _SPECIAL_PAGES = {"_app", "_document", "_error", "404", "500"}
 
 
-def _app_router_endpoint(path: str, extensions: tuple[str, ...] | None = ()) -> str | None:
+def app_router_endpoint(path: str, extensions: tuple[str, ...] | None = ()) -> str | None:
     """``app/settings/profile/page.tsx`` → ``/settings/profile``; None when the file is not an
     App Router page — ``page`` plus one of the app's ``extensions`` (``()``: none set, any; None:
     unknown) — or sits in a private (``_x``), intercepting (``(.)x``) or parallel-route slot
@@ -55,7 +55,7 @@ def _app_router_endpoint(path: str, extensions: tuple[str, ...] | None = ()) -> 
     return _url_segments(dirs)
 
 
-def _pages_router_endpoint(path: str, extensions: tuple[str, ...] | None) -> str | None:
+def pages_router_endpoint(path: str, extensions: tuple[str, ...] | None) -> str | None:
     """``pages/orders/[id].tsx`` → ``/orders/[id]``; None for ``pages/api/**``, the special
     files (``_app``, ``_document``, ``_error``, ``404``, ``500``), a file without one of the
     app's ``extensions`` (``()``: any) and when they are unknown (None)."""
@@ -78,9 +78,9 @@ def _page_endpoint(path: str, index: object | None) -> tuple[str, str] | None:
     if not path.endswith(_PAGE_EXTS):
         return None
     exts = page_extensions(index, path)
-    if (url := _app_router_endpoint(path, exts)) is not None:
+    if (url := app_router_endpoint(path, exts)) is not None:
         return "app", url
-    if (url := _pages_router_endpoint(path, exts)) is not None:
+    if (url := pages_router_endpoint(path, exts)) is not None:
         return "pages", url
     return None
 
@@ -157,11 +157,11 @@ def detect_nextjs_page(dc: DetectContext) -> Emit | None:
         stmt_node,
         {
             "semanticType": "route",
-            "endpoint": _served(local, dc.path, index),
+            "endpoint": served(local, dc.path, index),
             "framework": "nextjs",
             "handler": handler,
             "handlerLine": handler_line,
-            "guards": _middleware_guards(index, dc.path, local) or None,
+            "guards": middleware_guards(index, dc.path, local) or None,
             "routeKind": "page",
             "isRegex": False,
         },

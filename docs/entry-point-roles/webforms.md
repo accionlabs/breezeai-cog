@@ -20,5 +20,6 @@ language). `.ashx` handlers and `web.config` handler mappings are C# only.
 | Server-control event (`OnClick="Save_Click"`) | None | plain statement with `handler` = the code-behind method | Runs inside the page's postback |
 | `Response.Redirect` / `Server.Transfer` / `NavigateUrl` / `PostBackUrl` to a page | Outbound | `route`, `routeKind: navigation`, `endpoint` = the target page | Our code moving the user to a page |
 | `.ashx` generic handler (`IHttpHandler.ProcessRequest`) | Binding | `route`, `/<path>.ashx`, `handler: ProcessRequest` | One handler reached by URL |
+| `.ashx` `<%@ WebHandler Class=… %>` | Wiring | its own file record (`ashx`, `framework: aspnet-webforms`), statement stays plain; host → code-behind stays in `importFiles` | Gives the `.ashx` address to its handler class |
 | `web.config` `<add verb path type>` under `httpHandlers` / `handlers`, `type` a repo class | Binding | `route` on the class's `ProcessRequest` (`ProcessRequestAsync`, `BeginProcessRequest`, `GetHandler`), `endpoint` = the config's folder under the app root + `<location path>` + `path`, kept as written (`/Admin/Api/*.ashx`); `method` per verb, `*` = `ANY` | The handler answers every request the mapping matches |
 | `Global.asax` `Application_Start` | None | — | Start-up |

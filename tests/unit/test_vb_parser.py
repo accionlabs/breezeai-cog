@@ -159,9 +159,9 @@ def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
     assert "counter" in members
     # Heritage misparses must not appear as statements.
     assert "IConfig" not in members and "BaseConfig" not in members
-    # Property accessor bodies must NOT be pulled up and mis-parented to the class.
-    class_texts = [t for _, t in members.values()]
-    assert not any("Return 42" in t for t in class_texts), "property body leaked into class"
+    # A property is a statement of the class, as in C#, and so is its accessors' code.
+    assert members["Size"][0] == "property_declaration"
+    assert any(s.nodeType == "return_statement" and s.parentId == cls.id for s in rec.statements)
     # Nothing captured without the flag.
     ctx2 = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
@@ -294,8 +294,325 @@ def test_attribute_join_leaves_other_shapes_alone() -> None:
         b"<A>\n<B>\nx = 1\n",                                                # not a declaration
         b"Dim doc = <root>\n<item/>\n<item></item>\nPublic Sub M()\n",       # XML literal tags
         b"<xs:a>\n<xs:b>\nPublic Sub M()\n",                                 # namespaced XML tags
+        b"<A> _\n' note\n<B>\nPublic Sub M()\n",                            # comment inside the run
+        b"<A> <B>\nx = 1\n",                                                 # not a declaration
+        b"<a><b>Public</b></a>\n",                                           # XML literal on a line
+        b"<A> _\nPublic Sub M()\n",                                          # one block + continuation
     ):
         assert join_attribute_blocks(src) is src, src
+
+
+def test_attribute_blocks_on_a_line_or_continued_with_underscore_are_joined() -> None:
+    from breezeai_cog.parsers.vb.source import join_attribute_blocks
+
+    cases = {
+        # several on a line, above the declaration
+        b'<HttpGet("{id}")> <Authorize>\nPublic Function F() As Object\n':
+            b'<HttpGet("{id}"),  Authorize>\nPublic Function F() As Object\n',
+        # joined with ` _` (the continuations become spaces)
+        b'<HttpPost("bulk")> _\r\n<Authorize> _\r\nPublic Function F() As Object\r\n':
+            b'<HttpPost("bulk"),  \r\n Authorize>  \r\nPublic Function F() As Object\r\n',
+        # on the declaration's own line
+        b'<HttpDelete("{id}")> <Authorize> Public Function F() As Object\n':
+            b'<HttpDelete("{id}"),  Authorize> Public Function F() As Object\n',
+        # one per line, then a block on the declaration line
+        b'<A>\n<B("x > y")> Public Sub M()\n': b'<A,\n B("x > y")> Public Sub M()\n',
+        # a `>` inside parentheses or a string does not close the block
+        b'<Range(GetType(Integer), "a>b")> <C>\nPublic Sub M()\n':
+            b'<Range(GetType(Integer), "a>b"),  C>\nPublic Sub M()\n',
+    }
+    for src, want in cases.items():
+        out = join_attribute_blocks(src)
+        assert out == want, src
+        assert len(out) == len(src)
+
+
+_ATTRIBUTE_LAYOUTS = b'''Public Class OrdersController
+    <HttpGet("{id}")> <Authorize>
+    Public Function GetOne(id As Integer) As IActionResult
+        Return Ok(id)
+    End Function
+
+    <HttpPost("bulk")> _
+    <Authorize> _
+    Public Function Bulk(x As Integer) As IActionResult
+        Return Ok(x)
+    End Function
+
+    <HttpDelete("{id}")> <Authorize> Public Function Remove(id As Integer) As IActionResult
+        Return Ok(id)
+    End Function
+End Class
+'''
+
+
+def test_every_attribute_block_of_a_member_is_kept_whatever_the_layout(tmp_path) -> None:
+    p = tmp_path / "C.vb"
+    p.write_bytes(_ATTRIBUTE_LAYOUTS)
+    rec = VbParser().parse_file(ParseContext(
+        path="C.vb", abs_path=p, source=_ATTRIBUTE_LAYOUTS, repo_root=tmp_path))
+    got = [(f.name, f.startLine, [d.name for d in f.decorators]) for f in rec.functions]
+    assert got == [
+        ("GetOne", 2, ["HttpGet", "Authorize"]),
+        ("Bulk", 7, ["HttpPost", "Authorize"]),
+        ("Remove", 13, ["HttpDelete", "Authorize"]),
+    ]
+    bulk = rec.functions[1]
+    assert bulk.decorators[0].args == ["bulk"]
+
+
+def _vb(tmp_path, src: bytes):
+    p = tmp_path / "N.vb"
+    p.write_bytes(src)
+    return VbParser().parse_file(ParseContext(path="N.vb", abs_path=p, source=src,
+                                              repo_root=tmp_path))
+
+
+def test_a_nested_type_with_its_attributes_on_its_own_line_is_found(tmp_path) -> None:
+    # `<Serializable> Public Class Inner`: the type line starts with attribute blocks. The nested
+    # type is still found, so it keeps its members, its attributes, and the outer type keeps
+    # every member after it.
+    for attrs, names in ((b"<Serializable>", ["Serializable"]),
+                         (b"<Serializable> <DataContract>", ["Serializable", "DataContract"])):
+        rec = _vb(tmp_path, b"Public Class OA\n    Public Sub Before()\n    End Sub\n    " + attrs
+                  + b" Public Class Inner\n        Public Sub InSLA()\n        End Sub\n"
+                  b"    End Class\n    Public Sub AfterAll()\n    End Sub\nEnd Class\n")
+        assert {c.id: [d.name for d in c.decorators] for c in rec.classes} == {
+            "N.vb#OA": [], "N.vb#OA.Inner": names}, attrs
+        assert sorted(f.id for f in rec.functions) == [
+            "N.vb#OA#AfterAll@8", "N.vb#OA#Before@2", "N.vb#OA.Inner#InSLA@5"], attrs
+
+
+def test_a_nested_structure_and_enum_with_a_same_line_attribute_are_found(tmp_path) -> None:
+    rec = _vb(tmp_path, b"Public Module M\n    <Serializable> Public Structure Point\n"
+              b"        Public X As Integer\n    End Structure\n    <Flags> Public Enum Kind\n"
+              b"        A = 1\n    End Enum\n    Public Sub Run()\n    End Sub\nEnd Module\n")
+    assert {c.id: c.type for c in rec.classes} == {
+        "N.vb#M": "module", "N.vb#M.Point": "struct", "N.vb#M.Kind": "enum"}
+    assert [f.id for f in rec.functions] == ["N.vb#M#Run@8"]
+
+
+def test_a_property_is_a_statement_of_its_type_and_so_are_its_accessors(tmp_path) -> None:
+    # As C# records `public bool Ok { get; set; }`: the property is a statement named after it,
+    # and the statements of its Get / Set bodies belong to the type.
+    src = (b"Public Class OrderService\n    Public Class Result\n"
+           b"        Public Property Ok As Boolean\n"
+           b"        Public Property Count As Integer = 3\n"
+           b"        Public ReadOnly Property Total As Decimal\n            Get\n"
+           b"                Return Compute()\n            End Get\n        End Property\n"
+           b"    End Class\nEnd Class\n"
+           b"Public Interface IThing\n    Property Id As Integer\nEnd Interface\n")
+    p = tmp_path / "P.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="P.vb", abs_path=p, source=src,
+                                             repo_root=tmp_path, capture_statements=True))
+    got = [(s.parentId.split("#", 1)[1], s.nodeType, s.name, s.startLine, s.endLine)
+           for s in rec.statements]
+    assert sorted(got) == sorted([
+        ("OrderService.Result", "property_declaration", "Ok", 3, 3),
+        ("OrderService.Result", "property_declaration", "Count", 4, 4),
+        ("OrderService.Result", "property_declaration", "Total", 5, 9),
+        ("OrderService.Result", "return_statement", None, 7, 7),
+        ("IThing", "property_declaration", "Id", 13, 13),
+    ])
+
+
+def test_an_optional_parameter_keeps_its_name(tmp_path) -> None:
+    # `Optional ByVal n` was read with `ByVal` as the name, and an attribute before `Optional`
+    # lost the method: the shadow blanks `Optional` and the passing mode, neither recorded.
+    src = (b"Public Class P\n"
+           b"    Public Sub S1(ByVal name As String, Optional ByVal n As Integer = 5)\n    End Sub\n"
+           b"    Public Sub S2(Optional ByRef r As Integer = 0)\n    End Sub\n"
+           b"    Public Sub S3(Optional n As Integer = 5)\n    End Sub\n"
+           b"    Public Sub New(Optional ByVal size As Integer = 10)\n    End Sub\n"
+           b"    Public Sub S4(ByRef a As String, <[In]> Optional ByVal b As String = \"x\")\n"
+           b"    End Sub\n"
+           b"    Public Function S5(Optional ByVal xs As List(Of Dictionary(Of String, Integer))"
+           b" = Nothing) As Integer\n        Return 1\n    End Function\nEnd Class\n")
+    rec = _vb(tmp_path, src)
+    assert {f.name: [(p.name, p.type) for p in f.params] for f in rec.functions} == {
+        "S1": [("name", "String"), ("n", "Integer")],
+        "S2": [("r", "Integer")],
+        "S3": [("n", "Integer")],
+        "New": [("size", "Integer")],
+        "S4": [("a", "String"), ("b", "String")],
+        "S5": [("xs", "List(Of Dictionary(Of String, Integer))")],
+    }
+    s4 = next(f for f in rec.functions if f.name == "S4")
+    assert [d.name for d in s4.params[1].decorators] == ["[In]"]
+
+
+def test_an_operator_is_a_method_named_after_its_token(tmp_path) -> None:
+    # The grammar has no operator rule (header and body read as fields); the shadow reads each as
+    # a function, named `Operator <token>` as C# names `operator +`.
+    src = (b"Public Class Money\n    Public Amount As Decimal\n"
+           b"    Public Shared Operator +(a As Money, b As Money) As Money\n"
+           b"        Return New Money With {.Amount = a.Amount + b.Amount}\n    End Operator\n"
+           b"    Public Shared Operator <>(a As Money, b As Money) As Boolean\n"
+           b"        Return Not a.Amount = b.Amount\n    End Operator\n"
+           b"    Public Shared Widening Operator CType(d As Decimal) As Money\n"
+           b"        Return New Money With {.Amount = d}\n    End Operator\n"
+           b"    Public Shared Operator IsTrue(m As Money) As Boolean\n"
+           b"        Return m.Amount <> 0\n    End Operator\n"
+           b"    Public Sub After()\n        Audit()\n    End Sub\nEnd Class\n")
+    p = tmp_path / "M.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="M.vb", abs_path=p, source=src,
+                                             repo_root=tmp_path, capture_statements=True))
+    assert [(f.id, [x.name for x in f.params], f.returnType) for f in rec.functions] == [
+        ("M.vb#Money#Operator +@3", ["a", "b"], "Money"),
+        ("M.vb#Money#Operator <>@6", ["a", "b"], "Boolean"),
+        ("M.vb#Money#Operator CType@9", ["d"], "Money"),
+        ("M.vb#Money#Operator IsTrue@12", ["m"], "Boolean"),
+        ("M.vb#Money#After@15", [], None),
+    ]
+    fields = [s.text.strip() for s in rec.statements if s.nodeType == "field_declaration"]
+    assert fields == ["Public Amount As Decimal"]
+
+
+def test_a_declare_statement_is_a_shared_method_with_its_signature(tmp_path) -> None:
+    # The grammar has no `Declare`: the shadow blanks it and its `Lib … Alias …` clause, so each is a
+    # bodiless method named as declared (what callers use), Shared by definition.
+    src = (b"Public Class NativeMethods\n"
+           b"    Private Declare Function MessageBox Lib \"user32\" Alias \"MessageBoxA\" "
+           b"(ByVal h As Integer, ByVal t As String) As Integer\n"
+           b"    Private Declare Function F1 Lib \"user32\" (ByVal h As Integer) As Integer\n"
+           b"    Private Declare Sub S1 Lib \"kernel32\" Alias \"Sleep\" (ByVal ms As Integer)\n"
+           b"    Declare Unicode Sub Beep Lib \"kernel32\" (ByVal f As Integer, ByVal d As Integer)\n"
+           b"    Public Sub After()\n        Audit()\n    End Sub\nEnd Class\n")
+    rec = _vb(tmp_path, src)
+    assert [(f.name, f.isStatic, [(p.name, p.type) for p in f.params], f.returnType)
+            for f in sorted(rec.functions, key=lambda f: f.startLine)] == [
+        ("MessageBox", True, [("h", "Integer"), ("t", "String")], "Integer"),
+        ("F1", True, [("h", "Integer")], "Integer"),
+        ("S1", True, [("ms", "Integer")], None),
+        ("Beep", True, [("f", "Integer"), ("d", "Integer")], None),
+        ("After", False, [], None),
+    ]
+
+
+def test_a_declare_never_takes_the_members_after_it(tmp_path) -> None:
+    # A multi-line `Declare` followed by a nested type, constants and a method: the main parse
+    # never sees the `Declare` (its own parse reads it), so nothing after it becomes its body.
+    src = (b"Public Class Class1\n"
+           b"  Declare Function GetWindowRect Lib \"user32\" (\n"
+           b"      ByVal hwnd As Integer, ByRef lpRect As RECT) As Integer\n\n"
+           b"  Public Structure RECT\n      Public Left As Integer\n  End Structure\n\n"
+           b"  Const ERROR_INVALID As Long = 1400\n\n"
+           b"  Public Sub OnErrorDemo()\n      Dim x As Integer = 1\n  End Sub\nEnd Class\n"
+           b"Public Module M\n    <Obsolete> Private Declare Sub Sleep Lib \"kernel32\" (ByVal ms As Integer)\n"
+           b"End Module\n")
+    rec = _vb(tmp_path, src)
+    got = {f.id: (f.startLine, f.endLine, [p.name for p in f.params], f.returnType, f.isStatic,
+                  [d.name for d in f.decorators]) for f in rec.functions}
+    assert got == {
+        "N.vb#Class1#GetWindowRect@2": (2, 3, ["hwnd", "lpRect"], "Integer", True, []),
+        "N.vb#Class1#OnErrorDemo@11": (11, 13, [], None, False, []),
+        "N.vb#M#Sleep@16": (16, 16, ["ms"], None, True, ["Obsolete"]),
+    }
+    assert {c.id for c in rec.classes} == {"N.vb#Class1", "N.vb#Class1.RECT", "N.vb#M"}
+
+
+def test_a_declare_header_runs_to_its_closing_parenthesis(tmp_path) -> None:
+    # `) As Integer` alone on the last line, after a line with no trailing comma.
+    src = (b"Public Class Win32\n"
+           b"    Declare Auto Function MessageBox Lib \"user32.dll\" (\n"
+           b"        ByVal hWnd As Integer, ByVal txt As String,\n"
+           b"        ByVal caption As String, ByVal Type As Integer\n"
+           b"        ) As Integer\nEnd Class\n")
+    (fn,) = _vb(tmp_path, src).functions
+    assert (fn.startLine, fn.endLine, [p.name for p in fn.params], fn.returnType) == (
+        2, 5, ["hWnd", "txt", "caption", "Type"], "Integer")
+
+
+def test_a_declare_belongs_to_its_own_type_when_two_share_a_name(tmp_path) -> None:
+    src = (b"Module Module1\n    Sub A()\n    End Sub\nEnd Module\n"
+           b"Module Module1\n    Declare Sub DllSub Lib \"SomeLib.dll\" ()\nEnd Module\n")
+    rec = _vb(tmp_path, src)
+    second = next(c for c in rec.classes if c.startLine == 5)
+    dll = next(f for f in rec.functions if f.name == "DllSub")
+    assert dll.parentId == second.id != next(c.id for c in rec.classes if c.startLine == 1)
+
+
+def test_names_with_non_english_letters_are_kept_as_written(tmp_path) -> None:
+    # The grammar's names are ASCII only: `Après` read as `Apr`, `Ünïcödé` as `d`, and a nested
+    # `内部` was never found. The grammar now reads ASCII stand-ins; names come from the original.
+    src = ("Public Class Ünïcödé\n    Public Class 内部\n        Public Sub 方法()\n"
+           "            Dim größe As Integer = 1\n        End Sub\n    End Class\n"
+           "    Public Sub Après(ByVal café As String)\n        Dim s As String = \"Ünïcödé\"\n"
+           "    End Sub\n    Public Function Calcul() As Integer\n        Return Après2()\n"
+           "    End Function\nEnd Class\n").encode()
+    p = tmp_path / "U.vb"
+    p.write_bytes(src)
+    rec = VbParser().parse_file(ParseContext(path="U.vb", abs_path=p, source=src,
+                                             repo_root=tmp_path, capture_statements=True))
+    assert {c.id for c in rec.classes} == {"U.vb#Ünïcödé", "U.vb#Ünïcödé.内部"}
+    assert {f.id: [(x.name, x.type) for x in f.params] for f in rec.functions} == {
+        "U.vb#Ünïcödé.内部#方法@3": [],
+        "U.vb#Ünïcödé#Après@7": [("café", "String")],
+        "U.vb#Ünïcödé#Calcul@10": [],
+    }
+    calcul = next(f for f in rec.functions if f.name == "Calcul")
+    assert [c.name for c in calcul.calls] == ["Après2"]
+    assert "größe" in {s.name for s in rec.statements}
+    assert any(s.text.strip() == 'Dim s As String = "Ünïcödé"' for s in rec.statements)
+
+
+def test_only_name_characters_outside_strings_and_comments_are_replaced() -> None:
+    from breezeai_cog.parsers.vb.source import ascii_identifiers
+
+    bom = "﻿Public Class C\nEnd Class\n".encode()
+    assert ascii_identifiers(bom) is bom  # a byte order mark is not a name
+    text = "Dim é = \"é\" ' é\n".encode()
+    out = ascii_identifiers(text)
+    assert len(out) == len(text)
+    assert out == b'Dim xx = "\xc3\xa9" \' \xc3\xa9\n'
+
+
+def test_declare_in_a_string_or_comment_is_left_alone() -> None:
+    from breezeai_cog.parsers.vb.source import declare_spans
+
+    src = b'Dim s = "Declare Function F Lib ""x"" ()" \' Declare Sub S Lib "k" ()\n'
+    assert declare_spans(src) == []
+
+
+def test_operator_in_a_string_or_comment_is_left_alone() -> None:
+    from breezeai_cog.parsers.vb.source import blank_operators
+
+    src = b'Dim s = "Operator +(a" \' Operator <>(b) End Operator\n'
+    assert blank_operators(src) is src
+
+
+def test_optional_in_a_string_or_comment_is_left_alone() -> None:
+    from breezeai_cog.parsers.vb.source import blank_optional_modifiers
+
+    src = b'Dim s = "Optional ByVal x" \' Optional ByRef y\n'
+    assert blank_optional_modifiers(src) is src
+
+
+def test_an_xml_literal_line_is_not_a_type_opener() -> None:
+    from breezeai_cog.parsers.vb.source import _type_blocks
+
+    src = (b"Public Class C\n    Sub M()\n        Dim x = <root>Class Foo</root>\n    End Sub\n"
+           b"End Class\n")
+    assert [(b.name, b.depth) for b in _type_blocks(src) or []] == [("C", 0)]
+
+
+def test_a_nested_type_under_several_attribute_blocks_keeps_the_members_after_it(tmp_path) -> None:
+    # The nested type is blanked from its first attribute line on: the joined run does not leave
+    # a dangling block behind that would swallow the module's members after the type.
+    for end in (b"", b" _"):
+        src = (b"Module Service\n    <ServiceContract()>" + end + b"\n"
+               b"    <ServiceKnownType(GetType(Order))>" + end + b"\n"
+               b"    Public Interface IOrders\n        Sub Submit(ByVal x As Integer)\n"
+               b"    End Interface\n\n    Sub Main()\n        Run()\n    End Sub\nEnd Module\n")
+        p = tmp_path / "S.vb"
+        p.write_bytes(src)
+        rec = VbParser().parse_file(ParseContext(path="S.vb", abs_path=p, source=src,
+                                                 repo_root=tmp_path))
+        orders = next(c for c in rec.classes if c.name == "IOrders")
+        assert [d.name for d in orders.decorators] == ["ServiceContract", "ServiceKnownType"], end
+        assert {f.name for f in rec.functions} == {"Submit", "Main"}, end
 
 
 STACKED = b'''Imports System.ServiceModel
@@ -344,15 +661,16 @@ End Class
 def test_a_broken_method_header_keeps_its_declared_name(tmp_path) -> None:
     # This header shape (an attributed parameter named ``to…``, a generic return type, an
     # ``If … OrElse …`` call condition) makes the grammar fail inside the header; its ``name`` field then points at
-    # ``IsNullOrWhiteSpace`` on the If line; the name comes from the header text instead, and the
-    # mis-read parameters and return type stay empty rather than wrong.
+    # ``IsNullOrWhiteSpace`` on the If line; the name comes from the header text instead. The
+    # mis-read parameters stay empty rather than partial; the return type, right after the
+    # list's ``)``, is still read.
     p = tmp_path / "R.vb"
     p.write_bytes(BROKEN_HEADER)
     ctx = ParseContext(path="R.vb", abs_path=p, source=BROKEN_HEADER, repo_root=tmp_path)
     rec = VbParser().parse_file(ctx)
     fns = {f.name: f for f in rec.functions}
     assert set(fns) == {"GetRate", "Other"}
-    assert fns["GetRate"].params == [] and fns["GetRate"].returnType is None
+    assert fns["GetRate"].params == [] and fns["GetRate"].returnType == "Task(Of IActionResult)"
     assert fns["GetRate"].id == "R.vb#ReportsController#GetRate@2"
     # nothing in the file is named IsNullOrWhiteSpace, so that call resolves to no local function
     assert [c.path for c in fns["Other"].calls if c.name == "IsNullOrWhiteSpace"] == [None]
@@ -460,7 +778,7 @@ def test_implements_is_left_alone_off_a_member_header() -> None:
         b"    Implements IOrderService",                                 # the class statement
         b'    Dim s = "Function F() Implements I.J"',                     # in a string
         b"    ' Public Function F() As X Implements I.J",                 # a comment
-        b"    Public Function F() As X _",                                # continued header
+        b"    Public Function F() As X _",                                # continued header, no clause
     ]
     for line in kept:
         assert blank_implements(line) == line, line
@@ -484,7 +802,119 @@ def test_a_generic_type_keeps_its_closing_parentheses(tmp_path) -> None:
     rec = _parse_source(tmp_path, _GENERICS)
     got = {f.name: (f.returnType, [(p.name, p.type) for p in f.params]) for f in rec.functions}
     assert got["B"] == ("Task(Of List(Of Customer))", [])
-    # A parameter after a generic one is lost to the grammar; a Sub still returns nothing.
-    assert got["S"][0] is None and got["S"][1][0] == ("xs", "List(Of Customer)")
+    # A parameter after a generic one is kept; a Sub still returns nothing.
+    assert got["S"] == (None, [("xs", "List(Of Customer)"), ("n", "Integer")])
     assert got["D"][0] == "Dictionary(Of String, List(Of Integer))"
     assert got["E"][0] == "Customer"
+
+
+_MULTI_ARG_GENERICS = b"""Public Interface IOrders
+    Function Find(f As Dictionary(Of String, String), take As Integer) As List(Of Order)
+End Interface
+Public Class C
+    Implements IOrders
+    Private _map As Dictionary(Of String, Integer), _s3 As IAmazonS3
+    Public Sub New(repo As IRepository(Of Order, Integer), <FromServices> log As ILogger)
+    End Sub
+    Public Function A2(a As Dictionary(Of String, Integer), b As String) As Integer
+        Return 1
+    End Function
+    Public Function A3(d As Dictionary(Of String, List(Of Integer))) As Integer
+        Return 1
+    End Function
+    Public Function Pat(d As Dictionary(Of String, List(Of Integer)), ParamArray z() As String) As Task(Of List(Of Dictionary(Of String, Integer))) Implements IA.Pat, IB.Pat
+        Return Nothing
+    End Function
+    Public Function Multi(
+        a As Dictionary(Of String,
+                           Integer),
+        <FromBody> b As String) As Integer
+        Return 1
+    End Function
+    Public Function FromAsync(Of T1, T2)(
+            begin As Func(Of T1, T2, IAsyncResult),
+            state As Object) As Task
+        Return Nothing
+    End Function
+    Public Function Q(x As Outer(Of Integer).Inner(Of String, Long), y As Integer) As Integer
+        Return 1
+    End Function
+    Public Function Find(f As Dictionary(Of String, String),
+                         take As Integer) As List(Of Order) _
+        Implements IOrders.Find
+        Dim s = "x As Dictionary(Of A, B)"
+        Return Nothing
+    End Function
+End Class
+"""
+
+
+def test_a_generic_with_several_type_arguments_keeps_the_parameter_list(tmp_path) -> None:
+    # The grammar reads the comma in `(Of A, B)` as the end of the parameter list, and a nested
+    # `(Of …)` as a parameter; the shadow blanks the group, the type is read whole from the source.
+    rec = _parse_source(tmp_path, _MULTI_ARG_GENERICS)
+    got = {(f.name, f.startLine): ([(p.name, p.type) for p in f.params], f.returnType)
+           for f in rec.functions}
+    assert got[("A2", 9)] == ([("a", "Dictionary(Of String, Integer)"), ("b", "String")], "Integer")
+    assert got[("A3", 12)] == ([("d", "Dictionary(Of String, List(Of Integer))")], "Integer")
+    assert got[("Pat", 15)] == (
+        [("d", "Dictionary(Of String, List(Of Integer))"), ("z", "String")],
+        "Task(Of List(Of Dictionary(Of String, Integer)))")
+    multi = got[("Multi", 18)]
+    assert [n for n, _ in multi[0]] == ["a", "b"] and multi[1] == "Integer"
+    # a method's own type parameters are not its parameter list
+    assert got[("FromAsync", 24)] == (
+        [("begin", "Func(Of T1, T2, IAsyncResult)"), ("state", "Object")], "Task")
+    assert got[("Q", 29)] == (
+        [("x", "Outer(Of Integer).Inner(Of String, Long)"), ("y", "Integer")], "Integer")
+    # an interface member, and a member whose Implements clause is on a continued line
+    assert got[("Find", 2)] == (
+        [("f", "Dictionary(Of String, String)"), ("take", "Integer")], "List(Of Order)")
+    assert got[("Find", 32)] == got[("Find", 2)]
+    from breezeai_cog.parsers.vb.source import member_implements
+    assert member_implements(_MULTI_ARG_GENERICS)[32] == ["IOrders.Find"]
+    ctor = next(f for f in rec.functions if f.name == "New")
+    assert [(p.name, p.type, [d.name for d in p.decorators]) for p in ctor.params] == [
+        ("repo", "IRepository(Of Order, Integer)", []), ("log", "ILogger", ["FromServices"])]
+    assert [(p.name, p.type) for p in rec.classes[-1].constructorParams] == [
+        ("repo", "IRepository(Of Order, Integer)"), ("log", "ILogger")]
+
+
+def test_generic_arguments_are_blanked_only_after_as_and_a_method_name() -> None:
+    from breezeai_cog.parsers.vb.source import blank_generic_arguments
+
+    src = b"Function F(Of T)(a As List(Of T)) As Dictionary(Of K, V)\n"
+    out = blank_generic_arguments(src)
+    assert len(out) == len(src)
+    # the method's type parameters and both type argument lists: spaces, same length
+    assert out == b"Function F      (a As List      ) As Dictionary         \n"
+    kept = [
+        b"Public Class Repo(Of K, V)",                 # a type's own type parameters
+        b"    Inherits Base(Of K, V)",
+        b"    x = New List(Of Integer)()",             # an expression, no As
+        b'    s = "a As List(Of A, B)"',               # in a string
+        b"    ' a As List(Of A, B)",                   # in a comment
+        b"    Dim d As Dictionary(Of String,",         # not closed on its logical line
+    ]
+    for line in kept:
+        assert blank_generic_arguments(line + b"\n    End Sub\n") == line + b"\n    End Sub\n", line
+
+
+def test_a_parameter_list_the_grammar_lost_text_from_is_empty_not_partial(tmp_path) -> None:
+    # `<FromQuery> toY` reads as the keyword `To`: the second parameter falls into an ERROR
+    # between the parameters. No partial list; an error inside one parameter
+    # (`<[In], Out>` on a parameter after a line break) loses no parameter and is kept.
+    src = b"""Public Class R
+    Public Function GetRate(<FromQuery> fromX As String, <FromQuery> toY As String) As Task(Of IActionResult)
+        Return Ok()
+    End Function
+    Friend Shared Function Test(
+        <[In], Out> ByVal pointArray() As MyPoint, ByVal size As Integer) _
+        As Integer
+    End Function
+End Class
+"""
+    rec = _parse_source(tmp_path, src)
+    got = {f.name: ([p.name for p in f.params], f.returnType) for f in rec.functions}
+    assert got["GetRate"] == ([], "Task(Of IActionResult)")
+    assert got["Test"] == (["pointArray", "size"], "Integer")

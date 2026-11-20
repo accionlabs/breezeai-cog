@@ -26,9 +26,10 @@ Rule            Severity Violation
 ``endpoint``    error    an empty string instead of no value, or a code placeholder
                          (``${…}``, ``#{…}``, a backtick) instead of a resolved address
                          (§6, §8)
-``one-record``  error    two entry points with the same file, line, method, endpoint and
-                         handler (§8); one address serving several handlers (a Vert.x
-                         service proxy's methods) is several bindings
+``one-record``  error    two entry points with the same file, line, method, endpoint,
+                         handler and version (§8); one address serving several handlers (a
+                         Vert.x service proxy's methods) or several header-selected versions
+                         is several bindings
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
 ``handlerPath`` error    an empty string, the record's own file, or an absolute path (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
@@ -55,7 +56,9 @@ from ..schemas import FileRecord, Statement
 from .aspnet_common import FRAMEWORK_SERVED
 from .django_common import DJANGO_SERVED
 
-ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
+#: ``mcp_tool``: an MCP server tool is an entry point an AI client calls, held to
+#: the same contract as a route (``method="TOOL"``, ``endpoint`` = the tool name).
+ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer", "mcp_tool"})
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
 NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation"})
@@ -63,16 +66,18 @@ NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigat
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({
     "ANY", "WEBSOCKET",
-    "QUERY", "MUTATION", "SUBSCRIPTION", "RESOLVE_REFERENCE",
+    "QUERY", "MUTATION", "SUBSCRIPTION", "RESOLVE_FIELD", "RESOLVE_REFERENCE",
     "RPC",
     "MESSAGE", "EVENT", "CONSUMER",
     "TIMER", "PERIODIC",
+    "TOOL",
 })
 
 ROUTE_KINDS: dict[str, frozenset[str | None]] = {
     "route": frozenset({"route", "rpc", "ws", "page", "query", "mutation", "subscription"}),
     "eventbus_consumer": frozenset({None, "message"}),
     "timer": frozenset({None}),
+    "mcp_tool": frozenset({None}),
 }
 
 _PLACEHOLDERS = ("${", "#{", "`")
@@ -123,6 +128,10 @@ def _framework_served(s: Statement) -> bool:
         return True
     if _django_served(s):
         return True
+    # A Next.js MDX page: the file's content is the page, no named component handles it.
+    if (s.framework == "nextjs" and s.routeKind == "page" and s.nodeType == "synthetic"
+            and s.parentId.lower().endswith(".mdx")):
+        return True
     # A Relay node field of a server's schema: the GraphQL server resolves it.
     return (s.framework == "graphql" and s.routeKind == "query" and s.responseDTO == "Node"
             and s.endpoint in ("node", "nodes"))
@@ -158,7 +167,7 @@ def _check(s: Statement) -> list[tuple[str, str]]:
 def validate(record: FileRecord) -> list[Violation]:
     """Contract violations among ``record``'s entry points, in statement order."""
     out: list[Violation] = []
-    seen: Counter[tuple[int, str | None, str | None, str | None]] = Counter()
+    seen: Counter[tuple[int, str | None, str | None, str | None, str | None]] = Counter()
     for s in record.statements:
         if s.semanticType in OUTBOUND_TYPES or s.routeKind == "navigation":
             bad = _bad_address(s.endpoint)
@@ -171,7 +180,7 @@ def validate(record: FileRecord) -> list[Violation]:
             Violation(rule, "gap" if rule in _GAPS else "error", s.id, detail)
             for rule, detail in _check(s)
         )
-        key = (s.startLine, s.method, s.endpoint, s.handler)
+        key = (s.startLine, s.method, s.endpoint, s.handler, s.version)
         seen[key] += 1
         if seen[key] == 2:
             out.append(Violation(

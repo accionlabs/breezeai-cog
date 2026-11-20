@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
-from ..callresolve import CallResolver, noop_resolver
+from ..callresolve import CallResolver, method_types, noop_resolver
+from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import extract_statements, is_anonymous_body
 
 
 def modifiers_node(node: Node) -> Node | None:
@@ -76,37 +78,73 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
 
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
-    owner: str | None = None,
+    owner: str | None = None, scope: Mapping[str, str | None] | None = None,
+    *, through: tuple[str | None, ...] | None = None, own_anonymous: bool = False,
 ) -> list[Call]:
-    """The calls in a method body. ``owner`` is the simple name of the class it is declared in:
-    a call on ``this`` or ``super``, or a bare call (Java's implicit ``this``), may resolve to an
-    inherited method."""
+    """The calls in a method body, one per name in order of first appearance. ``owner`` is the
+    simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
+    (Java's implicit ``this``), may resolve to an inherited method. ``scope`` is the method's own
+    variable types (``method_types``).
+
+    A name's ``path`` comes from the first of its calls that resolves: in ``config.getString(k)``
+    then ``JsonUtil.getString(o, k)`` the second, in-repo call gives ``getString`` its file.
+
+    ``through``: the body is a method of an anonymous or local class (each enclosing such
+    class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
+    calls in an anonymous class body are that class's methods' own, so they are left out."""
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    at: dict[str, int] = {}
+    # In an anonymous or local class body `this.x` is that class's field, not the outer one's.
+    inner_scope = None if scope is None else {k: v for k, v in scope.items() if not k.startswith("this.")}
 
-    def visit(node: Node, inner: bool) -> None:
+    def target(name: str, receiver: str | None, through: tuple[str | None, ...] | None) -> str | None:
+        inner = through is not None
+        if receiver is not None and receiver.endswith(".this"):
+            # `Outer.this.m()` compiles only when `Outer` is this class or an enclosing one, so
+            # it is `this.m()` written in `Outer`, inside an anonymous class body or not.
+            qualifier = receiver[: -len(".this")].rsplit(".", 1)[-1]
+            return resolve(name, "this", qualifier) if qualifier else None
+        if inner:
+            path = resolve(name, receiver, None, inner_scope, field_owner=owner, through=through)
+        else:
+            path = resolve(name, receiver, owner, scope)
+        if path is None and receiver is None and owner is not None:
+            path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
+        return path
+
+    def visit(node: Node, through: tuple[str | None, ...] | None) -> None:
         # Descend into every scope, including inline lambdas — their calls belong to
         # the nearest named enclosing function (see build_function). Inside an anonymous or
-        # local class body (`inner`), `this` and a bare name may mean that class's own members,
-        # so the call is not credited to the enclosing class's own methods.
+        # local class body (`through` is not None: each enclosing such class's type, innermost
+        # first, None for a local class), `this` and a bare name may mean that class's own
+        # members, so the call is not credited to the enclosing class's own methods.
         for child in node.named_children:
+            if own_anonymous and is_anonymous_body(child):
+                continue
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
                     name = node_text(name_node, source)
                     obj = child.child_by_field_name("object")
                     receiver = node_text(obj, source) if obj is not None else None
-                    if name and name not in seen:
-                        seen.add(name)
-                        path = resolve(name, receiver, None if inner else owner)
-                        if path is None and receiver is None and owner is not None:
-                            path = resolve(name, "this", owner)  # `foo()` is `this.foo()`
-                        calls.append(Call(name=name, path=path))
-            visit(child, inner or child.type == "class_body")
+                    if name and (name not in at or calls[at[name]].path is None):
+                        path = target(name, receiver, through)
+                        if name not in at:
+                            at[name] = len(calls)
+                            calls.append(Call(name=name, path=path))
+                        elif path is not None:
+                            calls[at[name]] = Call(name=name, path=path)
+            nested = through
+            if child.type == "class_body":
+                created = node.child_by_field_name("type") \
+                    if node.type == "object_creation_expression" else None
+                nested = (node_text(created, source) if created is not None else None,
+                          *(through or ()))
+            visit(child, nested)
 
-    visit(body, False)
+    visit(body, through)
     return calls
 
 
@@ -176,34 +214,98 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     return names
 
 
-def type_map(root: Node, source: bytes) -> dict[str, str]:
-    """Variable name → declared type, for receiver-type call resolution (Phase 2).
-    Fields (the DI pattern) win over params/locals on name collisions."""
-    types: dict[str, str] = {}
-
-    def add(name_node: Node | None, type_node: Node | None, *, override: bool) -> None:
-        if name_node is None or type_node is None:
-            return
-        name = node_text(name_node, source)
-        if override or name not in types:
-            types[name] = node_text(type_node, source)
+def type_map(root: Node, source: bytes) -> dict[str, str | None]:
+    """Variable name → declared type across the whole file, for a name a method does not
+    declare itself (a field it inherits): kept only while every typed declaration of the name
+    in the file agrees, else ``None``. Untyped ones (``var x = f()``, ``x -> …``) say nothing."""
+    types: dict[str, str | None] = {}
 
     def walk(n: Node) -> None:
         for c in n.named_children:
-            if c.type == "field_declaration":
-                for d in c.named_children:
-                    if d.type == "variable_declarator":
-                        add(d.child_by_field_name("name"), c.child_by_field_name("type"), override=True)
-            elif c.type == "formal_parameter":
-                add(c.child_by_field_name("name"), c.child_by_field_name("type"), override=False)
-            elif c.type == "local_variable_declaration":
-                for d in c.named_children:
-                    if d.type == "variable_declarator":
-                        add(d.child_by_field_name("name"), c.child_by_field_name("type"), override=False)
+            for name, typ in declarations(c, source):
+                if typ is not None:
+                    record_distinct(types, name, typ)
             walk(c)
 
     walk(root)
     return types
+
+
+def class_fields(body: Node | None, source: bytes) -> dict[str, str | None]:
+    """A class body's own fields → their written type (a record's components included, via
+    its ``parameters`` handled by the caller)."""
+    out: dict[str, str | None] = {}
+    for member in class_members(body) if body is not None else ():
+        if member.type in ("field_declaration", "constant_declaration"):
+            out.update(declarations(member, source))
+    return out
+
+
+def declarations(node: Node, source: bytes) -> list[tuple[str, str | None]]:
+    """The names one declaration node introduces, with their written type (None: untyped or
+    not one class type, such as a multi-catch)."""
+    def text(n: Node | None) -> str | None:
+        return node_text(n, source) if n is not None else None
+
+    t = node.type
+    if t in ("field_declaration", "constant_declaration", "local_variable_declaration"):
+        typ = text(node.child_by_field_name("type"))
+        out = []
+        for d in node.children_by_field_name("declarator"):
+            nm = d.child_by_field_name("name")
+            if nm is None:
+                continue
+            if typ == "var":  # `var x = new T(…)` is a T; any other initializer is not read
+                value = d.child_by_field_name("value")
+                created = value.child_by_field_name("type") if value is not None and \
+                    value.type == "object_creation_expression" else None
+                out.append((node_text(nm, source), text(created)))
+            else:
+                out.append((node_text(nm, source), typ))
+        return out
+    if t in ("formal_parameter", "enhanced_for_statement", "resource"):
+        nm = node.child_by_field_name("name")
+        return [(node_text(nm, source), text(node.child_by_field_name("type")))] if nm is not None else []
+    if t == "catch_formal_parameter":
+        nm = node.child_by_field_name("name")
+        ct = next((c for c in node.named_children if c.type == "catch_type"), None)
+        one = ct.named_children[0] if ct is not None and len(ct.named_children) == 1 else None
+        return [(node_text(nm, source), text(one))] if nm is not None else []
+    if t == "spread_parameter":  # `String... more` is an array, not a String
+        vd = next((c for c in node.named_children if c.type == "variable_declarator"), None)
+        spread = vd.child_by_field_name("name") if vd is not None else None
+        return [(node_text(spread, source), None)] if spread is not None else []
+    if t == "instanceof_expression":  # `x instanceof Order o`
+        nm = node.child_by_field_name("name")
+        return [(node_text(nm, source), text(node.child_by_field_name("right")))] if nm is not None else []
+    if t == "lambda_expression":  # untyped lambda parameters: `x -> …`, `(x, y) -> …`
+        ps = node.child_by_field_name("parameters")
+        if ps is not None and ps.type == "identifier":
+            return [(node_text(ps, source), None)]
+        if ps is not None and ps.type == "inferred_parameters":
+            return [(node_text(c, source), None) for c in ps.named_children if c.type == "identifier"]
+    return []
+
+
+def method_scope(
+    node: Node, source: bytes, fields: Mapping[str, str | None],
+) -> dict[str, str | None]:
+    """The variable types a method's calls resolve with (``callresolve.method_types``)."""
+    params: list[tuple[str, str | None]] = []
+    ps = node.child_by_field_name("parameters")
+    for p in ps.named_children if ps is not None else ():
+        params.extend(declarations(p, source))
+    locals_: list[tuple[str, str | None]] = []
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            locals_.extend(declarations(c, source))
+            walk(c)
+
+    body = node.child_by_field_name("body")
+    if body is not None:
+        walk(body)
+    return method_types(fields, params, locals_)
 
 
 def build_method(
@@ -218,7 +320,18 @@ def build_method(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    fields: Mapping[str, str | None] | None = None,
+    through: tuple[str | None, ...] | None = None,
+    scope_node: Node | None = None,
+    own_anonymous: bool = False,
 ) -> tuple[Function, list[Statement]]:
+    """``fields``: the enclosing class's fields (outer classes' included), for the method's
+    variable types; omitted, its calls use the resolver's file-wide types.
+
+    ``own_anonymous``: anonymous classes in the body are captured as their own Class, so their
+    calls and statements are not this method's. ``through`` and ``scope_node`` are for a method
+    of an anonymous class: the enclosing anonymous or local classes' types (see ``_calls``) and
+    the declaration whose variables its calls see (the named method it is written in)."""
     modifiers = modifiers_node(node)
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
@@ -244,11 +357,14 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name),
+        calls=_calls(body, source, resolve, class_name,
+                     None if fields is None else method_scope(scope_node or node, source, fields),
+                     through=through, own_anonymous=own_anonymous),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline lambdas — attribute their statements here
+        skip_anonymous=own_anonymous,
     )
     return fn, statements
 

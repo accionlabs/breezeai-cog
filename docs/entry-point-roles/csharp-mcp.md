@@ -1,0 +1,12 @@
+# MCP C# SDK — entry-point roles
+
+Parser: `src/breezeai_cog/parsers/csharp_mcp/tools.py` (additive detector) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_csharp_mcp.py`
+
+A tool a C# MCP server declares with the `ModelContextProtocol` SDK's attribute. The fields of an `mcp_tool` record, how `params` is read and limited, and what an incremental sync does are the same for every MCP framework: [entry-point contract, MCP tools](../architecture/entry-points.md#mcp-tools).
+
+| Construct | Role | Record | Why |
+|---|---|---|---|
+| `[McpServerTool(Name = …)]` with `[Description(…)]` (`ModelContextProtocol`) | Binding | `mcp_tool`, `framework: csharp-mcp`, at the attribute; `endpoint` = `Name`, else the name the SDK derives from the method (SDK 0.3+): a trailing `Async` dropped when it returns `Task` / `ValueTask` / `IAsyncEnumerable`, other characters than ASCII letters and digits → `_`, then snake_case as `JsonNamingPolicy.SnakeCaseLower` (`GetWeatherAsync` → `get_weather`, `GetHTTPStatus` → `get_http_status`); `description` = `[Description]`, else the XML `<summary>`; a parameter is optional only with a default; `CancellationToken`, `IMcpServer` / `McpServer`, `RequestContext<…>`, `IProgress<…>`, `IServiceProvider`, `[FromServices]` skipped | The SDK's own attribute |
+| A computed tool name (`Name = Const`) | None | — | The tool exists, but its name is unknown |
+
+Not covered yet (follow-up): `mcp_resource` / `mcp_prompt`, and MCP **client** calls.

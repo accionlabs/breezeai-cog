@@ -49,7 +49,7 @@ files (`.blade.php`) remain unsupported.
 PHP data access is recorded only where the code proves it: a static call on a class that extends an
 Eloquent model (`User::create([...])`, `Song::query()->get()`) or an instance typed as one →
 `dataAccessHint: "eloquent"`; a typed Doctrine `EntityManagerInterface` / repository → `"doctrine"`;
-a CodeIgniter `$this->db` builder or `CodeIgniter\Model` subclass → `"codeigniter-builder"`; the
+a CodeIgniter `$this->db` builder or `CodeIgniter\Model` subclass → `"codeigniter"`; the
 imported `DB` facade → no hint (it is the query builder, not Eloquent). Calls on untyped variables
 are not guessed.
 
@@ -423,6 +423,9 @@ Most-used settings:
 | SCM pagination ceiling (pages per listing; server) | `BREEZEAI_COG_SCM_MAX_PAGES` | `100` |
 | SCM fallback token per provider (server; used when the request has no `gitToken`) | `BREEZEAI_COG_SCM_TOKEN_GITHUB` · `…_GITLAB` · `…_BITBUCKET` · `…_AZURE_DEVOPS` | — |
 | Self-hosted SCM instances (server; JSON host→provider, host→API base) | `BREEZEAI_COG_SCM_INSTANCES` · `BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING` | `{}` |
+| Hosts the server may call (comma-separated; empty = any but loopback/link-local/reserved) | `BREEZEAI_COG_SCM_ALLOWED_API_HOSTS` | — |
+| Also refuse private ranges (off by default — self-hosted instances live on them) | `BREEZEAI_COG_SCM_BLOCK_PRIVATE_NETWORKS` | `false` |
+| SCM connect-phase timeout (seconds) | `BREEZEAI_COG_SCM_API_CONNECT_TIMEOUT` | `10` |
 
 ### Choosing which files are analyzed
 
@@ -477,15 +480,45 @@ backend, so they require the `AWS_*` and `BREEZE_API_URL` settings. Errors come 
 
 **Git providers for `/api/analyze-diff`.** The `repoUrl` decides the provider: `github.com`,
 `bitbucket.org`, `gitlab.com`, `dev.azure.com` and `<org>.visualstudio.com` are recognised out of
-the box. A self-hosted instance (GitHub Enterprise, GitLab, Bitbucket Server, Azure DevOps Server)
-is recognised once its host is listed in `BREEZEAI_COG_SCM_INSTANCES` and its REST API base in
-`BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING`. Pass the credential as `gitToken` on the request
-(Bitbucket expects `username:api_key`); when it is absent the per-provider
-`BREEZEAI_COG_SCM_TOKEN_*` setting is used, and when that is absent too the request is anonymous,
-which only works for public repositories. The first analysis of a repository is a shallow clone;
-later runs that supply `currentCommitId` fetch only the changed files through the provider's REST
-API, for all four providers. A provider API failure is reported as `502`, a malformed credential or
-unknown host as `400`.
+the box. A self-hosted instance (GitHub Enterprise, GitLab, Bitbucket Data Center, Azure DevOps
+Server) is recognised once its host is listed in `BREEZEAI_COG_SCM_INSTANCES` and, where needed,
+its REST API base in `BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING`. Pass the credential as
+`gitToken` on the request (Bitbucket Cloud expects `username:api_key`); when it is absent the
+per-provider `BREEZEAI_COG_SCM_TOKEN_*` setting is used, and when that is absent too the request is
+anonymous, which only works for public repositories. The first analysis of a repository is a
+shallow clone; later runs that supply `currentCommitId` fetch only the changed files through the
+provider's REST API, for every provider. A provider API failure is reported as `502`, a malformed
+credential or unknown host as `400`.
+
+**Bitbucket Data Center (`bitbucket_server`)** is a separate provider from Bitbucket Cloud, not a
+Cloud instance on another host: it speaks REST 1.0 and addresses repositories as
+`/projects/{projectKey}/repos/{repositorySlug}`. It ships no public cloud, so its host must be
+identified by `"gitProvider": "bitbucket_server"` on the request (on `/api/analyze-diff` and every
+`/api/git/*` route alike) — the only slug `gitProvider` acts on, since every other provider is
+identified from the URL. Without it the host must be listed
+in `BREEZEAI_COG_SCM_INSTANCES` instead. It has no anonymous mode either — a request without
+`gitToken` is a `400`. Unlike the other four providers it has **no**
+`BREEZEAI_COG_SCM_TOKEN_*` fallback: every Data Center host is a different customer's instance, so
+a deployment-wide credential would be sent to whichever host the request named.
+
+```bash
+BREEZEAI_COG_SCM_INSTANCES='{"stash.payroll.co.jp": "bitbucket_server"}'
+# Optional: only needed when REST is not served under the instance's own context path.
+BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING='{"stash.payroll.co.jp": "https://stash.payroll.co.jp/stash/rest/api/1.0"}'
+```
+
+The credential travels as `gitToken` on each request, in any of three forms: a **bare HTTP access
+token** (`BBDC-…`, what Data Center's own UI issues — sent as `Bearer`), a raw
+`username:password`, or a pre-encoded base64 `username:password` (both sent as `Basic`). A
+credential with an empty username is rejected. The URL's scheme and port are honoured, so a stock
+install on `http://host:7990` or a proxied one on `:8443` works. The API base is otherwise derived from the
+repository URL: `https://stash.payroll.co.jp/stash/scm/p3/kit.git` yields the context path `/stash`
+and therefore the base `https://stash.payroll.co.jp/stash/rest/api/1.0`, the project key `p3` and
+the slug `kit`. Browse URLs (`/projects/P3/repos/kit/browse`) and personal repositories
+(`/users/jdoe/...`, normalised to the API's `~jdoe`) parse the same way.
+
+Two values Data Center does not report, left empty rather than guessed: `compare` returns no
+per-file line counts or patch text, so `additions` / `deletions` are `0` and `patch` is absent.
 
 ---
 

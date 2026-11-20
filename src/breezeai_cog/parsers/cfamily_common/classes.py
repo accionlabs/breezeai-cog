@@ -1173,6 +1173,7 @@ def build_class(
                         for p in extract_params(
                             fd.child_by_field_name("parameters") if fd is not None else None, source
                         )
+                        if p.type is not None
                     ]
 
     cls = Class(

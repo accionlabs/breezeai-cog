@@ -31,6 +31,8 @@ func helper() {}
 func main() {
     helper()
     func() { helper() }()
+    notify := func() { helper() }
+    notify()
 }
 '''
     path = tmp_path / "main.go"
@@ -46,9 +48,12 @@ func main() {
     )
 
     assert record.functions[0].name == "helper"
-    assert [call.path for call in record.functions[1].calls] == ["main.go"]
-    anonymous = next(function for function in record.functions if function.type == "anonymous")
-    assert [call.path for call in anonymous.calls] == ["main.go"]
+    # The inline literal is part of main; the literal stored in `notify` is a Function of its own.
+    assert [call.path for call in record.functions[1].calls] == ["main.go", None]
+    notify = next(function for function in record.functions if function.name == "notify")
+    assert notify.type == "function_expression"
+    assert [call.path for call in notify.calls] == ["main.go"]
+    assert all(function.type != "anonymous" for function in record.functions)
 
 
 # def test_go_grouped_type_declaration_emits_each_type_with_its_span(tmp_path) -> None:
@@ -321,7 +326,7 @@ def test_go_repo_is_analyzed_and_capabilities_match_ticket(tmp_path) -> None:
     assert "go.sum" in caps["extensions"]
 
 
-def test_go_captures_anonymous_functions_and_channels(tmp_path) -> None:
+def test_go_inline_function_literals_are_not_functions_and_channels_are_captured(tmp_path) -> None:
     src = b'''\
 package demo
 
@@ -346,7 +351,7 @@ func run(ch chan int) {
         )
     )
 
-    assert any(function.type == "anonymous" for function in record.functions)
+    assert [function.name for function in record.functions] == ["run"]
     assert any(
         statement.nodeType == "for_statement" and "range ch" in statement.text
         for statement in record.statements
@@ -451,19 +456,15 @@ def test_go_closures_are_parented_by_tree_not_by_line(tmp_path) -> None:
     record = _parse(tmp_path, b'''package p
 
 func f() {
-    a := func() {}; b := func() { _ = func() {} }
+    a := func() {}; b := func() { c := func() {}; c() }
     _, _ = a, b
 }
 ''')
 
-    f = next(fn for fn in record.functions if fn.name == "f")
-    anon = sorted((fn for fn in record.functions if fn.type == "anonymous"), key=lambda fn: fn.id)
-    assert len(anon) == 3
-    parents = {fn.parentId for fn in anon}
-    # a and b both belong to f; the literal inside b belongs to b — never a sibling on the same line.
-    assert sum(1 for fn in anon if fn.parentId == f.id) == 2
-    inner = next(fn for fn in anon if fn.parentId != f.id)
-    assert inner.parentId in {fn.id for fn in anon} and parents - {f.id} == {inner.parentId}
+    fns = {fn.name: fn for fn in record.functions}
+    assert set(fns) == {"f", "a", "b", "c"}
+    # a and b both belong to f; c, stored inside b, belongs to b — never a sibling on the same line.
+    assert (fns["a"].parentId, fns["b"].parentId, fns["c"].parentId) == (fns["f"].id, fns["f"].id, fns["b"].id)
 
 
 def test_go_index_resolves_packages_in_nested_modules(tmp_path) -> None:
@@ -536,3 +537,29 @@ def test_import_files_are_the_files_declaring_the_names_used(tmp_path) -> None:
     assert main["externalImports"] == ["fmt"]
     register = next(c for f in main["functions"] for c in f["calls"] if c["name"] == "Register")
     assert register["path"] == "users/routers.go"
+
+
+def test_go_stored_function_literals_are_functions_and_inline_ones_are_not(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+var notify = func(msg string) { send(msg) }
+var Handlers = map[string]func(){"a": func() { fire() }}
+
+func Run() {
+    go func() {
+        svc.Send()
+    }()
+}
+''')
+
+    fns = {fn.name: fn for fn in record.functions}
+    assert set(fns) == {"notify", "Run"}
+    assert (fns["notify"].type, fns["notify"].visibility, fns["notify"].parentId) == (
+        "function_expression", "package", "main.go")
+    got = {(s.parentId, s.nodeType, s.text) for s in record.statements}
+    assert ("main.go#notify@3", "expression_statement", "send(msg)") in got
+    assert ("main.go#Run@6", "expression_statement", "svc.Send()") in got
+    # An inline literal at package level gives its statements to the file.
+    assert ("main.go", "expression_statement", "fire()") in got
+    # The `var` that only stores `notify` is not repeated as a statement.
+    assert not any(s.text.startswith("var notify") for s in record.statements)

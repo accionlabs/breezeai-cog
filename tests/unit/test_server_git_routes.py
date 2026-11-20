@@ -54,6 +54,11 @@ class FakeClient(AbstractSCMClient):
         self._maybe_fail()
         return self._changes
 
+    def compare_relation(self, ref, base, head):
+        self.calls.append(("compare_relation", base, head))
+        self._maybe_fail()
+        return ChangeSet(relation="ahead", merge_base_sha=base)
+
     def tree(self, ref, commit):
         self.calls.append(("tree", commit))
         self._maybe_fail()
@@ -227,10 +232,32 @@ def test_compare_returns_git_diff_result() -> None:
     assert fake.calls == [("compare", OLD, SHA)]
 
 
+def test_compare_relation_only_skips_the_file_list() -> None:
+    fake = FakeClient(changed=["a.py"], files=[FileDiff("a.py", "modified", 1, 0)])
+    r = _app(fake).post(
+        "/api/git/compare",
+        json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA, "relationOnly": True},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"baseSha": OLD, "headSha": SHA, "relation": "ahead", "mergeBaseSha": OLD}
+    assert fake.calls == [("compare_relation", OLD, SHA)]
+
+
 def test_compare_empty_diff() -> None:
     r = _app(FakeClient()).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
     assert r.status_code == 200
     assert r.json() == {"baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": []}
+
+
+def test_compare_reports_relation_and_merge_base_when_known() -> None:
+    fake = FakeClient()
+    fake._changes.relation, fake._changes.merge_base_sha = "behind", "c" * 40
+    r = _app(fake).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
+    assert r.status_code == 200
+    assert r.json() == {
+        "baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": [],
+        "relation": "behind", "mergeBaseSha": "c" * 40,
+    }
 
 
 def test_compare_requires_both_commits() -> None:
@@ -290,6 +317,17 @@ def test_pull_request_provider_404_is_502() -> None:
     assert r.status_code == 502 and "HTTP 404" in r.json()["error"]
 
 
+def test_provider_status_is_reported_so_the_backend_can_tell_not_found_from_an_outage() -> None:
+    fake = FakeClient(fail=SCMAPIError("GitHub API GET /compare failed with HTTP 404", http_status=404))
+    r = _app(fake).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": "a", "headCommitId": "b"})
+    assert r.status_code == 502 and r.json()["providerStatus"] == 404
+
+
+def test_error_without_a_provider_status_omits_providerStatus() -> None:
+    r = _app(FakeClient()).post("/api/git/compare", json={"repoUrl": REPO})
+    assert r.status_code == 400 and "providerStatus" not in r.json()
+
+
 # --- pr-comment ---------------------------------------------------------------------
 
 
@@ -344,3 +382,69 @@ def test_parse_pr_url_invalid_is_400(url) -> None:
 def test_parse_pr_url_requires_pr_url() -> None:
     r = _app(FakeClient()).post("/api/git/parse-pr-url", json={})
     assert r.status_code == 400 and r.json() == {"error": "All fields required: prUrl"}
+
+
+# --- gitProvider override (Bitbucket Data Center only) ------------------------------
+
+DC_REPO = "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+
+
+def test_bitbucket_server_is_addressable_without_scm_instances() -> None:
+    """Data Center has no public-cloud URL pattern, so `gitProvider` is what makes an
+    unregistered customer host reachable without deployment-wide config."""
+    fake = FakeClient()
+    seen: list = []
+    r = _app(fake, seen=seen).post("/api/git/latest-commit", json={
+        "repoUrl": DC_REPO, "gitBranch": "develop", "gitToken": "tok",
+        "gitProvider": "bitbucket_server",
+    })
+    assert r.status_code == 200
+    ref = seen[0][0]
+    assert ref == RepoRef(
+        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
+        host="stash.payroll.co.jp", context_path="/stash",
+    )
+
+
+def test_bitbucket_server_without_the_override_is_a_400() -> None:
+    r = _app(FakeClient()).post("/api/git/latest-commit", json={
+        "repoUrl": DC_REPO, "gitBranch": "develop", "gitToken": "tok",
+    })
+    assert r.status_code == 400 and r.json() == {"error": INVALID_REPO_URL_MESSAGE}
+
+
+def test_any_slug_other_than_bitbucket_server_is_ignored() -> None:
+    """The four clouds are identified from the URL and always have been; honouring a
+    slug for them too would be a second source of truth that can disagree with the
+    host."""
+    seen: list = []
+    r = _app(FakeClient(), seen=seen).post("/api/git/latest-commit", json={
+        "repoUrl": REPO, "gitBranch": "main", "gitToken": "tok",
+        "gitProvider": "gitlab",
+    })
+    assert r.status_code == 200 and seen[0][0].provider == "github"
+
+
+def test_bitbucket_server_slug_on_a_cloud_url_is_a_400_not_a_silent_fallback() -> None:
+    """The slug is the caller stating the grammar. A github.com URL has no Data Center
+    anchor, so the contradiction is reported rather than resolved in their favour."""
+    r = _app(FakeClient()).post("/api/git/latest-commit", json={
+        "repoUrl": REPO, "gitBranch": "main", "gitToken": "tok",
+        "gitProvider": "bitbucket_server",
+    })
+    assert r.status_code == 400 and r.json() == {"error": INVALID_REPO_URL_MESSAGE}
+
+
+def test_parse_pr_url_honours_the_bitbucket_server_override() -> None:
+    r = _app(FakeClient()).post("/api/git/parse-pr-url", json={
+        "prUrl": ("https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+                  "/pull-requests/42/overview"),
+        "gitProvider": "bitbucket_server",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "bitbucket_server" and body["prId"] == "42"
+    assert body["prLinks"]["comment"] == (
+        "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
+        "/pull-requests/42/comments"
+    )

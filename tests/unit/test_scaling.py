@@ -290,6 +290,59 @@ def _kotlin_ktor(n: int) -> str:
             f"object Paths {{\n{consts}}}\n{tops}fun Route.r() {{\n{routes}}}\n")
 
 
+def _markdown(n: int) -> str:
+    body = "".join(
+        f"## Step {i}\n"
+        f"Run it with `TOKEN_{i}` set, or `DB_PASSWORD_{i}=p{i}`.\n"
+        f"| Key | Value |\n|---|---|\n| API_KEY_{i} | k{i} |\n"
+        f"```yaml\n- name: DB_PASSWORD\n  value: s{i}\npassword: p{i}\n```\n"
+        f"export API_KEY_{i}=k{i}\n"
+        for i in range(n)
+    )
+    return f"---\nname: guide\ndescription: A guide\napi_token: t\n---\n# Guide\n{body}"
+
+
+def _python_mcp(n: int) -> str:
+    tools = "".join(
+        f"@mcp.tool(name='t{i}')\n"
+        f"def t{i}(q: str, n: int = {i}, ctx: Context = None) -> str:\n"
+        f"    \"\"\"Tool {i}.\n\n    Args:\n        q: The query,\n            continued.\n"
+        f"        n (int): A number.\n    \"\"\"\n"
+        f"    return q\n\n\n"
+        for i in range(n)
+    )
+    return f"from fastmcp import FastMCP, Context\n\nmcp = FastMCP('demo')\n\n\n{tools}"
+
+
+def _typescript_mcp(n: int) -> str:
+    tools = "".join(
+        f"server.tool('t{i}', 'Tool {i}', {{ q: z.string().describe('q'), n: z.number().optional() }},\n"
+        f"  async ({{ q }}) => ({{ content: [] }}));\n"
+        for i in range(n)
+    )
+    return (
+        "import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';\n"
+        "import { z } from 'zod';\n"
+        f"const server = new McpServer({{ name: 'demo', version: '1' }});\n{tools}"
+    )
+
+
+def _mdx(n: int) -> str:
+    """ESM blocks, JSX, ``{…}`` expressions and code fences: the block probes, the shadow parse
+    and the document reading grow with the file. One paragraph of prose that starts with
+    ``import`` (up to 21 probes) is kept fixed, so neither size reaches the per-file block
+    budget, which would flatten the cost and hide a regression."""
+    parts = []
+    for i in range(n):
+        parts.append(
+            f"import {{ C{i} }} from './c{i}'\n\n"
+            f"## Section {i}\n\n"
+            f"<C{i} value={{{{ n: {i} }}}} />\n\n"
+            f"```js\nimport x{i} from 'x'\n```\n\n"
+        )
+    return "# Guide\n\nimport the data and run it.\n\n" + "".join(parts)
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -312,6 +365,10 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-struts2": ("OrderAction.java", _struts2),
     "struts2-xml": ("struts.xml", _struts2_xml),
     "kotlin-ktor": ("Routes.kt", _kotlin_ktor),
+    "markdown": ("docs/guide.md", _markdown),
+    "mdx": ("docs/guide.mdx", _mdx),
+    "python-mcp": ("server.py", _python_mcp),
+    "typescript-mcp": ("server.ts", _typescript_mcp),
 }
 
 

@@ -18,7 +18,7 @@ from ..treesitter import parse_source
 from .classes import build_class
 from .functions import (
     _constructor_target_name,
-    build_anonymous_function,
+    build_literal_function,
     build_function,
     scan_file,
 )
@@ -49,6 +49,19 @@ def _resolver(packages: dict[str, str], names: set[str], types: dict[str, str], 
         return local(name, receiver, owner)
 
     return resolve
+
+
+def _owner(literal: Node, bound: frozenset[tuple[int, int]]) -> Node | None:
+    """The nearest function, method or stored literal (``bound``) around ``literal``; None at
+    package level. An inline literal on the way up is skipped: it is not a Function."""
+    node = literal.parent
+    while node is not None:
+        if node.type in ("function_declaration", "method_declaration") or (
+            node.type == "func_literal" and (node.start_byte, node.end_byte) in bound
+        ):
+            return node
+        node = node.parent
+    return None
 
 
 class GoParser(BaseParser):
@@ -129,6 +142,9 @@ class GoParser(BaseParser):
                     if cls.name[:1].isupper():
                         exports.add(cls.name)
 
+        # Function literals stored in a variable are Functions of their own (named after the
+        # variable); every other literal is inline code of the function, or file, around it.
+        bound = frozenset((node.start_byte, node.end_byte) for node, _ in scan.bound)
         owner_ids: dict[int, str] = {}  # function/literal start byte -> Function.id
         for child in root.named_children:
             if child.type in {"function_declaration", "method_declaration"}:
@@ -145,6 +161,7 @@ class GoParser(BaseParser):
                     capture=capture,
                     limit=limit,
                     resolve=resolve,
+                    barriers=bound,
                 )
                 functions.append(fn)
                 owner_ids[child.start_byte] = fn.id
@@ -157,23 +174,32 @@ class GoParser(BaseParser):
                     target_name = _constructor_target_name(fn.name, fn.returnType)
                     target = class_by_name.get(target_name)
                     if target is not None:
-                        target.constructorParams = [ConstructorParam(name=p.name, type=p.type) for p in fn.params]
+                        target.constructorParams = [
+                            ConstructorParam(name=p.name, type=p.type)
+                            for p in fn.params
+                            if p.type is not None
+                        ]
 
-        for node, owner in scan.literals:  # document order: an enclosing literal comes first
-            fn = build_anonymous_function(
-                node, source, path,
-                parent_id=owner_ids.get(owner, fid) if owner is not None else fid,
-                seen_ids=seen_ids, resolve=resolve,
+        for node, name in scan.bound:  # document order: an enclosing literal comes first
+            enclosing = _owner(node, bound)
+            fn, fn_statements = build_literal_function(
+                node, name, source, path,
+                parent_id=owner_ids.get(enclosing.start_byte, fid) if enclosing is not None else fid,
+                package_level=enclosing is None,
+                seen_ids=seen_ids, capture=capture, limit=limit,
+                barriers=bound - {(node.start_byte, node.end_byte)}, resolve=resolve,
             )
             functions.append(fn)
+            statements.extend(fn_statements)
             owner_ids[node.start_byte] = fn.id
 
         # Package-level declarations (`const BaseURL = "/api"`, `var db *gorm.DB`). The walk
-        # stops at NESTED_SCOPES, so function bodies are not re-walked. Runs before the comment
-        # pass so a same-line trailing comment rides on the statement's `text`.
+        # stops at NESTED_SCOPES and stored literals, so function bodies are not re-walked; an
+        # inline literal's statements belong to the file. Runs before the comment pass so a
+        # same-line trailing comment rides on the statement's `text`.
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture,
-                               limit=limit, seen_ids=seen_ids)
+                               limit=limit, seen_ids=seen_ids, barriers=bound)
         )
 
         if capture:

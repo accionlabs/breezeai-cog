@@ -19,15 +19,50 @@ _CALL_TYPES = {
     "scoped_call_expression",
 }
 _SCOPE_BARRIERS = NESTED_SCOPES
+#: Closures: a Function only when stored in a variable (``$notify = function …``).
+CLOSURES = frozenset({"anonymous_function", "arrow_function"})
 
 
-def _walk_in_scope(node: Node) -> Iterator[Node]:
+def bound_closure_name(node: Node, source: bytes) -> str | None:
+    """The variable a closure is stored in (``$notify = function ($m) {…};`` → ``notify``),
+    else None — an inline closure (an argument, an array value, a property assignment)."""
+    parent = node.parent
+    if node.type not in CLOSURES or parent is None or parent.type != "assignment_expression":
+        return None
+    statement = parent.parent  # the assignment is the whole statement, not part of an expression
+    if statement is None or statement.type != "expression_statement" or len(statement.named_children) != 1:
+        return None
+    right, left = parent.child_by_field_name("right"), parent.child_by_field_name("left")
+    if right is None or (right.start_byte, right.end_byte) != (node.start_byte, node.end_byte):
+        return None
+    if left is None or left.type != "variable_name":
+        return None
+    return node_text(left, source).lstrip("$") or None
+
+
+def _stores_only(node: Node, bound: frozenset[tuple[int, int]]) -> bool:
+    """True for ``$notify = function …;`` whose closure is a Function (in ``bound``): the
+    statement would repeat it."""
+    if not bound or node.type != "expression_statement" or len(node.named_children) != 1:
+        return False
+    expr = node.named_children[0]
+    right = expr.child_by_field_name("right") if expr.type == "assignment_expression" else None
+    return right is not None and (right.start_byte, right.end_byte) in bound
+
+
+def _walk_in_scope(node: Node, bound: frozenset[tuple[int, int]] = frozenset()) -> Iterator[Node]:
+    """Statement nodes of a scope. The walk stops at classes and declared functions and at a
+    closure stored in a variable (``bound``), each its own record; an inline closure is
+    walked, so its statements belong to the enclosing function, or to the file."""
     for child in node.named_children:
-        if child.type in _SCOPE_BARRIERS:
+        span = (child.start_byte, child.end_byte)
+        if (child.type in _SCOPE_BARRIERS and child.type not in CLOSURES) or span in bound:
+            continue
+        if _stores_only(child, bound):
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _walk_in_scope(child)
+        yield from _walk_in_scope(child, bound)
 
 
 def _unwrap(node: Node) -> Node:
@@ -91,11 +126,12 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    bound: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _walk_in_scope(body):
+    for node in _walk_in_scope(body, bound):
         out.extend(
             classify_statement(
                 node,
@@ -113,3 +149,18 @@ def extract_statements(
             )
         )
     return out
+
+
+def extract_expression_body(
+    body: Node, source: bytes, path: str, *, parent_id: str, capture: bool, limit: int,
+    seen_ids: set[str],
+) -> list[Statement]:
+    """The expression body of a stored arrow function (``$f = fn ($x) => save($x);``) as that
+    function's one statement, with its own raw ``nodeType``."""
+    if not capture:
+        return []
+    return classify_statement(
+        body, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
+        emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPES,
+        name_of=_name_of, call_details=_call_details, language="php",
+    )

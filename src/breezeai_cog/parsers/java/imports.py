@@ -19,10 +19,16 @@ from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
 from ..constfold import Token, resolve_all
-from ..index_common import ClassHeritage, parallel_map, record_distinct, seed_same_package
+from ..index_common import (
+    ClassHeritage,
+    methods_where_unknown,
+    parallel_map,
+    record_distinct,
+    seed_same_package,
+)
 from ..treesitter import node_text, parse_source
 from .constants import collect_constants
-from .heritage import HeritageFrag, build_heritage, collect_heritage
+from .heritage import HeritageFrag, build_heritage, collect_heritage, foreign_bases
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -45,6 +51,16 @@ class JavaIndex:
     #: Simple class name → its in-repo base and declared methods, for inherited-method calls
     #: (``heritage.py``); ``None`` when the name is declared more than once.
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
+    #: ``(file, class simple name)`` → the methods that class declares there, for each class
+    #: ``class_heritage`` maps to ``None`` (``index_common.methods_where_unknown``).
+    unknown_methods: dict[tuple[str, str], frozenset[str] | None] = field(default_factory=dict)
+    #: Class simple name → the FQCNs its base may be, when that base is no Java class of the
+    #: repository (``heritage.foreign_bases``): a Groovy class of the repository, or a library's.
+    foreign_bases: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
+    #: FQCN (nested types as ``pkg.Outer.Inner``) → its declaration's tree-sitter type
+    #: (``class_declaration``, ``interface_declaration`` …); ``None`` when two files declare it.
+    #: Tells an anonymous class whether the type it instantiates is a class or an interface.
+    type_kinds: dict[str, str | None] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
@@ -120,7 +136,15 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
     consts = resolve_all(raw_consts)
-    index = JavaIndex(fqcn=fqcn, consts=consts, class_heritage=build_heritage(heritage, fqcn))
+    class_heritage = build_heritage(heritage, fqcn)
+    type_kinds: dict[str, str | None] = {}
+    for _, cls in heritage:
+        record_distinct(type_kinds, cls.fqcn, cls.kind)
+    index = JavaIndex(fqcn=fqcn, consts=consts, class_heritage=class_heritage,
+                      unknown_methods=methods_where_unknown(
+                          ((rel, c.fqcn.rsplit(".", 1)[-1], c.methods) for rel, c in heritage),
+                          class_heritage),
+                      foreign_bases=foreign_bases(heritage, fqcn), type_kinds=type_kinds)
     # Registered facts may need the whole index, so they resolve after it is built.
     return replace(index, facts=resolve_additive("java", collected, index))
 

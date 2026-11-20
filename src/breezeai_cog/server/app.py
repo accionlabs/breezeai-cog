@@ -52,9 +52,11 @@ def create_app(settings: Settings | None = None, deps: ServerDeps | None = None)
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
-        content: dict[str, str] = {"error": str(exc)}
+        content: dict[str, str | int] = {"error": str(exc)}
         if exc.failed_step:
             content["failedStep"] = exc.failed_step
+        if exc.provider_status is not None:
+            content["providerStatus"] = exc.provider_status
         _log_failure(request, exc.status_code, str(exc), failed_step=exc.failed_step,
                      cause=exc.__cause__ or exc)
         return JSONResponse(status_code=exc.status_code, content=content)

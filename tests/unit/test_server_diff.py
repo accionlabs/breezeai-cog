@@ -15,6 +15,7 @@ from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
 from breezeai_cog.server.git import INVALID_REPO_URL_MESSAGE, parse_repo_url
+from breezeai_cog.server.git import resolve_repo_ref as _REAL_RESOLVE
 
 BODY = {
     "repoUrl": "https://github.com/acme/widgets.git",
@@ -29,6 +30,7 @@ class _Captured:
     def __init__(self) -> None:
         self.records: list[dict] = []
         self.notifications: list[tuple[str, dict]] = []
+        self.aborted = 0
 
 
 class _FakeInfra:
@@ -41,6 +43,9 @@ class _FakeInfra:
     def close(self) -> str:
         self._c.records.extend(json.loads(x) for x in self._lines)
         return "ok"
+
+    def abort(self) -> None:
+        self._c.aborted += 1
 
 
 def _make_client(captured: _Captured, filter_set, deleted, repo_files: dict | None = None) -> TestClient:
@@ -83,6 +88,22 @@ def test_full_clone(captured: _Captured) -> None:
     assert payload["codeOntologyId"] == "C1" and payload["storage_key"] == out["storage_key"]
 
 
+def test_successful_export_is_not_aborted(captured: _Captured) -> None:
+    client = _make_client(captured, filter_set=None, deleted=[])
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 200
+    assert captured.aborted == 0
+
+
+def test_parse_failure_aborts_the_upload(captured: _Captured, monkeypatch) -> None:
+    def boom(*_a, **_k):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr("breezeai_cog.server.routes.run_diff_stream", boom)
+    client = _make_client(captured, filter_set=None, deleted=[])
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 500
+    assert captured.aborted == 1  # the upload thread is released, not left to the idle timeout
+
+
 def test_incremental_diff_filters_to_changed(captured: _Captured) -> None:
     client = _make_client(captured, filter_set={"a.py"}, deleted=["old.py"])
     r = client.post("/api/analyze-diff", json=BODY)
@@ -105,6 +126,16 @@ def test_config_files_are_not_analyzed_languages(captured: _Captured) -> None:
     assert meta["analyzedLanguages"] == ["python"]
     assert meta["configs"]["totalConfigFiles"] == 2
     assert meta["totalLinesOfCode"] == 4  # a.py plus both one-line JSON config records
+
+
+def test_docs_add_no_lines_of_code(captured: _Captured) -> None:
+    # same rule as the full scan: Markdown is streamed but is not code
+    files = {"README.md": "# Widgets\n\nline one\nline two\n"}
+    client = _make_client(captured, filter_set=None, deleted=[], repo_files=files)
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 200
+    assert "README.md" in {rec["path"] for rec in captured.records}
+    meta = captured.notifications[0][1]["projectMetaData"]
+    assert meta["totalLinesOfCode"] == 5  # a.py (2) + b.py (3); README.md adds none
 
 
 def test_deletion_only_commit(captured: _Captured) -> None:
@@ -454,10 +485,46 @@ def test_unhandled_exception_is_logged_and_returns_json(
     def boom(*args, **kwargs):
         raise KeyError("unexpected")
 
-    monkeypatch.setattr(routes_mod, "parse_repo_url", boom)
+    monkeypatch.setattr(routes_mod, "resolve_repo_ref", boom)
     client = _make_failing_client(captured)
     r = client.post("/api/analyze-diff", json=BODY)
     assert r.status_code == 500
     assert r.json() == {"error": "Internal Server Error"}
     text = _log_text(file_log)
     assert "status=500" in text and "KeyError" in text and "Traceback" in text
+
+
+def test_analyze_diff_resolves_a_bitbucket_server_url_via_git_provider() -> None:
+    """`/api/analyze-diff` parses `repoUrl` itself to derive `repo_name`, separately from
+    `acquire_diff`. Honouring `gitProvider` in only one of the two rejected the request
+    with a 400 before acquisition ever ran."""
+    body = {
+        "repoUrl": "https://stash.payroll.co.jp/stash/scm/p3/pippen-navigate-for-webkit.git",
+        "gitProvider": "bitbucket_server",
+    }
+    ref = _REAL_RESOLVE(body, {})
+    assert ref is not None
+    assert (ref.provider, ref.owner, ref.repo, ref.context_path) == (
+        "bitbucket_server", "p3", "pippen-navigate-for-webkit", "/stash",
+    )
+
+
+def test_analyze_diff_rejects_a_bitbucket_server_url_without_the_slug() -> None:
+    body = {"repoUrl": "https://stash.payroll.co.jp/stash/scm/p3/kit.git"}
+    assert _REAL_RESOLVE(body, {}) is None
+
+
+def test_analyze_diff_logs_the_s3_url_after_a_successful_upload(caplog, captured) -> None:
+    """The URL is logged only after `upload.close()` returns, which is the storage
+    contract's proof that the object is complete — printing it earlier could point the
+    reader at a partial upload."""
+    import logging as _logging
+
+    client = _make_client(captured, filter_set=None, deleted=[])
+    with caplog.at_level(_logging.INFO, logger="breezeai_cog.server.routes"):
+        r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 200
+    key = r.json()["storage_key"]
+    logged = [m for m in caplog.messages if "breezeai_capture_uploaded" in m]
+    assert logged, "no upload log line"
+    assert key in logged[0] and "s3://" in logged[0]
