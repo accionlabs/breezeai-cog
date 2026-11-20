@@ -52,7 +52,7 @@ from ..typescript.imports import (
 )
 from ..typescript.imports import _resolve as _resolve_module
 from ..typescript_express.mounts import mw_name
-from ..typescript_express.routes import package_locals
+from ..typescript_express.mounts import package_locals
 
 FACT = "fastify.plugin-prefixes"
 
