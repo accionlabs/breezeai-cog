@@ -416,7 +416,7 @@ never share a name only because their last parts match:
 | A configuration entry read by literal keys: `config().getJsonObject("api-verticle").getString("address")`, `config.get("base")`, `env.getProperty("app.base")` | `config:` and the key path: `${config:api-verticle.address}`, `${config:base}`, `${config:app.base}` |
 | An environment variable: `process.env.BASE_PATH`, `os.getenv("BASE")`, `System.getenv("BUS")` | `env:` and its name: `${env:BASE_PATH}`, `${env:BASE}`, `${env:BUS}` |
 | A name or member path (a variable, a field, a constant cog cannot resolve) | written whole, less a leading `this.` / `self.`: `config.contextRoot` → `${config.contextRoot}`, `user.id` → `{user.id}`, `this.userId` → `{userId}` |
-| A local variable assigned once from a configuration or environment lookup | named after that lookup (`String address = config().getString("a"); send(address, …)` → `${config:a}`) |
+| A local variable assigned once from a configuration or environment lookup | named after that lookup (`String address = config().getString("a"); send(address, …)` → `${config:a}`; `const p = process.env.P; app.get(p, h)` → `${env:P}`). Assigned twice, reassigned, or shadowed by a parameter of that name: named as itself (`${address}`) |
 | Another lookup by a literal key | the key: `map.get("pathPrefix")` → `${pathPrefix}` |
 | Another call | `${…}`: the called function (`prefixFromEnv()` → `${prefixFromEnv}`); `{param}` for a request value (`encodeURIComponent(id)`) |
 | Values added with no string between them | one marker each: `prefix + host + ":" + port` → `${prefix}${host}:${port}`; a parenthesised sum `(page + 1)` stays one value |
@@ -445,6 +445,7 @@ only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such a
 | `router.get("/api/" + version + "/orders")` | route | `/api/${version}/orders` |
 | `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath: process.env.BASE_PATH` (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | route | `${config.base}/…`, `${config.x}/…`, `${settings.X}/…`, `${prefixFromEnv}/…`, `${env:BASE_PATH}/…` |
 | ``app.get(`${BASE}`, h)`` | route | `${BASE}` |
+| `router.get(path).handler(h)`, `app.get(ordersPath, h)`, `app.get(routes.orders, h)` (a whole path that is one value: [how it is told from another argument](#a-path-that-is-one-value)) | route | `${path}`, `${ordersPath}`, `${routes.orders}`; `${config:orders.path}` / `${env:ORDERS_PATH}` when the variable is read once from there |
 | `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + order.id })` — and the same shapes in every language's HTTP calls | outbound | `${config.contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{order.id}` |
 | `$.get("/api/users/" + user.id + "/roles")`, `` $.getJSON(`/api/users/${id}`) `` — a jQuery URL reads exactly as the same `axios` URL | outbound | `/api/users/{user.id}/roles`, `/api/users/{id}` |
 | `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` |
@@ -461,10 +462,29 @@ unknown part is never written `{name}`: that would read as one segment a caller 
 marker is cog's, never copied source syntax (a JavaScript template literal's `${x}` is read and
 re-marked). Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS
 application path, a literal or constant), a real path parameter (`/api/orders/{id}`), and a router
-mounted at two known prefixes (empty). A detector still needs a literal path to tell a path
-argument from another value (`app.use(loggerMiddleware)` is no mount; `router.get(path)` with
-only a variable is not recorded as a route). Every outbound URL and every route address goes
+mounted at two known prefixes (empty). Every outbound URL and every route address goes
 through `parsers/addresses.py` once per file, so the notation is the same in every language.
+
+### A path that is one value
+
+Naming a value says what an address is built from; it does not say whether an argument **is**
+an address. A detector decides that first, from the code around the argument, and the
+evidence it asks for grows as the argument says less:
+
+| The first argument | What makes it a path | Example: recorded | Example: not recorded |
+|---|---|---|---|
+| Has a literal part (a string, a template with text, a sum with a string) | the receiver and verb, as for any literal path | `router.get(prefix + "/x")` → `${prefix}/x` | — |
+| Is one value: a name, a member path, or a configuration / environment read | **all of**: (1) a receiver the file certainly holds as an app or router — bound to `Router.router(vertx)`, `new RouteMatcher()`, `express()`, `Router()` / `express.Router()`, or a field or parameter typed as one, never a receiver known only by its name; (2) a handler — the verb's second argument or a chained `.handler(…)`; (3) the value is no function or router of the file | `router.get(path).handler(this::list)` → `${path}`; `app.get(ordersPath, listOrders)` → `${ordersPath}` | `router.get(path)` (no handler); `cache.get(key, onHit)` (no router); `app.get(listOrders, x)` (a function); `router.get(helper()).handler(h)` (another call) |
+| Is one value, on a mount (`app.use(value, router)`) | (1) and (2) above, the mounted argument a router of this file, **and** the value a configuration or environment read (directly or through a variable read once from it): the first argument of `use` is as often a middleware | `app.use(process.env.API, apiRouter)` → the router's routes under `${env:API}` | `app.use(logger, apiRouter)`; `app.use(authMiddleware)` |
+| Anything else (a call that is no configuration read, an object, a function) | never a path | — | `app.use(helmet(), cors())` |
+
+The record is then named as any other value is (the table above): `${path}`, or
+`${config:orders.path}` / `${env:ORDERS_PATH}` when the variable is assigned once from that read.
+A router mounted at a base read at runtime carries the marked base into its routes, first
+(`${env:API}/orders`, `${BASE}/api/orders`), as a Vert.x sub-router does; mounted at two bases, or
+at a value that is neither, its routes stay empty. Applied to Vert.x (Java) and Express routes; a
+variable read once from configuration names a **whole** path or event-bus address — inside a
+built path (`pathPrefix + "/x"`) each part is still named as written (`${pathPrefix}/x`).
 
 ## 7. Examples
 

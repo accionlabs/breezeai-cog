@@ -223,9 +223,8 @@ public class Main extends AbstractVerticle {
     assert _addr(_one(st, "route", VERTX, 11)) == "/plain/:id"
     assert _addr(_one(st, "route", VERTX, 13)) == "/api/x"  # resolved constant
     assert _addr(_one(st, "route", VERTX, 14)) == "${pathPrefix}/a/${pathPrefix}"  # each marked
-    assert [
-        s for s in st if s.path == VERTX and s.startLine == 12 and s.semanticType == "route"
-    ] == []  # variable only: not a route, as before
+    # the whole path a local read once from configuration: named after that read
+    assert _addr(_one(st, "route", VERTX, 12)) == "${config:p}"
 
 
 def test_vertx_route_under_a_mount_with_unknown_prefix(analyze_files) -> None:
