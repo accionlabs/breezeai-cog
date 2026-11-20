@@ -419,6 +419,7 @@ never share a name only because their last parts match:
 | A local variable assigned once from a configuration or environment lookup | named after that lookup (`String address = config().getString("a"); send(address, …)` → `${config:a}`; `const p = process.env.P; app.get(p, h)` → `${env:P}`). Assigned twice, reassigned, or shadowed by a parameter of that name: named as itself (`${address}`) |
 | Another lookup by a literal key | the key: `map.get("pathPrefix")` → `${pathPrefix}` |
 | Another call | `${…}`: the called function (`prefixFromEnv()` → `${prefixFromEnv}`); `{param}` for a request value (`encodeURIComponent(id)`) |
+| A formatted string: `String.format("%s/notice", prefix)` (Java Vert.x) | as the same concatenation: `${prefix}/notice`; only `%s` / `%d` with a format cog can read |
 | Values added with no string between them | one marker each: `prefix + host + ":" + port` → `${prefix}${host}:${port}`; a parenthesised sum `(page + 1)` stays one value |
 | Anything else | `${value}` / `{param}` |
 

@@ -226,6 +226,69 @@ def route_template(path: str | None) -> str | None:
     return inbound_template(path)
 
 
+#: The ``String.format`` conversions an address is rendered through: ``%s``, ``%d``, ``%%``.
+_FORMAT_SPEC = re.compile(r"%[sd%]")
+
+
+def _format_call(node: Node, source: bytes) -> tuple[Node, list[Node]] | None:
+    """(format, arguments) of ``String.format(fmt, a, …)`` / ``fmt.formatted(a, …)``, else None."""
+    if node.type != "method_invocation":
+        return None
+    name, obj = node.child_by_field_name("name"), node.child_by_field_name("object")
+    args = node.child_by_field_name("arguments")
+    named = list(args.named_children) if args is not None else []
+    method = node_text(name, source) if name is not None else ""
+    if method == "format" and obj is not None \
+            and node_text(obj, source) in ("String", "java.lang.String") and named:
+        return named[0], named[1:]
+    if method == "formatted" and obj is not None:
+        return obj, named
+    return None
+
+
+def _render_format(
+    node: Node, source: bytes, consts: dict[str, str], string_render: StringRender
+) -> str | None:
+    """``String.format("%s/notice", prefix)`` → ``{prefix}/notice``: the format folded to its
+    text (a literal or a constant), each ``%s`` / ``%d`` filled with its argument as a
+    concatenation part is (:func:`_addr_leaf`). None when the format does not fold, holds any
+    other conversion (``%07d``, ``%x``, ``%1$s``) or the arguments do not match its slots."""
+    call = _format_call(node, source)
+    if call is None:
+        return None
+    fmt_node, args = call
+    tokens = init_tokens(fmt_node, source)
+    fmt = resolve_tokens(tokens, consts) if tokens is not None else None
+    if fmt is None:
+        return None
+    out: list[str] = []
+    at = slot = 0
+    for m in _FORMAT_SPEC.finditer(fmt):
+        literal = fmt[at:m.start()]
+        if "%" in literal:
+            return None
+        out.append(literal)
+        at = m.end()
+        if m.group() == "%%":
+            out.append("%")
+            continue
+        if slot >= len(args):
+            return None
+        arg = args[slot]
+        slot += 1
+        if arg.type in ("decimal_integer_literal", "hex_integer_literal"):
+            out.append(node_text(arg, source))
+            continue
+        part = _addr_leaf(arg, source, consts, string_render)
+        if part is None:
+            return None
+        out.append(part)
+    tail = fmt[at:]
+    if "%" in tail or slot != len(args):
+        return None
+    return "".join(out) + tail
+
+
 def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:
     """Leaf renderer for :func:`render_address`'s concatenation walk: a string literal renders
     (GString-aware), a constant resolves to its value, anything else is a ``{name}`` placeholder
@@ -235,6 +298,9 @@ def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render:
         return string_render(node, source)
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
+    formatted = _render_format(node, source, consts, string_render)
+    if formatted is not None:
+        return formatted
     text = node_text(node, source)
     value = consts.get(text)
     return value if value is not None else "{" + runtime_name(text) + "}"
@@ -257,7 +323,7 @@ def render_address(
         return string_render(node, source)
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
-    return None
+    return _render_format(node, source, consts, string_render)
 
 
 # ── Sub-routers ─────────────────────────────────────────────────────────────────────────────

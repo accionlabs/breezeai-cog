@@ -314,6 +314,16 @@ def test_http_client_uri_that_is_not_a_constant_is_empty(analyze_files) -> None:
     assert _api(st) == [("GET", "/1.0/data/ORDERS/{id}", "vertx")]
 
 
+def test_http_client_uri_built_with_format(analyze_files) -> None:
+    st = analyze_files(_client("""
+    HttpClient client = vertx.createHttpClient();
+    String base = container.config().getString("fileApi");
+    client.getNow(String.format("%s/%s", base, ctx.getString("fileId")), response -> { });
+    client.getNow(String.format("/1.0/data/%s/%d", "ORDERS", 7), response -> { });"""))
+    assert _api(st) == [("GET", "${base}/{fileId}", "vertx"),
+                        ("GET", "/1.0/data/ORDERS/7", "vertx")]
+
+
 def test_get_on_something_that_is_not_a_vertx2_http_client_is_not_an_api_call(
         analyze_files) -> None:
     st = analyze_files(_client("""

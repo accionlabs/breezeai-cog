@@ -26,17 +26,19 @@ def fold_arg(node: Node, source: bytes, values: dict[str, str]) -> str | None:
 
 
 def _final_string_declarators(cls: Node, source: bytes) -> Iterator[tuple[str, Node]]:
-    """Yield ``(name, initializer_node)`` for each ``static final String`` field on ``cls``."""
+    """Yield ``(name, initializer_node)`` for each ``static final String`` field on ``cls``: a
+    ``final`` field of a class, or any field of an interface (``String A = "x";`` there is
+    implicitly ``public static final``)."""
     body = cls.child_by_field_name("body")
     if body is None:
         return
     for member in body.named_children:
-        if member.type != "field_declaration":
+        if member.type not in ("field_declaration", "constant_declaration"):
             continue
         mods = next((c for c in member.named_children if c.type == "modifiers"), None)
         mod_words = node_text(mods, source).split() if mods is not None else []
-        if "final" not in mod_words:  # faithful: only the language's compile-time constants
-            continue
+        if member.type == "field_declaration" and "final" not in mod_words:
+            continue  # faithful: only the language's compile-time constants
         type_node = member.child_by_field_name("type")
         if type_node is None or node_text(type_node, source) != "String":
             continue
