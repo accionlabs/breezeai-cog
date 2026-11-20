@@ -36,6 +36,7 @@ from .mappings import (
     COMMENT_TYPES,
     CONTROL_FLOW,
     FRAMEWORKS,
+    JS_ARRAY_TYPES,
     JS_BUILTIN_METHODS,
     STATEMENT_TYPES,
 )
@@ -185,6 +186,7 @@ class TypeScriptParser(BaseParser):
             type_map(root, source),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
             builtin_methods=JS_BUILTIN_METHODS,
+            array_types=JS_ARRAY_TYPES,
         )
         functions: list[Function] = []
         classes = []

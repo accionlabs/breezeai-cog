@@ -166,6 +166,17 @@ def _type_parts(t: str | None) -> list[str]:
     return parts if all(parts) else []
 
 
+def _is_array(t: str | None, generic: frozenset[str]) -> bool:
+    """Whether a written type is an array: ``Order[]``, ``(A | B)[]``, ``Array<Order>``,
+    ``readonly Order[]``."""
+    if not t:
+        return False
+    t = t.strip()
+    if t.startswith("readonly "):
+        t = t[len("readonly "):].strip()
+    return t.endswith("[]") or t.split("<", 1)[0].strip() in generic
+
+
 #: A receiver type written as a simple name: the qualified-type tier does not apply.
 _SIMPLE = ("", "")
 
@@ -186,6 +197,7 @@ def make_resolver(
     fieldless_types: frozenset[str] = frozenset(),
     qualified_types: Mapping[str, str | None] | None = None,
     declared_types: Container[tuple[str, str]] | None = None,
+    array_types: frozenset[str] = frozenset(),
 ) -> CallResolver:
     """``(name, receiver, owner=None, scope=None) -> repo path | None``. ``receiver`` is the
     callee's qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -215,7 +227,10 @@ def make_resolver(
     ``com.acme.Outer.Inner`` — is the class declared under that name, found through ``Outer``'s
     file as this file binds it, or through ``qualified_types`` (top-level class FQCN → file) for
     a package-qualified name; anything else gives ``None``. Java only: there a capitalised first
-    segment is a class, while in C# or TypeScript it may be a namespace."""
+    segment is a class, while in C# or TypeScript it may be a namespace.
+    ``array_types`` (the generic names of a language's array types: ``Array``, ``ReadonlyArray``)
+    turns on the array rule: a receiver typed ``T[]`` or ``Array<T>`` gives ``None`` for any
+    method — ``orders.find(…)`` is the array's method, never one of ``T``'s file."""
     types = types or {}
 
     def _type_of(key: str, scope: Mapping[str, str | None] | None) -> tuple[bool, str | None]:
@@ -438,6 +453,8 @@ def make_resolver(
             q = _qualified(written) if declared_types is not None else _SIMPLE
             if q is not _SIMPLE:  # `Outer.Inner x` / `pkg.Type x`: never this file's own class
                 return _in_class(name, *q) if q is not None else None
+            if array_types and _is_array(written, array_types):
+                return None  # a method of the array, not of its element type
             typ = _base_type(written)
             if typ:
                 resolved = bindings.get(typ) or (path if typ in local_defs else None)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.emit import to_line
@@ -1363,3 +1365,29 @@ def test_a_declaration_that_stores_more_than_functions_is_kept(tmp_path) -> None
     # Only a function whose declaration is not emitted gets its expression body as a statement:
     # anything else would record the same call twice.
     assert not any(s.parentId != "f.ts" for s in rec.statements)
+
+
+def _call_paths(tmp_path, files: dict[str, str], target: str) -> dict[str, str | None]:
+    from breezeai_cog import iter_file_records
+
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    rec = next(r for r in iter_file_records(tmp_path) if r.path == target)
+    return {c.name: c.path for f in rec.functions for c in f.calls}
+
+
+@pytest.mark.parametrize("decl", ["orders: Order[]", "orders: Array<Order>",
+                                  "orders: ReadonlyArray<Order>", "orders: readonly Order[]"])
+def test_a_call_on_an_array_is_never_its_element_types(tmp_path, decl) -> None:
+    # `orders.find(…)` is Array.prototype.find, not a method of Order's file
+    paths = _call_paths(tmp_path, {
+        "src/order.model.ts": "export class Order { find(x: string) { return x; } total() { return 1; } }\n",
+        "src/list.ts": "import { Order } from './order.model';\n"
+        f"export class List {{\n  {decl} = [];\n  one: Order = new Order();\n"
+        "  first(id: string) { return this.orders.find((o) => o.total() === 1); }\n"
+        "  sum() { return this.one.total(); }\n}\n",
+    }, "src/list.ts")
+    assert paths["find"] is None
+    assert paths["total"] == "src/order.model.ts"  # a single Order still resolves
