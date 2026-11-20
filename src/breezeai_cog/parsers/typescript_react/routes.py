@@ -18,7 +18,16 @@ handler methods), mirroring the Angular detector.
 
 **Additive** (``react-routes``): a router file is not always owned by the React parser — one that
 also imports a ``@nestjs/…`` DTO in a monorepo is the NestJS parser's — so this runs for every
-TypeScript file that the React parser would claim (:data:`REACT_GUARDS`), whatever parser owns it.
+TypeScript file that mentions ``react-router`` (``react-router-dom``, ``@react-router/dev``),
+whatever parser owns it. A file that never mentions it has no routes, whatever its arrays look
+like: a plain component's tab or menu list (``[{ path, component }]``) is data, and so is a Vue
+router that holds the text ``'react'``. A route list split into a file without the import (no
+``RouteObject`` type, a wouter ``<Route>``) is not recorded either (when unsure, record less).
+
+Paths: a nested path that starts with ``/`` is absolute (React Router requires it to repeat its
+parents' path), so it is not joined onto them. A ``path`` that is not a literal (``undefined``,
+``PATHS.home``, ``'/a/' + id``) gives ``endpoint`` null, and so do the relative paths under it —
+never the expression's text.
 
 Wiring has no record (contract §4): a path-only parent (nested routes, no element), a layout (an
 element whose children include an index or empty-path child, which always fills its outlet), a
@@ -30,12 +39,14 @@ layout is plain wiring (when unsure, record less)."""
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 
 from tree_sitter import Node
 
 from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
+from ..navigation_common import literal
 from ..treesitter import entry_text, node_text
 from ..typescript.imports import resolve_const_value
 
@@ -43,6 +54,25 @@ from ..typescript.imports import resolve_const_value
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
+
+
+def _child_path(prefix: str | None, sub: str | None) -> str | None:
+    """A JSX / config route's full path under its parents' ``prefix``. An absolute ``sub``
+    (``/p/kid`` under ``/p``) is already the full path. None when the path, or a parent's under a
+    relative one, is not a literal (the address is unknown)."""
+    if sub is not None and sub.startswith("/"):
+        return _join("", sub)
+    if prefix is None or sub is None:
+        return None
+    return _join(prefix, sub)
+
+
+def _path_literal(node: Node | None, source: bytes) -> str | None:
+    """A JSX / config route's own ``path``: a string or a template without substitutions, also in
+    JSX braces (``path={"/x"}``). Anything else → None."""
+    if node is not None and node.type == "jsx_expression":
+        node = node.named_children[0] if node.named_children else None
+    return literal(node, source) if node is not None else None
 
 
 def _string_val(node: Node | None, source: bytes) -> str:
@@ -147,19 +177,19 @@ def _jsx_attrs(el: Node, source: bytes) -> dict[str, Node]:
 _ELEMENT_KEYS = ("element", "Component", "component", "render", "lazy")
 
 
-def _fills_outlet(attrs: dict[str, Node], source: bytes) -> bool:
+def _fills_outlet(keys: Collection[str], path_value: Node | None, source: bytes) -> bool:
     """An index route, or one with ``path=""`` — it renders at its parent's URL."""
-    return ("index" in attrs and "path" not in attrs) or (
-        "path" in attrs and _string_val(attrs["path"], source) == "")
+    return ("index" in keys and "path" not in keys) or (
+        "path" in keys and _path_literal(path_value, source) == "")
 
 
-def _process_jsx(el: Node, prefix: str, source: bytes, path: str,
+def _process_jsx(el: Node, prefix: str | None, source: bytes, path: str,
                  routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
     attrs = _jsx_attrs(el, source)
     has_path = "path" in attrs
     is_index = "index" in attrs and not has_path  # <Route index .../> -> parent's path
-    sub = _string_val(attrs.get("path"), source) if has_path else ""
-    full = _join(prefix, sub)
+    sub = _path_literal(attrs.get("path"), source) if has_path else ""
+    full = _child_path(prefix, sub)
     handler = _component_name(attrs.get("element"), source)
     nested = [c for c in el.named_children if _is_route(c, source)] if el.type == "jsx_element" else []
     shows = any(k in attrs for k in _ELEMENT_KEYS)
@@ -168,7 +198,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str,
     # Wiring: nested routes under a path with no element, a layout (a child fills the outlet),
     # or a guard layout.
     wiring = bool(nested) and (guard_layout or not shows or any(
-        _fills_outlet(_jsx_attrs(c, source), source) for c in nested))
+        _fills_outlet(a, a.get("path"), source) for a in (_jsx_attrs(c, source) for c in nested)))
     if (has_path or is_index) and handler not in _REDIRECTS and not wiring:
         routes.append(Emit(el, dict(
             semanticType="route",
@@ -202,6 +232,26 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
+def _keys(obj: Node, source: bytes) -> set[str]:
+    """Every key an object sets: ``key: value`` pairs, methods (``loader() {}``, ``async lazy()
+    {}``) and shorthand (``{ path, Component }``). A computed method name has no key. Only the
+    pairs have a value to read (:func:`_pairs`)."""
+    keys: set[str] = set()
+    for c in obj.named_children:
+        key: str | None = None
+        if c.type == "pair":
+            key = _key(c, source)
+        elif c.type == "method_definition":
+            name = c.child_by_field_name("name")
+            if name is not None and name.type != "computed_property_name":
+                key = node_text(name, source).strip("'\"")
+        elif c.type == "shorthand_property_identifier":
+            key = node_text(c, source)
+        if key:
+            keys.add(key)
+    return keys
+
+
 #: Keys only a React Router route object has. A ``path`` alone is not enough: breadcrumb, menu
 #: and step lists (``{ path: '/home', label: 'Home' }``) have one too.
 _ROUTER_KEYS = frozenset({
@@ -218,7 +268,7 @@ def _is_route_array(arr: Node, source: bytes) -> bool:
     for e in arr.named_children:
         if e.type != "object":
             continue
-        keys = _pairs(e, source).keys()
+        keys = _keys(e, source)
         if ("path" in keys and keys & _ROUTER_KEYS) or (
                 "children" in keys and keys & {"element", "Component"}):
             return True
@@ -230,13 +280,14 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
-def _process_config(arr: Node, prefix: str, source: bytes, path: str,
+def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
                     routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
     for elem in arr.named_children:
         if elem.type != "object":
             continue
         pairs = _pairs(elem, source)
-        is_index = "index" in pairs and "path" not in pairs  # index route -> parent's path
+        keys = _keys(elem, source)
+        is_index = "index" in keys and "path" not in keys  # index route -> parent's path
         children = pairs.get("children")
         nested = [c for c in children.named_children if c.type == "object"] \
             if children is not None and children.type == "array" else []
@@ -244,20 +295,22 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
         if element is not None and element.type == "identifier" and element is pairs.get("element"):
             element = None  # element: someVar — a value, not a component name
         handler = _component_name(element, source)
-        if "path" not in pairs and not is_index:
+        if "path" not in keys and not is_index:
             # A pathless layout route: no record; a guard element guards its children.
             if children is not None and nested:
                 guards = (*inherited, handler) if handler and _is_guard_element(handler) \
                     else inherited
                 _process_config(children, prefix, source, path, routes, guards)
             continue
-        full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
+        # A shorthand ``{ path }`` has no literal value: an unknown path, like ``path: PATHS.x``.
+        full = _child_path(prefix, "" if is_index else _path_literal(pairs.get("path"), source))
         if handler in _REDIRECTS:
             continue
-        shows = any(k in pairs for k in _ELEMENT_KEYS)
+        shows = any(k in keys for k in _ELEMENT_KEYS)
         guard_layout = bool(nested) and bool(handler) and _is_guard_element(handler)
         wiring = bool(nested) and (guard_layout or not shows or any(
-            _fills_outlet(_pairs(c, source), source) for c in nested))
+            _fills_outlet(_keys(c, source), _pairs(c, source).get("path"), source)
+            for c in nested))
         if wiring and children is not None:
             guards = (*inherited, handler) if guard_layout and handler else inherited
             _process_config(children, full, source, path, routes, guards)
@@ -446,13 +499,13 @@ def detect_react_routes(root: Node, source: bytes, path: str, *,
 # Byte guards for a React file: a router import (routes) OR a bare ``react`` import — the
 # latter is what a plain component file (``Button.tsx``) has. ``'react'`` / ``"react"`` match
 # ``from 'react'`` exactly and do NOT match ``react-dom`` / ``react-router-dom`` (more chars
-# precede the closing quote). Shared with the React parser's ``claims``.
+# precede the closing quote). The React parser's ``claims``; routes need the router itself.
 REACT_GUARDS = (b"react-router", b"'react'", b'"react"')
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    if not any(g in dc.source for g in REACT_GUARDS):
-        return None  # a Vue / Angular `{ path, component }` array is not a React route
+    if b"react-router" not in dc.source:
+        return None  # a component's `{ path, component }` list, or a Vue / Angular router
     routes = detect_react_routes(
         dc.root, dc.source, dc.path,
         const_values=getattr(dc.ctx.resolution_index, "const_values", None),

@@ -19,6 +19,10 @@ a `@nestjs/…` DTO in a monorepo) keeps its routes.
 | Element + children with no index child | Binding (and wiring for the children) | `route`, `page`, `handler` = the element | Its own URL shows it with an empty outlet |
 | Guard element as a layout (`<Route element={<ProtectedRoute/>}>` + children) | Guard | name in `guards` of each child. A guard by whole words of its name: `Protected`, `Private`, `Guard`, `Authenticated`, `Authorized` (not after `Non`/`Not`/`No`), or `Require` + `Auth`/`Login`/`User`/`Role`/`Admin`/`Permission`/`Session`; not a name with `Layout`/`Page`/`Shell` (`RequiredFieldsNotice`, `UnprotectedRoute` are not guards) | Runs before the children's pages |
 | `<Route path element={<Navigate to/>}>` | None | — | A redirect; no page |
+| Router key written as a method or shorthand (`{ path: '/', loader() {…}, Component() {…} }`, `{ path, Component }`) | Binding | `route`, `page`; `handler` empty (an inline or shorthand component has no reference to read) | Counted like `key: value` router keys |
+| Nested path starting with `/` (`/p/kid` under `/p`) | Binding | `endpoint` = the path as written, not joined onto the parent | React Router requires an absolute child to repeat its parents' path |
+| `path` not a literal (`PATHS.home`, `undefined`, `'/a/' + id`, shorthand `path`) | Binding | `endpoint` empty, and the relative paths under it too | The address is unknown; never the expression's text |
+| `{ path, … }` arrays in a file that never mentions `react-router` (a component's tab or menu list, a Vue router, a route list split into a file without the import) | None | — | Not router config; when unsure, record less |
 | v7 `route(path, file)` / `index(file)` | Binding | `route`, `page`; `handler` = the module's component, never the file path | One route module |
 | v7 `layout(file, [...])` | Wiring | statement stays plain | A layout around its children |
 | v7 `prefix(base, [...])` | Wiring | statement stays plain; `base` prefixes the children | Prefix only |

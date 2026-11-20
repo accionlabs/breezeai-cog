@@ -36,7 +36,7 @@ from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
-from ..navigation_common import literal
+from ..navigation_common import first_arg, literal
 
 # Dynamic-import target: ``() => import('./views/Reports.vue')`` -> ``./views/Reports.vue``
 # (an import specifier is a resolvable link; falling back to it beats honest-null here).
@@ -415,7 +415,39 @@ def _module_route_objects(root: Node, source: bytes) -> list[Node]:
 # additive pass defers to them (their signal is reliable) rather than double-emitting the same
 # array under framework="vue". No such collision exists with call-shaped route frameworks
 # (Express `app.get()`) or decorator-shaped ones (Nest `@Get()`) — different syntax entirely.
+# A file that imports React itself is a React component, never a vue-router config: its
+# `{path, component}` arrays are its own data (tabs, menus) — see _imports_react.
 _COMPETING_CONFIG_ROUTERS = (b"@angular/", b"react-router")
+
+
+def _is_react_module(spec: str) -> bool:
+    return spec in ("react", "react-dom") or spec.startswith(("react/", "react-dom/"))
+
+
+def _imports_react(root: Node, source: bytes) -> bool:
+    """Whether a top-level ``import … from 'react'`` / ``require('react-dom')`` brings in React.
+    Only import statements and ``require`` declarations are read, so a Vue router that merely
+    holds the text ``'react'`` (``const frameworks = ['react', 'vue']``) is not one."""
+    if b"react" not in source:
+        return False
+    for child in root.named_children:
+        if child.type == "import_statement":
+            # `import React = require('react')` keeps its source in the require clause
+            clause = next((c for c in child.named_children if c.type == "import_require_clause"), child)
+            spec = clause.child_by_field_name("source")
+            if spec is not None and _is_react_module(literal(spec, source) or ""):
+                return True
+        elif child.type in ("lexical_declaration", "variable_declaration"):
+            for vd in child.named_children:
+                value = vd.child_by_field_name("value") if vd.type == "variable_declarator" else None
+                if value is None or value.type != "call_expression":
+                    continue
+                fn = value.child_by_field_name("function")
+                arg = first_arg(value)
+                if (fn is not None and node_text(fn, source) == "require" and arg is not None
+                        and _is_react_module(literal(arg, source) or "")):
+                    return True
+    return False
 
 
 def detect_vue_routes(root: Node, source: bytes, path: str) -> list[Emit]:
@@ -427,6 +459,8 @@ def detect_vue_routes(root: Node, source: bytes, path: str) -> list[Emit]:
     if any(m in source for m in _COMPETING_CONFIG_ROUTERS):
         return []
     if b"path" not in source or (b"component" not in source and b"beforeEnter" not in source):
+        return []
+    if _imports_react(root, source):
         return []
     routes: list[Emit] = []
     router_guards = _router_guards(root, source)
