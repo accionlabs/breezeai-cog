@@ -109,7 +109,9 @@ _DOTNET_VERBS = {
 
 
 def match_api(
-    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None,
+    callee: str,
+    method: str,
+    http_client_ids: "frozenset[str] | None" = None,
     language: str | None = None,
 ) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.

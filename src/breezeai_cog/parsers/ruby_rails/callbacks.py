@@ -23,6 +23,7 @@ callback cannot be read removes every callback: a guard is never kept where it m
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -40,13 +41,16 @@ FACT = "rails.controller-callbacks"
 Callback = tuple[str, tuple[str, ...] | None, tuple[str, ...]]
 
 #: One ``skip_before_action``: (the callbacks it names, or None when unreadable — all of them;
-#: the actions it is limited to, or None for all; the actions it leaves the callback on).
-Skip = tuple[tuple[str, ...] | None, tuple[str, ...] | None, tuple[str, ...]]
+#: the actions it is limited to, or None for all; the actions it leaves the callback on;
+#: whether a conditional or unreadable skip makes the result uncertain).
+Skip = tuple[tuple[str, ...] | None, tuple[str, ...] | None, tuple[str, ...], bool]
 #: A class body's callbacks and skips, in declaration order: one of the two is set.
 _Op = tuple[Callback | None, Skip | None]
 
 _BEFORE = {"before_action", "prepend_before_action"}
 _SKIP = {"skip_before_action"}
+_AUTH_CALLBACKS = frozenset({"authenticate", "require_login", "authorize"})
+_DEVISE_AUTH = re.compile(r"authenticate_[a-z0-9_]+!|authenticated?\([a-z0-9_:]+\)")
 
 
 def _symbols(node: Node | None, source: bytes) -> tuple[str, ...] | None:
@@ -115,28 +119,28 @@ def _skip(call: Node, source: bytes) -> Skip:
             elif key == "except" and values is not None:
                 keep = values
         else:
-            return None, None, ()  # a callback we cannot name: every one may be skipped
+            return None, None, (), True  # a callback we cannot name: every one may be skipped
     if not names or call.child_by_field_name("block") is not None:
-        return None, None, ()
-    return (tuple(names), None, ()) if everywhere else (tuple(names), only, keep)
+        return None, None, (), True
+    return (tuple(names), None, (), True) if everywhere else (tuple(names), only, keep, False)
 
 
 def _apply_skip(callbacks: list[Callback], skip: Skip) -> list[Callback]:
     """``callbacks`` with ``skip`` applied: each one it names runs on fewer actions, or none."""
-    names, only, keep = skip
+    names, only, keep, uncertain = skip
     out: list[Callback] = []
     for cb in callbacks:
         name, cb_only, cb_except = cb
         if names is not None and name not in names:
             out.append(cb)
+        elif uncertain:
+            continue
         elif only is not None:  # skipped for these actions
             out.append((name, cb_only, tuple(dict.fromkeys(cb_except + only))))
-        elif keep:  # skipped for every action but these
+        elif keep or only is None:  # except: skips every action outside the keep list
             left = tuple(a for a in keep
                          if (cb_only is None or a in cb_only) and a not in cb_except)
-            if left:
-                out.append((name, left, ()))
-        # else: skipped everywhere
+            out.append((name, left, ()))
     return out
 
 
@@ -155,7 +159,9 @@ def _class_ops(cls: Node, source: bytes) -> list[_Op]:
             entries = _callbacks(stmt, source) if stmt.type == "call" else None
             out.extend((e, None) for e in entries or [])
         elif name in _SKIP:
-            out.append((None, _skip(stmt, source) if stmt.type == "call" else (None, None, ())))
+            out.append(
+                (None, _skip(stmt, source) if stmt.type == "call" else (None, None, (), True))
+            )
     return out
 
 
@@ -209,6 +215,11 @@ def guards_for(callbacks: list[Callback], action: str) -> list[str]:
     """The guard names that run before ``action``, in declaration order."""
     return [name for name, only, exclude in callbacks
             if (only is None or action in only) and action not in exclude]
+
+
+def is_auth_guard(name: str) -> bool:
+    """Whether a callback name certainly requires an authenticated user."""
+    return name in _AUTH_CALLBACKS or _DEVISE_AUTH.fullmatch(name) is not None
 
 
 def callbacks_of(index: Any | None, controller: str) -> list[Callback] | None:

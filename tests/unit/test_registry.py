@@ -66,6 +66,110 @@ def test_framework_selected_only_when_it_claims() -> None:
     assert registry.base_parser_for("a.fk").name == "fake"  # base = priority 0
 
 
+def test_select_passes_parse_timeout_to_every_claim() -> None:
+    timeouts: list[int] = []
+
+    class TimeoutLang(FakeLang):
+        def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+            timeouts.append(parse_timeout_micros)
+            return True
+
+    class TimeoutFramework(TimeoutLang):
+        name = "timeout-fw"
+        priority = 10
+
+        def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+            timeouts.append(parse_timeout_micros)
+            return True
+
+    registry.register(TimeoutLang())
+    registry.register(TimeoutFramework())
+
+    selected = registry.select("a.fk", b"source", parse_timeout_micros=1234)
+
+    assert selected is not None and selected.name == "timeout-fw"
+    assert timeouts == [1234, 1234]
+
+
+def test_select_passes_timeout_and_parsed_root_through_standard_claim_adapter() -> None:
+    received: list[tuple[int, object | None]] = []
+
+    class ContextLang(FakeLang):
+        def claims(
+            self,
+            path: str,
+            source: bytes,
+            parse_timeout_micros: int = 0,
+            parsed_root=None,
+        ) -> bool:
+            received.append((parse_timeout_micros, parsed_root))
+            return True
+
+    registry.register(ContextLang())
+    parsed_root = object()
+
+    selected = registry.select(
+        "a.fk", b"source", parse_timeout_micros=9876, parsed_root=parsed_root
+    )
+
+    assert selected is not None and selected.name == "fake"
+    assert received == [(9876, parsed_root)]
+
+
+def test_claim_signatures_are_inspected_only_when_registered(monkeypatch) -> None:
+    inspected: list[object] = []
+    original_signature = registry.inspect.signature
+
+    def counting_signature(claim):
+        inspected.append(claim)
+        return original_signature(claim)
+
+    monkeypatch.setattr(registry.inspect, "signature", counting_signature)
+    registry.register(FakeLang())
+    registry.register(FakeFramework())
+    registered_count = len(inspected)
+
+    for _ in range(3):
+        assert registry.select("a.fk", b"FRAMEWORK").name == "fake-fw"
+        assert registry.select("a.fk", b"plain").name == "fake"
+
+    assert registered_count == 2
+    assert len(inspected) == registered_count
+
+
+def test_select_supports_legacy_two_argument_claims() -> None:
+    registry.register(FakeLang())
+    registry.register(FakeFramework())
+
+    selected = registry.select("a.fk", b"FRAMEWORK", parse_timeout_micros=1234)
+
+    assert selected is not None and selected.name == "fake-fw"
+
+
+def test_claim_exception_propagates_and_false_claim_falls_back() -> None:
+    class FalseFramework(FakeLang):
+        name = "false-fw"
+        priority = 20
+
+        def claims(self, path: str, source: bytes) -> bool:
+            return False
+
+    registry.register(FakeLang())
+    registry.register(FalseFramework())
+    assert registry.select("a.fk", b"source").name == "fake"
+
+    class BrokenFramework(FakeLang):
+        name = "broken-fw"
+        priority = 30
+
+        def claims(self, path: str, source: bytes) -> bool:
+            raise ValueError("claim failed")
+
+    registry.register(BrokenFramework())
+    with pytest.raises(ValueError, match="claim failed"):
+        registry.select("a.fk", b"source")
+
+
 def test_capabilities_aggregate() -> None:
     registry.register(FakeLang())
     registry.register(FakeFramework())
@@ -90,6 +194,41 @@ def test_config_filename_matching() -> None:
     assert registry.select("config/app.json", b"") is not None
     assert registry.select("svc/.env", b"") is not None
     assert registry.select("main.go", b"") is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tasks/release.rake",
+        "rubocop.gemspec",
+        "Gemfile",
+        "Rakefile",
+    ],
+)
+def test_ruby_project_file_matching(path: str) -> None:
+    registry.discover_builtin()
+
+    parser = registry.base_parser_for(path)
+
+    assert parser is not None and parser.name == "ruby"
+    assert registry.select(path, b"") is parser
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Gemfile.local",
+        "custom-extensionless-file",
+        "exe/other",
+        "other/exe/rubocop",
+        "bin/console",
+    ],
+)
+def test_ruby_project_file_matching_is_narrow(path: str) -> None:
+    registry.discover_builtin()
+
+    assert registry.base_parser_for(path) is None
+    assert registry.select(path, b"") is None
 
 
 def test_specific_framework_outranks_express() -> None:
@@ -118,6 +257,151 @@ end
 '''
 
     assert registry.select("config/routes.rb", source).name == "ruby-rails"
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        (
+            "api.rb",
+            b'require "rails"\nrequire "grape"\n'
+            b'class API < Grape::API\n  get "/users" do\n  end\nend\n',
+            "ruby-grape",
+        ),
+        (
+            "app.rb",
+            b'require "rails"\nrequire "sinatra"\n'
+            b'get "/health" do\n  "ok"\nend\n',
+            "ruby-sinatra",
+        ),
+    ],
+)
+def test_ruby_specific_framework_claims_beat_incidental_rails_require(
+    path: str, source: bytes, expected: str,
+) -> None:
+    registry.discover_builtin()
+
+    selected = registry.select(path, source)
+
+    assert selected is not None and selected.name == expected
+
+
+def test_namespaced_engine_routes_select_rails() -> None:
+    registry.discover_builtin()
+    source = b'''Foo::Engine.routes.draw do
+  get "/health", to: "health#show"
+end
+'''
+
+    selected = registry.select("engines/foo/config/routes.rb", source)
+
+    assert selected is not None and selected.name == "ruby-rails"
+
+
+def test_ruby_framework_claim_uses_registry_parse_timeout(monkeypatch) -> None:
+    from breezeai_cog.parsers import ruby_rails
+    from breezeai_cog.parsers.ruby.parser import RubyParser
+
+    parse_timeouts: list[int] = []
+    original_parse_source = ruby_rails.parser.parse_source
+
+    def recording_parse_source(language: str, source: bytes, timeout_micros: int = 0):
+        parse_timeouts.append(timeout_micros)
+        return original_parse_source(language, source, timeout_micros)
+
+    monkeypatch.setattr(ruby_rails.parser, "parse_source", recording_parse_source)
+    registry.register(RubyParser())
+    registry.register(ruby_rails.parser.RailsParser())
+
+    source = b'require "rails"\nclass UsersController < ApplicationController\nend\n'
+    selected = registry.select("users_controller.rb", source, parse_timeout_micros=1234)
+
+    assert selected is not None and selected.name == "ruby-rails"
+    assert parse_timeouts == [1234]
+
+
+@pytest.mark.parametrize(
+    ("filename", "source", "framework"),
+    [
+        (
+            "config/routes.rb",
+            b'require "rails"\nRails.application.routes.draw do\n  get "/health", to: "health#show"\nend\n',
+            "rails",
+        ),
+        (
+            "app.rb",
+            b'require "sinatra"\nget "/health" do\n  "ok"\nend\n',
+            "sinatra",
+        ),
+        (
+            "api.rb",
+            b'require "grape"\nclass API < Grape::API\n  get "/health" do\n    "ok"\n  end\nend\n',
+            "grape",
+        ),
+    ],
+)
+def test_ruby_framework_selection_and_extraction_parse_once(
+    tmp_path, monkeypatch, filename: str, source: bytes, framework: str
+) -> None:
+    from breezeai_cog.core import executor
+    from breezeai_cog.parsers import ruby_grape, ruby_rails, ruby_sinatra, treesitter
+
+    registry.discover_builtin()
+    path = tmp_path / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(source)
+    parse_calls: list[tuple[str, int]] = []
+    original_parse_source = treesitter.parse_source
+
+    def recording_parse_source(language: str, source: bytes, timeout_micros: int = 0):
+        parse_calls.append((language, timeout_micros))
+        return original_parse_source(language, source, timeout_micros)
+
+    monkeypatch.setattr(treesitter, "parse_source", recording_parse_source)
+    # The framework modules import parse_source directly; spy on those aliases too so the
+    # assertion detects an unshared parse in claims() or parse_file().
+    for module in (ruby_rails.parser, ruby_sinatra.parser, ruby_grape.parser):
+        monkeypatch.setattr(module, "parse_source", recording_parse_source)
+    record = executor._parse_entry(
+        filename,
+        str(tmp_path),
+        {
+            "parse_timeout_micros": 1234,
+            "capture_statements": True,
+            "statement_text_limit": 8000,
+            "indexes": {},
+        },
+    )
+
+    assert record is not None and record.framework == framework
+    assert any(item.semanticType == "route" for item in record.statements)
+    assert parse_calls == [("ruby", 1234)]
+
+
+def test_ruby_parse_timeout_is_isolated_per_file(tmp_path, monkeypatch) -> None:
+    from breezeai_cog.core import executor
+    from breezeai_cog.parsers import treesitter
+
+    registry.discover_builtin()
+    path = tmp_path / "app.rb"
+    path.write_bytes(b'require "sinatra"\nget "/" do\nend\n')
+
+    def timeout_parse_source(language: str, source: bytes, timeout_micros: int = 0):
+        raise ValueError("Parsing failed")
+
+    monkeypatch.setattr(treesitter, "parse_source", timeout_parse_source)
+    record = executor._parse_entry(
+        "app.rb",
+        str(tmp_path),
+        {
+            "parse_timeout_micros": 1234,
+            "capture_statements": True,
+            "statement_text_limit": 8000,
+            "indexes": {},
+        },
+    )
+
+    assert record is None
 
 
 class FakeTemplateLang(BaseParser):

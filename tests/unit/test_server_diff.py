@@ -125,6 +125,7 @@ def test_config_files_are_not_analyzed_languages(captured: _Captured) -> None:
     meta = captured.notifications[0][1]["projectMetaData"]
     assert meta["analyzedLanguages"] == ["python"]
     assert meta["configs"]["totalConfigFiles"] == 2
+    assert meta["totalLinesOfCode"] == 4  # a.py plus both one-line JSON config records
 
 
 def test_docs_add_no_lines_of_code(captured: _Captured) -> None:
