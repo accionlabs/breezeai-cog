@@ -668,3 +668,74 @@ def test_mcp_server_types_fact_reads_no_other_languages_source() -> None:
     assert ".java" not in sources.get("kotlin", ())
     assert "kotlin" in JavaParser.related_languages
     assert "java" in KotlinParser.related_languages
+
+
+_WILDCARD_JAVA = """package demo;
+
+import io.modelcontextprotocol.server.*;
+import io.modelcontextprotocol.spec.McpSchema;
+
+public class App {
+    void start(Object transport) {
+        McpServer.sync(transport).tool(new McpSchema.Tool("calc", "C", "{}"), (e, a) -> null).build();
+    }
+}
+"""
+_WILDCARD_KOTLIN = """package demo
+
+import io.modelcontextprotocol.server.*
+import io.modelcontextprotocol.spec.McpSchema
+
+fun build(transport: Any) {
+    McpServer.sync(transport).tool(McpSchema.Tool("calc", "C", "{}")) { _, _ -> null }.build()
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("failing", "files"),
+    [
+        (
+            "kotlin",
+            {
+                "src/main/java/demo/App.java": _WILDCARD_JAVA,
+                "src/main/kotlin/demo/Util.kt": "package demo\n\nfun util() = 1\n",
+            },
+        ),
+        (
+            "java",
+            {
+                "src/main/kotlin/demo/Build.kt": _WILDCARD_KOTLIN,
+                "src/main/java/demo/Util.java": "package demo;\npublic class Util {}\n",
+            },
+        ),
+        ("java", {"src/main/java/demo/App.java": _WILDCARD_JAVA}),
+        ("kotlin", {"src/main/kotlin/demo/Build.kt": _WILDCARD_KOTLIN}),
+    ],
+)
+def test_wildcard_mcp_server_is_not_proven_when_a_jvm_index_failed(
+    analyze_files, monkeypatch, failing, files
+) -> None:
+    """With only ``io.modelcontextprotocol.server.*`` imported, bare ``McpServer`` is the SDK's
+    only when no type of the file's package has that name. When the index of a JVM language
+    with files failed (its own, or the other one's), its ``McpServer`` types are unknown, so
+    the name is not proven — no record. With the index built, the tool is recorded."""
+    from breezeai_cog.parsers.java.parser import JavaParser
+    from breezeai_cog.parsers.kotlin.parser import KotlinParser
+
+    assert set(_tools(analyze_files(files))) == {"calc"}
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("index failed")
+
+    parser = {"java": JavaParser, "kotlin": KotlinParser}[failing]
+    monkeypatch.setattr(parser, "build_index", fail)
+    assert _tools(analyze_files(files)) == {}
+
+
+def test_wildcard_mcp_server_is_proven_when_the_other_jvm_language_has_no_files(
+    analyze_files,
+) -> None:
+    """A Java-only repo has no Kotlin index at all (not a failed one): nothing of Kotlin can
+    declare ``McpServer``, so the wildcard-imported name is the SDK's."""
+    assert set(_tools(analyze_files({"src/main/java/demo/App.java": _WILDCARD_JAVA}))) == {"calc"}

@@ -205,8 +205,9 @@ def _build_indexes(
                 "build_index.done", parser=name, files=len(files[name]),
                 ms=round((time.perf_counter() - start) * 1000, 1), built=index is not None,
             )
-        if index is not None:
-            indexes[name] = index
+        # A language with files whose index failed stays, as None: a parser reading a related
+        # language's index can tell "its index failed" from "the repo has none of it".
+        indexes[name] = index
     return indexes
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 
 from breezeai_cog.schemas import Statement
 
@@ -966,3 +967,98 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools = _tools(analyze_files({"src/esc.ts": src}))
     assert set(tools) == {"plain", "tmpl"}
     assert tools["plain"].description is None and tools["tmpl"].description is None
+
+
+_WRITTEN_SRC = """
+import {{ McpServer }} from "@modelcontextprotocol/sdk/server/mcp.js";
+import {{ Server }} from "@modelcontextprotocol/sdk/server/index.js";
+import {{ ListToolsRequestSchema }} from "@modelcontextprotocol/sdk/types.js";
+
+let server = new McpServer({{ name: "a", version: "1" }});
+let low = new Server({{ name: "b", version: "1" }}, {{}});
+class Host {{
+  mcp = new McpServer({{ name: "c", version: "1" }});
+  start() {{
+    {write}
+    this.mcp.tool("field", async () => ({{ content: [] }}));
+  }}
+}}
+function later() {{
+  {write}
+}}
+server.tool("high", async () => ({{ content: [] }}));
+low.setRequestHandler(ListToolsRequestSchema, async () => ({{ tools: [{{ name: "low" }}] }}));
+"""
+
+
+@pytest.mark.parametrize(
+    ("write", "unproven"),
+    [
+        ("server = makeProxy();", {"high"}),
+        ("server ||= makeProxy();", {"high"}),
+        ("server += 1;", {"high"}),
+        ("server++;", {"high"}),
+        ("[server] = proxies;", {"high"}),
+        ("[first, ...server] = proxies;", {"high"}),
+        ("({ server } = registry);", {"high"}),
+        ("({ s: server = fallback } = registry);", {"high"}),
+        ("for (server of proxies) {}", {"high"}),
+        ("for (server in registry) {}", {"high"}),
+        ("for ([server] of pairs) {}", {"high"}),
+        ("server! = makeProxy();", {"high"}),
+        ("(server as any) = makeProxy();", {"high"}),
+        ("low = wrap(low);", {"low"}),
+        ("this.mcp = makeProxy();", {"field"}),
+        ("[this.mcp] = proxies;", {"field"}),
+    ],
+)
+def test_typescript_server_written_anything_else_is_not_proven(
+    analyze_files, write, unproven
+) -> None:
+    """A binding is a server only when every write to it is ``new McpServer(…)`` / ``new
+    Server(…)``: an assignment of anything else (a compound one, ``++``, a destructuring
+    target, a ``for … of`` / ``in`` without a declaration), wherever the binding is seen, makes
+    it unproven — no record. The other servers of the file keep their tools."""
+    all_tools = {"high", "low", "field"}
+    assert set(_tools(analyze_files({"src/a.ts": _WRITTEN_SRC.format(write="")}))) == all_tools
+    src = _WRITTEN_SRC.format(write=write)
+    assert set(_tools(analyze_files({"src/a.ts": src}))) == all_tools - unproven
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "let server = makeProxy();",
+        "const { server } = registry;",
+        "for (const server of proxies) {}",
+        "for (let server in registry) {}",
+        "try {} catch (server) { server = 1; }",
+        "function inner(server) { server = makeProxy(); }",
+        "const f = (server) => { server++; };",
+        "server = new McpServer({ name: 'again', version: '1' });",
+        "let other = makeProxy(); other = server;",
+        "let server;",
+    ],
+)
+def test_typescript_server_kept_when_another_binding_is_written(analyze_files, write) -> None:
+    """A write to another binding of the same name (a local, a destructured local, a loop's own
+    variable, a ``catch`` or a parameter of a nested function), a second ``new McpServer(…)``, a
+    write to another name, and a declaration without a value leave the proven server as it
+    is."""
+    src = _WRITTEN_SRC.format(write=write)
+    assert set(_tools(analyze_files({"src/a.ts": src}))) == {"high", "low", "field"}
+
+
+def test_typescript_var_loop_variable_writes_its_function_binding(analyze_files) -> None:
+    """``for (var s of …)`` writes the function's ``s`` (a ``var`` belongs to the function): a
+    server declared there is no longer proven. ``for (let s of …)`` is the loop's own."""
+    src = """
+import {{ McpServer }} from "@modelcontextprotocol/sdk/server/mcp.js";
+function build(xs) {{
+  var server = new McpServer({{ name: "a", version: "1" }});
+  for ({kind} server of xs) {{}}
+  server.tool("built", async () => ({{ content: [] }}));
+}}
+"""
+    assert _tools(analyze_files({"src/a.ts": src.format(kind="var")})) == {}
+    assert set(_tools(analyze_files({"src/a.ts": src.format(kind="let")}))) == {"built"}

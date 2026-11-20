@@ -233,7 +233,13 @@ def index_types(ctx: Any) -> list[Any]:
     """The ``package.Type`` collections a parse context holds: the ``package.Type → path`` maps
     of its own language's and the related languages' indexes, and the Java and Kotlin
     ``McpServer`` declarations (fact :data:`MCP_SERVER_TYPES`); empty when no index was
-    built."""
+    built, or when the file's own or the other JVM language's index failed (that language has
+    files, so its ``McpServer`` types are unknown)."""
+    if ctx.resolution_index is None or any(
+        lang in ctx.related_indexes and ctx.related_indexes[lang] is None
+        for lang in ("java", "kotlin")
+    ):
+        return []
     out: list[Any] = []
     for idx in (ctx.resolution_index, *ctx.related_indexes.values()):
         fqcn = idx if isinstance(idx, dict) else getattr(idx, "fqcn", None)
@@ -256,7 +262,7 @@ def mcp_server_names(source: bytes, types: list[Any]) -> frozenset[str]:
     another file, Java or Kotlin, a Kotlin ``typealias`` included) wins over the wildcard in
     Java and Kotlin: bare ``McpServer`` is the SDK's only when ``types`` (the indexes'
     ``package.Type`` collections, :func:`index_types`) are there and none has
-    ``<package>.McpServer``. Without an index it is not proven."""
+    ``<package>.McpServer``. Without an index, or with a failed one, it is not proven."""
     names = {MCP_SERVER}
     by_name = wildcard = other = False
     if _DECLARES_MCP_SERVER.search(source):
