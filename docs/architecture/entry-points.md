@@ -457,8 +457,28 @@ only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such a
 records with the same `${…}` read the same variable or key, but each module or deployment may set
 it differently, so records are **never joined on equal `${…}` text**. A reader comparing a call
 with a route drops the leading `${…}`, compares the rest (treating `{id}`, `:id` and `<id>` alike),
-and gets a **candidate**, never a certain match; it never matches through a `${…}` part. The
-unknown part is never written `{name}`: that would read as one segment a caller fills in. The
+and gets a **candidate**, never a certain match; it never matches through a `${…}` part. In detail:
+
+- **`:` is a source, `.` is code.** `${config:a.b}` is configuration entry `a.b` and `${env:X}`
+  environment variable `X`; `${config.ordersUrl}` is a member of a code object that happens to be
+  named `config` — a variable, not a configuration key.
+- **Same method, or no match.** A call is a candidate only for a route with the same HTTP method
+  (a route with `method` empty or `ANY` takes every verb). A route whose endpoint is only `${…}`
+  is neither matched nor ruled out: "cannot tell".
+- **Mounts are already applied.** A route's endpoint includes the prefix of the router it is
+  mounted on (`adminRouter.get('/audit')` mounted at `process.env.ADMIN_BASE` →
+  `${env:ADMIN_BASE}/audit`); the mount has no record of its own.
+- **A request value keeps its whole name.** `{order.id}` is a request value named by its member
+  path; for matching it is a parameter like `{id}` or `:id`.
+- **The two prefixes differ.** A call's leading `${…}` may hold a scheme and host
+  (`https://billing.example`), a route's only a path prefix: dropping both compares paths, which is
+  why the result is a candidate.
+- **A name says how far cog could follow the value, not where it ends.** A local read once from
+  configuration names the read when it is the whole address (`${config:orders.path}`); inside a
+  built path, or as a field, it is named as written (`${pathPrefix}/x`, `${reportPath}`). A plain
+  `${name}` therefore does not mean the value is not configuration — only that cog did not trace it.
+
+The unknown part is never written `{name}`: that would read as one segment a caller fills in. The
 marker is cog's, never copied source syntax (a JavaScript template literal's `${x}` is read and
 re-marked). Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS
 application path, a literal or constant), a real path parameter (`/api/orders/{id}`), and a router
