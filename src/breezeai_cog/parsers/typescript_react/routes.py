@@ -25,9 +25,10 @@ router that holds the text ``'react'``. A route list split into a file without t
 ``RouteObject`` type, a wouter ``<Route>``) is not recorded either (when unsure, record less).
 
 Paths: a nested path that starts with ``/`` is absolute (React Router requires it to repeat its
-parents' path), so it is not joined onto them. A ``path`` that is not a literal (``undefined``,
-``PATHS.home``, ``'/a/' + id``) gives ``endpoint`` null, and so do the relative paths under it —
-never the expression's text.
+parents' path), so it is not joined onto them. A constant path (``PATHS.home``, a `${…}` template
+of consts) is folded through the repo-wide ``const_values``. A ``path`` that is neither a literal
+nor a constant that folds (``undefined``, ``'/a/' + id``) gives ``endpoint`` null, and so do the
+relative paths under it — never the expression's text.
 
 Wiring has no record (contract §4): a path-only parent (nested routes, no element), a layout (an
 element whose children include an index or empty-path child, which always fills its outlet), a
@@ -67,12 +68,19 @@ def _child_path(prefix: str | None, sub: str | None) -> str | None:
     return _join(prefix, sub)
 
 
-def _path_literal(node: Node | None, source: bytes) -> str | None:
+def _path_literal(node: Node | None, source: bytes,
+                  const_values: dict[str, str | None] | None = None) -> str | None:
     """A JSX / config route's own ``path``: a string or a template without substitutions, also in
-    JSX braces (``path={"/x"}``). Anything else → None."""
+    JSX braces (``path={"/x"}``), or a constant the repo-wide ``const_values`` folds to one
+    (``PATHS.home``, a `${…}` template of consts). Anything else → None."""
     if node is not None and node.type == "jsx_expression":
         node = node.named_children[0] if node.named_children else None
-    return literal(node, source) if node is not None else None
+    if node is None:
+        return None
+    value = literal(node, source)
+    if value is None and const_values:
+        value = resolve_const_value(node, source, const_values)
+    return value
 
 
 def _string_val(node: Node | None, source: bytes) -> str:
@@ -184,11 +192,12 @@ def _fills_outlet(keys: Collection[str], path_value: Node | None, source: bytes)
 
 
 def _process_jsx(el: Node, prefix: str | None, source: bytes, path: str,
-                 routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
+                 routes: list[Emit], inherited: tuple[str, ...] = (),
+                 const_values: dict[str, str | None] | None = None) -> None:
     attrs = _jsx_attrs(el, source)
     has_path = "path" in attrs
     is_index = "index" in attrs and not has_path  # <Route index .../> -> parent's path
-    sub = _path_literal(attrs.get("path"), source) if has_path else ""
+    sub = _path_literal(attrs.get("path"), source, const_values) if has_path else ""
     full = _child_path(prefix, sub)
     handler = _component_name(attrs.get("element"), source)
     nested = [c for c in el.named_children if _is_route(c, source)] if el.type == "jsx_element" else []
@@ -211,7 +220,8 @@ def _process_jsx(el: Node, prefix: str | None, source: bytes, path: str,
     child_guards = (*inherited, handler) if guard_layout and handler else inherited
     # Recurse into nested <Route> children (paired elements only), joining paths.
     for child in nested:
-        _process_jsx(child, full if has_path else prefix, source, path, routes, child_guards)
+        _process_jsx(child, full if has_path else prefix, source, path, routes, child_guards,
+                     const_values)
 
 
 # ---- config-object form -----------------------------------------------------
@@ -281,7 +291,8 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
 
 
 def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
-                    routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
+                    routes: list[Emit], inherited: tuple[str, ...] = (),
+                    const_values: dict[str, str | None] | None = None) -> None:
     for elem in arr.named_children:
         if elem.type != "object":
             continue
@@ -300,10 +311,12 @@ def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
             if children is not None and nested:
                 guards = (*inherited, handler) if handler and _is_guard_element(handler) \
                     else inherited
-                _process_config(children, prefix, source, path, routes, guards)
+                _process_config(children, prefix, source, path, routes, guards, const_values)
             continue
-        # A shorthand ``{ path }`` has no literal value: an unknown path, like ``path: PATHS.x``.
-        full = _child_path(prefix, "" if is_index else _path_literal(pairs.get("path"), source))
+        # A shorthand ``{ path }`` has no value to read: an unknown path, like an unresolved
+        # ``path: PATHS.x``.
+        full = _child_path(prefix, "" if is_index
+                           else _path_literal(pairs.get("path"), source, const_values))
         if handler in _REDIRECTS:
             continue
         shows = any(k in keys for k in _ELEMENT_KEYS)
@@ -313,7 +326,7 @@ def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
             for c in nested))
         if wiring and children is not None:
             guards = (*inherited, handler) if guard_layout and handler else inherited
-            _process_config(children, full, source, path, routes, guards)
+            _process_config(children, full, source, path, routes, guards, const_values)
             continue
         routes.append(Emit(elem, dict(
             semanticType="route",
@@ -324,7 +337,7 @@ def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
             guards=list(inherited) or None,
         ), parent=file_id(path), text=entry_text(elem, source)))
         if children is not None and nested:
-            _process_config(children, full, source, path, routes, inherited)
+            _process_config(children, full, source, path, routes, inherited, const_values)
 
 
 # ---- entry point ------------------------------------------------------------
@@ -484,13 +497,13 @@ def detect_react_routes(root: Node, source: bytes, path: str, *,
     _walk(root, "jsx_self_closing_element", jsx)
     for el in jsx:
         if _is_route(el, source) and not _has_route_ancestor(el, source):
-            _process_jsx(el, "", source, path, routes)
+            _process_jsx(el, "", source, path, routes, const_values=const_values)
     # Config objects: route arrays that are not a nested ``children:`` value.
     arrays: list[Node] = []
     _walk(root, "array", arrays)
     for arr in arrays:
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process_config(arr, "", source, path, routes)
+            _process_config(arr, "", source, path, routes, const_values=const_values)
     # v7 framework-mode config DSL (gated on the @react-router/dev import).
     _detect_v7(root, source, path, routes, const_values)
     return routes

@@ -84,6 +84,12 @@ def test_one_record_per_binding() -> None:
     assert _rules(_route(), _route(id="a.ts:1:0#2", method="POST")) == []
     # One address, several handlers (a service proxy's methods): several bindings.
     assert _rules(_route(), _route(id="a.ts:1:0#2", handler="other")) == []
+    # Two unknown addresses on one line, same handler: one binding only if the text matches.
+    unknown = _route(endpoint=None, text="{ path: A.x, element: <P/> }")
+    assert _rules(unknown, _route(id="a.ts:1:0#2", endpoint=None,
+                                  text="{ path: A.y, element: <P/> }")) == []
+    assert _rules(unknown, _route(id="a.ts:1:0#2", endpoint=None, text=unknown.text)) == [
+        ("one-record", "error")]
 
 
 def test_only_entry_points_are_checked() -> None:

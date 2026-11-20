@@ -601,6 +601,40 @@ def test_non_literal_path_is_an_unknown_endpoint(analyze_files) -> None:
                    "S": None}
 
 
+def test_constant_path_resolves_to_its_url(analyze_files) -> None:
+    paths = (
+        "const base = 'admin';\n"
+        "export const PATHS = { home: '/home', admin: `/${base}`, users: 'users' } as const;\n"
+    )
+    config = RR + (
+        "import { PATHS } from './paths';\n"
+        "export const r = createBrowserRouter([\n"
+        "  { path: PATHS.home, element: <H /> },\n"
+        "  { path: PATHS.admin, element: <A />, children: [ { path: PATHS.users, element: <U /> } ] },\n"
+        "  { path: PATHS.missing, element: <M /> },\n"
+        "  { element: <Shell />, children: [ { path: PATHS.home, element: <L /> } ] } ]);\n"
+    )
+    st = analyze_files({"src/paths.ts": paths, "src/router.tsx": config})
+    got = {s.handler: s.endpoint for s in st
+           if s.semanticType == "route" and s.framework == "react"}
+    # a key the constant object doesn't have stays unknown — never its text; a pathless
+    # layout's children resolve too
+    assert got == {"H": "/home", "A": "/admin", "U": "/admin/users", "M": None, "L": "/home"}
+
+
+def test_constant_path_resolves_in_jsx(analyze_files) -> None:
+    src = (
+        "import { Routes, Route } from 'react-router-dom';\n"
+        "const HOME = '/home';\n"
+        "export function App() { return (<Routes>\n"
+        "  <Route path={HOME} element={<Home/>} />\n"
+        "  <Route path={'/p/' + id} element={<P/>} />\n"
+        "</Routes>); }\n"
+    )
+    assert sorted(_react_routes(analyze_files, src, "src/App.tsx"), key=str) == sorted(
+        [("/home", "Home"), (None, "P")], key=str)
+
+
 def test_children_of_an_unknown_path_are_unknown_unless_absolute(analyze_files) -> None:
     src = RR + (
         "export const r = createBrowserRouter([ { path: PATHS.admin, element: <Adm />, children: [\n"

@@ -21,7 +21,8 @@ a `@nestjs/…` DTO in a monorepo) keeps its routes.
 | `<Route path element={<Navigate to/>}>` | None | — | A redirect; no page |
 | Router key written as a method or shorthand (`{ path: '/', loader() {…}, Component() {…} }`, `{ path, Component }`) | Binding | `route`, `page`; `handler` empty (an inline or shorthand component has no reference to read) | Counted like `key: value` router keys |
 | Nested path starting with `/` (`/p/kid` under `/p`) | Binding | `endpoint` = the path as written, not joined onto the parent | React Router requires an absolute child to repeat its parents' path |
-| `path` not a literal (`PATHS.home`, `undefined`, `'/a/' + id`, shorthand `path`) | Binding | `endpoint` empty, and the relative paths under it too | The address is unknown; never the expression's text |
+| `path` a constant (`PATHS.home`, `HOME`, a `${…}` template of consts), in this file or imported | Binding | `endpoint` = the constant's value | Folded through the repo-wide constants, as for v7 `route()` |
+| `path` not a literal and not a constant that folds (`undefined`, `'/a/' + id`, a missing key, shorthand `path`) | Binding | `endpoint` empty, and the relative paths under it too | The address is unknown; never the expression's text |
 | `{ path, … }` arrays in a file that never mentions `react-router` (a component's tab or menu list, a Vue router, a route list split into a file without the import) | None | — | Not router config; when unsure, record less |
 | v7 `route(path, file)` / `index(file)` | Binding | `route`, `page`; `handler` = the module's component, never the file path | One route module |
 | v7 `layout(file, [...])` | Wiring | statement stays plain | A layout around its children |
