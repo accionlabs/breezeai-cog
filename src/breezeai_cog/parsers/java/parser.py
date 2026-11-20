@@ -104,7 +104,8 @@ class JavaParser(BaseParser):
             unknown_methods=view.unknown_methods if view is not None else None,
             inherited_fields=True,
             fieldless_types=fieldless_types(external),
-            nested_types=True,
+            qualified_types=view.fqcn if view is not None else None,
+            declared_types=idx.declared_types if isinstance(idx, JavaIndex) else frozenset(),
         )
         functions: list[Function] = []
         classes = []

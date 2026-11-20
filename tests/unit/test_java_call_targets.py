@@ -417,3 +417,54 @@ public class Handler {
 """
     calls = _calls(tmp_path, {"Handler.java": handler}, "Handler.java")
     assert calls["run"] == {"self": None, "setAppId": None}
+
+
+# --- a type written with its package is the class that package and name give -------------------
+
+_API = {
+    "api/Getter.java": "package com.acme.api;\n"
+    "public class Getter { public static class Context { public void setAppId(String s) {} } }\n",
+    "api/Order.java": "package com.acme.api;\npublic class Order { public int total() { return 1; } }\n",
+    "Order.java": "package com.acme;\npublic class Order { public int total() { return 2; } }\n",
+}
+_QUALIFIED = """package com.acme;
+public class Handler {
+    static class Context { void setAppId(String s) {} }
+    static class Entry { Object getKey() { return null; } }
+    void lib(java.util.Map.Entry<String, String> e) { e.getKey(); }
+    void nested(com.acme.api.Getter.Context c) { c.setAppId("x"); }
+    void top(com.acme.api.Order o) { o.total(); }
+    void list(java.util.List<String> l) { l.add("x"); }
+}
+"""
+
+
+def test_a_package_qualified_receiver_is_the_class_its_package_names(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, {**_API, "Handler.java": _QUALIFIED}, "Handler.java")
+    assert calls["lib"] == {"getKey": None}  # a library type, never this file's Entry
+    assert calls["nested"] == {"setAppId": _f("api/Getter.java")}  # not this file's Context
+    assert calls["top"] == {"total": _f("api/Order.java")}  # not the same-package Order
+    assert calls["list"] == {"add": None}
+
+
+def test_a_nested_class_with_no_method_of_its_own_reads_its_ancestor(tmp_path: Path) -> None:
+    files = {
+        "Base.java": "package com.acme;\npublic class Base { public void go() {} }\n",
+        "Outer.java": "package com.acme;\n"
+        "public class Outer { public static class Inner extends Base { } }\n",
+        "Handler.java": "package com.acme;\n"
+        "public class Handler { void run() { Outer.Inner i = new Outer.Inner(); i.go(); } }\n",
+    }
+    assert _calls(tmp_path, files, "Handler.java")["run"] == {"go": _f("Base.java")}
+
+
+def test_a_nested_class_the_outer_class_does_not_declare_has_no_path(tmp_path: Path) -> None:
+    # `Outer.Inner` names a class Outer inherits (declared in Base): not resolved through Outer
+    files = {
+        "Base.java": "package com.acme;\n"
+        "public class Base { public static class Inner { public void go() {} } }\n",
+        "Outer.java": "package com.acme;\npublic class Outer extends Base { }\n",
+        "Handler.java": "package com.acme;\n"
+        "public class Handler { void run(Outer.Inner i) { i.go(); } }\n",
+    }
+    assert _calls(tmp_path, files, "Handler.java")["run"] == {"go": None}
