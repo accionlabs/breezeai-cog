@@ -968,7 +968,7 @@ flowchart TD
 Other places that resolve values:
 - **Constant folding** (`parsers/constfold.py`): a route path or event address written as a
   constant is replaced by its value, but only for true compile-time constants (e.g. Java
-  `static final String`). A runtime value stays unresolved.
+  `static final String`) that the file declares or imports. A runtime value stays unresolved.
 - **Parts read at runtime** (`parsers/addresses.py`): a value cog cannot read in an HTTP or
   event-bus address (a context root, base path, prefix or whole URL from config, env, a variable or
   a call) is marked `${…}` where it stands, named after its source — `${config.contextRoot}/orders/{id}`,

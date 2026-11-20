@@ -439,8 +439,10 @@ Two further rules apply to detectors:
   are throwaway test set-ups: additive detectors with `Gate(skip_fixtures=True)`, parser-owned
   route code with `is_fixture_file`.
 - **Constants are folded** into `endpoint` when they are true compile-time constants (`ORDERS` →
-  `orders.created`; a route path `app.get(API + "/orders")` → `/api/orders`). See
-  [Cross-file resolution](cross-file-resolution.md).
+  `orders.created`; a route path `app.get(API + "/orders")` → `/api/orders`) and the file shows
+  which constant a name is: it declares it or imports it. A name it does neither for — or reads
+  at runtime under the same name — is marked, never filled from another file's constant. See
+  [Cross-file resolution §7](cross-file-resolution.md#7-constant-folding).
 - **A part read at runtime is marked `${…}`** where it stands, named after its source, never
   guessed, and never written `{name}` (a path parameter): inbound
   `router.get(pathPrefix + "/request")` → `endpoint: ${pathPrefix}/request`; outbound
