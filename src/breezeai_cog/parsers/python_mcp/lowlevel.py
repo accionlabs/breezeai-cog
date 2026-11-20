@@ -30,7 +30,9 @@
   hides it, and a function that declares the name ``global`` (``nonlocal``) and binds it
   breaks the module's (the enclosing function's) proof.
 * **Tools** — each ``Tool(…)`` call (``Tool`` imported from ``mcp.types``, or ``types.Tool`` with
-  ``types`` bound to ``mcp.types``; the standard library's ``types`` is not it) that is a direct
+  ``types`` bound to ``mcp.types``; the standard library's ``types`` is not it, and a name the
+  module also binds to anything else — ``import types``, ``from other import Tool``, ``Tool =
+  …``, a ``from other import *`` — is neither) that is a direct
   element of a list literal returned by the ``@<server>.list_tools()`` function
   (``return [...]``, or ``return ListToolsResult(tools=[...])``). A list built by a
   comprehension, a filter, a condition or a variable → no record. A server with more than one
@@ -117,7 +119,15 @@ def _types_names(root: Node, source: bytes, name: str) -> set[str]:
     out |= {f"{t}.{name}" for t in _imported_names(root, source, ("mcp",), "types")}
     if f"mcp.{name}" in out:  # `import mcp`
         out.add(f"mcp.types.{name}")
-    return out
+    if not out:
+        return out
+    # `import types`, `from other import Tool`, `Tool = …`: which one a call means is not read.
+    sdk: _Sdk = (
+        frozenset({(TYPES_MODULE, name), ("mcp", name), ("mcp", "types")}),
+        frozenset({TYPES_MODULE, "mcp"}),
+    )
+    rebound = _module_rebinds(root, source, {n.split(".")[0] for n in out}, sdk)
+    return {n for n in out if n.split(".")[0] not in rebound}
 
 
 def server_class_names(root: Node, source: bytes) -> set[str]:
@@ -127,16 +137,23 @@ def server_class_names(root: Node, source: bytes) -> set[str]:
     names = _imported_names(root, source, SERVER_MODULES, "Server")
     if not names:
         return names
-    rebound = _module_rebinds(root, source, {n.split(".")[0] for n in names})
+    rebound = _module_rebinds(root, source, {n.split(".")[0] for n in names}, _SERVER_SDK)
     return {n for n in names if n.split(".")[0] not in rebound}
 
 
-def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
-    """The ``heads`` the module binds other than by importing the SDK's ``Server`` (or, for
-    ``mcp.server.lowlevel.Server``, any ``mcp`` package): a ``def`` / ``class``, an assignment, a
-    loop or ``with`` target, or an import of anything else. Function and class bodies are not
-    read (only the module scope). A walrus, a ``case`` capture or a ``del`` of a head binds it
-    too."""
+#: The SDK's own imports of a name, for :func:`_module_rebinds`: the ``(module, name)`` pairs a
+#: ``from … import`` brings it in by, and the modules an ``import … as`` may alias.
+_Sdk = tuple[frozenset[tuple[str, str]], frozenset[str]]
+_SERVER_SDK: _Sdk = (frozenset((m, "Server") for m in SERVER_MODULES), frozenset(SERVER_MODULES))
+
+
+def _module_rebinds(root: Node, source: bytes, heads: set[str], sdk: _Sdk) -> set[str]:
+    """The ``heads`` the module binds other than by importing them from the SDK (``sdk``; a
+    plain ``import mcp…`` is always the SDK): a ``def`` / ``class``, an assignment, a loop or
+    ``with`` target, or an import of anything else. Function and class bodies are not read
+    (only the module scope). A walrus, a ``case`` capture or a ``del`` of a head binds it too,
+    and a ``from … import *`` of anything but the SDK may bind every one."""
+    sdk_from, sdk_modules = sdk
     out: set[str] = set()
 
     def bind(name: str) -> None:
@@ -171,9 +188,13 @@ def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
                 bind(name)
         elif t == "import_from_statement":
             module = node.child_by_field_name("module_name")
-            sdk = module is not None and node_text(module, source) in SERVER_MODULES
+            module_text = node_text(module, source) if module is not None else ""
             for child in node.named_children:
                 if child == module:
+                    continue
+                if child.type == "wildcard_import":
+                    if module_text.split(".")[0] != "mcp":
+                        out.update(heads)
                     continue
                 orig = (
                     child.child_by_field_name("name") if child.type == "aliased_import" else child
@@ -183,7 +204,7 @@ def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
                 )
                 if orig is None or alias is None:
                     continue
-                if not (sdk and node_text(orig, source) == "Server"):
+                if (module_text, node_text(orig, source)) not in sdk_from:
                     bind(node_text(alias, source))
             continue
         elif t == "import_statement":
@@ -194,7 +215,7 @@ def _module_rebinds(root: Node, source: bytes, heads: set[str]) -> set[str]:
                         child.child_by_field_name("alias"),
                     )
                     if target is not None and alias is not None:
-                        if node_text(target, source) not in SERVER_MODULES:
+                        if node_text(target, source) not in sdk_modules:
                             bind(node_text(alias, source))
                 elif child.type == "dotted_name":
                     head = node_text(child, source).split(".")[0]
@@ -359,7 +380,9 @@ def _bindings(
             left = node.child_by_field_name("left")
             for name in _pattern_names(left, source) if left is not None else []:
                 bind(_scope_of(node), name, False)
-        elif t in ("for_statement", "for_in_clause"):
+        elif t == "for_in_clause":
+            continue  # a comprehension's variable is its own (Python 3): nothing around it
+        elif t == "for_statement":
             left = node.child_by_field_name("left")
             for name in _pattern_names(left, source) if left is not None else []:
                 bind(_scope_of(node), name, False)
