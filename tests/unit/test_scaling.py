@@ -635,6 +635,58 @@ def _kotlin_mcp_add_tools_one_list(n: int) -> str:
     )
 
 
+def _typescript_mcp_named_handlers(n: int) -> str:
+    """One function registering many tools, each with its own top-level handler by name: each
+    handler's scope check stays at the reference's depth, never a re-read of the function."""
+    regs = "".join(f'  server.tool("t{i}", "Tool {i}", {{}}, h{i});\n' for i in range(n))
+    funcs = "".join(f"export function h{i}() {{ return {{ content: [] }}; }}\n" for i in range(n))
+    return (
+        "import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';\n"
+        f"export function register(server: McpServer) {{\n{regs}}}\n{funcs}"
+    )
+
+
+def _java_mcp_method_refs(n: int) -> str:
+    """Many specifications, each naming a different method of the class: the class body is
+    indexed once, not scanned per reference."""
+    specs = "".join(f"            new SyncToolSpecification(tool, this::h{i}),\n" for i in range(n))
+    methods = "".join(f"    Object h{i}(Object e, Object a) {{ return null; }}\n" for i in range(n))
+    return (
+        "package demo;\n"
+        "import io.modelcontextprotocol.server.McpServerFeatures.SyncToolSpecification;\n"
+        "import io.modelcontextprotocol.spec.McpSchema;\n"
+        'public class App {\n    McpSchema.Tool tool = new McpSchema.Tool("t", "d", "{}");\n'
+        f"    java.util.List<Object> specs() {{\n        return java.util.List.of(\n{specs}"
+        f"            null);\n    }}\n{methods}}}\n"
+    )
+
+
+def _kotlin_mcp_function_refs(n: int) -> str:
+    """Many ``addTool`` calls, each naming a different top-level function (``::hN``)."""
+    adds = "".join(
+        f'    server.addTool(name = "t{i}", description = "Tool {i}", handler = ::h{i})\n'
+        for i in range(n)
+    )
+    funs = "".join(f"fun h{i}(r: CallToolRequest): CallToolResult = TODO()\n" for i in range(n))
+    return (
+        "package demo\nimport io.modelcontextprotocol.kotlin.sdk.server.Server\n"
+        f"fun register(server: Server) {{\n{adds}}}\n{funs}"
+    )
+
+
+def _kotlin_mcp_method_refs(n: int) -> str:
+    """Many ``addTool`` calls, each naming a different method of the class (``this::hN``)."""
+    adds = "".join(
+        f'        server.addTool(name = "t{i}", description = "Tool {i}", handler = this::h{i})\n'
+        for i in range(n)
+    )
+    funs = "".join(f"    fun h{i}(r: CallToolRequest): CallToolResult = TODO()\n" for i in range(n))
+    return (
+        "package demo\nimport io.modelcontextprotocol.kotlin.sdk.server.Server\n"
+        f"class Registry {{\n    fun register(server: Server) {{\n{adds}    }}\n{funs}}}\n"
+    )
+
+
 def _mdx(n: int) -> str:
     """ESM blocks, JSX, ``{…}`` expressions and code fences: the block probes, the shadow parse
     and the document reading grow with the file. One paragraph of prose that starts with
@@ -682,9 +734,13 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "typescript-mcp": ("server.ts", _typescript_mcp),
     "python-mcp-lowlevel": ("server.py", _python_mcp_lowlevel),
     "typescript-mcp-lowlevel": ("server.ts", _typescript_mcp_lowlevel),
+    "typescript-mcp-named-handlers": ("server.ts", _typescript_mcp_named_handlers),
     "go-mcp": ("main.go", _go_mcp),
     "go-mcp-functions": ("tools.go", _go_mcp_functions),
     "java-mcp-shortcut": ("App.java", _java_mcp_shortcut),
+    "java-mcp-method-refs": ("App.java", _java_mcp_method_refs),
+    "kotlin-mcp-function-refs": ("Registry.kt", _kotlin_mcp_function_refs),
+    "kotlin-mcp-method-refs": ("Registry.kt", _kotlin_mcp_method_refs),
     "kotlin-mcp-add-tools": ("Registry.kt", _kotlin_mcp_add_tools),
     "python-mcp-entries": ("server.py", _python_mcp_entries),
     "typescript-mcp-entries": ("server.ts", _typescript_mcp_entries),

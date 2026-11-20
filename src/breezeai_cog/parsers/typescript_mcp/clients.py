@@ -38,14 +38,11 @@ from ..treesitter import node_text
 from ..typescript.declarations import import_bindings
 from .lowlevel import _pairs, _sdk_names, _string, _unparen, _walk
 from .scopes import binds as _binds
-from .tools import (
-    _FUNCTION_SCOPES,
-    _PARAMETERS,
-    FRAMEWORK,
-    BlockDeclarations,
-    block_declarations,
-    bound_names,
-)
+from .scopes import FUNCTION_SCOPES as _FUNCTION_SCOPES
+from .scopes import bound_names
+from .tools import FRAMEWORK
+
+_PARAMETERS = ("required_parameter", "optional_parameter")
 
 _CLASSES = ("class_declaration", "class", "abstract_class_declaration")
 #: Functions that give ``this`` a value of their own (an arrow function keeps the class's).
@@ -94,6 +91,49 @@ _CALLS = {
     "readResource": ("RESOURCE", "uri"),
     "getPrompt": ("PROMPT", "name"),
 }
+
+
+#: Per file: a block's span → each name its ``let`` / ``const`` / ``var`` declarations bind →
+#: the first such declarator's value (``None`` for a function or class declaration). Built once
+#: per block, so a block of many calls is read once.
+BlockDeclarations = dict[tuple[int, int], dict[str, Node | None]]
+
+#: Declarations that bind their ``name`` to a function or class, never to a built value.
+_NAMED_DECLARATIONS = frozenset(
+    {
+        "function_declaration",
+        "generator_function_declaration",
+        "class_declaration",
+        "abstract_class_declaration",
+    }
+)
+
+
+def block_declarations(
+    block: Node, source: bytes, cache: BlockDeclarations
+) -> dict[str, Node | None]:
+    key = (block.start_byte, block.end_byte)
+    found = cache.get(key)
+    if found is None:
+        found = {}
+        for stmt in block.named_children:
+            if stmt.type == "export_statement":  # `export const x = …` (module level)
+                stmt = stmt.child_by_field_name("declaration") or stmt
+            if stmt.type in _NAMED_DECLARATIONS:  # `function client() {}`: never a value
+                name = stmt.child_by_field_name("name")
+                if name is not None:
+                    found.setdefault(node_text(name, source), None)
+                continue
+            if stmt.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for decl in stmt.named_children:
+                if decl.type != "variable_declarator":
+                    continue
+                value = decl.child_by_field_name("value")
+                for bound in bound_names(decl.child_by_field_name("name"), source):
+                    found.setdefault(bound, value)
+        cache[key] = found
+    return found
 
 
 def _detect(dc: DetectContext) -> Detection | None:

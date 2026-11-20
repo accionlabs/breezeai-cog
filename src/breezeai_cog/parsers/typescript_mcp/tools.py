@@ -10,9 +10,11 @@
                 { description: "Echo", inputSchema: { msg: z.string() } }, echoHandler)
 
 * **Server receiver** — the call's object must be a name (or ``this.x``) assigned
-  ``new McpServer(…)`` in this file, or a parameter typed ``McpServer``; a name shadowed at
-  the call by another parameter or local of an enclosing scope
-  (``function f(server: Foo) { server.tool(…) }``) is not the server.
+  ``new McpServer(…)`` in this file, or a parameter typed ``McpServer``, and the call's
+  nearest binding of the name must be that one: a name shadowed at the call by another
+  parameter or local of an enclosing scope (``function f(server: Foo) { server.tool(…) }``, a
+  ``var`` anywhere in the function), or a ``this.x`` of a class other than the one whose field
+  is the server, is not the server (:mod:`.scopes`).
 * ``tool(name, [description], [paramsShape], [annotations], callback)`` — every overload: the
   description is the string after the name; an object is the params shape only when its values
   are zod chains, so an annotations object (``{ readOnlyHint: true }``) is never read as params.
@@ -79,8 +81,7 @@ from ..mcp_common import (
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings, top_level_declarations
 from .lowlevel import detect_lowlevel
-from .scopes import binds as _binds
-from .scopes import function_line
+from .scopes import Binding, Scopes, function_line, proven_receivers, receiver_binding
 
 FRAMEWORK = "typescript-mcp"
 _CALLBACKS = (
@@ -148,59 +149,6 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
-def _servers(root: Node, source: bytes) -> set[str]:
-    """Receivers proven to be an ``McpServer``."""
-    out: set[str] = set()
-    for node in _walk(root):
-        if node.type == "new_expression":
-            ctor = node.child_by_field_name("constructor")
-            if ctor is None or node_text(ctor, source).rsplit(".", 1)[-1] != "McpServer":
-                continue
-            parent = node.parent
-            if parent is not None and parent.type == "variable_declarator":
-                name = parent.child_by_field_name("name")
-                if name is not None and name.type == "identifier":
-                    out.add(node_text(name, source))
-            elif parent is not None and parent.type == "assignment_expression":
-                left = parent.child_by_field_name("left")
-                if left is not None:
-                    out.add(node_text(left, source))
-            elif parent is not None and parent.type in (
-                "public_field_definition",
-                "field_definition",
-            ):  # class Srv { private server = new McpServer(…) }
-                name = parent.child_by_field_name("name") or parent.child_by_field_name("property")
-                if name is not None:
-                    out.update((node_text(name, source), f"this.{node_text(name, source)}"))
-        elif node.type in ("required_parameter", "optional_parameter", "public_field_definition"):
-            ann = node.child_by_field_name("type")
-            name = node.child_by_field_name("pattern") or node.child_by_field_name("name")
-            if (
-                ann is not None
-                and name is not None
-                and node_text(ann, source).lstrip(": ").rsplit(".", 1)[-1] == "McpServer"
-            ):
-                text = node_text(name, source)
-                out.add(text)
-                if node.type == "public_field_definition":
-                    out.add(f"this.{text}")
-    return out
-
-
-_FUNCTION_SCOPES = frozenset(
-    {
-        "function_declaration",
-        "function_expression",
-        "function",
-        "arrow_function",
-        "method_definition",
-        "generator_function_declaration",
-        "generator_function",
-    }
-)
-_PARAMETERS = ("required_parameter", "optional_parameter")
-
-
 def _mcp_typed(node: Node, source: bytes) -> bool:
     ann = node.child_by_field_name("type")
     return ann is not None and node_text(ann, source).lstrip(": ").rsplit(".", 1)[-1] == "McpServer"
@@ -213,106 +161,12 @@ def _new_mcp_server(node: Node | None, source: bytes) -> bool:
     return ctor is not None and node_text(ctor, source).rsplit(".", 1)[-1] == "McpServer"
 
 
-def bound_names(pattern: Node | None, source: bytes) -> list[str]:
-    """The names a binding pattern (a name, a destructuring) declares (what :func:`_binds`
-    matches)."""
-    out: list[str] = []
-    stack = [pattern] if pattern is not None else []
-    while stack:
-        node = stack.pop()
-        if node.type in ("identifier", "shorthand_property_identifier_pattern"):
-            out.append(node_text(node, source))
-        elif node.type in ("assignment_pattern", "object_assignment_pattern"):
-            left = node.child_by_field_name("left")
-            if left is not None:
-                stack.append(left)
-        elif node.type == "pair_pattern":
-            value = node.child_by_field_name("value")
-            if value is not None:
-                stack.append(value)
-        elif node.type in ("object_pattern", "array_pattern", "rest_pattern"):
-            stack.extend(reversed(node.named_children))
-    return out
-
-
-#: Per file: a block's span → each name its ``let`` / ``const`` / ``var`` declarations bind →
-#: the first such declarator's value (``None`` for a function or class declaration). Built once
-#: per block, so a block of many calls is read once.
-BlockDeclarations = dict[tuple[int, int], dict[str, Node | None]]
-
-#: Declarations that bind their ``name`` to a function or class, never to a built value.
-_NAMED_DECLARATIONS = frozenset(
-    {
-        "function_declaration",
-        "generator_function_declaration",
-        "class_declaration",
-        "abstract_class_declaration",
-    }
-)
-
-
-def block_declarations(
-    block: Node, source: bytes, cache: BlockDeclarations
-) -> dict[str, Node | None]:
-    key = (block.start_byte, block.end_byte)
-    found = cache.get(key)
-    if found is None:
-        found = {}
-        for stmt in block.named_children:
-            if stmt.type == "export_statement":  # `export const x = …` (module level)
-                stmt = stmt.child_by_field_name("declaration") or stmt
-            if stmt.type in _NAMED_DECLARATIONS:  # `function client() {}`: never a value
-                name = stmt.child_by_field_name("name")
-                if name is not None:
-                    found.setdefault(node_text(name, source), None)
-                continue
-            if stmt.type not in ("lexical_declaration", "variable_declaration"):
-                continue
-            for decl in stmt.named_children:
-                if decl.type != "variable_declarator":
-                    continue
-                value = decl.child_by_field_name("value")
-                for bound in bound_names(decl.child_by_field_name("name"), source):
-                    found.setdefault(bound, value)
-        cache[key] = found
-    return found
-
-
-def _shadowed(
-    call: Node,
-    name: str,
-    source: bytes,
-    typed: Callable[[Node, bytes], bool] | None = None,
-    built: Callable[[Node | None, bytes], bool] | None = None,
-    blocks: BlockDeclarations | None = None,
-) -> bool:
-    """True when the receiver ``name`` of ``call`` is, at the call, a binding other than the
-    ``McpServer``: a parameter of an enclosing function not typed ``McpServer``
-    (``function f(server: Foo) { server.tool(…) }``), or a ``let`` / ``const`` / ``var`` of an
-    enclosing block not assigned ``new McpServer(…)``. The nearest binding wins; module-level
-    bindings are the ones :func:`_servers` reads. ``typed`` / ``built`` say what a server
-    parameter / initializer is for another server class (the low-level ``Server``)."""
-    typed = typed or _mcp_typed
-    built = built or _new_mcp_server
-    node = call.parent
-    while node is not None and node.type != "program":
-        if node.type in _FUNCTION_SCOPES:
-            single = node.child_by_field_name("parameter")  # `server => …`
-            if single is not None and _binds(single, name, source):
-                return True
-            params = node.child_by_field_name("parameters")
-            for p in params.named_children if params is not None else ():
-                if p.type in _PARAMETERS:
-                    if _binds(p.child_by_field_name("pattern"), name, source):
-                        return not typed(p, source)
-                elif _binds(p, name, source):
-                    return True
-        elif node.type == "statement_block":
-            declared = block_declarations(node, source, blocks if blocks is not None else {})
-            if name in declared:
-                return not built(declared[name], source)
-        node = node.parent
-    return False
+def _servers(root: Node, source: bytes, scopes: Scopes) -> set[Binding]:
+    """The bindings proven to be an ``McpServer``: a name assigned ``new McpServer(…)`` or a
+    parameter typed ``McpServer``, and a class field given either (``this.x``, for that class).
+    A call is on the server only when its receiver's nearest binding is one of them, so
+    ``function f(server: Foo) { server.tool(…) }`` is not."""
+    return proven_receivers(root, source, scopes, _mcp_typed, _new_mcp_server)
 
 
 def _zod_names(dc: DetectContext) -> set[str]:
@@ -507,7 +361,7 @@ def _tool_params(middle: list[Node], source: bytes, zod: set[str]) -> list[Param
     return _zod_shape(middle[0], source, zod)
 
 
-def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
+def _unwrap(cb: Node, source: bytes, functions: dict[str, int], scopes: Scopes) -> Node:
     """The node naming the handler: the callback itself, or the function inside a wrapper call
     (``withErrors(async (a) => …)``). A wrapper's argument is taken only when it is a function
     literal, or a function declared in this file passed alone (``withErrors(namedHandler)``);
@@ -524,7 +378,7 @@ def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
         if len(args) != 1:
             return cb
         (arg,) = args
-        if arg.type == "identifier" and function_line(arg, source, functions) is not None:
+        if arg.type == "identifier" and function_line(arg, source, functions, scopes) is not None:
             return arg
         if arg.type != "call_expression":
             return cb
@@ -532,9 +386,11 @@ def _unwrap(cb: Node, source: bytes, functions: dict[str, int]) -> Node:
     return cb
 
 
-def _handler(cb: Node, source: bytes, functions: dict[str, int]) -> tuple[str | None, int | None]:
+def _handler(
+    cb: Node, source: bytes, functions: dict[str, int], scopes: Scopes
+) -> tuple[str | None, int | None]:
     if cb.type == "identifier":
-        return node_text(cb, source), function_line(cb, source, functions)
+        return node_text(cb, source), function_line(cb, source, functions, scopes)
     if cb.type == "member_expression":
         name = node_text(cb, source)
         return name, functions.get(name)
@@ -660,19 +516,9 @@ def _top_level_function_lines(dc: DetectContext) -> dict[str, int]:
 
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
-    servers = _servers(dc.root, source)
+    scopes = Scopes(dc.root, source)
+    servers = _servers(dc.root, source, scopes)
     functions = _top_level_function_lines(dc)
-    blocks: BlockDeclarations = {}
-
-    def shadowed(
-        call: Node,
-        name: str,
-        src: bytes,
-        typed: Callable[[Node, bytes], bool] | None = None,
-        built: Callable[[Node | None, bytes], bool] | None = None,
-    ) -> bool:
-        return _shadowed(call, name, src, typed, built, blocks)
-
     found: list[Emit] = guarded(
         dc.path,
         detect_lowlevel,
@@ -680,7 +526,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         source,
         servers,
         functions,
-        shadowed,
+        scopes,
         lambda n: _json_schema(n, source),
     )
     if not servers and not found:
@@ -704,20 +550,19 @@ def _detect(dc: DetectContext) -> Detection | None:
         if (
             method not in _REGISTRATIONS
             or obj is None
-            or node_text(obj, source) not in servers
-            or (obj.type == "identifier" and shadowed(call, node_text(obj, source), source))
+            or receiver_binding(obj, source, scopes) not in servers
         ):
             continue
         args_node = call.child_by_field_name("arguments")
         args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]
         if len(args) < 2 or args[-1].type not in (*_CALLBACKS, "call_expression"):
             continue
-        callback = _unwrap(args[-1], source, functions)
+        callback = _unwrap(args[-1], source, functions, scopes)
         read = _registration(method, args, source, zod, templates)
         if read is None:
             continue
         endpoint, description, params = read
-        handler, handler_line = _handler(callback, source, functions)
+        handler, handler_line = _handler(callback, source, functions, scopes)
         found.append(
             mcp_emit(
                 call,

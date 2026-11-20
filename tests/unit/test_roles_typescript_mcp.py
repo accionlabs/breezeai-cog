@@ -723,3 +723,102 @@ function reg8(m: McpServer, ok) {
     assert (tools["unbound"].handler, tools["unbound"].handlerLine) == ("lookup", 6)
     # A `let` in a sibling block binds only that block: the top-level function's line.
     assert (tools["siblinglet"].handler, tools["siblinglet"].handlerLine) == ("lookup", 6)
+
+
+def test_typescript_server_is_proven_by_its_binding_not_its_name(analyze_files) -> None:
+    """A server proven in one scope does not make a same-named receiver of another scope a
+    server: a module-level name assigned something else, a ``var`` declared in a nested block
+    (it binds the whole function), or ``this.x`` of a class other than the one whose field is
+    the server. Each gives no record; the proven bindings next to them still do."""
+    files = {
+        "src/proxy.ts": """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+function build() { const server = new Server({ name: "s", version: "1" }, { capabilities: {} }); return server; }
+const server = makeProxy();
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "unproven", description: "d", inputSchema: { type: "object" } }] }));
+""",
+        "src/var.ts": """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+function setup(server: Server) {
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "typed" }] }));
+}
+function other(o) {
+  if (o) { var server = o.server; }
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "hoisted" }] }));
+}
+function mcpSetup(mcp: McpServer) { mcp.tool("mcpTyped", async () => ({ content: [] })); }
+function mcpOther(o) {
+  if (o) { var mcp = o.mcp; }
+  mcp.tool("mcpHoisted", async () => ({ content: [] }));
+}
+""",
+        "src/classes.ts": """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+class A {
+  server = new Server({ name: "a", version: "1" }, {});
+  mcp = new McpServer({ name: "a", version: "1" });
+  start() {
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "fieldA" }] }));
+    this.mcp.tool("mcpFieldA", async () => ({ content: [] }));
+  }
+}
+class B {
+  constructor(server, mcp) { this.server = server; this.mcp = mcp; }
+  start() {
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "otherClass" }] }));
+    this.mcp.tool("mcpOtherClass", async () => ({ content: [] }));
+    this.mcp.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "otherLow" }] }));
+  }
+}
+class C {
+  server = new Server({ name: "c", version: "1" }, {});
+  start() {
+    run(function () {
+      this.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "ownThis" }] }));
+    });
+  }
+}
+""",
+    }
+    assert set(_tools(analyze_files(files))) == {"typed", "mcpTyped", "fieldA", "mcpFieldA"}
+
+
+def test_typescript_server_proven_by_assignment_typed_field_or_constructor(analyze_files) -> None:
+    """A server assigned to a declared name, a field typed ``McpServer`` and a field assigned in
+    the constructor are each proven; a destructured parameter or default naming the handler
+    binds it (no line); ``this.x`` outside any class is no server."""
+    src = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+async function lookup() { return { content: [] }; }
+
+let server;
+function init() { server = new McpServer({ name: "a", version: "1" }); }
+server.tool("assigned", {}, lookup);
+
+class Typed {
+  private mcp: McpServer;
+  start() { this.mcp.tool("typedField", async () => ({ content: [] })); }
+}
+class Built {
+  constructor() { this.srv = new McpServer({ name: "b", version: "1" }); }
+  start() { this.srv.tool("ctorField", async () => ({ content: [] })); }
+}
+function reg(m: McpServer, { a: lookup }, [other = lookup2]) {
+  m.tool("pairPattern", {}, lookup);
+}
+function reg2(m: McpServer, [lookup = null]) {
+  m.tool("arrayDefault", {}, lookup);
+}
+this.server.tool("noClass", async () => ({ content: [] }));
+"""
+    tools = _tools(analyze_files({"src/index.ts": src}))
+    assert set(tools) == {"assigned", "typedField", "ctorField", "pairPattern", "arrayDefault"}
+    assert (tools["assigned"].handler, tools["assigned"].handlerLine) == ("lookup", 4)
+    for name in ("pairPattern", "arrayDefault"):
+        assert (tools[name].handler, tools[name].handlerLine) == ("lookup", None), name

@@ -405,7 +405,9 @@ def collect_additive(
         try:
             value = spec.collect(root, source, rel, repo_root)
         except ParserTimeout:
-            raise  # the file's parse budget is spent: handled like any parse timeout
+            # Nothing raises it today; kept so one raised later is handled like any parse
+            # timeout (as in run_additive), never skipped as one fact's failure.
+            raise
         except Exception as exc:  # one fact never drops the file's other facts or the index
             from ..logging import get_logger
             get_logger("breezeai_cog.index").warning(

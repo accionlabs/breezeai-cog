@@ -154,7 +154,7 @@ def test_a_failing_subreader_keeps_the_detectors_other_tools(
 def test_a_failing_resource_and_prompt_reader_keeps_every_tool(
     analyze_files, monkeypatch, module, reader, path, src, everything
 ) -> None:
-    """The resource / prompt readers (BREEZEAI-1584 PR 2) run guarded too: forced to fail, the
+    """The resource / prompt readers run guarded too: forced to fail, the
     file's tools all stay."""
 
     def boom(*args, **kwargs):
@@ -165,3 +165,18 @@ def test_a_failing_resource_and_prompt_reader_keeps_every_tool(
         assert _tool_names(analyze_files({path: src})) == everything
     assert [e for e in logs if e["event"] == "mcp.subreader.failed"]
     assert not [e for e in logs if e["event"] == "additive.detector.failed"]
+
+
+def test_a_parse_timeout_in_a_subreader_is_not_swallowed() -> None:
+    """``guarded`` turns a sub-reader's failure into a warning, but not a ``ParserTimeout``: the
+    file's parse budget is spent, and the file is handled like any parse timeout. Nothing
+    raises it today; the re-raise keeps one raised later from becoming a partial record set."""
+    from breezeai_cog.errors import ParserTimeout
+    from breezeai_cog.parsers.mcp_common import guarded
+
+    def timeout(*args):
+        raise ParserTimeout("x.ts")
+
+    with capture_logs() as logs, pytest.raises(ParserTimeout):
+        guarded("x.ts", timeout, 1)
+    assert not [e for e in logs if e["event"] == "mcp.subreader.failed"]

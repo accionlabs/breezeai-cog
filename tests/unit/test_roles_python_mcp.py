@@ -305,6 +305,57 @@ async def list_tools():
     assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
 
 
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "def reset():\n    global server\n    server = other()\n",
+        "def reset():\n    global server\n    for server in others():\n        pass\n",
+    ],
+)
+def test_lowlevel_server_rebound_through_global_is_not_proven(analyze_files, rebinding) -> None:
+    """A function that declares the module's server ``global`` and binds it again rebinds the
+    module's name: which object the decorator runs on is not read — no record. ``global``
+    without a binding, or a same-named local of another function, changes nothing."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+
+{rebinding}
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+    assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
+    for harmless in (
+        "def read():\n    global server\n    return server\n",
+        "def other():\n    server = other()\n",
+    ):
+        assert set(_tools(analyze_files({"srv.py": src.format(rebinding=harmless)}))) == {"maybe"}
+
+
+def test_lowlevel_server_rebound_through_nonlocal_is_not_proven(analyze_files) -> None:
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def build():
+    server = Server("x")
+
+    def reset():
+        nonlocal server
+        server = other()
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="maybe", inputSchema={})]
+"""
+    assert _tools(analyze_files({"srv.py": src})) == {}
+
+
 def test_lowlevel_server_class_rebound_only_inside_a_function_is_still_proven(
     analyze_files,
 ) -> None:
@@ -467,6 +518,23 @@ def test_lowlevel_server_in_another_module_for_any_jobs(capture_mcp_tools, jobs)
     tools = capture_mcp_tools(files, jobs)
     assert set(tools) == {"hello"}
     assert (tools["hello"]["framework"], tools["hello"]["handler"]) == ("python-mcp", "dispatch")
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_lowlevel_imported_server_rebound_through_global_is_not_proven(
+    capture_mcp_tools, jobs
+) -> None:
+    files = {
+        "app/server.py": "from mcp.server.lowlevel import Server\n\nserver = Server('x')\n",
+        "app/tools.py": (
+            "from mcp import types\n"
+            "from app.server import server\n\n\n"
+            "def reset():\n    global server\n    server = other()\n\n\n"
+            "@server.list_tools()\nasync def list_tools():\n"
+            "    return [types.Tool(name='rebound', inputSchema={})]\n"
+        ),
+    }
+    assert capture_mcp_tools(files, jobs) == {}
 
 
 @pytest.mark.parametrize("jobs", [1, 2])

@@ -17,7 +17,9 @@
 * **Server receiver** — a name (or ``this.x``) assigned ``new Server(…)`` or a parameter typed
   ``Server``, with ``Server`` imported from ``@modelcontextprotocol/sdk/server/index.js``; or
   ``<mcp>.server``, the low-level server of a proven ``McpServer``. A ``Server`` of any other
-  package (socket.io, ``http``) is not one; a nearer binding of the name hides it.
+  package (socket.io, ``http``) is not one. The call's nearest binding of the name must be the
+  proven one (a nearer binding, a ``var`` anywhere in the function, hides it); a ``this.x``
+  is the server only in the class whose field it is.
 * **Schemas** — ``ListToolsRequestSchema`` / ``CallToolRequestSchema`` imported from
   ``@modelcontextprotocol/sdk/types.js``; the same name from anywhere else is not it.
 * **Tools** — the object literals of the ``tools: [...]`` array of the object the list handler
@@ -63,19 +65,9 @@ from ..emits import Emit
 from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
 from ..typescript.declarations import import_bindings
 from ..treesitter import node_text
-from .scopes import function_line
+from .scopes import Binding, Scopes, function_line, proven_receivers, receiver_binding
 
-#: ``(call, name, source, typed, built) → shadowed?`` — ``tools._shadowed``.
-Shadowed = Callable[
-    [
-        Node,
-        str,
-        bytes,
-        Callable[[Node, bytes], bool] | None,
-        Callable[[Node | None, bytes], bool] | None,
-    ],
-    bool,
-]
+
 #: A JSON-schema object literal → its params, or None (unknown).
 SchemaReader = Callable[[Node], "list[Parameter] | None"]
 
@@ -247,50 +239,17 @@ def _returned_objects(fn: Node) -> list[Node]:
     return out
 
 
-def _binding_scope(receiver: Node, source: bytes) -> tuple[int, int]:
-    """Where the receiver's name is bound: the nearest enclosing function (by its parameters)
-    or block (by a declaration) that binds it, for a plain name; the enclosing class for
-    ``this.x``; else the file. Two calls on the same text in the same binding scope are on the
-    same server."""
-    text = node_text(receiver, source)
-    node = receiver.parent
-    while node is not None and node.type != "program":
-        if receiver.type != "identifier":
-            if node.type in ("class_declaration", "class") and text.startswith("this."):
-                return (node.start_byte, node.end_byte)
-        elif node.type in _FUNCTION_SCOPES:
-            params = node.child_by_field_name("parameters") or node.child_by_field_name("parameter")
-            if params is not None and any(
-                c.type == "identifier" and node_text(c, source) == text for c in _walk(params)
-            ):
-                return (node.start_byte, node.end_byte)
-        elif node.type == "statement_block":
-            for stmt in node.named_children:
-                if stmt.type not in ("lexical_declaration", "variable_declaration"):
-                    continue
-                for decl in stmt.named_children:
-                    name = (
-                        decl.child_by_field_name("name")
-                        if decl.type == "variable_declarator"
-                        else None
-                    )
-                    if name is not None and node_text(name, source) == text:
-                        return (node.start_byte, node.end_byte)
-        node = node.parent
-    return (-1, -1)
-
-
 def detect_lowlevel(
     dc_root: Node,
     source: bytes,
-    mcp_servers: set[str],
+    mcp_servers: set[Binding],
     functions: dict[str, int],
-    shadowed: Shadowed,
+    scopes: Scopes,
     input_schema: SchemaReader,
 ) -> list[Emit]:
     """The tools, resources and prompts of the file's ``setRequestHandler(List…RequestSchema,
-    …)`` calls (see the module docstring). ``mcp_servers`` are the proven ``McpServer``
-    receivers, ``shadowed`` the detector's scope check and ``input_schema`` its JSON-schema
+    …)`` calls (see the module docstring). ``mcp_servers`` are the bindings proven to be an
+    ``McpServer``, ``scopes`` the file's scopes and ``input_schema`` the detector's JSON-schema
     literal reader."""
     if b"setRequestHandler" not in source or not any(
         listed[0].encode() in source for listed in _LISTED
@@ -319,40 +278,15 @@ def detect_lowlevel(
         ctor = value.child_by_field_name("constructor")
         return ctor is not None and node_text(ctor, src) in classes
 
-    servers: set[str] = {f"{m}.server" for m in mcp_servers}
-    for node in _walk(dc_root):
-        if node.type == "new_expression" and built(node, source):
-            parent = node.parent
-            if parent is not None and parent.type == "variable_declarator":
-                name = parent.child_by_field_name("name")
-                if name is not None and name.type == "identifier":
-                    servers.add(node_text(name, source))
-            elif parent is not None and parent.type == "assignment_expression":
-                left = parent.child_by_field_name("left")
-                if left is not None:
-                    servers.add(node_text(left, source))
-            elif parent is not None and parent.type in (
-                "public_field_definition",
-                "field_definition",
-            ):
-                name = parent.child_by_field_name("name") or parent.child_by_field_name("property")
-                if name is not None:
-                    servers.update((node_text(name, source), f"this.{node_text(name, source)}"))
-        elif node.type in ("required_parameter", "optional_parameter", "public_field_definition"):
-            name = node.child_by_field_name("pattern") or node.child_by_field_name("name")
-            if name is not None and typed(node, source):
-                text = node_text(name, source)
-                servers.add(text)
-                if node.type == "public_field_definition":
-                    servers.add(f"this.{text}")
-    if not servers:
+    servers = proven_receivers(dc_root, source, scopes, typed, built) if classes else set()
+    if not servers and not mcp_servers:
         return []
 
-    listers: list[tuple[int, tuple[str, tuple[int, int]], Node]] = []
-    dispatchers: dict[tuple[str, tuple[str, tuple[int, int]]], list[Node]] = {}
+    listers: list[tuple[int, Binding, Node]] = []
+    dispatchers: dict[tuple[str, Binding], list[Node]] = {}
     #: Per (list schema, server): how many list handlers it is given (each replaces the one
     #: before at runtime).
-    list_handlers: dict[tuple[int, tuple[str, tuple[int, int]]], int] = {}
+    list_handlers: dict[tuple[int, Binding], int] = {}
     for call in _walk(dc_root):
         if call.type != "call_expression":
             continue
@@ -362,25 +296,14 @@ def detect_lowlevel(
         obj, prop = fn.child_by_field_name("object"), fn.child_by_field_name("property")
         if obj is None or prop is None or node_text(prop, source) != "setRequestHandler":
             continue
-        receiver = node_text(obj, source)
-        if receiver not in servers:
+        key = _server(obj, source, scopes, servers, mcp_servers)
+        if key is None:
             continue
-        if obj.type == "identifier" and shadowed(call, receiver, source, typed, built):
-            continue
-        if obj.type == "member_expression" and receiver.endswith(".server"):
-            inner = obj.child_by_field_name("object")
-            if (
-                inner is not None
-                and inner.type == "identifier"
-                and shadowed(call, node_text(inner, source), source, None, None)
-            ):
-                continue
         args_node = call.child_by_field_name("arguments")
         args = [a for a in (args_node.named_children if args_node else []) if a.type != "comment"]
         if len(args) != 2:
             continue
         schema = node_text(args[0], source)
-        key = (receiver, _binding_scope(obj, source))
         if schema in list_schemas:
             listed = list_schemas[schema]
             list_handlers[(listed, key)] = list_handlers.get((listed, key), 0) + 1
@@ -404,7 +327,7 @@ def detect_lowlevel(
                 handler_line = cb.start_point[0] + 1
             elif cb.type == "identifier":
                 handler = node_text(cb, source)
-                handler_line = function_line(cb, source, functions)
+                handler_line = function_line(cb, source, functions, scopes)
         for result in _returned_objects(fn):
             entries = _unparen(_pairs(result, source).get(array_key))
             if entries is None or entries.type != "array":
@@ -422,6 +345,27 @@ def detect_lowlevel(
                     seen.add(obj_node.start_byte)
                     found.append(emit)
     return found
+
+
+def _server(
+    obj: Node,
+    source: bytes,
+    scopes: Scopes,
+    servers: set[Binding],
+    mcp_servers: set[Binding],
+) -> Binding | None:
+    """The binding of a ``setRequestHandler`` receiver when it is a proven ``Server``, or the
+    ``.server`` of a proven ``McpServer``; else None."""
+    key = receiver_binding(obj, source, scopes)
+    if key is None:
+        return None
+    if key in servers:
+        return key
+    inner = obj.child_by_field_name("object") if obj.type == "member_expression" else None
+    prop = obj.child_by_field_name("property") if inner is not None else None
+    if inner is None or prop is None or node_text(prop, source) != "server":
+        return None
+    return key if receiver_binding(inner, source, scopes) in mcp_servers else None
 
 
 def _literal_string(node: Node | None, source: bytes) -> str | None:

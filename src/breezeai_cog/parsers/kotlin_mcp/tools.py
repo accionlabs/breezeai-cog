@@ -296,16 +296,16 @@ def _fun_name(decl: Node, source: bytes) -> str | None:
     return node_text(ident, source) if ident is not None else None
 
 
-def _declared_funs(holder: Node | None, name: str, source: bytes) -> list[Node]:
-    """The functions called ``name`` declared directly in ``holder`` (a file, a class body, a
-    block), extensions included (a same-named extension makes the name ambiguous)."""
-    out: list[Node] = []
-    for c in holder.named_children if holder is not None else ():
+def _declared_funs(holder: Node, source: bytes) -> dict[str, list[Node]]:
+    """Name → the functions of that name declared directly in ``holder`` (a file, a class body,
+    a block), extensions included (a same-named extension makes the name ambiguous)."""
+    out: dict[str, list[Node]] = {}
+    for c in holder.named_children:
         if c.type != "function_declaration":
             continue
         ident = next((x for x in c.named_children if x.type == "simple_identifier"), None)
-        if ident is not None and node_text(ident, source) == name:
-            out.append(c)
+        if ident is not None:
+            out.setdefault(node_text(ident, source), []).append(c)
     return out
 
 
@@ -319,6 +319,8 @@ class _HandlerSites:
         self.root = root
         self.source = source
         self.imported: set[str] = set()
+        #: A holder (by its span) → its functions by name, read once per holder.
+        self._funs: dict[tuple[int, int], dict[str, list[Node]]] = {}
         headers = [
             h
             for top in root.named_children
@@ -335,17 +337,22 @@ class _HandlerSites:
             ):
                 self.imported.add(node_text(path, source).rsplit(".", 1)[-1].strip())
 
+    def _declared(self, holder: Node, name: str) -> list[Node]:
+        key = (holder.start_byte, holder.end_byte)
+        funs = self._funs.get(key)
+        if funs is None:
+            funs = self._funs[key] = _declared_funs(holder, self.source)
+        return funs.get(name, [])
+
     def top_level(self, ref: Node, name: str) -> int | None:
         if name in self.imported:
             return None  # the imported function, declared elsewhere
         node = ref.parent
         while node is not None and node.type != "source_file":
-            if node.type in ("class_body", "statements") and _declared_funs(
-                node, name, self.source
-            ):
+            if node.type in ("class_body", "statements") and self._declared(node, name):
                 return None  # a member or local function of the name is nearer
             node = node.parent
-        found = _declared_funs(self.root, name, self.source)
+        found = self._declared(self.root, name)
         if len(found) != 1 or _fun_name(found[0], self.source) != name:
             return None
         return found[0].start_point[0] + 1
@@ -359,7 +366,7 @@ class _HandlerSites:
         if node is None:
             return None
         body = next((c for c in node.named_children if c.type == "class_body"), None)
-        found = _declared_funs(body, name, self.source)
+        found = self._declared(body, name) if body is not None else []
         if len(found) != 1 or _fun_name(found[0], self.source) != name:
             return None
         return found[0].start_point[0] + 1

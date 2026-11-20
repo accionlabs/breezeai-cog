@@ -138,7 +138,10 @@ def guarded(path: str, reader: Callable[..., list[_T]], *args: Any) -> list[_T]:
     try:
         return reader(*args)
     except ParserTimeout:
-        raise  # the file's parse budget is spent: handled like any parse timeout
+        # Nothing raises it today (a tree-sitter timeout surfaces where the file is parsed);
+        # kept so one raised later is handled like any parse timeout, never logged as a
+        # sub-reader failure while the file keeps a partial set of records.
+        raise
     except Exception as exc:
         from ..logging import get_logger
 
