@@ -170,3 +170,29 @@ def test_an_mcp_call_names_what_it_calls() -> None:
     assert _rules(_call(handlerLine=3)) == [("outbound", "error")]
     # Not an entry point: a call is never one record of a binding.
     assert _rules(_call(), _call(id="a.ts:1:0#2")) == []
+
+
+def test_a_resource_uri_template_is_read_without_its_expressions() -> None:
+    """RFC 6570: ``page://doc#{anchor}`` is a literal ``#`` then an expression, not a ``#{…}``
+    placeholder. A ``${…}`` or a backtick outside an expression is still one."""
+    for uri in (
+        "page://doc#{anchor}",
+        "page://doc{#anchor}",
+        "files://{+path}",
+        "users://{ids*}/x#{a,b}",
+        "q://x{?page,size}",
+    ):
+        assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint=uri)) == [], uri
+        assert _rules(_call(method="RESOURCE", endpoint=uri)) == [], uri
+    for uri in ("${BASE}/x", "page://`x`", "page://{id}/${rest}", "page://#{a"):
+        assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint=uri)) == [("endpoint", "error")]
+        assert _rules(_call(method="RESOURCE", endpoint=uri)) == [("outbound", "error")]
+    # Only a resource URI: a tool, a prompt, a route keep every placeholder.
+    assert _rules(_call(method="TOOL", endpoint="a#{b}")) == [("outbound", "error")]
+    assert _rules(_call(method="PROMPT", endpoint="a#{b}")) == [("outbound", "error")]
+    assert _rules(_mcp("mcp_prompt", "PROMPT", endpoint="a#{b}")) == [("endpoint", "error")]
+    assert _rules(_mcp("mcp_tool", "TOOL", endpoint="a#{b}")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="/x#{y}")) == [("endpoint", "error")]
+    assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/x#{y}")) == [
+        ("outbound", "error")
+    ]

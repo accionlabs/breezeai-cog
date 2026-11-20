@@ -703,6 +703,23 @@ def test_resources_in_a_file_with_no_tool(analyze_files) -> None:
     assert resources["search://{?q}"].params is None
 
 
+
+def test_a_fragment_expression_after_a_literal_hash_is_a_template(analyze_files) -> None:
+    """``page://doc#{anchor}``: a literal ``#`` then an RFC 6570 expression, not a ``#{…}``
+    placeholder; the record passes the contract (``analyze_files`` checks it)."""
+    src = """
+from fastmcp import FastMCP
+
+mcp = FastMCP("docs")
+
+
+@mcp.resource("page://doc#{anchor}")
+def page(anchor: str) -> str:
+    return anchor
+"""
+    assert set(_of(analyze_files({"srv.py": src}), "mcp_resource")) == {"page://doc#{anchor}"}
+
+
 PROMPTS_ONLY = '''
 from mcp.server.fastmcp import FastMCP
 

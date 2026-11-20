@@ -51,6 +51,7 @@ Rule            Severity Violation
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 
@@ -90,6 +91,11 @@ ROUTE_KINDS: dict[str, frozenset[str | None]] = {
 
 _PLACEHOLDERS = ("${", "#{", "`")
 
+#: An RFC 6570 expression of a URI template (``{id}``, ``{+path}``, ``{#anchor}``, ``{ids*}``),
+#: not one written as ``${…}``: a resource URI template's ``page://doc#{anchor}`` is a literal
+#: ``#`` and an expression, not a ``#{…}`` placeholder.
+_URI_TEMPLATE_EXPRESSION = re.compile(r"(?<!\$)\{[^{}]*\}")
+
 #: Rules whose violation is a missing value, not a wrong one.
 _GAPS = frozenset({"handler", "handlerLine"})
 
@@ -110,12 +116,25 @@ OUTBOUND_TYPES = frozenset({"api_call", "eventbus_send", "eventbus_publish", "mc
 MCP_CALL_METHODS = frozenset({"TOOL", "RESOURCE", "PROMPT"})
 
 
-def _bad_address(endpoint: str | None) -> str | None:
+def _bad_address(endpoint: str | None, uri_template: bool = False) -> str | None:
+    """Why ``endpoint`` is not an address, or None. A ``uri_template`` (an MCP resource URI)
+    is read without its RFC 6570 expressions."""
     if endpoint == "":
         return "empty string; an unresolved address has no value"
-    if endpoint is not None and any(p in endpoint for p in _PLACEHOLDERS):
+    if endpoint is None:
+        return None
+    literal = _URI_TEMPLATE_EXPRESSION.sub("", endpoint) if uri_template else endpoint
+    if any(p in literal for p in _PLACEHOLDERS):
         return endpoint
     return None
+
+
+def _is_resource_uri(s: Statement) -> bool:
+    """An MCP resource's URI or URI template: an ``mcp_resource``, or an ``mcp_call`` reading
+    one."""
+    return s.semanticType == "mcp_resource" or (
+        s.semanticType == "mcp_call" and s.method == "RESOURCE"
+    )
 
 
 def _check_mcp_call(s: Statement) -> list[str]:
@@ -172,7 +191,7 @@ def _check(s: Statement) -> list[tuple[str, str]]:
         found.append(("routeKind", repr(s.routeKind)))
     if not s.framework:
         found.append(("framework", "missing"))
-    bad = _bad_address(s.endpoint)
+    bad = _bad_address(s.endpoint, _is_resource_uri(s))
     if bad is not None:
         found.append(("endpoint", bad))
     if not s.handler and s.handlerLine is None and not _framework_served(s):
@@ -196,7 +215,7 @@ def validate(record: FileRecord) -> list[Violation]:
     seen: Counter[tuple[int, str | None, str | None, str | None, str | None]] = Counter()
     for s in record.statements:
         if s.semanticType in OUTBOUND_TYPES or s.routeKind == "navigation":
-            bad = _bad_address(s.endpoint)
+            bad = _bad_address(s.endpoint, _is_resource_uri(s))
             if bad is not None:
                 out.append(Violation("outbound", "error", s.id, bad))
             if s.semanticType == "mcp_call":
