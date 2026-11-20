@@ -117,6 +117,7 @@ _PATTERN_WRAPPERS = frozenset({
     "list_literal", "expression_list", "list_splat_pattern", "pair_pattern",
     "assignment_pattern", "rest_pattern", "tuple_expression", "variable_list",
     "parenthesized_variable_designation", "tuple_element", "pair", "argument",
+    "dotted_name",  # a Python ``case`` capture: ``case [sql]:``
 })
 #: Nodes whose names are bindings wherever they sit (outside their read fields).
 _BINDERS = frozenset({
