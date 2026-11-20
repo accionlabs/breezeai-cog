@@ -81,6 +81,60 @@ _SQL_AT_START = re.compile(r"\s*(?:" + _SQL_FORMS + ")", re.IGNORECASE)
 _SQL_VERB = re.compile(r"\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|MERGE)\b", re.IGNORECASE)
 
 
+def built_string_has_query(parts: "list[str]") -> bool:
+    """True if a string built from ``parts`` (a local's literals, joined as
+    ``string_has_query`` joins them) starts with SQL. Built SQL starts with its verb in the
+    first piece, so a verb further in (HTML or prose appended later) never counts."""
+    joined = " ".join(parts)
+    return bool(_SQL_VERB.match(joined) and _SQL_AT_START.match(joined))
+
+
+# Calls that run the SQL string they are given: DB-API ``execute``/``executemany``, PHP
+# ``query``/``exec``/``prepare``, Dapper ``Query*``/``Execute*``, ADO.NET ``Execute*``,
+# pandas ``read_sql``, Django ``raw``, Laravel ``DB::select``/``statement``, ``$wpdb``
+# ``get_results``/``get_var``/``get_row``/``get_col``, node-sqlite ``run``/``all``.
+_SQL_SINK_PREFIXES = ("query", "execute", "exec")
+_SQL_SINKS = frozenset({
+    "prepare", "preparestatement", "preparecall", "read_sql", "read_sql_query", "raw",
+    "rawquery", "fromsqlraw", "fromsql", "sqlquery", "createnativequery", "createsqlquery",
+    "nativequery", "statement", "unprepared", "select", "get_results", "get_var", "get_row",
+    "get_col", "run", "all", "addbatch",
+})
+# Database command types whose constructor takes the SQL (``new SqlCommand(sql, conn)``).
+_SQL_COMMAND = re.compile(
+    r"^(?:\w+\.)*(?:Sql|SqlCe|OleDb|Odbc|Oracle|MySql|Npgsql|Sqlite|SQLite|DB2|Db2|Fb|Ifx|Db)"
+    r"(?:Command|DataAdapter)$"
+)
+
+
+# PHP's procedural database functions take the connection first and the SQL after it.
+_SQL_ARGUMENT = {
+    "mysqli_query": 1, "mysqli_real_query": 1, "mysqli_multi_query": 1, "mysqli_prepare": 1,
+    "pg_query": 1, "pg_send_query": 1, "pg_prepare": 2, "sqlsrv_query": 1,
+    "sqlsrv_prepare": 1, "oci_parse": 1, "odbc_exec": 1, "odbc_prepare": 1, "db2_exec": 1,
+    "db2_prepare": 1, "ibase_query": 1, "mysql_query": 0,
+}
+
+
+def is_sql_sink(method: str) -> bool:
+    """Whether a call by this name runs the SQL string passed to it (see ``sql_argument``)."""
+    m = method.lower()
+    return m.startswith(_SQL_SINK_PREFIXES) or m in _SQL_SINKS or m in _SQL_ARGUMENT
+
+
+def sql_argument(method: str, count: int) -> int:
+    """The position of the SQL among a call's ``count`` arguments: the first, or after the
+    connection for PHP's procedural functions (``mysqli_query($conn, $sql)``; ``pg_query($sql)``
+    with the connection left out)."""
+    at = _SQL_ARGUMENT.get(method.lower(), 0)
+    return at if at < count else 0
+
+
+def is_sql_command_type(name: str) -> bool:
+    """Whether ``name`` is a database command type taking the SQL first (``SqlCommand``…)."""
+    return bool(_SQL_COMMAND.match(name.strip()))
+
+
 def text_has_query(text: str) -> bool:
     """True if the statement's source embeds a raw SQL string literal (structure-checked)."""
     return bool(_SQL_IN_TEXT.search(text))
