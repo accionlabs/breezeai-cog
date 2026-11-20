@@ -198,7 +198,7 @@ def test_ktor_unresolved_path_part_is_marked():
     # a path with no literal part left (`Config.EXTERNAL`) stays empty.
     rec = _parse(_UNRESOLVED_SRC)
     endpoints = [s.endpoint for s in rec.statements if s.semanticType == "route"]
-    assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, "${base}/x",
+    assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, "${env.base}/x",
                          "${ELSEWHERE}/nested"]
 
 

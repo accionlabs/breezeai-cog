@@ -22,8 +22,14 @@ Which one a runtime part becomes:
   host included) is ``${name}``; a part after it is a request value, ``{name}``.
 
 An address with no literal path part (``${host}${path}``, ``${base}/``) says nothing: ``endpoint``
-is then empty. ``name`` is the value's own name (``config.contextRoot`` → ``contextRoot``), the
-key it is read with (``config.getString("pathPrefix")`` → ``pathPrefix``), else ``value``.
+is then empty.
+
+Both markers name a value the same way (:func:`value_path`): a name or member path is written
+whole, less a leading ``this.`` / ``self.`` (``config.contextRoot`` → ``${config.contextRoot}``,
+``user.id`` → ``{user.id}``), so two values never share a name only because their last parts
+match. A ``${name}`` read with a literal key is named by the key
+(``config.getString("pathPrefix")`` → ``${pathPrefix}``); another call by the called name;
+anything else is ``${value}`` (``{param}`` for a request value).
 """
 
 from __future__ import annotations
@@ -43,19 +49,43 @@ _RUNTIME_PART = re.compile(r"\$\{[^{}]*\}")
 #: A ``{name}`` part that is not already ``${name}``.
 _PLACEHOLDER = re.compile(r"(?<!\$)\{([^{}]*)\}")
 _SIMPLE = re.compile(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*")
+#: A name or member path of plain identifiers (``user.id``), spaces removed.
+_DOTTED = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+#: Receivers that only say "this object": left out of a value's name.
+_SELF = ("this.", "self.")
 _KEYED = re.compile(r"""\(\s*["'`]([\w.\-]+)["'`]\s*[,)]""")
 _CALLED = re.compile(r"([A-Za-z_$][\w$]*)\s*\(")
 
 
+def _drop_self(path: str) -> str:
+    for prefix in _SELF:
+        if path.startswith(prefix) and len(path) > len(prefix):
+            return path[len(prefix):]
+    return path
+
+
+def value_path(expr_text: str) -> str | None:
+    """The name of a value an address is built from, when its source text is a name or member
+    path of plain identifiers: the whole path, spaces removed, less a leading ``this.`` /
+    ``self.`` (``user.id`` → ``user.id``, ``this.baseUrl`` → ``baseUrl``). None otherwise (a
+    call, an index, an operator)."""
+    text = "".join(expr_text.split())
+    return _drop_self(text) if _DOTTED.fullmatch(text) else None
+
+
 def runtime_name(expr_text: str) -> str:
-    """A short name for a value read at runtime, from its source text: a name or member path
-    gives its last part (``config.contextRoot`` → ``contextRoot``, ``this.prefix`` →
-    ``prefix``); a lookup by a literal key gives the key (``config().getString("pathPrefix")``,
-    ``os.getenv("BASE")`` → ``pathPrefix``, ``BASE``); another call gives the called name
-    (``prefixFromEnv()`` → ``prefixFromEnv``); anything else is ``value``."""
+    """The name of a value read at runtime, from its source text: a name or member path is
+    written whole (:func:`value_path`; ``config.contextRoot`` → ``config.contextRoot``,
+    ``this.prefix`` → ``prefix``); a lookup by a literal key gives the key
+    (``config().getString("pathPrefix")``, ``os.getenv("BASE")`` → ``pathPrefix``, ``BASE``);
+    another call gives the called name (``prefixFromEnv()`` → ``prefixFromEnv``); anything
+    else is ``value``."""
     text = expr_text.strip()
-    if _SIMPLE.fullmatch(text):
-        return re.split(r"\s*\.\s*", text)[-1]
+    path = value_path(text)
+    if path is not None:
+        return path
+    if _SIMPLE.fullmatch(text):  # a JavaScript name with a `$` in it
+        return _drop_self("".join(text.split()))
     keyed: list[str] = _KEYED.findall(text)
     if keyed:
         return keyed[-1]

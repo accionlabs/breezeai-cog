@@ -18,7 +18,7 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ...utils.jsonc import load_json_object
-from ..addresses import runtime_part, with_literal
+from ..addresses import runtime_part, value_path, with_literal
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
@@ -315,9 +315,9 @@ def runtime_path_template(
 
 
 def _simple_name(text: str) -> str | None:
-    """``order.id`` → ``id``; None for anything that is not a plain name."""
-    name = text.rsplit(".", 1)[-1].strip()
-    return name if name and name.replace("_", "").isalnum() else None
+    """``order.id`` → ``order.id`` (``addresses.value_path``); None for anything that is not a
+    name or member path."""
+    return value_path(text)
 
 
 def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:

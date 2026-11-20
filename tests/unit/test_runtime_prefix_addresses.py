@@ -1,6 +1,7 @@
 """One notation for an address with a part read at runtime (``parsers.addresses``): the part is
 marked ``${name}`` where it stands, for every framework and both directions. ``{name}`` stays a
-path parameter (one segment); an address with no literal part, and a router mounted at two
+path parameter (one segment); both name a value by its whole member path (``config.contextRoot``,
+``user.id``), less ``this.`` / ``self.``; an address with no literal part, and a router mounted at two
 places, stay empty; a resolved prefix is unchanged."""
 
 from __future__ import annotations
@@ -11,8 +12,10 @@ from breezeai_cog.parsers.addresses import (
     inbound_template,
     outbound_template,
     runtime_name,
+    value_path,
     with_literal,
 )
+from breezeai_cog.parsers.statements_common import url_placeholder
 
 
 def _one(stmts, semantic: str, path: str, line: int | None = None):
@@ -33,8 +36,11 @@ def _addr(stmt) -> str | None:
 @pytest.mark.parametrize(
     "expr, name",
     [
-        ("config.contextRoot", "contextRoot"),
+        ("config.contextRoot", "config.contextRoot"),
+        ("config . contextRoot", "config.contextRoot"),
         ("this.prefix", "prefix"),
+        ("self.settings.base", "settings.base"),
+        ("$scope.base", "$scope.base"),
         ('config().getString("pathPrefix")', "pathPrefix"),
         ("os.getenv('BASE')", "BASE"),
         ("prefixFromEnv()", "prefixFromEnv"),
@@ -44,6 +50,40 @@ def _addr(stmt) -> str | None:
 )
 def test_runtime_name(expr, name) -> None:
     assert runtime_name(expr) == name
+
+
+@pytest.mark.parametrize(
+    "expr, path",
+    [
+        ("id", "id"),
+        ("user.id", "user.id"),
+        ("req.params.user.id", "req.params.user.id"),
+        ("this.userId", "userId"),
+        ("self.base_url", "base_url"),
+        ("this", "this"),  # nothing after it: kept
+        ("getId()", None),
+        ("user.getId()", None),
+        ('row["id"]', None),
+        ("a + b", None),
+    ],
+)
+def test_value_path(expr, path) -> None:
+    assert value_path(expr) == path
+
+
+@pytest.mark.parametrize(
+    "expr, placeholder",
+    [
+        ("user.id", "{user.id}"),  # two values never share a name: {user.id} / {order.id}
+        ("order.id", "{order.id}"),
+        ("this.userId", "{userId}"),
+        ("encodeURIComponent(id)", "{param}"),  # a call is not a name
+        ("@user.id", "{id}"),  # not a plain path: its last part, as before
+        ("$user->id", "{param}"),
+    ],
+)
+def test_url_placeholder(expr, placeholder) -> None:
+    assert url_placeholder(expr) == placeholder
 
 
 @pytest.mark.parametrize(
@@ -67,7 +107,7 @@ def test_outbound_template(rendered, url) -> None:
 
 def test_inbound_template_and_with_literal() -> None:
     assert inbound_template("{pathPrefix}/request") == "${pathPrefix}/request"
-    assert inbound_template("/api/{config.version}/orders/:id") == "/api/${version}/orders/:id"
+    assert inbound_template("/api/{config.version}/orders/:id") == "/api/${config.version}/orders/:id"
     assert inbound_template("{a}/{b}") is None
     assert with_literal("${base}/x") == "${base}/x"
     assert with_literal("${base}/") is None
@@ -92,8 +132,8 @@ export function go(id, url) {
 """,
         }
     )
-    assert _addr(_one(st, "api_call", CLIENT, 3)) == "${contextRoot}/orders/confirm"
-    assert _addr(_one(st, "api_call", CLIENT, 4)) == "${contextRoot}/orders/{id}"  # concat = template
+    assert _addr(_one(st, "api_call", CLIENT, 3)) == "${config.contextRoot}/orders/confirm"
+    assert _addr(_one(st, "api_call", CLIENT, 4)) == "${config.contextRoot}/orders/{id}"  # concat = template
     assert _addr(_one(st, "api_call", CLIENT, 5)) == "/api/orders/{id}"  # a parameter
     assert _addr(_one(st, "api_call", CLIENT, 6)) is None  # variable only
     assert _addr(_one(st, "api_call", CLIENT, 7)) == "/api/plain"
@@ -109,8 +149,8 @@ def go(settings, oid):
 """
         }
     )
-    assert _addr(_one(st, "api_call", "app/client.py", 3)) == "${BASE}/orders/{oid}"
-    assert _addr(_one(st, "api_call", "app/client.py", 4)) == "${BASE}/orders"
+    assert _addr(_one(st, "api_call", "app/client.py", 3)) == "${settings.BASE}/orders/{oid}"
+    assert _addr(_one(st, "api_call", "app/client.py", 4)) == "${settings.BASE}/orders"
 
 
 def test_outbound_jquery(analyze_files) -> None:
@@ -124,7 +164,7 @@ def test_outbound_jquery(analyze_files) -> None:
 """
         }
     )
-    assert _addr(_one(st, "api_call", "web/page.js", 2)) == "${contextRoot}/orders/confirm"
+    assert _addr(_one(st, "api_call", "web/page.js", 2)) == "${config.contextRoot}/orders/confirm"
     assert _addr(_one(st, "api_call", "web/page.js", 3)) == "/orders/list"
     assert _addr(_one(st, "api_call", "web/page.js", 4)) is None
 
@@ -230,7 +270,7 @@ fastify.register(require('./users'), { prefix: '/users' });
 """,
         }
     )
-    assert _addr(_one(st, "route", "web/items.js")) == "${base}/items/:id"
+    assert _addr(_one(st, "route", "web/items.js")) == "${config.base}/items/:id"
     assert _addr(_one(st, "route", "web/users.js")) == "/users"
 
 
@@ -265,7 +305,7 @@ export class CatsController {
 @pytest.mark.parametrize(
     "prefix, expected",
     [
-        ("config.x", "${x}/cats/:id"),
+        ("config.x", "${config.x}/cats/:id"),
         ("'api'", "/api/cats/:id"),
     ],
 )
@@ -288,7 +328,7 @@ async function bootstrap() {{
 @pytest.mark.parametrize(
     "include, expected",
     [
-        ("app.include_router(router, prefix=settings.API_PREFIX)", "${API_PREFIX}/items/{item_id}"),
+        ("app.include_router(router, prefix=settings.API_PREFIX)", "${settings.API_PREFIX}/items/{item_id}"),
         ('app.include_router(router, prefix="/v1")', "/v1/items/{item_id}"),
         (
             'app.include_router(router, prefix="/a")\napp.include_router(router, prefix="/b")',
@@ -377,7 +417,7 @@ export class App extends RestApplication {
             "src/controllers/ping.controller.ts": LB_CONTROLLER % "'/v1'",
         }
     )
-    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == "${BASE_PATH}/v1/ping"
+    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == "${process.env.BASE_PATH}/v1/ping"
 
 
 def test_vertx_sub_router_mounted_at_two_places_has_no_address(analyze_files) -> None:
@@ -415,4 +455,64 @@ function go(ctx, order) {
         }
     )
     jq, ax = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
-    assert _addr(jq) == _addr(ax) == "${ctx}/orders/{id}"
+    assert _addr(jq) == _addr(ax) == "${ctx}/orders/{order.id}"
+
+
+# ── jQuery: a URL built from strings and values reads as axios reads it ──────
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ('config.contextRoot + "/orders/confirm"', "${config.contextRoot}/orders/confirm"),
+        ('"/api/users/" + id', "/api/users/{id}"),
+        ('"/api/users/" + user.id + "/roles"', "/api/users/{user.id}/roles"),
+        ("`${base}/api/items`", "${base}/api/items"),
+        ("`/api/users/${id}`", "/api/users/{id}"),
+        ('"/a/" + id + ".json"', "/a/{id}.json"),
+        ('"/a?q=" + q', "/a?q={q}"),
+        ('"http://" + host + "/x"', "http://${host}/x"),
+        ('"/api/a"', "/api/a"),
+        ("u", None),  # only a variable
+        ("base + suffix", None),  # no literal part
+        ('base + "/"', None),
+        ("`${host}${path}`", None),
+    ],
+)
+def test_jquery_built_url_equals_axios(analyze_files, url, expected) -> None:
+    st = analyze_files(
+        {
+            "package.json": '{"dependencies": {"axios": "1", "jquery": "3"}}',
+            "web/page.js": f"""import axios from 'axios';
+import $ from 'jquery';
+axios.get({url});
+$.get({url});
+$.post({url}, data);
+$.getJSON({url});
+$.ajax({{ url: {url}, type: "post" }});
+""",
+        }
+    )
+    calls = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
+    assert [s.startLine for s in calls] == [3, 4, 5, 6, 7]
+    assert {_addr(s) for s in calls} == {expected}
+
+
+def test_kotlin_string_template_names_a_member_path(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "src/Client.kt": """import io.ktor.client.HttpClient
+class Client(private val httpClient: HttpClient) {
+  fun a(user: User, id: String) {
+    httpClient.get("/api/users/${user.id}/roles")
+    httpClient.get("/api/users/$id")
+    httpClient.get("/api/users/${user.getId()}")
+  }
+}
+"""
+        }
+    )
+    calls = sorted((s for s in st if s.semanticType == "api_call"), key=lambda s: s.startLine)
+    assert [_addr(s) for s in calls] == [
+        "/api/users/{user.id}/roles",
+        "/api/users/{id}",
+        "/api/users/{param}",  # a call is not a name
+    ]

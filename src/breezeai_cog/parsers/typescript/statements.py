@@ -215,7 +215,7 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _render_url(node: Node, source: bytes) -> str | None:
+def render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string, template literal, or ``+`` concatenation.
     Interpolations become ``{name}`` placeholders; a leading interpolated base/host
     segment is dropped (``\\`${base}/users/${id}\\``` -> ``/users/{id}``)."""
@@ -232,7 +232,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
                 parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
         return "".join(parts)
     if node.type == "binary_expression":  # string concatenation: '/a/' + id + '/b'
-        return render_concat(node, source, _render_url)
+        return render_concat(node, source, render_url)
     return None
 
 
@@ -254,12 +254,12 @@ def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | N
             val = pair.child_by_field_name("value")
             kname = node_text(key, source) if key is not None else ""
             if kname in ("url", "uri", "path") and val is not None:
-                url = _render_url(val, source)
+                url = render_url(val, source)
             elif kname == "method" and val is not None:
-                mv = _render_url(val, source)
+                mv = render_url(val, source)
                 override = mv.lower() if mv else None
         return url, override
-    return resolve_endpoint(named, source, _render_url)
+    return resolve_endpoint(named, source, render_url)
 
 
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:

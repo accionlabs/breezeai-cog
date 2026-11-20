@@ -28,6 +28,7 @@ from typing import cast
 from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
+from .addresses import value_path
 from ..schemas import Decorator, Statement
 from ..schemas.enums import SemanticType
 from .detection import classify_call, string_has_query, text_has_query, vendor_from_imports
@@ -182,7 +183,12 @@ UrlRenderer = Callable[[Node, bytes], "str | None"]
 
 
 def url_placeholder(expr_text: str) -> str:
-    """A non-string URL sub-expression -> ``{name}`` (simple name) or ``{param}``."""
+    """A non-string URL sub-expression -> ``{name}``: a name or member path written whole
+    (``user.id`` → ``{user.id}``, ``addresses.value_path``), else the last part when it is a
+    plain name, else ``{param}``."""
+    path = value_path(expr_text)
+    if path is not None:
+        return "{" + path + "}"
     simple = expr_text.rsplit(".", 1)[-1].strip()
     return "{" + simple + "}" if simple and simple.replace("_", "").isalnum() else "{param}"
 

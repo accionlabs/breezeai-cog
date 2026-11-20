@@ -102,14 +102,14 @@ def test_receiver_qualified_routematcher(tmp_path) -> None:
 
 def test_bare_calls_inside_routematcher_scope(tmp_path) -> None:
     """Bare ``get("...")`` / ``delete("...")`` inside ``rm.with {}`` → route (route_scope). The
-    paths start with ``${config.path}`` (runtime config): marked ``${path}``; a path with no
-    literal part besides its runtime parts (``${path}/${ECHO}``) says nothing → empty."""
+    paths start with ``${config.path}`` (runtime config): marked as written; a path with
+    no literal part besides its runtime parts (``${config.path}/${ECHO}``) says nothing → empty."""
     rec = _parse(tmp_path, FILTER_SRC, "URIMapperVerticle.groovy")
     assert rec.framework == "vertx"
     routes = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"]
     assert sorted(m for m, _ in routes) == ["DELETE", "DELETE", "GET", "GET"]
     assert sorted(ep or "" for _, ep in routes) == [
-        "", "", "${path}/${cache}/schema", "${path}/:platformId/:filterId"]
+        "", "", "${config.path}/${cache}/schema", "${config.path}/:platformId/:filterId"]
 
 
 def test_bare_verb_calls_need_routematcher_in_file(tmp_path) -> None:
@@ -184,8 +184,8 @@ def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "M.groovy")
     routes = _routes(rec)
-    assert ("POST", "${path}/job") in routes
-    assert ("DELETE", "${path}/job/:jobId") in routes
+    assert ("POST", "${cfg.path}/job") in routes
+    assert ("DELETE", "${cfg.path}/job/:jobId") in routes
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:

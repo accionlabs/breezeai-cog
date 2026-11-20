@@ -968,7 +968,7 @@ Other places that resolve values:
   `static final String`). A runtime value stays unresolved.
 - **Parts read at runtime** (`parsers/addresses.py`): a value cog cannot read in an HTTP address
   (a context root, base path or prefix from config, env or a variable) is marked `${name}` where
-  it stands — `${contextRoot}/orders/{id}` — never guessed, dropped or written `{name}` (a path
+  it stands — `${config.contextRoot}/orders/{id}` — never guessed, dropped or written `{name}` (a path
   parameter). Detectors mark it in route paths and prefixes; after `link_handlers`, the executor
   runs `normalize_addresses` once per file, for every language, to mark a runtime base in outbound
   URLs and tidy route templates. See

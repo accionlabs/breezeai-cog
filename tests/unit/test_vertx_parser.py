@@ -142,7 +142,7 @@ def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
                        capture_statements=True)
     rec = VertxParser().parse_file(ctx)
     by = {(s.semanticType, s.method, s.endpoint) for s in rec.statements if s.semanticType}
-    assert ("route", "POST", "${base}/job") in by
+    assert ("route", "POST", "${cfg.base}/job") in by
     assert ("eventbus_send", None, None) in by  # unknown address → empty, never {prefix}/audit
 
 

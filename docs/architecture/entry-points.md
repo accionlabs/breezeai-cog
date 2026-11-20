@@ -404,10 +404,17 @@ value and never guesses it; it keeps the address with the value **marked where i
 
 - **`${name}`** — a value from code or config that cog cannot read. It may be empty, one path
   segment, several, or a scheme and host. Fixed for a deployment, never filled by a caller.
-  `name` is the value's own name (`config.contextRoot` → `contextRoot`), the key it is read with
-  (`config.getString("pathPrefix")` → `pathPrefix`), the called function
-  (`prefixFromEnv()` → `prefixFromEnv`), else `value`.
 - **`{name}`, `:name`, `<name>`** — a path parameter, unchanged: one segment, filled per request.
+
+Both markers name a value the same way, so two values never share a name only because their last
+parts match:
+
+| The value in the code | Its name |
+|---|---|
+| A name or member path | written whole, less a leading `this.` / `self.`: `config.contextRoot` → `${config.contextRoot}`, `user.id` → `{user.id}`, `this.userId` → `{userId}` |
+| A lookup by a literal key | the key: `config.getString("pathPrefix")`, `os.getenv("BASE")` → `${pathPrefix}`, `${BASE}` |
+| Another call | `${…}`: the called function (`prefixFromEnv()` → `${prefixFromEnv}`); `{param}` for a request value (`encodeURIComponent(id)`) |
+| Anything else | `${value}` / `{param}` |
 
 Which one a runtime part becomes:
 
@@ -420,8 +427,9 @@ Which one a runtime part becomes:
 |---|---|---|
 | `router.get(pathPrefix + "/request")` (Vert.x), ``app.get(`${BASE}/users/:id`)`` (Express) | inbound | `${pathPrefix}/request`, `${BASE}/users/:id` |
 | `router.get("/api/" + version + "/orders")` | inbound | `/api/${version}/orders` |
-| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath` from env (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | inbound | `${base}/…`, `${x}/…`, `${X}/…`, `${prefixFromEnv}/…`, `${BASE_PATH}/…` |
-| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + id })` — and the same shapes in every language's HTTP calls | outbound | `${contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{id}` |
+| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath: process.env.BASE_PATH` (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | inbound | `${config.base}/…`, `${config.x}/…`, `${settings.X}/…`, `${prefixFromEnv}/…`, `${process.env.BASE_PATH}/…` |
+| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + order.id })` — and the same shapes in every language's HTTP calls | outbound | `${config.contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{order.id}` |
+| `$.get("/api/users/" + user.id + "/roles")`, `` $.getJSON(`/api/users/${id}`) `` — a jQuery URL reads exactly as the same `axios` URL | outbound | `/api/users/{user.id}/roles`, `/api/users/{id}` |
 | `` fetch(`${host}${path}`) ``, ``app.get(`${BASE}`)`` | both | empty: no literal path part |
 
 A reader comparing a call with a route drops the leading `${…}`, compares the rest (treating

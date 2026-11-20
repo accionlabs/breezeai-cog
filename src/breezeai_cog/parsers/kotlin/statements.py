@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_placeholder
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -40,12 +40,10 @@ def _render_url(node: Node, source: bytes) -> str | None:
         for child in node.named_children:
             if child.type == "string_content":
                 parts.append(node_text(child, source))
-            elif child.type in {"string_interpolation", "multiline_string_interpolation"}:
-                expr = next(iter(child.named_children), None)
-                if expr is not None and expr.type == "simple_identifier":
-                    parts.append("{" + node_text(expr, source) + "}")
-                else:
-                    parts.append("{param}")
+            elif child.type in {"interpolated_identifier", "interpolated_expression"}:
+                # `$id` / `${user.id}`: the node is the expression; its `$`, `${`, `}`
+                # delimiters are sibling nodes that carry no text of the URL
+                parts.append(url_placeholder(node_text(child, source)))
         return "".join(parts) if parts else node_text(node, source).strip('"')
     if node.type == "additive_expression":
         return render_concat(node, source, _render_url)

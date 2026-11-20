@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from breezeai_cog import iter_file_records
 from breezeai_cog.cli import app
+from breezeai_cog.parsers.addresses import normalize_addresses
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
 from breezeai_cog.parsers.html.parser import HtmlParser
@@ -35,6 +36,7 @@ def _parse(parser, name: str, *, capture: bool = True) -> FileRecord:
 def _jquery(rec: FileRecord) -> list[tuple[str | None, str | None]]:
     """(method, endpoint) of every jquery api_call — assertions target the framework, not
     'no api_call at all', so unrelated calls in a fixture cannot mask a result."""
+    normalize_addresses(rec)  # as the executor does once per file
     return [
         (s.method, s.endpoint)
         for s in rec.statements
@@ -195,7 +197,7 @@ def _src(tmp_path, src: str, name: str = "a.js", parser=None) -> list[tuple[str 
         ('$.ajax({ url: "/api/d", type: "POST", method: "PUT" });', [("POST", "/api/d")]),
         ('$.ajax({ url: "/api/d", method: "PUT", type: "POST" });', [("POST", "/api/d")]),
         # a dynamic endpoint is null, never the expression text
-        ('import $ from "jquery";\n$.get(`/api/${id}`);', [("GET", None)]),
+        ('import $ from "jquery";\n$.get(`/api/${id}`);', [("GET", "/api/{id}")]),
     ],
 )
 def test_recognition_edges(tmp_path, src: str, expected) -> None:
@@ -249,7 +251,7 @@ _JQ = 'import $ from "jquery";\n'
         (_JQ + '$.ajax({ url: "/api/a", type: "GET" });', [("GET", "/api/a")]),
         (_JQ + '$.ajax({ url: target, type: "POST" });', [("POST", None)]),
         (_JQ + '$.ajax({ url: form.action, type: "POST" });', [("POST", None)]),
-        (_JQ + '$.ajax({ url: "/api/" + id, method: "GET" });', [("GET", None)]),
+        (_JQ + '$.ajax({ url: "/api/" + id, method: "GET" });', [("GET", "/api/{id}")]),
         # every verb, from `type` and from `method`, any case
         (_JQ + '$.ajax({ url: "/v", type: "put" });', [("PUT", "/v")]),
         (_JQ + '$.ajax({ url: "/v", method: "PATCH" });', [("PATCH", "/v")]),
@@ -266,11 +268,11 @@ _JQ = 'import $ from "jquery";\n'
         # shorthand helpers keep their fixed verbs
         (_JQ + '$.get(target);', [("GET", None)]),
         (_JQ + '$.post(target, data);', [("POST", None)]),
-        (_JQ + '$.getJSON(`/api/${id}`);', [("GET", None)]),
+        (_JQ + '$.getJSON(`/api/${id}`);', [("GET", "/api/{id}")]),
         # .load: GET, literal or built URL; the legacy load EVENT and non-selections are not requests
         (_JQ + '$("#c").load("/Products/Details");', [("GET", "/Products/Details")]),
-        (_JQ + '$("#c").load("/p/" + id);', [("GET", None)]),
-        (_JQ + '$("#c").load(`/p/${id}`, cb);', [("GET", None)]),
+        (_JQ + '$("#c").load("/p/" + id);', [("GET", "/p/{id}")]),
+        (_JQ + '$("#c").load(`/p/${id}`, cb);', [("GET", "/p/{id}")]),
         (_JQ + '$("#c").load("?handler=Partial");', [("GET", "?handler=Partial")]),
         (_JQ + '$(window).load(function () {});', []),
         (_JQ + '$(window).load(init);', []),
@@ -594,6 +596,10 @@ def test_layout_bundle_is_evidence_for_the_view(tmp_path) -> None:
         ("cshtml", 'jQuery.get("https://user@host.example/x");', [(1, "GET", "https://user@host.example/x")]),
         ("cshtml", 'jQuery.ajax({ url: "/api/s", type: "POST" });', [(1, "POST", "/api/s")]),
         ("html", 'jQuery.get("/api/@Model.Id");', [(1, "GET", None)]),  # plain markup: same honest-null
+        # a URL built from strings and JavaScript values reads as axios reads it, in every markup
+        ("cshtml", 'jQuery.get("/api/users/" + user.id + "/roles");', [(1, "GET", "/api/users/{user.id}/roles")]),
+        ("aspx", 'jQuery.post("/api/users/" + id, data);', [(1, "POST", "/api/users/{id}")]),
+        ("html", 'jQuery.ajax({ url: `/api/items/${item.id}`, type: "PUT" });', [(1, "PUT", "/api/items/{item.id}")]),
         # a Razor/WebForms expression elsewhere (a callback) does not null a literal URL
         ("cshtml", 'jQuery.get("/api/ok", function () { var x = @Model.Id; });', [(1, "GET", "/api/ok")]),
         ("aspx", 'jQuery.get("/api/ok", function () { var x = <%= Id %>; });', [(1, "GET", "/api/ok")]),
