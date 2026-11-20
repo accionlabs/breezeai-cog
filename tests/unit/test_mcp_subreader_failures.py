@@ -130,3 +130,18 @@ def test_a_failing_subreader_keeps_the_detectors_other_tools(
     failed = [e for e in logs if e["event"] == "mcp.subreader.failed"]
     assert failed and failed[0]["reader"] == "boom" and failed[0]["error"] == "ValueError: boom"
     assert not [e for e in logs if e["event"] == "additive.detector.failed"]
+
+
+def test_a_parse_timeout_in_a_subreader_is_not_swallowed() -> None:
+    """``guarded`` turns a sub-reader's failure into a warning, but not a ``ParserTimeout``: the
+    file's parse budget is spent, and the file is handled like any parse timeout. Nothing
+    raises it today; the re-raise keeps one raised later from becoming a partial record set."""
+    from breezeai_cog.errors import ParserTimeout
+    from breezeai_cog.parsers.mcp_common import guarded
+
+    def timeout(*args):
+        raise ParserTimeout("x.ts")
+
+    with capture_logs() as logs, pytest.raises(ParserTimeout):
+        guarded("x.ts", timeout, 1)
+    assert not [e for e in logs if e["event"] == "mcp.subreader.failed"]
