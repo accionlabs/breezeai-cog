@@ -81,10 +81,10 @@ class R {
 """, [(5, "Execute")]),
     ("csharp", "dapper sink name", """\
 class R {
-    void Get(SqlConnection c) {
+    void Get(SqlConnection conn) {
         var sql = "SELECT a ";
         sql += "FROM t";
-        c.QueryAsync<int>(sql);
+        conn.QueryAsync<int>(sql);
     }
 }
 """, [(5, "QueryAsync")]),
@@ -221,6 +221,7 @@ _NOT_JOINED = [
     ("python", "parameter append", """\
 def f(cur, where):
     sql = "SELECT id "
+    sql += "FROM orders "
     sql += where
     cur.execute(sql)
 """),
@@ -241,13 +242,15 @@ def f(cur):
     ("python", "non-literal piece", """\
 def f(cur, id):
     sql = "SELECT a "
-    sql += "FROM t WHERE id = " + str(id)
+    sql += "FROM t "
+    sql += "WHERE id = " + str(id)
     cur.execute(sql)
 """),
     ("python", "f-string piece", """\
 def f(cur, uid):
     sql = "SELECT id "
-    sql += f"FROM orders WHERE uid = {uid}"
+    sql += "FROM orders "
+    sql += f"WHERE uid = {uid}"
     cur.execute(sql)
 """),
     ("python", "other compound op", """\
@@ -308,11 +311,11 @@ def f(cur, v):
 """),
     ("csharp", "ref argument", """\
 class R {
-    void F(SqlConnection c) {
+    void F(SqlConnection conn) {
         var sql = "SELECT a ";
         sql += "FROM t";
         Fix(ref sql);
-        c.Query(sql);
+        conn.Query(sql);
     }
 }
 """),
@@ -338,10 +341,11 @@ class R {
 """),
     ("csharp", "interpolated piece", """\
 class R {
-    void F(SqlConnection c, int id) {
+    void F(SqlConnection conn, int id) {
         var s = "SELECT a ";
-        s += $"FROM t WHERE id = {id}";
-        c.Query(s);
+        s += "FROM t ";
+        s += $"WHERE id = {id}";
+        conn.Query(s);
     }
 }
 """),
@@ -365,11 +369,12 @@ class R {
     }
 }
 """),
-    ("csharp", "builder from parameter", """\
+    ("csharp", "chained append of a parameter", """\
 class R {
     void F(SqlConnection c, string p) {
-        var sb = new StringBuilder(p);
-        sb.Append("FROM t");
+        var sb = new StringBuilder("SELECT a ");
+        sb.Append("FROM t ");
+        sb.Append("WHERE ").Append(p);
         new SqlCommand(sb.ToString(), c);
     }
 }
@@ -388,7 +393,9 @@ class R {
 class R {
     void f(String p) {
         StringBuilder sb = new StringBuilder("SELECT a ");
-        jdbcTemplate.query(sb.append(p).toString(), m);
+        sb.append("FROM t ");
+        log(sb.append(p));
+        jdbcTemplate.query(sb.toString(), m);
     }
 }
 """),
@@ -396,6 +403,7 @@ class R {
 class R {
     void f(String p) {
         StringBuilder sb = new StringBuilder("SELECT a ");
+        sb.append("FROM t ");
         sb.append(p);
         jdbcTemplate.query(sb.toString(), m);
     }
@@ -437,9 +445,28 @@ function f($db, $a) {
     $db->query($sql);
 }
 """),
+    ("php", "reference alias", """\
+<?php
+function f($db) {
+    $sql = "SELECT a ";
+    $ref = &$sql;
+    $ref = "hello ";
+    $sql .= "FROM t";
+    $db->query($sql);
+}
+"""),
+    ("php", "reference in an array", """\
+<?php
+function f($db) {
+    $sql = "SELECT a ";
+    $sql .= "FROM t";
+    $refs = [&$sql];
+    $db->query($sql);
+}
+"""),
     ("php", "interpolated piece", """\
 <?php
-function f($db, $id) { $s = "SELECT a "; $s .= "FROM t WHERE id = $id"; $db->query($s); }
+function f($db, $id) { $s = "SELECT a "; $s .= "FROM t "; $s .= "WHERE id = $id"; $db->query($s); }
 """),
     ("vb", "case variant", """\
 Public Class R
@@ -503,13 +530,15 @@ export function f(db: any, api: any) {
 """),
     ("typescript", "block redeclaration", """\
 export function f(db: any, x: boolean) {
-  let sql = "nothing";
-  if (x) { let sql = "SELECT id "; sql += "FROM orders"; console.log(sql); }
+  let sql = "SELECT id ";
+  if (x) { let sql = "SELECT x "; sql += "FROM y"; console.log(sql); }
   db.query(sql);
 }
 """),
     ("typescript", "template substitution", """\
-export function f(db: any, id: number) { let s = `SELECT a `; s += `FROM t WHERE id = ${id}`; db.query(s); }
+export function f(db: any, id: number) {
+  let s = `SELECT a `; s += `FROM t `; s += `WHERE id = ${id}`; db.query(s);
+}
 """),
 ]
 
@@ -607,6 +636,57 @@ def f(cur, n):
     assert _queries("python", src, tmp_path) == []
 
 
+@pytest.mark.parametrize(("lang", "src"), [
+    # generic names on a receiver that is not a database handle: an LLM chain, an index,
+    # a process, a LINQ query, the DOM
+    ("python", 'def f(chain):\n    p = "Select the three best products "\n'
+               '    p += "from the catalogue below."\n    chain.run(p)\n'),
+    ("python", 'def f(index):\n    q = "Select the answer "\n    q += "from the context"\n'
+               '    index.query(q)\n'),
+    ("python", 'import subprocess\ndef f():\n    cmd = "delete "\n    cmd += "from /tmp/x"\n'
+               '    subprocess.run(cmd)\n'),
+    ("csharp", 'class R {\n  void F(G g) {\n    var m = "Select a customer ";\n'
+               '    m += "from the list";\n    g.Select(m);\n  }\n}\n'),
+    ("typescript", 'export function f() {\n  let s = "SELECT a ";\n  s += "FROM t";\n'
+                   '  document.querySelectorAll(s);\n}\n'),
+])
+def test_generic_names_count_only_on_a_database_handle(lang, src, tmp_path) -> None:
+    assert _queries(lang, src, tmp_path) == []
+
+
+@pytest.mark.parametrize(("lang", "src", "expected"), [
+    ("php", '<?php\nclass M {\n  function f() {\n    $sql = "SELECT a ";\n    $sql .= "FROM t";\n'
+            '    $this->db->query($sql);\n  }\n}\n', [(6, "query")]),
+    ("php", '<?php\nfunction f() {\n  $sql = "SELECT a ";\n  $sql .= "FROM t";\n'
+            '  DB::select($sql);\n}\n', [(5, "select")]),
+    ("typescript", 'export async function f(pool: any) {\n  let q = "SELECT a ";\n  q += "FROM t";\n'
+                   '  await pool.query(q);\n}\n', [(4, "query")]),
+])
+def test_generic_names_on_a_database_handle_count(lang, src, expected, tmp_path) -> None:
+    assert _queries(lang, src, tmp_path) == expected
+
+
+def test_sql_built_from_an_earlier_local_counts(tmp_path) -> None:
+    src = """\
+def f(cur):
+    base = "SELECT a "
+    sql = base + "FROM t"
+    cur.execute(sql)
+"""
+    assert _queries("python", src, tmp_path) == [(4, "execute")]
+
+
+def test_built_cte_counts(tmp_path) -> None:
+    src = """\
+def f(cur):
+    sql = "WITH x AS (SELECT a "
+    sql += "FROM t) SELECT a "
+    sql += "FROM x"
+    cur.execute(sql)
+"""
+    assert _queries("python", src, tmp_path) == [(5, "execute")]
+
+
 # ── built_queries: the gate, the limits and the fail-safe ───────────────────────────────
 def _body(src: str):
     from breezeai_cog.parsers.treesitter import parse_source
@@ -646,6 +726,17 @@ def test_oversized_local_is_left_out(appends) -> None:
     assert built_queries(_body(src), src.encode(), "python") is None
 
 
+def test_a_left_out_local_stops_growing() -> None:
+    from breezeai_cog.parsers import sql_variables
+
+    src = ('def f(cur):\n    sql = "INSERT INTO t VALUES "\n'
+           + '    sql += "(1),"\n' * 5000 + "    cur.execute(sql)\n")
+    body = _body(src)
+    run = sql_variables._Pass(src.encode(), "python")
+    assert run.run(body) is None
+    assert "sql" in run.out and run.locals["sql"].parts == []
+
+
 def test_joined_text_is_handed_to_the_call() -> None:
     from breezeai_cog.parsers.sql_variables import built_queries
 
@@ -659,17 +750,34 @@ def test_joined_text_is_handed_to_the_call() -> None:
 def test_built_string_has_query_needs_sql_at_the_start() -> None:
     assert built_string_has_query(["SELECT a ", "FROM t"])
     assert built_string_has_query(["select ID ", " ", "  from ACCOUNTS"])
+    assert built_string_has_query(["WITH x AS (SELECT a FROM t) ", "SELECT a FROM x"])
     assert not built_string_has_query(["<option value='update'>Update</option>", "Set x"])
     assert not built_string_has_query(["Hello ", "SELECT a FROM t"])
     assert not built_string_has_query(["Select"])
 
 
 def test_is_sql_sink() -> None:
-    for name in ("execute", "executemany", "query", "QueryAsync", "ExecuteNonQuery", "exec",
-                 "prepare", "read_sql", "raw", "get_results", "mysqli_query", "run", "all"):
+    for name in ("execute", "executemany", "ExecuteNonQuery", "prepare", "read_sql",
+                 "get_results", "mysqli_query", "FromSqlRaw"):
         assert is_sql_sink(name), name
-    for name in ("print", "debug", "Show", "write", "get", "update", "WriteLine"):
+    for name in ("print", "debug", "Show", "write", "get", "update", "WriteLine", "query",
+                 "run", "all", "exec", "select"):
         assert not is_sql_sink(name), name
+
+
+def test_generic_sink_needs_a_database_handle() -> None:
+    for callee, name in (("db.query", "query"), ("$this->db->query", "query"),
+                         ("conn.QueryAsync<int>", "QueryAsync"), ("cursor.query", "query"),
+                         ("db.run", "run"), ("db.all", "all"), ("DB::select", "select"),
+                         ("pool.query", "query"), ("jdbcTemplate.query", "query"),
+                         ("self.connection.exec", "exec")):
+        assert is_sql_sink(name, callee), callee
+    for callee, name in (("chain.run", "run"), ("index.query", "query"),
+                         ("subprocess.run", "run"), ("g.Select", "Select"),
+                         ("document.querySelectorAll", "querySelectorAll"),
+                         ("db.querySelector", "querySelector"), ("query", "query"),
+                         ("child_process.exec", "exec")):
+        assert not is_sql_sink(name, callee), callee
 
 
 def test_is_sql_command_type() -> None:
