@@ -707,3 +707,98 @@ async def p():
     }
     statements = analyze_files(files)
     assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+_REBOUND_SRC = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+
+{rebinding}
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "if (server := other()):\n    pass\n",
+        "match msg:\n    case server:\n        pass\n",
+        'match msg:\n    case {"s": server}:\n        pass\n',
+        "match msg:\n    case [server, *rest]:\n        pass\n",
+        "match msg:\n    case Foo(a=server):\n        pass\n",
+        "match msg:\n    case [first, *server]:\n        pass\n",
+        "match msg:\n    case Foo() as server:\n        pass\n",
+        "del server\n",
+        "server, other = 1, 2\n",
+        "[first, *server] = items\n",
+        "(server, other) = pair\n",
+        "server += 1\n",
+        "for server, other in pairs:\n    pass\n",
+        "with open('f') as server:\n    pass\n",
+    ],
+)
+def test_lowlevel_server_rebound_by_any_binding_is_not_proven(analyze_files, rebinding) -> None:
+    """A walrus, a ``case`` capture (a bare name, a mapping or sequence value, a keyword
+    pattern, a ``*rest``, an ``as`` alias), a ``del``, an unpacking target, an augmented
+    assignment, a ``for`` target or a ``with … as`` all rebind the server name: no record."""
+    assert _tools(analyze_files({"srv.py": _REBOUND_SRC.format(rebinding=rebinding)})) == {}
+
+
+@pytest.mark.parametrize(
+    "harmless",
+    [
+        "match msg:\n    case Color.RED:\n        pass\n",
+        "match msg:\n    case Foo():\n        pass\n",
+        "match msg:\n    case {\"s\": other}:\n        pass\n",
+        "if (other := make()):\n    pass\n",
+        "del other\n",
+        "first, *rest = items\n",
+    ],
+)
+def test_lowlevel_server_kept_when_other_names_are_bound(analyze_files, harmless) -> None:
+    """A dotted value or a class pattern captures nothing, and binding other names leaves the
+    proven server as it is."""
+    assert set(_tools(analyze_files({"srv.py": _REBOUND_SRC.format(rebinding=harmless)}))) == {
+        "maybe"
+    }
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "(Server := make_server)\n",
+        "match kind:\n    case Server:\n        pass\n",
+        "del Server\n",
+        "Server, other = make_server, 1\n",
+        "for Server in classes:\n    pass\n",
+        "with ctx() as Server:\n    pass\n",
+        "from other.servers import Server\n",
+        "from other.servers import Base as Server\n",
+        "import Server\n",
+        "class Server:\n    pass\n",
+    ],
+)
+def test_lowlevel_server_class_rebound_by_any_binding_is_not_proven(
+    analyze_files, rebinding
+) -> None:
+    """The ``Server`` class name bound again in the module (walrus, ``case``, ``del``,
+    unpacking, ``for``, ``with``, another import, a class) is no longer the SDK's: no record."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+{rebinding}
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+    assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
