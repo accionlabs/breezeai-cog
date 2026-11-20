@@ -236,6 +236,26 @@ mcp.resource("config", "config://app", async () => ({ contents: [] }));
 mcp.prompt("review", { code: z.string() }, async () => ({ messages: [] }));
 """
 
+TYPESCRIPT_LOWLEVEL_ENTRIES = """
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import {
+  ListToolsRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ListPromptsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+
+const server = new Server({ name: "demo", version: "1" }, { capabilities: {} });
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [{ name: "search", inputSchema: { type: "object", properties: {} } }],
+}));
+server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+  resourceTemplates: [{ uriTemplate: "config://app", name: "config" }],
+}));
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+  prompts: [{ name: "review", arguments: [{ name: "code", required: true }] }],
+}));
+"""
+
 CSHARP_ENTRIES = """
 using ModelContextProtocol.Server;
 
@@ -261,6 +281,21 @@ ENTRY_CASES = [
     ("python_mcp_common", "prompt_params", "srv.py", PYTHON_ENTRIES, "mcp_prompt"),
     ("typescript_mcp.tools", "_resource_uri", "src/index.ts", TYPESCRIPT_ENTRIES, "mcp_resource"),
     ("typescript_mcp.tools", "prompt_params", "src/index.ts", TYPESCRIPT_ENTRIES, "mcp_prompt"),
+    # the low-level reader: each list handler is read guarded, so one kind failing keeps the others
+    (
+        "typescript_mcp.lowlevel",
+        "uri_template_params",
+        "src/low.ts",
+        TYPESCRIPT_LOWLEVEL_ENTRIES,
+        "mcp_resource",
+    ),
+    (
+        "typescript_mcp.lowlevel",
+        "_prompt_arguments",
+        "src/low.ts",
+        TYPESCRIPT_LOWLEVEL_ENTRIES,
+        "mcp_prompt",
+    ),
     ("csharp_mcp.tools", "uri_template_params", "Entries.cs", CSHARP_ENTRIES, "mcp_resource"),
     ("csharp_mcp.tools", "prompt_params", "Entries.cs", CSHARP_ENTRIES, "mcp_prompt"),
 ]
@@ -271,7 +306,7 @@ def test_a_failing_resource_or_prompt_read_in_the_tool_detector_keeps_its_tools(
     analyze_files, monkeypatch, module, reader, path, src, dropped
 ) -> None:
     """Resources and prompts read inside a tool detector (Spring AI, the Python decorators, the
-    TypeScript ``McpServer`` methods, C# attributes) run guarded: forced to fail, the file's
+    TypeScript ``McpServer`` methods and low-level list handlers, C# attributes) run guarded: forced to fail, the file's
     tools stay, and so does the other kind (``dropped`` None: the one reader reads both)."""
     kinds = ("mcp_tool", "mcp_resource", "mcp_prompt")
 

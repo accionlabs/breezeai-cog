@@ -521,6 +521,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     found: list[Emit] = guarded(
         dc.path,
         detect_lowlevel,
+        dc.path,
         dc.root,
         source,
         servers,

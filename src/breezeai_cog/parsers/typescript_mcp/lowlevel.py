@@ -62,7 +62,7 @@ from tree_sitter import Node
 
 from ...schemas import Parameter
 from ..emits import Emit
-from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
+from ..mcp_common import PROMPT, RESOURCE, TOOL, guarded, mcp_emit, param, uri_template_params
 from ..typescript.declarations import import_bindings
 from ..treesitter import node_text
 from .scopes import Binding, Scopes, function_line, proven_receivers, receiver_binding
@@ -240,6 +240,7 @@ def _returned_objects(fn: Node) -> list[Node]:
 
 
 def detect_lowlevel(
+    path: str,
     dc_root: Node,
     source: bytes,
     mcp_servers: set[Binding],
@@ -250,7 +251,8 @@ def detect_lowlevel(
     """The tools, resources and prompts of the file's ``setRequestHandler(List…RequestSchema,
     …)`` calls (see the module docstring). ``mcp_servers`` are the bindings proven to be an
     ``McpServer``, ``scopes`` the file's scopes and ``input_schema`` the detector's JSON-schema
-    literal reader."""
+    literal reader. Each list handler is read guarded (``path`` names the file in the log), so a
+    resource or prompt list that fails to read never drops the file's tools, nor the reverse."""
     if b"setRequestHandler" not in source or not any(
         listed[0].encode() in source for listed in _LISTED
     ):
@@ -317,34 +319,69 @@ def detect_lowlevel(
     for listed, key, fn in listers:
         if list_handlers[(listed, key)] > 1:
             continue  # only the last one set answers at runtime: which one is unknown
-        _, dispatch_name, array_key, kind = _LISTED[listed]
-        handler: str | None = None
-        handler_line: int | None = None
-        cbs = dispatchers.get((dispatch_name, key), [])
-        if len(cbs) == 1:
-            cb = cbs[0]
-            if cb.type in _FUNCTION_LITERALS:
-                handler_line = cb.start_point[0] + 1
-            elif cb.type == "identifier":
-                handler = node_text(cb, source)
-                handler_line = function_line(cb, source, functions, scopes)
-        for result in _returned_objects(fn):
-            entries = _unparen(_pairs(result, source).get(array_key))
-            if entries is None or entries.type != "array":
-                continue
-            for element in entries.named_children:
-                obj_node = _unparen(element)
-                if obj_node is not None and obj_node.type == "identifier":
-                    obj_node = consts.get(node_text(obj_node, source))
-                if obj_node is None or obj_node.type != "object" or obj_node.start_byte in seen:
-                    continue
-                emit = _entry(
-                    obj_node, source, kind, array_key, (handler, handler_line), input_schema
-                )
-                if emit is not None:
-                    seen.add(obj_node.start_byte)
-                    found.append(emit)
+        _, dispatch_name, _, _ = _LISTED[listed]
+        read = guarded(
+            path,
+            _listed_entries,
+            listed,
+            fn,
+            dispatchers.get((dispatch_name, key), []),
+            source,
+            consts,
+            functions,
+            scopes,
+            input_schema,
+            seen,
+        )
+        for start, emit in read:
+            seen.add(start)
+            found.append(emit)
     return found
+
+
+def _listed_entries(
+    listed: int,
+    fn: Node,
+    dispatch: list[Node],
+    source: bytes,
+    consts: dict[str, Node | None],
+    functions: dict[str, int],
+    scopes: Scopes,
+    input_schema: SchemaReader,
+    seen: set[int],
+) -> list[tuple[int, Emit]]:
+    """(start byte, record) of each entry one list handler ``fn`` returns, for the ``_LISTED``
+    kind ``listed``, linked to its server's one dispatch callback (``dispatch``). ``seen`` holds
+    the entries already recorded (it is only read: the caller adds these once they are all read)."""
+    _, _, array_key, kind = _LISTED[listed]
+    handler: str | None = None
+    handler_line: int | None = None
+    if len(dispatch) == 1:
+        cb = dispatch[0]
+        if cb.type in _FUNCTION_LITERALS:
+            handler_line = cb.start_point[0] + 1
+        elif cb.type == "identifier":
+            handler = node_text(cb, source)
+            handler_line = function_line(cb, source, functions, scopes)
+    read: list[tuple[int, Emit]] = []
+    taken: set[int] = set()
+    for result in _returned_objects(fn):
+        entries = _unparen(_pairs(result, source).get(array_key))
+        if entries is None or entries.type != "array":
+            continue
+        for element in entries.named_children:
+            obj_node = _unparen(element)
+            if obj_node is not None and obj_node.type == "identifier":
+                obj_node = consts.get(node_text(obj_node, source))
+            if obj_node is None or obj_node.type != "object":
+                continue
+            if obj_node.start_byte in seen or obj_node.start_byte in taken:
+                continue
+            emit = _entry(obj_node, source, kind, array_key, (handler, handler_line), input_schema)
+            if emit is not None:
+                taken.add(obj_node.start_byte)
+                read.append((obj_node.start_byte, emit))
+    return read
 
 
 def _server(
