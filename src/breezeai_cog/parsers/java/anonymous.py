@@ -6,6 +6,9 @@ Each anonymous class body becomes a Class parented to the file, like a named nes
 * stored in a field (``T onError = new T() { … };``, the whole initializer): the field's name,
   ``Outer.onError``. The Class spans the field declaration and carries its annotations, and the
   declaration is not also a statement (a declaration that stores anything else still is);
+* an enum constant's body (``RED("r") { … }``, a static field of the enum): the constant's name,
+  ``Color.RED``, extending the enum. The Class spans the constant; the constant stays an
+  ``enum_member`` statement of the enum;
 * anywhere else (an argument, a ``return``, a local variable, part of a larger expression):
   ``Outer$1``, ``Outer$2`` … in source order within the named class that holds it, and
   ``Outer$1$1`` for one nested in another. A field-named class takes no number.
@@ -183,6 +186,12 @@ def _heritage(creation: Node, created: str | None, kind_of: KindOf | None) -> tu
     return None, []
 
 
+def owner_class_of(qualified: str) -> str:
+    """The simple name of the class holding a member named ``qualified`` (``a.Color.RED`` →
+    ``Color``)."""
+    return qualified.rsplit(".", 2)[-2] if qualified.count(".") else qualified
+
+
 def _through(member: Node, stop: Node, source: bytes) -> tuple[str | None, ...]:
     """The anonymous and local classes ``member`` is declared in, innermost first, up to the named
     class body ``stop``: each anonymous class's type as written, ``None`` for any other body."""
@@ -208,6 +217,8 @@ def _names(member: Node, source: bytes, qualified: str, n: int) -> tuple[list[tu
     out: list[tuple[Node, str]] = []
     for inner in anonymous_bodies(member):
         decl = stored_field(inner)
+        if inner.parent is not None and inner.parent.type == "enum_constant":
+            decl = inner.parent  # `RED { … }`: the constant is the field
         nm = decl.child_by_field_name("name") if decl is not None else None
         if nm is not None:
             out.append((inner, f"{qualified}.{node_text(nm, source)}"))
@@ -243,9 +254,14 @@ def build_anonymous(
     classes' fields."""
     creation = body.parent
     assert creation is not None
-    type_node = creation.child_by_field_name("type")
-    created = node_text(type_node, source) if type_node is not None else None
-    extends, implements = _heritage(creation, created, kind_of)
+    extends: str | None
+    implements: list[str]
+    if creation.type == "enum_constant":  # an enum constant's body subclasses the enum
+        extends, implements = owner_class_of(qualified), []
+    else:
+        type_node = creation.child_by_field_name("type")
+        created = node_text(type_node, source) if type_node is not None else None
+        extends, implements = _heritage(creation, created, kind_of)
     cid = disambiguate(class_id(path, qualified), seen_ids)
 
     # Stored in a field: the Class is that declaration (its span and annotations); a field

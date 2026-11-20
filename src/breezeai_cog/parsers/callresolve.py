@@ -36,8 +36,11 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
 
 * **Call receiver** (with ``declared_only``): ``x.m().n()`` / ``m().n()`` / ``Type.m().n()``
   → ``m``'s declared return type (``heritage`` ``returns``, from ``x``'s type, the enclosing
-  class or ``Type``, ancestors included) → the file that declares ``n`` on that type. One call
-  deep; a return type two repository classes share a name with → ``None``.
+  class or ``Type``, ancestors included) → the file that declares ``n`` on that type. A longer
+  chain (``x.a().b().n()``) goes through each return type in turn; the first link with no
+  known return type stops it (``None``). A chain may start at an object built or cast in place
+  (``new T(…).n()``, ``((T) x).n()``): its type is ``T``. A return type two repository classes
+  share a name with → ``None``.
 
 The Extension and Inheritance tiers are inert unless ``ext_index`` / ``heritage`` are
 supplied (and, for inheritance, the call passes the ``owner`` class), so callers that omit
@@ -58,22 +61,58 @@ CallResolver = Callable[..., str | None]
 _CALL_RECEIVER = re.compile(r"(?:([A-Za-z_]\w*)\.)?([A-Za-z_]\w*)\s*\(")
 
 
-def _one_call(receiver: str) -> tuple[str | None, str] | None:
-    """``(qualifier, method)`` when ``receiver`` is exactly one call (its argument list closes at
-    the end), else None: ``builder.dataApi()`` → ``("builder", "dataApi")``."""
-    m = _CALL_RECEIVER.fullmatch(receiver[: receiver.find("(") + 1]) if "(" in receiver else None
-    if m is None or not receiver.endswith(")"):
-        return None
+#: The head of a chain built in place: ``new T(`` (``T`` may be qualified or generic).
+_NEW_HEAD = re.compile(r"new\s+([A-Za-z_][\w.]*)\s*(?:<[^()]*>)?\s*\(")
+#: A cast of a name: ``(T) x`` / ``(T<U>) this.x``, inside its own parentheses.
+_CAST = re.compile(r"\(\s*([A-Za-z_][\w.]*)\s*(?:<[^()]*>)?\s*\)\s*[A-Za-z_][\w.]*")
+#: A link of a chain: ``.m(``.
+_LINK = re.compile(r"\.\s*([A-Za-z_]\w*)\s*\(")
+
+
+def _close(text: str, start: int) -> int:
+    """The index of the ``)`` closing the ``(`` at ``start``, else -1 (string literals with a
+    bracket in them are not told apart: such a chain is then not read)."""
     depth = 0
-    for i in range(m.end() - 1, len(receiver)):
-        ch = receiver[i]
-        if ch == "(":
+    for i in range(start, len(text)):
+        if text[i] == "(":
             depth += 1
-        elif ch == ")":
+        elif text[i] == ")":
             depth -= 1
-            if depth == 0 and i != len(receiver) - 1:
-                return None  # `a.m().n()` — more than one call
-    return (m.group(1), m.group(2)) if depth == 0 else None
+            if depth == 0:
+                return i
+    return -1
+
+
+def _call_chain(receiver: str) -> tuple[str | None, str | None, list[str]] | None:
+    """A receiver that is a chain of calls, as ``(qualifier, head type, methods)``, else None:
+    ``builder.a().b()`` → ``("builder", None, ["a", "b"])``; ``new T(x).a()`` →
+    ``(None, "T", ["a"])``; ``((T) o).a()`` → ``(None, "T", ["a"])``; ``new T()`` →
+    ``(None, "T", [])``."""
+    text = receiver.strip()
+    qual: str | None = None
+    head: str | None = None
+    methods: list[str] = []
+    if (m := _NEW_HEAD.match(text)) is not None:
+        head = m.group(1).rsplit(".", 1)[-1]
+        end = _close(text, m.end() - 1)
+    elif text.startswith("(("):
+        end = _close(text, 0)
+        cast = _CAST.fullmatch(text[1:end]) if end > 0 else None
+        if cast is None:
+            return None
+        head = cast.group(1).rsplit(".", 1)[-1]
+    elif (m := _CALL_RECEIVER.match(text)) is not None:
+        qual, methods = m.group(1), [m.group(2)]
+        end = _close(text, m.end() - 1)
+    else:
+        return None
+    while end != -1 and end < len(text) - 1:
+        link = _LINK.match(text, end + 1)
+        if link is None:
+            return None
+        methods.append(link.group(1))
+        end = _close(text, link.end() - 1)
+    return (qual, head, methods) if end != -1 else None
 
 
 def method_types(
@@ -236,21 +275,34 @@ def make_resolver(
     def _via_call(
         name: str, receiver: str, owner: str | None, scope: Mapping[str, str | None] | None,
     ) -> str | None:
-        """``x.m().name()``: ``name`` on ``m``'s return type → the file that declares it."""
-        call = _one_call(receiver)
-        if call is None or heritage is None:
+        """``x.a().b().name()``: ``name`` on the last call's return type, each link through
+        the one before → the file that declares it. ``new T(…)`` / ``((T) x)`` at the head
+        start the chain at ``T``."""
+        chain = _call_chain(receiver)
+        if chain is None or heritage is None:
             return None
-        qual, method = call
-        if qual is None or qual == "this":
+        qual, head, methods = chain
+        cls: str | None
+        if head is not None:
+            # as for a variable of that type: only a class this file's imports / package bind
+            # to a repository file (a library class of the same simple name is not it)
+            resolved = bindings.get(head) or (path if head in local_defs else None)
+            if resolved is None:
+                return None
+            if not methods:
+                return _declared(name, head, resolved)
+            cls = head
+        elif qual is None or qual == "this":
             cls = owner
         else:
             # a variable (even one of unknown type) hides a class of the same name
             known, typ = _type_of(qual, scope)
             cls = _base_type(typ) if known else (qual if qual in heritage else None)
-        if cls is None:
-            return None
-        ret = _lookup(cls, method, "returns")[1]
-        return _lookup(ret, name, "methods")[1] if ret else None
+        for method in methods:
+            if cls is None:
+                return None
+            cls = _lookup(cls, method, "returns")[1]
+        return _lookup(cls, name, "methods")[1] if cls else None
 
     def _own(owner: str | None) -> set[str]:
         if owner_defs is not None and owner is not None and owner in owner_defs:

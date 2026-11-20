@@ -166,7 +166,55 @@ def test_a_call_on_a_call_resolves_through_the_return_type(tmp_path: Path) -> No
     assert calls["d"]["get"] is None                            # a library return type
     assert calls["e"]["missing"] is None                        # not declared on the type
     assert calls["f"]["get"] == f"{_ROOT}/DataApiHandler.java"  # own method's return type
-    assert calls["g"]["get"] is None                            # two calls deep: not followed
+    assert calls["g"]["get"] == f"{_ROOT}/DataApiHandler.java"  # two calls deep: each link
+
+
+_CHAIN = {
+    "A.java": "package com.acme;\npublic class A { public B b() { return null; } }\n",
+    "B.java": "package com.acme;\nimport java.util.List;\n"
+              "public class B { public C c(int x) { return null; } public List<C> all() { return null; } }\n",
+    "C.java": "package com.acme;\npublic class C { public D d() { return null; } public void own() {} }\n",
+    "D.java": "package com.acme;\npublic class D { public void e() {} }\n",
+    "Leaf.java": "package com.acme;\npublic class Leaf { public A start() { return null; } public void m() {} }\n",
+    "web/Main.java": """package com.acme.web;
+import com.acme.A;
+import com.acme.Leaf;
+public class Main {
+    void a(A a) { a.b().c(f(1)).d().e(); }
+    void b(A a) { a.b().all().get(0).own(); }
+    void c() { new Leaf().m(); }
+    void d(Object o) { ((Leaf) o).m(); }
+    void e() { new Leaf().start().b().c(0).own(); }
+    void g(Object o) { ((java.util.List<Leaf>) o).get(0); }
+    int f(int x) { return x; }
+}
+""",
+    "web/Other.java": """package com.acme.web;
+import org.lib.Leaf;
+public class Other {
+    void a() { new Leaf().m(); }
+}
+""",
+}
+
+
+def test_a_chain_of_calls_resolves_link_by_link(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, _CHAIN, "web/Main.java")
+    # every link through the return type before it, arguments with calls of their own included
+    assert calls["a"] == {"b": f"{_ROOT}/A.java", "c": f"{_ROOT}/B.java", "d": f"{_ROOT}/C.java",
+                          "e": f"{_ROOT}/D.java", "f": f"{_ROOT}/web/Main.java"}
+    # a link whose return type is a library type stops the chain: no path after it
+    assert calls["b"]["own"] is None and calls["b"]["get"] is None
+    # an object built or cast in place starts the chain at its class
+    assert calls["c"] == {"m": f"{_ROOT}/Leaf.java"}
+    assert calls["d"] == {"m": f"{_ROOT}/Leaf.java"}
+    assert calls["e"]["own"] == f"{_ROOT}/C.java"
+    assert calls["g"]["get"] is None  # a library type cast
+
+
+def test_a_library_class_named_like_a_repository_class_is_not_it(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, _CHAIN, "web/Other.java")
+    assert calls["a"] == {"m": None}  # `Leaf` here is org.lib.Leaf
 
 
 _NOTICE = """package com.acme;

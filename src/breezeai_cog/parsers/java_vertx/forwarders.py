@@ -37,7 +37,7 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
-from ..handler_sites import handler_info, method_lines
+from ..handler_sites import handler_info, handler_location, locate_method, method_lines
 from ..index_common import record_distinct
 from ..java_variables_common import typed_vars
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
@@ -48,8 +48,12 @@ from .java_syntax import (anonymous_handle, arguments, calls_and_creations, hand
 FORWARDERS = "vertx.address-forwarders"
 
 #: A forwarder: (semanticType, address argument index, handler argument index or -1, the
-#: handler is the class itself (``registerHandler(address, this)``)).
-Forwarder = tuple[SemanticType, int, int, bool]
+#: handler when it is the object itself — :data:`SELF` (``registerHandler(address, this)``),
+#: ``ref:<method>`` (``consumer(address, this::onMessage)``), ``at:<file>:<line>`` (a lambda,
+#: ``consumer(address, m -> …)``), else ``""``).
+Forwarder = tuple[SemanticType, int, int, str]
+#: The handler is the registering object's class (its ``handle``).
+SELF = "this"
 #: A relay: method ``key`` passes its own parameters on to a method ``member``
 #: (``name/arity``) of a class written ``owner`` in its file, as
 #: ``((callee argument index, own parameter index), …)``; it forwards an address when the
@@ -88,15 +92,31 @@ def _bus_call(call: Node, source: bytes) -> tuple[SemanticType, list[Node]] | No
     return EVENTBUS[method], args
 
 
+def _own_handler(arg: Node, source: bytes, rel: str) -> str:
+    """A consumer's handler argument that is the registering object itself, as the fourth part
+    of a :data:`Forwarder`: ``this`` → :data:`SELF`; ``this::onMessage`` → ``ref:onMessage``
+    (resolved in the object's class, which may override it); a lambda → ``at:<file>:<line>``,
+    the line where it starts; anything else → ``""``."""
+    if arg.type == "lambda_expression":
+        return f"at:{rel}:{arg.start_point[0] + 1}"
+    if arg.type == "method_reference":
+        parts = arg.named_children
+        if len(parts) == 2 and parts[0].type == "this" and parts[1].type == "identifier":
+            return "ref:" + name_of(parts[1], source)
+        return ""
+    return SELF if plain(name_of(arg, source)) == "this" else ""
+
+
 def _handler_ref(semantic: SemanticType, args: list[Node], names: list[str],
-                 source: bytes) -> tuple[int, bool]:
-    """A consumer's handler argument as (parameter index or -1, is ``this``)."""
+                 source: bytes, rel: str) -> tuple[int, str]:
+    """A consumer's handler argument as (parameter index or -1, :func:`_own_handler`)."""
     if semantic != "eventbus_consumer" or len(args) < 2:
-        return -1, False
+        return -1, ""
+    own = _own_handler(args[1], source, rel)
+    if own:
+        return -1, own
     text = plain(name_of(args[1], source))
-    if text == "this":
-        return -1, True
-    return (names.index(text), False) if text in names else (-1, False)
+    return (names.index(text), "") if text in names else (-1, "")
 
 
 class _Names:
@@ -257,7 +277,8 @@ def _scan(root: Node, source: bytes, names_of: _Names) -> list[_Class]:
     return classes
 
 
-def _forwarders(root: Node, source: bytes) -> tuple[list[tuple[str, Forwarder]], list[Relay]]:
+def _forwarders(root: Node, source: bytes, rel: str
+                ) -> tuple[list[tuple[str, Forwarder]], list[Relay]]:
     """This file's address forwarders by ``Class.method/arity`` and its relays (calls passing a
     parameter on to another method of a class, resolved repo-wide). One walk (:func:`_scan`);
     each method's calls and assignments are then read from what it collected."""
@@ -304,25 +325,26 @@ def _forwarders(root: Node, source: bytes) -> tuple[list[tuple[str, Forwarder]],
                 semantic, args = bus
                 addr = name_of(args[0], source)
                 if args[0].type == "identifier" and addr in names and addr not in reassigned:
-                    hidx, self_ = _handler_ref(semantic, args, names, source)
-                    found.append((key, (semantic, names.index(addr), hidx, self_)))
+                    hidx, own = _handler_ref(semantic, args, names, source, rel)
+                    found.append((key, (semantic, names.index(addr), hidx, own)))
                 elif args[0].type in ("identifier", "field_access") and addr not in names \
                         and plain(addr) in stable and not ctor \
                         and semantic == "eventbus_consumer" and len(args) >= 2 \
-                        and plain(name_of(args[1], source)) == "this":
-                    # A class registering itself on the address its constructor was given: the
-                    # construction is the registration. A send / publish through the field
-                    # stays at its own call site (one per method of a proxy).
+                        and (own := _own_handler(args[1], source, rel)):
+                    # A class registering itself (`this`, `this::onMessage`, a lambda) on the
+                    # address its constructor was given: the construction is the
+                    # registration. A send / publish through the field stays at its own call
+                    # site (one per method of a proxy).
                     for node, index in stable[plain(addr)]:
                         arity = len(_params(node, source) or [])
                         found.append((f"{cls.name}.<init>/{arity}",
-                                      (semantic, index, -1, True)))
+                                      (semantic, index, -1, own)))
     return found, relays
 
 
 def _collect_forwarders(root: Node, source: bytes, rel: str, repo_root: Path | None
                         ) -> tuple[list[tuple[str, Forwarder]], list[Relay]] | None:
-    found, relays = _forwarders(root, source)
+    found, relays = _forwarders(root, source, rel)
     return (found, relays) if found or relays else None
 
 
@@ -350,11 +372,12 @@ def _resolve_forwarders(values: list[tuple[list[tuple[str, Forwarder]], list[Rel
             semantic, addr, hidx, self_ = fwd
             own = dict(mapping)
             if addr in own:
-                # A handler that is the callee's own class is not this method's (unsure: none),
-                # except through ``super(…)`` / ``this(…)``: the object built is this class's.
+                # A handler that is the callee's own object is not this method's (unsure:
+                # none), except through ``super(…)`` / ``this(…)``: the object built is this
+                # class's.
                 record_distinct(derived, key, (semantic, own[addr],
                                                own.get(hidx, -1) if hidx >= 0 else -1,
-                                               self_ and member.startswith("<init>/")))
+                                               self_ if member.startswith("<init>/") else ""))
         new = {k: v for k, v in derived.items() if v is not None and k not in known}
         if not new:
             break
@@ -415,13 +438,22 @@ def forwarder_sites(
     def emit(node: Node, cls: str, fwd: Forwarder, args: list[Node]) -> None:
         # A relay's own call (an overload passing its address parameter on) is a record too,
         # its address unknown: like the helper's own call, it is kept whoever calls it.
-        semantic, addr, hidx, self_ = fwd
+        semantic, addr, hidx, own = fwd
         endpoint = known_address(args[addr], source, consts) if addr < len(args) else None
         handler: str | None = None
         line: int | None = None
         handler_path: str | None = None
-        if semantic == "eventbus_consumer":
-            impl = cls if self_ else None
+        if semantic == "eventbus_consumer" and own.startswith("ref:"):
+            # `this::onMessage`: the method of the object's own class. One it inherits is not
+            # located: a subclass of that class may override it (an abstract class's always is).
+            handler = own[len("ref:"):]
+            line, handler_path = handler_location(locate_method(index, "java", cls, handler), path)
+        elif semantic == "eventbus_consumer" and own.startswith("at:"):
+            # A lambda in the registering class: where it starts (an anonymous handler).
+            file, _, at = own[len("at:"):].rpartition(":")
+            line, handler_path = int(at), (file if file != path else None)
+        elif semantic == "eventbus_consumer":
+            impl = cls if own == SELF else None
             if hidx >= 0 and hidx < len(args):
                 handler, line = handler_info(args[hidx], source, methods)
                 anon_line = anonymous_handle(args[hidx], source) if handler is None else None
