@@ -11,7 +11,8 @@
 
 * **Client receiver** — ``Client`` imported from the SDK's ``client/index.js`` (``import * as``
   too). A name whose nearest binding is a ``let`` / ``const`` / ``var`` assigned ``new Client(…)``
-  or a parameter typed ``Client`` (a loop or ``catch`` variable, an untyped parameter, any other
+  or a parameter typed ``Client`` whose pattern is the bare name (a destructured parameter,
+  ``({ transport }: Client)``, is not; a loop or ``catch`` variable, an untyped parameter, any other
   declaration hides it — a ``var`` of the function's in a nested block or loop head too; no
   binding in the file, or any other write to the name — a destructuring, augmented or logical
   assignment, a ``for (client of …)`` loop over it — → not one).
@@ -229,7 +230,14 @@ def _detect(dc: DetectContext) -> Detection | None:
                 for p in params.named_children if params is not None else ():
                     pattern = p.child_by_field_name("pattern") if p.type in _PARAMETERS else p
                     if _binds(pattern, name, source):
-                        return p.type in _PARAMETERS and typed(p, source)
+                        # `({ transport }: Client)`: the annotation types the whole object,
+                        # not the name bound inside the pattern.
+                        return (
+                            p.type in _PARAMETERS
+                            and pattern is not None
+                            and pattern.type == "identifier"
+                            and typed(p, source)
+                        )
             elif node.type in ("statement_block", "program"):
                 if node.type == "program" or (
                     node.parent is not None and node.parent.type in _FUNCTION_SCOPES

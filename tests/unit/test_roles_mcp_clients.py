@@ -1103,6 +1103,42 @@ function f() {
     ]
 
 
+
+@pytest.mark.parametrize(
+    "param",
+    [
+        "{ transport }: Client",
+        "{ c: transport }: Client",
+        "{ transport = fallback }: Client",
+        "[transport]: Client[]",
+        "[transport]: Client",
+        "...transport: Client[]",
+        "{ transport }?: Client",
+    ],
+)
+def test_typescript_destructured_client_parameter_is_not_a_client(
+    analyze_files, param: str
+) -> None:
+    """The annotation types the whole parameter, not a name bound inside its pattern."""
+    src = f"""
+import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
+export async function f({param}) {{
+  return transport.callTool({{ name: "destructured" }});
+}}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == []
+
+
+def test_typescript_optional_client_parameter_is_a_client(analyze_files) -> None:
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+export async function f(transport?: Client) {
+  return transport.callTool({ name: "optional" });
+}
+"""
+    assert _calls(analyze_files({"c.ts": src})) == [("TOOL", "optional", "typescript-mcp")]
+
+
 # ── TypeScript: any write to the name, not only a plain `x = …`, rebinds it ──
 
 
