@@ -10,12 +10,13 @@ relevant) that the pipeline aggregates into ``projectMetaData.configs``.
 from __future__ import annotations
 
 import configparser
-import json
 import re
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+from ...utils.jsonc import load_json
 
 try:  # PyYAML is a core dep; degrade gracefully if somehow absent
     import yaml
@@ -292,73 +293,6 @@ def _generic_json(text: str) -> dict[str, Any]:
         "category": "json",
         "topLevelKeys": list(d.keys()) if isinstance(d, dict) else [],
     }, mode)
-
-
-def _strip_json_comments(text: str) -> str:
-    """Remove ``//`` line and ``/* */`` block comments, ignoring ``/`` inside string literals
-    (so a value like ``"http://…"`` is untouched). Used by ``load_json`` for JSONC files (e.g.
-    a Vert.x ``mod.json`` or stack descriptor) that standard ``json`` rejects."""
-    out: list[str] = []
-    i, n, in_str, esc = 0, len(text), False, False
-    while i < n:
-        ch = text[i]
-        if in_str:
-            out.append(ch)
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            i += 1
-        elif ch == '"':
-            in_str = True
-            out.append(ch)
-            i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
-
-
-#: ``metadata.parseMode`` values: which fallback read a JSON file strict parsing rejected.
-#: Raw control characters (a tab or line break) inside a string.
-PARSE_MODE_LENIENT = "lenient"
-#: ``//`` / ``/* */`` comments (JSON with comments), with control characters allowed too.
-PARSE_MODE_JSONC = "jsonc"
-
-
-def load_json(text: str) -> tuple[Any, str | None]:
-    """Parse JSON the way the tools that read these files do: strict first, then with raw
-    control characters allowed inside strings, then with comments outside strings removed.
-
-    Returns ``(data, mode)``; ``mode`` is None for strict JSON, else ``PARSE_MODE_LENIENT`` or
-    ``PARSE_MODE_JSONC``. Values are kept exactly as read (a raw tab stays a tab). When every
-    attempt fails, the strict parser's error is raised, so ``parseError`` names the real fault.
-    """
-    try:
-        return json.loads(text), None
-    except json.JSONDecodeError as exc:
-        strict_error = exc
-    try:
-        return json.loads(text, strict=False), PARSE_MODE_LENIENT
-    except json.JSONDecodeError:
-        pass
-    stripped = _strip_json_comments(text)
-    if stripped != text:
-        try:
-            return json.loads(stripped, strict=False), PARSE_MODE_JSONC
-        except json.JSONDecodeError:
-            pass
-    raise strict_error
 
 
 def _with_mode(meta: dict[str, Any], mode: str | None) -> dict[str, Any]:

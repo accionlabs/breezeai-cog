@@ -30,12 +30,8 @@ from ...emit import file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..config.extractors import (
-    NX_ONLY_JSON_NAMES,
-    RICH_JSON_NAMES,
-    extract_config,
-    load_json,
-)
+from ...utils.jsonc import load_json
+from ..config.extractors import NX_ONLY_JSON_NAMES, RICH_JSON_NAMES, extract_config
 from ..config.nx import in_nx_workspace
 from .toon import encode
 

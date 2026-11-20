@@ -8,7 +8,6 @@ a tsconfig ``compilerOptions.paths`` alias or a Vite ``resolve.alias`` entry (se
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field, replace
@@ -18,6 +17,7 @@ from typing import Any, Iterator, Sequence
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ...utils.jsonc import load_json_object
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
@@ -65,20 +65,13 @@ class TsAliasIndex:
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-def _load_jsonc(path: Path) -> dict | None:
-    """Tolerant JSON-with-comments loader for tsconfig files."""
+def _load_jsonc(path: Path) -> dict[str, Any] | None:
+    """A tsconfig-style JSON-with-comments file as an object, else None."""
     try:
         text = path.read_text("utf-8")
     except OSError:
         return None
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)  # block comments
-    text = re.sub(r"(^|\s)//.*$", "", text, flags=re.M)  # line comments (whitespace-prefixed)
-    text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
-    try:
-        result = json.loads(text)
-        return result if isinstance(result, dict) else None
-    except json.JSONDecodeError:
-        return None
+    return load_json_object(text)
 
 
 #: Directories never worth walking for tsconfigs (dependencies + build output).

@@ -1,6 +1,7 @@
 """JSON that its own reader accepts but strict JSON rejects: a raw tab or line break inside a
-string, and ``//`` / ``/* */`` comments. These files are captured like any other JSON, with
-``metadata.parseMode`` naming the fallback; broken JSON still records the strict error."""
+string, ``//`` / ``/* */`` comments and trailing commas. These files are captured like any
+other JSON, with ``metadata.parseMode`` naming the fallback; broken JSON records the error at
+its true line and column."""
 
 from __future__ import annotations
 
@@ -9,7 +10,8 @@ import json
 import pytest
 
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.config.extractors import extract_config, load_json
+from breezeai_cog.parsers.config.extractors import extract_config
+from breezeai_cog.utils.jsonc import load_json, load_json_object, normalize_jsonc
 from breezeai_cog.parsers.structured_json.parser import JsonParser
 
 
@@ -76,11 +78,66 @@ def test_broken_json_raises_the_strict_error() -> None:
     assert str(caught.value) == strict
 
 
-def test_broken_json_with_a_comment_reports_the_strict_error() -> None:
-    # the comment-stripped retry also fails; the message is the strict parser's, at line 1
+def test_an_error_after_a_block_comment_names_its_true_line() -> None:
+    # comments become spaces with their line breaks kept: the position is the one in the file
+    with pytest.raises(json.JSONDecodeError) as caught:
+        load_json('/* a\nb */\n{"a": }')
+    assert (caught.value.lineno, caught.value.colno) == (3, 7)
+
+
+def test_an_error_in_a_file_with_a_comment_names_the_real_fault() -> None:
+    # not the comment on line 1 (where strict JSON stops), but the missing value on line 2
     with pytest.raises(json.JSONDecodeError) as caught:
         load_json('// c\n{"a": ')
-    assert caught.value.lineno == 1 and caught.value.colno == 1
+    assert caught.value.lineno == 2
+
+
+def test_an_unterminated_block_comment_is_an_error() -> None:
+    with pytest.raises(json.JSONDecodeError) as caught:
+        load_json('{"a": 1} /* not closed')
+    assert caught.value.msg == "Unterminated comment"
+
+
+@pytest.mark.parametrize(
+    "text, data",
+    [
+        ('{"strict": true,}', {"strict": True}),
+        ("[1, 2,]", [1, 2]),
+        ('{"a": {"b": [1,],},}', {"a": {"b": [1]}}),
+        ('{"a": 1, // last\n}', {"a": 1}),
+        ('{"a": 1, /* x */ }', {"a": 1}),
+    ],
+)
+def test_trailing_commas_are_jsonc(text: str, data: object) -> None:
+    assert load_json(text) == (data, "jsonc")
+
+
+@pytest.mark.parametrize("text", ["{,}", "[,]", "[1,,]", "{'a': 1}", "{a: 1}", "[0x1]"])
+def test_beyond_jsonc_stays_an_error(text: str) -> None:
+    # a comma with nothing before it, and the JSON5 forms, are not read
+    with pytest.raises(ValueError):
+        load_json(text)
+
+
+def test_a_comma_or_comment_inside_a_string_is_kept() -> None:
+    text = '{"a": "x,}", "b": "/* y */", "c": "// z",}'
+    assert load_json(text) == ({"a": "x,}", "b": "/* y */", "c": "// z"}, "jsonc")
+
+
+def test_an_escaped_quote_does_not_end_the_string() -> None:
+    assert load_json('{"a": "say \\"//\\" ok", // c\n}') == ({"a": 'say "//" ok'}, "jsonc")
+
+
+def test_normalizing_keeps_offsets() -> None:
+    text = '{ /* c */ "a": 1, // d\n}'
+    out, changed = normalize_jsonc(text)
+    assert changed and len(out) == len(text) and out.count("\n") == text.count("\n")
+
+
+def test_load_json_object() -> None:
+    assert load_json_object('{"a": 1,}') == {"a": 1}
+    assert load_json_object("[1]") is None
+    assert load_json_object("{") is None
 
 
 # ── JsonParser: captured like any other JSON ─────────────────────────────────
@@ -129,10 +186,10 @@ def test_broken_json_keeps_parse_error() -> None:
     assert "parseMode" not in rec.metadata
 
 
-def test_broken_json_reports_the_strict_message() -> None:
-    # a raw control character AND an unbalanced brace: the message is the strict one
+def test_broken_json_reports_the_real_fault() -> None:
+    # a raw control character AND an unbalanced brace: the message names the brace, not the tab
     rec = _parse("cfg/data.json", '{"a": "x\ty"')
-    assert rec.metadata["parseError"].startswith("Invalid control character")
+    assert rec.metadata["parseError"].startswith("Expecting ',' delimiter")
 
 
 # ── named configs read through the same loader ───────────────────────────────
