@@ -585,7 +585,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, Kotlin, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, config, C++, C#, Go, GraphQL, Groovy, Java, Kotlin, PHP, Python, Ruby, Scala, TypeScript, VB), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -867,6 +867,7 @@ Every record gets an id from the helpers in `emit/ids.py`:
 |---|---|---|
 | File | `path` | `src/com/acme/OrderVerticle.java` |
 | Class | `path#Class` (nested: `path#Outer.Inner`) | `…OrderVerticle.java#OrderVerticle` |
+| Class (Java anonymous, `isAnonymous`) | stored in a field: `path#Outer.field`; else `path#Outer$1` in source order within the named class (`Outer$1$1` nested) | `…OrderVerticle.java#OrderVerticle.onError`, `…#OrderVerticle$1` |
 | Function | `path#[Class#]name@startLine` | `…#OrderVerticle#start@9` |
 | Statement | `path:startLine:startCol` | `…OrderVerticle.java:12:4` |
 | Statement part | `…#part{i}of{n}` | `…:12:4#part1of3` |

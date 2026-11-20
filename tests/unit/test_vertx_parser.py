@@ -415,7 +415,7 @@ def test_route_and_consumer_handlers(tmp_path) -> None:
         "/c": ("update", None),        # other::update — another object's method: no line
         "/d": (None, None),            # a factory call names no handler
         "q.one": ("onOne", 21),
-        "q.two": (None, 14),           # anonymous Handler class
+        "q.two": ("handle", 15),       # anonymous Handler class: its own `handle` (`Api$1#handle`)
         "q.out": (None, None),         # a send's reply callback is not an entry point's handler
     }
 

@@ -31,7 +31,7 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
-from .java_syntax import (calls_and_creations, handler_class, imports_and_package,
+from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
                           invocations, java_string, local_value)
 from .forwarders import forwarder_sites
 from .handler_factories import FactoryCalls
@@ -442,6 +442,12 @@ def detect_vertx(
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
         )
+        if handler is None and semantic in HANDLER_SEMANTICS:
+            # `registerHandler(addr, new Handler<Message>() { void handle(…) })`: the anonymous
+            # class's `handle` is a Function of its own (`Outer$1#handle`) — the code that runs.
+            anon_line = anonymous_handle(_handler_arg(call, source), source)
+            if anon_line is not None:
+                handler, handler_line = "handle", anon_line
         # A service registration: every method of the interface is a binding on the address
         # (the message's `action` header picks it) — one consumer per method, handler = method.
         handlers: list[str | None] = [handler]

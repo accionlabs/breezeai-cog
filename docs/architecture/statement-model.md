@@ -126,6 +126,21 @@ scopes depends on where it is:
   that expression as its one statement, with the expression's own `nodeType`
   (`call_expression`), so the call is recorded under the Function.
 
+**Java anonymous classes** (`new T(…) { … }`) are a `Class` each (`isAnonymous: true`), with
+their methods as `Function`s; the enclosing method keeps only its own statements and calls.
+
+- **Stored in a field** as its whole initializer (`ResponseHandler onError = new ResponseHandler()
+  { … };`): named after the field (`Svc.onError`). The `Class` spans the declaration and carries
+  its annotations, so the declaration is not also a statement. A declaration that also stores
+  something else (`Runnable c = new Runnable() { … }, d = null;`) is still emitted, with the body
+  shown as `{ … }`.
+- **Anywhere else** (an argument, a `return`, a local variable, part of a larger expression):
+  numbered in source order within the named class, `Svc$1`, `Svc$2` (`Svc$1$1` nested). The
+  statement that creates it keeps its head, the body shown as `{ … }`.
+- The type after `new` is `extends` when it is certainly a class (constructor arguments, or a
+  class of this file, the repository or a known JDK type) and `implements` when it is certainly
+  an interface; a library type gives neither.
+
 | Code | `Function` | Statements |
 |---|---|---|
 | `func Run() { r.GET("/x", func(c *gin.Context) { c.JSON(200, list()) }) }` | `Run` | `r.GET(…)` and `c.JSON(200, list())`, both under `Run` |

@@ -120,7 +120,8 @@ def test_put_value_that_is_not_a_new_instance_has_no_handler(analyze_files) -> N
 
 def test_table_filled_in_another_file_keeps_the_loop_record(analyze_files) -> None:
     got = _tables(analyze_files, ENTRY_LOOP, "    // filled by a registry elsewhere")
-    assert got == [("ServiceServer.java", "eventbus_consumer", None, None, None)]
+    # the loop's anonymous dispatcher is what runs: its own `handle` (`ServiceServer$1#handle`)
+    assert got == [("ServiceServer.java", "eventbus_consumer", None, "handle", None)]
 
 
 # ── address forwarders ──────────────────────────────────────────────────────────────────────
