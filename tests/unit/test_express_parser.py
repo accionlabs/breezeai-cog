@@ -132,11 +132,11 @@ def test_template_literal_paths(tmp_path) -> None:
                        capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
     routes = {(s.method, s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"}
-    # An unresolved ${…} makes the address unknown: the route is kept, its endpoint empty —
-    # never a {key} placeholder (a code name) or a path with its base dropped.
-    assert ("GET", None, "sitemapHandler") in routes
+    # A value read at runtime is marked ${name} where it stands — never a {key} placeholder
+    # (a path parameter) or a path with its base dropped.
+    assert ("GET", "/sitemaps/${key}.txt", "sitemapHandler") in routes
     assert ("GET", "/plain", "plainHandler") in routes  # a template with no substitution
-    assert ("GET", None, "assetHandler") in routes
+    assert ("GET", "${prefix}/assets/${name}", "assetHandler") in routes
     assert ("ANY", None, "router") in routes            # a mount whose template path is unknown
 
 
@@ -240,7 +240,7 @@ app.get('*.*', staticHandler);
 
     rec = AngularParser().parse_file(ctx)
     routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
-    assert ("GET", None) in routes                   # template route kept, address unknown
+    assert ("GET", "/sitemaps/${key}.txt") in routes  # template route, runtime part marked
     assert ("GET", "*.*") in routes                  # wildcard route
     assert all(s.framework == "express" for s in rec.statements if s.semanticType == "route")
 

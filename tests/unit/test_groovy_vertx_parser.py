@@ -102,12 +102,14 @@ def test_receiver_qualified_routematcher(tmp_path) -> None:
 
 def test_bare_calls_inside_routematcher_scope(tmp_path) -> None:
     """Bare ``get("...")`` / ``delete("...")`` inside ``rm.with {}`` → route (route_scope). The
-    paths start with ``${config.path}`` (runtime config): the address is unknown → empty."""
+    paths start with ``${config.path}`` (runtime config): marked ``${path}``; a path with no
+    literal part besides its runtime parts (``${path}/${ECHO}``) says nothing → empty."""
     rec = _parse(tmp_path, FILTER_SRC, "URIMapperVerticle.groovy")
     assert rec.framework == "vertx"
     routes = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"]
     assert sorted(m for m, _ in routes) == ["DELETE", "DELETE", "GET", "GET"]
-    assert all(ep is None for _, ep in routes)
+    assert sorted(ep or "" for _, ep in routes) == [
+        "", "", "${path}/${cache}/schema", "${path}/:platformId/:filterId"]
 
 
 def test_bare_verb_calls_need_routematcher_in_file(tmp_path) -> None:
@@ -182,8 +184,8 @@ def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "M.groovy")
     routes = _routes(rec)
-    assert ("POST", None) in routes
-    assert ("DELETE", None) in routes
+    assert ("POST", "${path}/job") in routes
+    assert ("DELETE", "${path}/job/:jobId") in routes
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
@@ -274,7 +276,8 @@ def test_gstring_constants_resolve_reassigned_variables_do_not(tmp_path) -> None
         b"  }\n}\n"
     )
     rec = _parse(tmp_path, src, "R.groovy")
-    assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", None)}
+    # a reassigned local is read at runtime: marked, never folded to either value
+    assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", "${moving}/z")}
 
 
 def test_local_literal_folds_only_where_it_is_visible(tmp_path) -> None:
@@ -299,9 +302,8 @@ def test_local_literal_folds_only_where_it_is_visible(tmp_path) -> None:
         b"  }\n}\n"
     )
     rec = _parse(tmp_path, src, "Api.groovy")
-    assert _routes(rec) == {("GET", "/a/x"), ("GET", "/f/w"), ("GET", None)}
     assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
-        "", "", "", "/a/x", "/f/w"]
+        "${BASE}/v", "${prefix}/q", "${prefix}/y", "/a/x", "/f/w"]
 
 
 def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
@@ -316,7 +318,7 @@ def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "script.groovy")
     assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
-        "", "/s/closure", "/s/top"]
+        "${prefix}/method", "/s/closure", "/s/top"]
 
 
 _GROOVY_USER_API = """import io.vertx.ext.web.Router

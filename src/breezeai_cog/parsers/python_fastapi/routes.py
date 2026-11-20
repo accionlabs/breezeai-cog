@@ -168,9 +168,10 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     scoped = router_guards.get(receiver_name, []) + _dependencies(call, source)
     guards = middleware.get(roots.get(receiver_name, receiver_name), []) + scoped
     if served is _UNKNOWN:
-        endpoint = None  # a prefix we cannot resolve: the address is unknown
-    elif endpoint is not None and isinstance(served, str):
-        endpoint = (served + endpoint) or None
+        endpoint = None  # served at several places, or under a sub-application: unknown
+    elif isinstance(served, str) and endpoint is not None:
+        # A prefix read at runtime (``prefix=settings.X``) is a ``${X}`` part (addresses.py).
+        endpoint = served + endpoint
     parent = function_id(path, name, handler_line, class_name=class_name)
     return [
         Emit(dec, dict(

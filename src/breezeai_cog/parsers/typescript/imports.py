@@ -8,7 +8,6 @@ a tsconfig ``compilerOptions.paths`` alias or a Vite ``resolve.alias`` entry (se
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field, replace
@@ -18,6 +17,8 @@ from typing import Any, Iterator, Sequence
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ...utils.jsonc import load_json_object
+from ..addresses import runtime_part, with_literal
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
@@ -65,20 +66,13 @@ class TsAliasIndex:
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-def _load_jsonc(path: Path) -> dict | None:
-    """Tolerant JSON-with-comments loader for tsconfig files."""
+def _load_jsonc(path: Path) -> dict[str, Any] | None:
+    """A tsconfig-style JSON-with-comments file as an object, else None."""
     try:
         text = path.read_text("utf-8")
     except OSError:
         return None
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)  # block comments
-    text = re.sub(r"(^|\s)//.*$", "", text, flags=re.M)  # line comments (whitespace-prefixed)
-    text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
-    try:
-        result = json.loads(text)
-        return result if isinstance(result, dict) else None
-    except json.JSONDecodeError:
-        return None
+    return load_json_object(text)
 
 
 #: Directories never worth walking for tsconfigs (dependencies + build output).
@@ -263,6 +257,67 @@ def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]
         key = member_path(node, source)
         return consts.get(key) if key is not None else None
     return None
+
+
+def _path_parts(
+    node: Node, source: bytes, consts: dict[str, str | None]
+) -> list[tuple[str | None, str]]:
+    """A path expression as parts ``(value, source text)``: the literal text, or None for a
+    runtime value (one that does not fold to a constant). ``a + "/x"`` and ``${a}/x`` both give
+    ``[(None, "a"), ("/x", …)]``."""
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _path_parts(node.named_children[0], source, consts)
+    if node.type == "binary_expression":
+        op = node.child_by_field_name("operator")
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if op is not None and node_text(op, source) == "+" and left is not None \
+                and right is not None:
+            return _path_parts(left, source, consts) + _path_parts(right, source, consts)
+        return [(None, node_text(node, source))]
+    if node.type == "template_string":
+        parts: list[tuple[str | None, str]] = []
+        for c in node.children:
+            if c.type == "string_fragment":
+                parts.append((node_text(c, source), ""))
+            elif c.type == "template_substitution":
+                inner = c.named_children[0] if c.named_children else None
+                parts.append((
+                    None if inner is None else resolve_const_value(inner, source, consts),
+                    node_text(inner, source) if inner is not None else "",
+                ))
+        return parts
+    return [(resolve_const_value(node, source, consts), node_text(node, source))]
+
+
+def runtime_path_template(
+    node: Node, source: bytes, consts: dict[str, str | None], *, outbound: bool = False
+) -> str | None:
+    """A path expression with a part read at runtime, as an address with that part marked
+    (``addresses.py``): ``BASE + "/users"`` and `` `${BASE}/users` `` give ``${BASE}/users``. In a
+    route path (``outbound`` False) every unresolved part is ``${name}``. In an outbound URL a
+    part before the first literal ``/`` is ``${name}`` (a base) and one after it is a request
+    value, ``{name}`` (``ctx + "/orders/" + id`` → ``${ctx}/orders/{id}``). None when every part
+    resolves (no runtime part) or no literal path part is known."""
+    parts = _path_parts(node, source, consts)
+    if all(value is not None for value, _ in parts):
+        return None
+    out: list[str] = []
+    in_base = True
+    for value, text in parts:
+        if value is not None:
+            out.append(value)
+            in_base = in_base and "/" not in value
+        elif outbound and not in_base:
+            out.append("{" + (_simple_name(text) or "param") + "}")
+        else:
+            out.append(runtime_part(text))
+    return with_literal("".join(out))
+
+
+def _simple_name(text: str) -> str | None:
+    """``order.id`` → ``id``; None for anything that is not a plain name."""
+    name = text.rsplit(".", 1)[-1].strip()
+    return name if name and name.replace("_", "").isalnum() else None
 
 
 def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:

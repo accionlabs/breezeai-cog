@@ -23,6 +23,7 @@ from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from ..treesitter import node_text
 from ..handler_sites import handler_info, method_lines
+from ..addresses import join_runtime
 from ..vertx_common import (
     vertx_emit,
     HANDLER_CALLS,
@@ -39,9 +40,11 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    route_template,
     router_vars,
     service_builder_vars,
     sub_router_bases,
+    runtime_mount_prefixes,
 )
 
 
@@ -406,6 +409,7 @@ def detect_vertx_groovy(
         else ([], set())
     )
     bases = sub_router_bases(mounts)
+    runtime_mounts = runtime_mount_prefixes(mounts)
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
@@ -425,6 +429,9 @@ def detect_vertx_groovy(
         semantic, verb, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
+        if semantic == "route" and endpoint is None:
+            # A path with a part read at runtime (`"${prefix}/x"`): `${prefix}/x`.
+            endpoint = route_template(endpoint_path)
         unknown_base = False
         recv = router_name(obj)
         base: str | None | object = _NOT_MOUNTED
@@ -436,7 +443,10 @@ def detect_vertx_groovy(
                 mounted, prefix = factory_mount(index, cls, method_name)
                 if mounted:
                     base = prefix
-        if base is not _NOT_MOUNTED:
+        if semantic == "route" and recv in runtime_mounts and endpoint is not None:
+            # Mounted once, at a prefix read at runtime: `${prefix}/x` (addresses.py).
+            endpoint = join_runtime(runtime_mounts[recv], endpoint)
+        elif base is not _NOT_MOUNTED:
             if base is None or endpoint is None:
                 unknown_base, endpoint = True, None
             else:

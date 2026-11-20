@@ -24,7 +24,6 @@ from ..statements_common import (
     reset_http_client_ids,
     resolve_endpoint,
     set_http_client_ids,
-    strip_leading_base,
     url_placeholder,
 )
 from ..treesitter import node_text
@@ -122,7 +121,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
                 lambda match: url_placeholder(match.group(1) or match.group(2)),
                 body,
             )
-            return strip_leading_base(body)
+            return body
     if node.type == "infix_expression":
         op = node.child_by_field_name("operator")
         if op is not None and node_text(op, source) == "+":

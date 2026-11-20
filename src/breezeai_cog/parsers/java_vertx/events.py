@@ -36,9 +36,11 @@ from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, 
 from .forwarders import forwarder_sites
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
+from .route_guards import library_handlers, pathless_middleware, route_guards
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
+from ..addresses import join_runtime
 from ..vertx_common import (
     vertx_emit,
     MOUNTED_FACTORIES,
@@ -55,9 +57,11 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    route_template,
     router_vars,
     service_builder_vars,
     sub_router_bases,
+    runtime_mount_prefixes,
 )
 
 
@@ -393,6 +397,7 @@ def detect_vertx(
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
     bases = sub_router_bases(mounts)
+    runtime_mounts = runtime_mount_prefixes(mounts)
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
@@ -407,6 +412,12 @@ def detect_vertx(
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
                                      index, suppress, built_by)
     found.extend(sites)
+    # Middleware for the routes' `guards` (route_guards.py): path-less registrations, and the
+    # Vert.x library handlers chained ahead of a route's own handler.
+    middleware = pathless_middleware(calls, source, routers) if b"handler(" in source else []
+    singles, wildcards, package = imports_and_package(root, source)
+    is_library = library_handlers(singles, wildcards, package,
+                                  {c.name for c in record.classes}, index)
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # a table loop's own registration
@@ -421,6 +432,9 @@ def detect_vertx(
         semantic, method, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
+        if semantic == "route" and endpoint is None:
+            # A path with a part read at runtime (`pathPrefix + "/x"`): `${pathPrefix}/x`.
+            endpoint = route_template(_parts(call, source, consts)[1])
         unknown_base = False
         receiver = call.child_by_field_name("object")
         recv = router_name(_root_receiver(receiver, source)) if receiver is not None else ""
@@ -433,7 +447,10 @@ def detect_vertx(
                 mounted, prefix = factory_mount(index, cls, method_name)
                 if mounted:
                     base = prefix
-        if base is not _NOT_MOUNTED:
+        if semantic == "route" and recv in runtime_mounts and endpoint is not None:
+            # Mounted once, at a prefix read at runtime: `${prefix}/x` (addresses.py).
+            endpoint = join_runtime(runtime_mounts[recv], endpoint)
+        elif base is not _NOT_MOUNTED:
             if base is None or endpoint is None:
                 unknown_base, endpoint = True, None
             else:
@@ -478,9 +495,11 @@ def detect_vertx(
             handler_line, first_path = site(handler)
         else:
             first_path = None
+        guards = route_guards(call, recv, method, middleware, is_library, source) \
+            if semantic == "route" else None
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
-                                handler_path=first_path))
+                                handler_path=first_path, guards=guards))
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {

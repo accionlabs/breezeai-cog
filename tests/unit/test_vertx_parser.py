@@ -128,8 +128,8 @@ def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
 
 
 def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
-    # A route that concatenates a runtime variable with a literal is kept with an empty endpoint
-    # (unknown address, never a code name); an outbound send keeps its placeholder form.
+    # A route that concatenates a runtime variable with a literal marks it ${name}; an event-bus
+    # address is a name, not a path: unknown → empty.
     src = (
         b"package x;\nimport io.vertx.ext.web.Router;\n"
         b"public class V {\n"
@@ -142,7 +142,7 @@ def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
                        capture_statements=True)
     rec = VertxParser().parse_file(ctx)
     by = {(s.semanticType, s.method, s.endpoint) for s in rec.statements if s.semanticType}
-    assert ("route", "POST", None) in by
+    assert ("route", "POST", "${base}/job") in by
     assert ("eventbus_send", None, None) in by  # unknown address → empty, never {prefix}/audit
 
 
@@ -456,7 +456,7 @@ def test_sub_router_prefix_composes_and_mount_is_not_a_route(tmp_path) -> None:
         "items": "/api/v1/items",    # nested sub-routers compose
         "health": "/api/health",
         "legacy": "/old/legacy",     # 3.x mountSubRouter
-        "x": None,                   # mount path not a literal: address unknown
+        "x": "${prefix}/x",          # mount path read at runtime: marked where it stands
         "root": "/root",
     }
     # the route("/api/*") calls the sub-routers hang off are mounts, not routes

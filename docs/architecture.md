@@ -966,6 +966,13 @@ Other places that resolve values:
 - **Constant folding** (`parsers/constfold.py`): a route path or event address written as a
   constant is replaced by its value, but only for true compile-time constants (e.g. Java
   `static final String`). A runtime value stays unresolved.
+- **Parts read at runtime** (`parsers/addresses.py`): a value cog cannot read in an HTTP address
+  (a context root, base path or prefix from config, env or a variable) is marked `${name}` where
+  it stands — `${contextRoot}/orders/{id}` — never guessed, dropped or written `{name}` (a path
+  parameter). Detectors mark it in route paths and prefixes; after `link_handlers`, the executor
+  runs `normalize_addresses` once per file, for every language, to mark a runtime base in outbound
+  URLs and tidy route templates. See
+  [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name).
 - **Inheritance** (`parsers/index_common.py`): base classes in other files, e.g. routes
   inherited from a base controller.
 - **Handlers** (`handlerPath` / `handlerLine`): an entry point whose handler is declared in
@@ -1092,6 +1099,7 @@ src/breezeai_cog/
 │  ├─ additive.py, emits.py        detector + fact registry; the one place detector output is written
 │  ├─ enclosing.py, wiring.py      shared lookups: enclosing statement, wiring facts
 │  ├─ contract.py                  entry-point contract check
+│  ├─ addresses.py                 the `${name}` notation for parts of an address read at runtime
 │  ├─ handler_sites.py, aws_deploy.py  facts shared by several languages; where a handler is declared
 │  ├─ detection/                   shared api / db / query classifiers
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
@@ -1139,7 +1147,7 @@ from another. The same holds between languages: C, C++ and CUDA share their extr
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
 | **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `python_common.py`, `django_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
-| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
+| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `addresses.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.
 > **Why:** a change can then only affect the files that parser owns, which keeps reviews small
@@ -1152,7 +1160,7 @@ from another. The same holds between languages: C, C++ and CUDA share their extr
 | Topic | Limitation |
 |---|---|
 | Equal-priority claims | Two unrelated frameworks with the same priority can both claim a file (e.g. Spring Boot and JAX-RS, both 10). The winner then depends on registration order, silently. |
-| Runtime values | Routes or addresses built at runtime (from config, environment, reflection) stay empty. |
+| Runtime values | A part of an HTTP address read at runtime (config, environment) is marked `${name}`, never resolved; an address with no literal part, or built by reflection, stays empty. |
 | Type information | tree-sitter has no type checker, so overloads and inferred types are only partly resolved. |
 | One repository at a time | Links between repositories (a client in one repo calling a service in another) are not made by cog. |
 | Ids and line numbers | Ids include line numbers, so moving code changes ids. |

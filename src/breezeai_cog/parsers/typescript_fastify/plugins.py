@@ -38,6 +38,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
+from ..addresses import runtime_part
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import (
@@ -466,8 +467,11 @@ class _Analyzer:
     # Registrations -------------------------------------------------------------------------
 
     def prefix_token(self, opts: Node | None, scope: Scope) -> str | None:
-        """The ``prefix`` a registration's options give: ``""`` none, a literal, ``None`` when
-        it can't be read, :data:`FROM_OPTS` for the enclosing plugin's own options."""
+        """The ``prefix`` a registration's options give: ``""`` none, a literal,
+        a ``${name}`` part for a ``prefix`` value that does not resolve (``config.base`` →
+        ``${base}``, see ``addresses``),
+        ``None`` when the options can't be read, :data:`FROM_OPTS` for the enclosing plugin's own
+        options."""
         opts = _unwrap(opts)
         if opts is None:
             return ""
@@ -490,8 +494,12 @@ class _Analyzer:
             if value is None:
                 return None
             if value.type in ("string", "template_string"):
-                return resolve_const_value(value, src, self.consts)
-            return None
+                resolved = resolve_const_value(value, src, self.consts)
+                if resolved is not None:
+                    return resolved
+            # A prefix read at runtime (`prefix: config.base`): a `${base}` part of the routes'
+            # addresses.
+            return runtime_part(node_text(value, src))
         spreads = _has_spread(opts)
         if not spreads:
             return ""

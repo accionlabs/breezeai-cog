@@ -142,8 +142,9 @@ def test_dynamic_url_and_verb_are_honest_null(tmp_path) -> None:
     p = tmp_path / "d.js"
     p.write_bytes(src)
     ctx = ParseContext(path="d.js", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
-    # nothing is invented: the endpoint / verb that cannot be read statically stay null
-    assert _jquery(TypeScriptParser().parse_file(ctx)) == [("GET", None), (None, None)]
+    # nothing is invented: a base read at runtime is marked `${base}`; a URL or verb that
+    # cannot be read at all stays null
+    assert _jquery(TypeScriptParser().parse_file(ctx)) == [("GET", "${base}/x"), (None, None)]
 
 
 def test_non_javascript_script_block_is_ignored(tmp_path) -> None:

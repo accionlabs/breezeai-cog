@@ -23,9 +23,9 @@ Rule            Severity Violation
 ``routeKind``   error    missing on a ``route``, or outside the value set for its semantic
                          type (§5)
 ``framework``   error    missing (§5)
-``endpoint``    error    an empty string instead of no value, or a code placeholder
-                         (``${…}``, ``#{…}``, a backtick) instead of a resolved address
-                         (§6, §8)
+``endpoint``    error    an empty string instead of no value, or source text instead of an
+                         address (``${a + b}``, ``#{…}``, a backtick); a value read at
+                         runtime written ``${name}`` is the contract's marker (§6), not one
 ``one-record``  error    two entry points with the same file, line, method, endpoint,
                          handler and version (§8); one address serving several handlers (a
                          Vert.x service proxy's methods) or several header-selected versions
@@ -90,6 +90,8 @@ ROUTE_KINDS: dict[str, frozenset[str | None]] = {
 }
 
 _PLACEHOLDERS = ("${", "#{", "`")
+#: A part read at runtime, as the contract writes it (``${contextRoot}``; addresses.py).
+_RUNTIME_PART = re.compile(r"\$\{[\w.-]*\}")
 
 #: An RFC 6570 expression of a URI template (``{id}``, ``{+path}``, ``{#anchor}``, ``{ids*}``),
 #: not one written as ``${…}``: a resource URI template's ``page://doc#{anchor}`` is a literal
@@ -116,17 +118,26 @@ OUTBOUND_TYPES = frozenset({"api_call", "eventbus_send", "eventbus_publish", "mc
 MCP_CALL_METHODS = frozenset({"TOOL", "RESOURCE", "PROMPT"})
 
 
-def _bad_address(endpoint: str | None, uri_template: bool = False) -> str | None:
-    """Why ``endpoint`` is not an address, or None. A ``uri_template`` (an MCP resource URI)
-    is read without its RFC 6570 expressions."""
+def _bad_address(s: Statement) -> str | None:
+    """Why ``s.endpoint`` is not an address, or None. An MCP resource URI is read without its
+    RFC 6570 expressions. An MCP name or URI is a literal, so only a non-MCP address may hold a
+    ``${name}`` part read at runtime."""
+    endpoint = s.endpoint
     if endpoint == "":
         return "empty string; an unresolved address has no value"
     if endpoint is None:
         return None
-    literal = _URI_TEMPLATE_EXPRESSION.sub("", endpoint) if uri_template else endpoint
+    literal = _URI_TEMPLATE_EXPRESSION.sub("", endpoint) if _is_resource_uri(s) else endpoint
+    if not _is_mcp(s):
+        literal = _RUNTIME_PART.sub("", literal)
     if any(p in literal for p in _PLACEHOLDERS):
         return endpoint
     return None
+
+
+def _is_mcp(s: Statement) -> bool:
+    """An MCP server's tool, resource or prompt, or an MCP client's call."""
+    return s.semanticType in {"mcp_tool", "mcp_resource", "mcp_prompt", "mcp_call"}
 
 
 def _is_resource_uri(s: Statement) -> bool:
@@ -191,7 +202,7 @@ def _check(s: Statement) -> list[tuple[str, str]]:
         found.append(("routeKind", repr(s.routeKind)))
     if not s.framework:
         found.append(("framework", "missing"))
-    bad = _bad_address(s.endpoint, _is_resource_uri(s))
+    bad = _bad_address(s)
     if bad is not None:
         found.append(("endpoint", bad))
     if not s.handler and s.handlerLine is None and not _framework_served(s):
@@ -215,7 +226,7 @@ def validate(record: FileRecord) -> list[Violation]:
     seen: Counter[tuple[int, str | None, str | None, str | None, str | None]] = Counter()
     for s in record.statements:
         if s.semanticType in OUTBOUND_TYPES or s.routeKind == "navigation":
-            bad = _bad_address(s.endpoint, _is_resource_uri(s))
+            bad = _bad_address(s)
             if bad is not None:
                 out.append(Violation("outbound", "error", s.id, bad))
             if s.semanticType == "mcp_call":

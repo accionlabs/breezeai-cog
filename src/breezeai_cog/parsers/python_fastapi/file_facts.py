@@ -10,6 +10,7 @@ from pathlib import Path
 
 from tree_sitter import Node
 
+from ..addresses import runtime_part
 from ..python_common import calls, import_refs, keyword, literal, module_constants
 from ..treesitter import node_text
 
@@ -25,7 +26,7 @@ ROUTERS = frozenset({"APIRouter", "fastapi.APIRouter", "FastAPI", "fastapi.FastA
 APPS = frozenset({"FastAPI", "fastapi.FastAPI"})
 
 #: A prefix as recorded in the index (picklable): ``("lit", "/x")``, ``("const", file, name)``
-#: for a module-level string constant (this file or another), or ``("unknown",)``.
+#: for a module-level string constant (this file or another), or ``("unknown", source text)``.
 PrefixSpec = tuple[str, ...]
 #: The router an include site mounts: ``("local", var)``, ``("ext", file, var)``, or
 #: ``("factory", file, function)`` — the router a factory function returns
@@ -35,14 +36,18 @@ RouterRef = tuple[str, ...]
 
 def prefix_kwarg(call: Node, source: bytes) -> str | object:
     """The ``prefix=`` keyword of an ``APIRouter(...)`` / ``include_router(...)`` call: its literal
-    value, ``""`` when absent, or :data:`UNKNOWN` when present but not a literal (Python has no
-    compile-time constants, so a name or attribute has no value cog can trust here)."""
+    value, ``""`` when absent, or a ``${name}`` part when present but not a literal (Python has
+    no compile-time constants, so a name or attribute is a value read at runtime; see
+    ``addresses``)."""
     args = call.child_by_field_name("arguments")
     for arg in args.named_children if args is not None else []:
         key = arg.child_by_field_name("name") if arg.type == "keyword_argument" else None
         if key is not None and node_text(key, source) == "prefix":
-            value = literal(arg.child_by_field_name("value"), source)
-            return value if value is not None else UNKNOWN
+            node = arg.child_by_field_name("value")
+            value = literal(node, source)
+            if value is not None:
+                return value
+            return runtime_part(node_text(node, source)) if node is not None else UNKNOWN
     return ""
 
 
@@ -196,7 +201,7 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             ref = imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
             if ref is not None and ref[0] == "module" and attr is not None:
                 return ("const", ref[1], node_text(attr, source))
-        return ("unknown",)
+        return ("unknown", node_text(value, source))
 
     for node in calls(root):
         fn = node.child_by_field_name("function")

@@ -207,7 +207,7 @@ def test_special_and_story_files_are_not_pages(analyze_files) -> None:
     assert _pages(st) == []
 
 
-def test_unknown_base_path_leaves_the_endpoint_empty(analyze_files) -> None:
+def test_unknown_base_path_is_a_runtime_part(analyze_files) -> None:
     st = _run(
         analyze_files,
         {
@@ -217,7 +217,7 @@ def test_unknown_base_path_leaves_the_endpoint_empty(analyze_files) -> None:
         },
     )
     [p] = _pages(st)
-    assert p.endpoint is None
+    assert p.endpoint == "${base}/about"
 
 
 def test_mdx_page_beside_tsx_pages(analyze_files) -> None:

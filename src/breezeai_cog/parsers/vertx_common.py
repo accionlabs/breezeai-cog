@@ -26,6 +26,7 @@ from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
 from .index_common import record_distinct
+from .addresses import inbound_template, mark_runtime, runtime_name, runtime_part
 from .statements_common import render_concat
 from .treesitter import node_text
 
@@ -198,15 +199,26 @@ def _known_path(path: str) -> str | None:
     return None if "{" in path else path
 
 
+def route_template(path: str | None) -> str | None:
+    """A rendered route path with parts read at runtime, those parts marked ``${name}``
+    (``{pathPrefix}/request`` → ``${pathPrefix}/request``, addresses.py). Vert.x path
+    parameters are ``:id``, so every ``{…}`` of a rendered path is such a part. None when no
+    literal path part is known."""
+    return inbound_template(path)
+
+
 def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:
     """Leaf renderer for :func:`render_address`'s concatenation walk: a string literal renders
-    (GString-aware), a constant resolves to its value, anything else → ``None`` so
-    ``render_concat`` inserts a ``{name}`` placeholder."""
+    (GString-aware), a constant resolves to its value, anything else is a ``{name}`` placeholder
+    named as ``addresses.runtime_name`` names a value read at runtime
+    (``config().getString("p")`` → ``{p}``)."""
     if node.type == "string_literal":
         return string_render(node, source)
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
-    return consts.get(node_text(node, source))
+    text = node_text(node, source)
+    value = consts.get(text)
+    return value if value is not None else "{" + runtime_name(text) + "}"
 
 
 def render_address(
@@ -301,6 +313,27 @@ def _mount_prefix(path: str) -> str:
     return p.rstrip("/") or "/"
 
 
+def runtime_mount_prefixes(mounts: Iterable[SubRouterMount]) -> dict[str, str]:
+    """Sub-router → the prefix it is served under, for a sub-router mounted at exactly one place
+    at a prefix with a part read at runtime: that prefix with the part marked ``${name}``
+    (``mountSubRouter(cfgPrefix + "/api", sub)`` → ``${cfgPrefix}/api``; a prefix that cannot
+    be rendered → ``${value}``). A sub-router mounted at two places is not one: its routes'
+    address stays empty."""
+    seen: dict[str, set[tuple[str, str | None]]] = {}
+    for sub, parent, prefix in mounts:
+        seen.setdefault(router_name(sub), set()).add((router_name(parent), prefix))
+    out: dict[str, str] = {}
+    for sub, at in seen.items():
+        if len(at) != 1:
+            continue
+        prefix = next(iter(at))[1]
+        if prefix is None:
+            out[sub] = runtime_part("")
+        elif "{" in prefix:
+            out[sub] = mark_runtime(_mount_prefix(prefix))
+    return out
+
+
 def sub_router_bases(mounts: Iterable[SubRouterMount]) -> dict[str, str | None]:
     """Sub-router variable → the base its routes are served under, composed through nested
     sub-routers (``api`` on ``router`` at ``/api``, ``v1`` on ``api`` at ``/v1`` → ``/api/v1``).
@@ -374,13 +407,16 @@ def vertx_emit(
     call: Node, semantic: str, method: str | None, endpoint: str | None,
     route_kind: str | None, handler: str | None, handler_line: int | None,
     *, unknown_base: bool = False, handler_path: str | None = None,
+    guards: list[str] | None = None,
 ) -> Emit:
     """A Vert.x detection for :func:`~.emits.apply`: it enriches whatever statement is on the
     call's line (``any``) — the type and framework always, the rest only where known — else
     it is a new record (a call inside a lambda, which the base parser skips). An unresolvable
-    sub-router mount clears the address (unknown)."""
+    sub-router mount clears the address (unknown). ``guards`` is the middleware that runs before
+    the route (``java_vertx/route_guards.py``)."""
     fill: dict[str, Any] = {"method": method, "routeKind": route_kind, "handler": handler,
-                            "handlerLine": handler_line, "handlerPath": handler_path}
+                            "handlerLine": handler_line, "handlerPath": handler_path,
+                            "guards": guards}
     fields: dict[str, Any] = {"semanticType": semantic, "framework": "vertx"}
     if unknown_base:
         fields["endpoint"] = None
