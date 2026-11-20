@@ -164,19 +164,17 @@ _VARIABLE_DECLS = frozenset(
 )
 
 
-def _body_methods(body: Node | None, name: str, source: bytes) -> list[Node]:
-    """The methods named ``name`` declared directly in a class / interface / enum body."""
-    if body is None:
-        return []
+def _body_methods(body: Node, source: bytes) -> dict[str, list[Node]]:
+    """Name → the methods of that name declared directly in a class / interface / enum body."""
     members = list(body.named_children)
     for c in body.named_children:
         if c.type == "enum_body_declarations":
             members.extend(c.named_children)
-    out = []
+    out: dict[str, list[Node]] = {}
     for m in members:
         nm = m.child_by_field_name("name") if m.type == "method_declaration" else None
-        if nm is not None and node_text(nm, source) == name:
-            out.append(m)
+        if nm is not None:
+            out.setdefault(node_text(nm, source), []).append(m)
     return out
 
 
@@ -194,7 +192,8 @@ class _HandlerSites:
         #: A ``this::`` reference (by its span) → the body of the class around it, found in this
         #: one walk down (walking up from each reference would cost a deep chain's depth each).
         self.this_bodies: dict[tuple[int, int], Node | None] = {}
-        self._found: dict[tuple[int, int, str], int | None] = {}
+        #: A class body (by its span) → its methods by name, read once per body.
+        self._methods: dict[tuple[int, int], dict[str, list[Node]]] = {}
         stack: list[tuple[Node, Node | None]] = [(root, None)]
         while stack:
             node, body = stack.pop()
@@ -233,11 +232,12 @@ class _HandlerSites:
             body = decls[0].child_by_field_name("body")
         if body is None:
             return None
-        key = (body.start_byte, body.end_byte, name)
-        if key not in self._found:
-            found = _body_methods(body, name, self.source)
-            self._found[key] = found[0].start_point[0] + 1 if len(found) == 1 else None
-        return self._found[key]
+        key = (body.start_byte, body.end_byte)
+        methods = self._methods.get(key)
+        if methods is None:
+            methods = self._methods[key] = _body_methods(body, self.source)
+        found = methods.get(name, [])
+        return found[0].start_point[0] + 1 if len(found) == 1 else None
 
 
 def _sdk_handler(
