@@ -206,7 +206,7 @@ def test_a_chain_of_calls_resolves_link_by_link(tmp_path: Path) -> None:
     # a link whose return type is a library type stops the chain: no path after it
     assert calls["b"]["own"] is None and calls["b"]["get"] is None
     # an object built or cast in place starts the chain at its class
-    assert calls["c"] == {"m": f"{_ROOT}/Leaf.java"}
+    assert calls["c"] == {"Leaf": f"{_ROOT}/Leaf.java", "m": f"{_ROOT}/Leaf.java"}  # + its constructor
     assert calls["d"] == {"m": f"{_ROOT}/Leaf.java"}
     assert calls["e"]["own"] == f"{_ROOT}/C.java"
     assert calls["g"]["get"] is None  # a library type cast

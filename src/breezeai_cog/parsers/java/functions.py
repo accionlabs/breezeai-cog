@@ -76,10 +76,22 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
+def _created_class(creation: Node, source: bytes) -> str | None:
+    """The class ``new X(…)`` / ``new X<T>(…)`` builds, as written without type arguments;
+    None for an anonymous class (``new X() { … }``) or a qualified name (``new a.b.X()``)."""
+    if any(c.type == "class_body" for c in creation.named_children):
+        return None
+    typ = creation.child_by_field_name("type")
+    if typ is not None and typ.type == "generic_type":
+        typ = typ.named_children[0] if typ.named_children else None
+    return node_text(typ, source) if typ is not None and typ.type == "type_identifier" else None
+
+
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, scope: Mapping[str, str | None] | None = None,
     *, through: tuple[str | None, ...] | None = None, own_anonymous: bool = False,
+    own_path: str | None = None,
 ) -> list[Call]:
     """The calls in a method body, one per name in order of first appearance. ``owner`` is the
     simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
@@ -91,7 +103,9 @@ def _calls(
 
     ``through``: the body is a method of an anonymous or local class (each enclosing such
     class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
-    calls in an anonymous class body are that class's methods' own, so they are left out."""
+    calls in an anonymous class body are that class's methods' own, so they are left out.
+    ``own_path``: this file; given, ``new X(…)`` of a class of another repository file is a
+    call named ``X`` (its constructor's Function name) with that file's path."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -123,6 +137,20 @@ def _calls(
         for child in node.named_children:
             if own_anonymous and is_anonymous_body(child):
                 continue
+            if child.type == "object_creation_expression" and own_path is not None:
+                built = _created_class(child, source)
+                # `new X(…)` calls X's constructor (a Function named X) when X resolves as Java
+                # resolves a type name (an import, this package) to another file of the
+                # repository. A library class or one of this file adds nothing; an anonymous
+                # class links through its `extends` instead.
+                if built is not None and (built not in at or calls[at[built]].path is None):
+                    path = resolve(built, None)
+                    if path is not None and path != own_path:
+                        if built not in at:
+                            at[built] = len(calls)
+                            calls.append(Call(name=built, path=path))
+                        else:
+                            calls[at[built]] = Call(name=built, path=path)
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
@@ -359,7 +387,7 @@ def build_method(
         endLine=end,
         calls=_calls(body, source, resolve, class_name,
                      None if fields is None else method_scope(scope_node or node, source, fields),
-                     through=through, own_anonymous=own_anonymous),
+                     through=through, own_anonymous=own_anonymous, own_path=path),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
