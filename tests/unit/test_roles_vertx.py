@@ -200,7 +200,7 @@ def test_address_forwarding_helper_binds_at_each_call_site(analyze_files) -> Non
     # Each call site binds its own address; the helper's own call keeps its record, its address
     # unknown (a parameter).
     got = sorted((r.semanticType, r.endpoint or "") for r in _eps(st))
-    assert got == [("eventbus_consumer", ""), ("eventbus_consumer", "svc.a"),
+    assert got == [("eventbus_consumer", "${address}"), ("eventbus_consumer", "svc.a"),
                    ("eventbus_consumer", "svc.b")]
 
 
@@ -256,7 +256,7 @@ def test_service_builder_in_a_variable_and_unknown_receivers(analyze_files) -> N
     # The side comes from the variable's declared type; an unresolved address is empty (Q15); a
     # setAddress on an unknown receiver is not known to be a service proxy: no record.
     assert [(s.semanticType, s.endpoint) for s in st if s.semanticType] == [
-        ("eventbus_consumer", None),
+        ("eventbus_consumer", "${env:ADDR}"),
     ]
 
 def test_proxygen_interface_is_none(analyze_files) -> None:

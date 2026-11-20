@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
+from ..addresses import informative, mark_runtime, runtime_name, source_kind
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
 from ..vertx_common import render_address
@@ -137,9 +138,40 @@ def arguments(call: Node) -> list[Node]:
 
 
 def known_address(node: Node, source: bytes, consts: dict[str, str]) -> str | None:
-    """An address / URI argument folded to a constant, else None (never a ``{name}``)."""
+    """An argument folded to a constant, else None (never a ``{name}``): for a verb."""
     value = render_address(node, source, consts, java_string)
     return value if value is not None and "{" not in value else None
+
+
+def value_source(node: Node, source: bytes) -> Node:
+    """What names a value: a local variable assigned once from a configuration or environment
+    lookup is named after that lookup (``String address = config().getString("a"); …
+    send(address)`` → ``config:a``); any other node names itself."""
+    if node.type == "identifier":
+        init = local_value(node, node_text(node, source), source)
+        if init is not None and init.type == "method_invocation" \
+                and source_kind(node_text(init, source)) is not None:
+            return init
+    return node
+
+
+def event_address(node: Node, source: bytes, consts: dict[str, str]) -> str | None:
+    """An event-bus address: its value when it folds to a constant, else every part read at
+    runtime marked ``${…}`` (``addresses.py``: ``${config:api-verticle.address}``,
+    ``${prefix}.orders``); None when it says nothing."""
+    value = render_address(node, source, consts, java_string)
+    if value is None:
+        value = "{" + runtime_name(node_text(value_source(node, source), source)) + "}"
+    return informative(mark_runtime(value))
+
+
+def request_address(node: Node, source: bytes, consts: dict[str, str]) -> str | None:
+    """An outbound URI argument: its value when it folds, else a ``{name}`` placeholder per part
+    read at runtime (the executor marks a base read at runtime ``${…}``, ``addresses.py``)."""
+    value = render_address(node, source, consts, java_string)
+    if value is None:
+        value = "{" + runtime_name(node_text(value_source(node, source), source)) + "}"
+    return value
 
 
 def handle_location(index: object | None, impl: str | None, path: str

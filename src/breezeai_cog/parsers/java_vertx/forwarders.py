@@ -43,7 +43,7 @@ from ..java_variables_common import typed_vars
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
 from .java_syntax import (anonymous_handle, arguments, calls_and_creations, handle_location,
                           handler_class,
-                          imports_and_package, known_address, name_of, plain)
+                          event_address, imports_and_package, name_of, plain)
 
 FORWARDERS = "vertx.address-forwarders"
 
@@ -439,7 +439,7 @@ def forwarder_sites(
         # A relay's own call (an overload passing its address parameter on) is a record too,
         # its address unknown: like the helper's own call, it is kept whoever calls it.
         semantic, addr, hidx, own = fwd
-        endpoint = known_address(args[addr], source, consts) if addr < len(args) else None
+        endpoint = event_address(args[addr], source, consts) if addr < len(args) else None
         handler: str | None = None
         line: int | None = None
         handler_path: str | None = None
@@ -523,7 +523,7 @@ def forwarder_sites(
         fwd = table.get(f"{target}.<init>/{len(args)}") if target else None
         if fwd is None:
             return
-        address = known_address(args[fwd[1]], source, consts) if fwd[1] < len(args) else None
+        address = event_address(args[fwd[1]], source, consts) if fwd[1] < len(args) else None
         if (own[0], fwd[0], address) in seen:  # two constructors, one address: one record
             spans.add((n.start_byte, n.end_byte))
             return

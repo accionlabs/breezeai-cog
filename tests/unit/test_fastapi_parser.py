@@ -159,7 +159,7 @@ def test_unresolved_prefix_leaves_endpoint_empty(analyze_files) -> None:
     ))
     # a prefix read at runtime is marked `${name}`, never guessed; `${ITEMS}/` has no literal
     # path part, so it says nothing and stays empty
-    assert got == {"get_order": "${settings.API_V1_PREFIX}/orders/{oid}", "list_items": None}
+    assert got == {"get_order": "${settings.API_V1_PREFIX}/orders/{oid}", "list_items": "${settings.ITEMS}/"}
 
 
 def test_router_included_twice_has_no_address_one_not_included_keeps_its_own(analyze_files) -> None:

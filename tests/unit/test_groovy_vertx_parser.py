@@ -109,7 +109,8 @@ def test_bare_calls_inside_routematcher_scope(tmp_path) -> None:
     routes = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"]
     assert sorted(m for m, _ in routes) == ["DELETE", "DELETE", "GET", "GET"]
     assert sorted(ep or "" for _, ep in routes) == [
-        "", "", "${config.path}/${cache}/schema", "${config.path}/:platformId/:filterId"]
+        "${config.path}/${ECHO}", "${config.path}/${cache}", "${config.path}/${cache}/schema",
+        "${config.path}/:platformId/:filterId"]
 
 
 def test_bare_verb_calls_need_routematcher_in_file(tmp_path) -> None:
@@ -148,7 +149,7 @@ def test_constant_addresses_fold(tmp_path) -> None:
     eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
     assert "svc/local" in eps    # same-file constant
     assert "svc/web" in eps      # cross-file constant (Addr.WEB)
-    assert None in eps and "runtimeVar" not in eps  # unresolvable var → empty (Q15)
+    assert "${runtimeVar}" in eps and "runtimeVar" not in eps  # unresolvable var: marked
 
 
 def test_class_dot_class_simple_name_stays_empty(tmp_path) -> None:
@@ -166,7 +167,7 @@ def test_class_dot_class_simple_name_stays_empty(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "N.groovy")
     eps = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
-    assert eps == [None, None]
+    assert eps == ["${ADDR}", "${getSimpleName}"]  # unresolved: named, never guessed
 
 
 def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:

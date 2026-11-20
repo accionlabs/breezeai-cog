@@ -18,7 +18,7 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ...utils.jsonc import load_json_object
-from ..addresses import runtime_part, value_path, with_literal
+from ..addresses import runtime_part, value_path, informative
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
@@ -311,7 +311,7 @@ def runtime_path_template(
             out.append("{" + (_simple_name(text) or "param") + "}")
         else:
             out.append(runtime_part(text))
-    return with_literal("".join(out))
+    return informative("".join(out))
 
 
 def _simple_name(text: str) -> str | None:

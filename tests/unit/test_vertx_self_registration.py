@@ -53,9 +53,9 @@ def _consumers(stmts):
 def test_super_call_is_the_consumer(analyze_files, handler, expected) -> None:
     got = _consumers(analyze_files({P + "Base.java": _base(handler), P + "Orders.java": ORDERS}))
     assert expected in got
-    # the base's own call keeps its record, its address unknown
+    # the base's own call keeps its record, its address the constructor's field
     assert [c for c in got if c[0] == "Base.java"] and all(
-        c[2] is None for c in got if c[0] == "Base.java")
+        c[2] == "${address}" for c in got if c[0] == "Base.java")
 
 
 def test_an_inherited_method_reference_is_not_located(analyze_files) -> None:

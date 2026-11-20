@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from breezeai_cog.parsers import additive
+from breezeai_cog.parsers.addresses import normalize_addresses
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.java.parser import JavaParser
 
@@ -40,7 +41,9 @@ def _calls(tmp_path: Path) -> list[tuple[int, str | None, str | None]]:
     path.write_text(SRC)
     ctx = ParseContext(path=rel, abs_path=path, source=SRC.encode(), repo_root=tmp_path,
                        capture_statements=True)
-    return [(s.startLine, s.method, s.endpoint) for s in JavaParser().parse_file(ctx).statements
+    rec = JavaParser().parse_file(ctx)
+    normalize_addresses(rec)  # as the executor does once per file
+    return [(s.startLine, s.method, s.endpoint) for s in rec.statements
             if s.semanticType == "api_call"]
 
 

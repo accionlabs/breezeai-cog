@@ -32,7 +32,7 @@ from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
-                          invocations, java_string, local_value)
+                          invocations, java_string, local_value, value_source)
 from .forwarders import forwarder_sites
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
@@ -43,6 +43,7 @@ from ..handler_sites import handler_info, handler_location, locate_method, metho
 from ..addresses import join_runtime
 from ..vertx_common import (
     vertx_emit,
+    EVENTBUS,
     MOUNTED_FACTORIES,
     FactoryMount,
     factory_mount,
@@ -92,7 +93,9 @@ def _parts(
     first_str = first_arg = None
     if args is not None and args.named_children:
         first_node = args.named_children[0]
-        first_arg = node_text(first_node, source)
+        # an event-bus address held in a local read from config / env is named after the read
+        first_arg = node_text(value_source(first_node, source) if method in EVENTBUS
+                              else first_node, source)
         first_str = render_address(first_node, source, consts, java_string)
     return method, first_str, first_arg, obj
 

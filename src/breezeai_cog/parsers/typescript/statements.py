@@ -12,7 +12,9 @@ from ..statements_common import (
     classify_statement,
     render_concat,
     resolve_endpoint,
+    url_or_value,
     url_placeholder,
+    url_first,
 )
 from ..treesitter import node_text
 from .decorators import extract_decorators
@@ -236,7 +238,8 @@ def render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
+def _resolve_args(args: Node | None, source: bytes, method: str | None = None
+                  ) -> tuple[str | None, str | None]:
     """(endpoint, override_method) from a call's arguments. Handles the config-object
     form (``axios({ url, method })``) — JS-specific — then falls back to the shared
     positional resolver (first-arg / verb-first)."""
@@ -254,19 +257,20 @@ def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | N
             val = pair.child_by_field_name("value")
             kname = node_text(key, source) if key is not None else ""
             if kname in ("url", "uri", "path") and val is not None:
-                url = render_url(val, source)
+                url = url_or_value(val, source, render_url)
             elif kname == "method" and val is not None:
                 mv = render_url(val, source)
                 override = mv.lower() if mv else None
         return url, override
-    return resolve_endpoint(named, source, render_url)
+    return resolve_endpoint(named, source, render_url, method=method)
 
 
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     fn = call.child_by_field_name("function")
     callee = node_text(fn, source) if fn is not None else ""
     method = callee.rsplit(".", 1)[-1]
-    endpoint, override = _resolve_args(call.child_by_field_name("arguments"), source)
+    endpoint, override = _resolve_args(call.child_by_field_name("arguments"), source,
+                                       url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

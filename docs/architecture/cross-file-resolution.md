@@ -616,7 +616,7 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | Kotlin, Scala: no inherited-call resolution; Groovy: a call inside a closure is resolved as the enclosing class's even where a builder would send it to its delegate (only when an in-repo ancestor declares that method); Java: class inheritance only (not an interface's `default` method) | `this.save()` from a base class has no `path` |
 | VB: no import resolution and no inherited calls | Few `CALLS` edges in VB repos |
 | The Scala index has a constants field that is never filled; Kotlin's is not followed through star imports or into a constant built from another file's constant | No cross-file constant folding in Scala; those Kotlin paths stay empty |
-| Values from config files / environment | Not read: in an HTTP address such a value is marked `${name}` ([contract §6](entry-points.md#a-part-read-at-runtime-name)); an event address built from one stays empty |
+| Values from config files / environment | Not read: in an HTTP or event-bus address such a value is marked where it stands, named after its source (`${config:api-verticle.address}`, `${env:BASE_PATH}`; [contract §6](entry-points.md#a-part-read-at-runtime-name)) |
 | HotChocolate root registrations made inside a helper method in another file, or registered by name only (`AddQueryType(d => d.Name("Query"))` with no class) | Not bound to a class; such roots are found only through attributes or descriptors |
 | MSBuild conditions on `<Using>` / `<ProjectReference>` are not evaluated | A conditional using or reference is treated as always on |
 | The C++ resolver's docstring says `super`/`base` returns `None`, but the code resolves it | Docstring is out of date |

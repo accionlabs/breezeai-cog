@@ -20,6 +20,7 @@ from tree_sitter import Node
 
 from ...emit import file_id
 from ...schemas import FileRecord
+from ..addresses import has_literal
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
@@ -394,7 +395,7 @@ def _classify(
     # rather than dropped.
     has_path = path is not None or (bool(arg_nodes) and (
         arg_nodes[0].type == "template_string"
-        or runtime_path_template(arg_nodes[0], source, consts or {}) is not None))
+        or has_literal(runtime_path_template(arg_nodes[0], source, consts or {}))))
     chain = arg_nodes[1:]  # everything after the path — the middleware + handler/router stack
 
     if method in _HTTP_VERBS:
@@ -501,7 +502,7 @@ def _classify_route_verb(
         return None
     path = _path_value(first, source, consts or {})
     if path is None and first.type != "template_string" \
-            and runtime_path_template(first, source, consts or {}) is None:
+            and not has_literal(runtime_path_template(first, source, consts or {})):
         return None
     vargs = call.child_by_field_name("arguments")
     verb_args = list(vargs.named_children) if vargs is not None else []

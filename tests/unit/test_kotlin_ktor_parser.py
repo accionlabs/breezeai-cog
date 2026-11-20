@@ -198,20 +198,20 @@ def test_ktor_unresolved_path_part_is_marked():
     # a path with no literal part left (`Config.EXTERNAL`) stays empty.
     rec = _parse(_UNRESOLVED_SRC)
     endpoints = [s.endpoint for s in rec.statements if s.semanticType == "route"]
-    assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, "${env.base}/x",
+    assert endpoints == ["/api/items/{id}", "/users", "/api/b", "${Config.EXTERNAL}", "${env.base}/x",
                          "${ELSEWHERE}/nested"]
 
 
 
 @pytest.mark.parametrize(("decls", "ref", "endpoint"), [
     # Admin is declared elsewhere: never Other's constant of the same name
-    ('object Other {\n    const val ITEMS = "/other-items"\n}', "Admin.ITEMS", None),
+    ('object Other {\n    const val ITEMS = "/other-items"\n}', "Admin.ITEMS", "${Admin.ITEMS}"),
     ('object Routes {\n    object Admin {\n        const val ITEMS = "/a"\n    }\n}', "Admin.ITEMS", "/a"),
     ('object Paths {\n    const val USERS = "/users"\n}', "com.acme.Paths.USERS", "/users"),
     ('class R {\n    companion object {\n        const val X = "/x"\n    }\n}', "R.X", "/x"),
-    ('val USERS = "/users"', "Paths.USERS", None),  # a top-level val is not Paths'
+    ('val USERS = "/users"', "Paths.USERS", "${Paths.USERS}"),  # a top-level val is not Paths'
     ('object A {\n    object Admin {\n        const val ITEMS = "/1"\n    }\n}\n'
-     'object B {\n    object Admin {\n        const val ITEMS = "/2"\n    }\n}', "Admin.ITEMS", None),
+     'object B {\n    object Admin {\n        const val ITEMS = "/2"\n    }\n}', "Admin.ITEMS", "${Admin.ITEMS}"),
 ])
 def test_ktor_qualified_constant_by_its_container(decls: str, ref: str, endpoint: str | None):
     src = (f"package com.acme\n\nimport io.ktor.server.routing.*\n\n{decls}\n\n"

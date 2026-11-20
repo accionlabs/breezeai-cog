@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_placeholder
+from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_placeholder, url_first
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -87,7 +87,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     arg_nodes: list[Node] = [
         a for a in (next(iter(va.named_children), None) for va in args) if a is not None
     ]
-    endpoint, override = resolve_endpoint(arg_nodes, source, _render_url)
+    endpoint, override = resolve_endpoint(arg_nodes, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

@@ -398,48 +398,73 @@ so the two match.
 
 ### A part read at runtime (`${name}`)
 
-Many apps build an HTTP address from a value read at runtime — a context root, base path or
-prefix from a config file, env var or settings object — plus a literal path. cog cannot read the
-value and never guesses it; it keeps the address with the value **marked where it stands**:
+Many apps build an address from a value cog cannot read — a context root, base path, prefix or
+whole URL from a config file, an env var, a settings object, a variable or a call — plus a literal
+path. cog never guesses the value; it keeps the address with the value **marked where it stands**,
+named after where it comes from:
 
-- **`${name}`** — a value from code or config that cog cannot read. It may be empty, one path
-  segment, several, or a scheme and host. Fixed for a deployment, never filled by a caller.
-- **`{name}`, `:name`, `<name>`** — a path parameter, unchanged: one segment, filled per request.
+- **`${…}`** — a value cog cannot read: it may be empty, one path segment, several, a scheme and
+  host, or a whole address. Fixed for a deployment, never filled by a caller.
+- **`{name}`, `:name`, `<name>`** — a path parameter or request value: one segment, filled per
+  request. A framework's own parameter syntax is kept as written.
 
-Both markers name a value the same way, so two values never share a name only because their last
-parts match:
+What is inside a marker names the value's **source**, the same way for both markers, so two values
+never share a name only because their last parts match:
 
 | The value in the code | Its name |
 |---|---|
-| A name or member path | written whole, less a leading `this.` / `self.`: `config.contextRoot` → `${config.contextRoot}`, `user.id` → `{user.id}`, `this.userId` → `{userId}` |
-| A lookup by a literal key | the key: `config.getString("pathPrefix")`, `os.getenv("BASE")` → `${pathPrefix}`, `${BASE}` |
+| A configuration entry read by literal keys: `config().getJsonObject("api-verticle").getString("address")`, `config.get("base")`, `env.getProperty("app.base")` | `config:` and the key path: `${config:api-verticle.address}`, `${config:base}`, `${config:app.base}` |
+| An environment variable: `process.env.BASE_PATH`, `os.getenv("BASE")`, `System.getenv("BUS")` | `env:` and its name: `${env:BASE_PATH}`, `${env:BASE}`, `${env:BUS}` |
+| A name or member path (a variable, a field, a constant cog cannot resolve) | written whole, less a leading `this.` / `self.`: `config.contextRoot` → `${config.contextRoot}`, `user.id` → `{user.id}`, `this.userId` → `{userId}` |
+| A local variable assigned once from a configuration or environment lookup | named after that lookup (`String address = config().getString("a"); send(address, …)` → `${config:a}`) |
+| Another lookup by a literal key | the key: `map.get("pathPrefix")` → `${pathPrefix}` |
 | Another call | `${…}`: the called function (`prefixFromEnv()` → `${prefixFromEnv}`); `{param}` for a request value (`encodeURIComponent(id)`) |
+| Values added with no string between them | one marker each: `prefix + host + ":" + port` → `${prefix}${host}:${port}`; a parenthesised sum `(page + 1)` stays one value |
 | Anything else | `${value}` / `{param}` |
 
-Which one a runtime part becomes:
+Which marker a part becomes:
 
-- in an **inbound** route path, every part cog cannot read is `${name}` (a request value
-  enters a route only through the framework's own parameter syntax, kept as written);
+- in an **inbound** route path or an **event-bus address**, every part cog cannot read is `${…}`
+  (a request value enters a route only through the framework's own parameter syntax);
 - in an **outbound** URL, a part in the base — before the path's first `/`, the scheme and host
-  included — is `${name}`; a part after it is a request value, `{name}`.
+  included — is `${…}`; a later part is a request value, `{name}` — except a configuration entry
+  or environment variable, which is `${…}` wherever it stands.
 
-| Code | Direction | `endpoint` |
+An address made **only of named markers is kept**: it names where the address comes from, not the
+address (`${url}`, `${config:api-verticle.address}`, `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}`).
+An address is empty only when no part has a name (`${value}`, `{param}` only): that says nothing.
+The URL of a call is taken from a variable only when the call takes its URL first — an HTTP verb
+(`get`, `post`, …), `fetch`, a `url(…)` / `uri(…)` builder, a RestTemplate verb — and never from a
+verb on a request builder (`ws.url(u).post(body)`: `post` takes the body); an event-bus address
+only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such as
+`EventBusUtil.send(container, …)`).
+
+| Code | Kind | `endpoint` |
 |---|---|---|
-| `router.get(pathPrefix + "/request")` (Vert.x), ``app.get(`${BASE}/users/:id`)`` (Express) | inbound | `${pathPrefix}/request`, `${BASE}/users/:id` |
-| `router.get("/api/" + version + "/orders")` | inbound | `/api/${version}/orders` |
-| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath: process.env.BASE_PATH` (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | inbound | `${config.base}/…`, `${config.x}/…`, `${settings.X}/…`, `${prefixFromEnv}/…`, `${process.env.BASE_PATH}/…` |
+| `router.get(config().getString("pathPrefix") + "/request")` (Vert.x), ``app.get(`${BASE}/users/:id`)`` (Express) | route | `${config:pathPrefix}/request`, `${BASE}/users/:id` |
+| `router.get("/api/" + version + "/orders")` | route | `/api/${version}/orders` |
+| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath: process.env.BASE_PATH` (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | route | `${config.base}/…`, `${config.x}/…`, `${settings.X}/…`, `${prefixFromEnv}/…`, `${env:BASE_PATH}/…` |
+| ``app.get(`${BASE}`, h)`` | route | `${BASE}` |
 | `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + order.id })` — and the same shapes in every language's HTTP calls | outbound | `${config.contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{order.id}` |
 | `$.get("/api/users/" + user.id + "/roles")`, `` $.getJSON(`/api/users/${id}`) `` — a jQuery URL reads exactly as the same `axios` URL | outbound | `/api/users/{user.id}/roles`, `/api/users/{id}` |
-| `` fetch(`${host}${path}`) ``, ``app.get(`${BASE}`)`` | both | empty: no literal path part |
+| `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` |
+| `new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + fileApiPath)` | outbound | `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}` |
+| `send(config().getObject("api-verticle").getString("address"), …)`, `consumer(config().getString("address"), h)`, `send(System.getenv("BUS") + ".orders", …)` | event bus | `${config:api-verticle.address}`, `${config:address}`, `${env:BUS}.orders` |
+| `axios.get(buildUrl(a, b) \|\| fallback)` | outbound | empty: no part has a name |
 
-A reader comparing a call with a route drops the leading `${…}`, compares the rest (treating
-`{id}`, `:id` and `<id>` alike), and gets a **candidate**, never a certain match: `${…}` can be any
-text. The unknown part is never written `{name}`: that would read as one segment a caller fills
-in. Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS application
-path, a literal or constant), a real path parameter (`/api/orders/{id}`), an address that is only
-a variable (`router.get(path)`, `$.get(url)`: empty), and a router mounted at two known prefixes
-(empty). Every outbound URL and every route address goes through `parsers/addresses.py` once per
-file, so the notation is the same in every language.
+**Reading it.** An endpoint made only of `${…}` parts names the **source** of the address: two
+records with the same `${…}` read the same variable or key, but each module or deployment may set
+it differently, so records are **never joined on equal `${…}` text**. A reader comparing a call
+with a route drops the leading `${…}`, compares the rest (treating `{id}`, `:id` and `<id>` alike),
+and gets a **candidate**, never a certain match; it never matches through a `${…}` part. The
+unknown part is never written `{name}`: that would read as one segment a caller fills in. The
+marker is cog's, never copied source syntax (a JavaScript template literal's `${x}` is read and
+re-marked). Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS
+application path, a literal or constant), a real path parameter (`/api/orders/{id}`), and a router
+mounted at two known prefixes (empty). A detector still needs a literal path to tell a path
+argument from another value (`app.use(loggerMiddleware)` is no mount; `router.get(path)` with
+only a variable is not recorded as a route). Every outbound URL and every route address goes
+through `parsers/addresses.py` once per file, so the notation is the same in every language.
 
 ## 7. Examples
 

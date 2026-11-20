@@ -1,8 +1,10 @@
 """One notation for an address with a part read at runtime (``parsers.addresses``): the part is
 marked ``${name}`` where it stands, for every framework and both directions. ``{name}`` stays a
 path parameter (one segment); both name a value by its whole member path (``config.contextRoot``,
-``user.id``), less ``this.`` / ``self.``; an address with no literal part, and a router mounted at two
-places, stay empty; a resolved prefix is unchanged."""
+``user.id``), less ``this.`` / ``self.``, and a configuration entry or environment variable by its
+kind and key (``config:a.b``, ``env:X``). An address of named parts only is kept (it names its
+source); one whose parts have no name, and a router mounted at two places, stay empty; a resolved
+prefix is unchanged."""
 
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from breezeai_cog.parsers.addresses import (
     outbound_template,
     runtime_name,
     value_path,
-    with_literal,
+    informative,
 )
 from breezeai_cog.parsers.statements_common import url_placeholder
 
@@ -41,8 +43,22 @@ def _addr(stmt) -> str | None:
         ("this.prefix", "prefix"),
         ("self.settings.base", "settings.base"),
         ("$scope.base", "$scope.base"),
-        ('config().getString("pathPrefix")', "pathPrefix"),
-        ("os.getenv('BASE')", "BASE"),
+        ('config().getString("pathPrefix")', "config:pathPrefix"),
+        ('container.config().getObject("api-verticle").getString("address")', "config:api-verticle.address"),
+        ('config().getJsonObject("a").getString("b", "dflt")', "config:a.b"),
+        ('env.getProperty("app.base")', "config:app.base"),
+        ('config.get("base")', "config:base"),
+        ("os.getenv('BASE')", "env:BASE"),
+        ('os.environ.get("BASE", "/")', "env:BASE"),
+        ('os.environ["BASE"]', "env:BASE"),
+        ("process.env.BASE_PATH", "env:BASE_PATH"),
+        ("process.env['BASE_PATH']", "env:BASE_PATH"),
+        ('System.getenv("BUS")', "env:BUS"),
+        ('Environment.GetEnvironmentVariable("HOST")', "env:HOST"),
+        ('ENV["ROOT"]', "env:ROOT"),
+        ("config:a.b", "config:a.b"),  # already named: unchanged
+        ("config().getString(key)", "getString"),  # a computed key is no config entry
+        ('map.get("k")', "k"),  # another lookup by a literal key: the key
         ("prefixFromEnv()", "prefixFromEnv"),
         ("a ? b : c", "value"),
         ("", "value"),
@@ -95,9 +111,12 @@ def test_url_placeholder(expr, placeholder) -> None:
         ("{scheme}://{host}/x/{id}", "${scheme}://${host}/x/{id}"),
         ("https://{host}/x", "https://${host}/x"),
         ("/api/{id}", "/api/{id}"),  # no runtime part in the base: unchanged
-        ("{base}", None),  # nothing literal
-        ("{base}{path}", None),
-        ("{base}/", None),
+        ("{base}", "${base}"),  # no literal part: still names where the URL comes from
+        ("{base}{path}", "${base}${path}"),
+        ("{base}/", "${base}/"),
+        ("{value}", None),  # no name: says nothing
+        ("{param}/{param}", None),
+        ("/a/{config:v}", "/a/${config:v}"),  # a config entry is never a request value
         ("${ctx}/x", "${ctx}/x"),  # already marked
     ],
 )
@@ -108,9 +127,12 @@ def test_outbound_template(rendered, url) -> None:
 def test_inbound_template_and_with_literal() -> None:
     assert inbound_template("{pathPrefix}/request") == "${pathPrefix}/request"
     assert inbound_template("/api/{config.version}/orders/:id") == "/api/${config.version}/orders/:id"
-    assert inbound_template("{a}/{b}") is None
-    assert with_literal("${base}/x") == "${base}/x"
-    assert with_literal("${base}/") is None
+    assert inbound_template("{a}/{b}") == "${a}/${b}"
+    assert inbound_template("{value}") is None
+    assert informative("${base}/x") == "${base}/x"
+    assert informative("${base}/") == "${base}/"
+    assert informative("${value}/{param}") is None
+    assert informative("/") == "/"  # a literal address is never cleared
 
 
 # ── outbound: axios / fetch (shared URL rendering, every language) ───────────
@@ -135,7 +157,7 @@ export function go(id, url) {
     assert _addr(_one(st, "api_call", CLIENT, 3)) == "${config.contextRoot}/orders/confirm"
     assert _addr(_one(st, "api_call", CLIENT, 4)) == "${config.contextRoot}/orders/{id}"  # concat = template
     assert _addr(_one(st, "api_call", CLIENT, 5)) == "/api/orders/{id}"  # a parameter
-    assert _addr(_one(st, "api_call", CLIENT, 6)) is None  # variable only
+    assert _addr(_one(st, "api_call", CLIENT, 6)) == "${url}"  # variable only: named
     assert _addr(_one(st, "api_call", CLIENT, 7)) == "/api/plain"
 
 
@@ -166,7 +188,7 @@ def test_outbound_jquery(analyze_files) -> None:
     )
     assert _addr(_one(st, "api_call", "web/page.js", 2)) == "${config.contextRoot}/orders/confirm"
     assert _addr(_one(st, "api_call", "web/page.js", 3)) == "/orders/list"
-    assert _addr(_one(st, "api_call", "web/page.js", 4)) is None
+    assert _addr(_one(st, "api_call", "web/page.js", 4)) == "${target}"
 
 
 # ── inbound: Vert.x (Java and Groovy) ────────────────────────────────────────
@@ -224,7 +246,7 @@ public class Main extends AbstractVerticle {
 """
         }
     )
-    assert _addr(_one(st, "route", VERTX, 8)) == "${p}/users"
+    assert _addr(_one(st, "route", VERTX, 8)) == "${config:p}/users"
 
 
 # ── inbound: Express ─────────────────────────────────────────────────────────
@@ -248,7 +270,7 @@ function getUser(req, res) {}
     assert _addr(_one(st, "route", SERVER, 4)) == "${BASE}/users"
     assert _addr(_one(st, "route", SERVER, 5)) == "${BASE}/users/:id"  # concat = template
     assert _addr(_one(st, "route", SERVER, 6)) == "/plain/:id"
-    assert _addr(_one(st, "route", SERVER, 7)) is None  # variable only
+    assert _addr(_one(st, "route", SERVER, 7)) == "${BASE}"  # variable only: named
 
 
 # ── inbound: Fastify ─────────────────────────────────────────────────────────
@@ -417,7 +439,7 @@ export class App extends RestApplication {
             "src/controllers/ping.controller.ts": LB_CONTROLLER % "'/v1'",
         }
     )
-    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == "${process.env.BASE_PATH}/v1/ping"
+    assert _addr(_one(st, "route", "src/controllers/ping.controller.ts")) == "${env:BASE_PATH}/v1/ping"
 
 
 def test_vertx_sub_router_mounted_at_two_places_has_no_address(analyze_files) -> None:
@@ -471,10 +493,12 @@ function go(ctx, order) {
         ('"/a?q=" + q', "/a?q={q}"),
         ('"http://" + host + "/x"', "http://${host}/x"),
         ('"/api/a"', "/api/a"),
-        ("u", None),  # only a variable
-        ("base + suffix", None),  # no literal part
-        ('base + "/"', None),
-        ("`${host}${path}`", None),
+        ("u", "${u}"),  # only a variable: named
+        ("base + suffix", "${base}${suffix}"),  # no literal part: each value named
+        ('base + "/"', "${base}/"),
+        ("`${host}${path}`", "${host}${path}"),
+        ("process.env.API + '/x'", "${env:API}/x"),
+        ("buildUrl(a, b) || fallback", None),  # no name: says nothing
     ],
 )
 def test_jquery_built_url_equals_axios(analyze_files, url, expected) -> None:
@@ -516,3 +540,90 @@ class Client(private val httpClient: HttpClient) {
         "/api/users/{id}",
         "/api/users/{param}",  # a call is not a name
     ]
+
+
+# ── an address of named parts only: event bus, config, env, wrappers ────────────────────────
+def test_event_bus_addresses_name_their_source(analyze_files) -> None:
+    st = analyze_files({VERTX: """package a;
+import io.vertx.core.AbstractVerticle;
+public class Main extends AbstractVerticle {
+  public void start() {
+    String address = config().getJsonObject("api-verticle").getString("address");
+    vertx.eventBus().send(address, "x");
+    vertx.eventBus().consumer(config().getString("address"), this::a);
+    vertx.eventBus().send(System.getenv("BUS") + ".orders", "y");
+    vertx.eventBus().send("orders.create", "z");
+  }
+  void a(Object o) {}
+}
+"""})
+    assert _addr(_one(st, "eventbus_send", VERTX, 6)) == "${config:api-verticle.address}"
+    assert _addr(_one(st, "eventbus_consumer", VERTX, 7)) == "${config:address}"
+    assert _addr(_one(st, "eventbus_send", VERTX, 8)) == "${env:BUS}.orders"
+    assert _addr(_one(st, "eventbus_send", VERTX, 9)) == "orders.create"  # literal: unchanged
+
+
+def test_a_wrapper_named_like_a_bus_does_not_take_its_first_argument(analyze_files) -> None:
+    # `EventBusUtil.send(container, …)` holds "Bus" in its name; its first argument is no address
+    st = analyze_files({VERTX: """package a;
+import org.vertx.java.platform.Verticle;
+public class Main extends Verticle {
+  public void start() { EventBusUtil.send(container, vertx, "x"); }
+}
+"""})
+    assert all(s.endpoint is None for s in st if s.semanticType == "eventbus_send")
+
+
+def test_values_only_url_names_each_value(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/FileApi.java": """package a;
+import org.apache.http.client.methods.HttpPost;
+public class FileApi {
+  String fileApiPrefix, fileApiHost, filePort, fileApiPath;
+  void up() {
+    new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + fileApiPath);
+    new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + "/file/upload");
+    new HttpPost((fileApiPrefix + fileApiHost) + "/x");
+  }
+}
+"""})
+    path = "src/main/java/a/FileApi.java"
+    assert _addr(_one(st, "api_call", path, 6)) == "${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}"
+    assert _addr(_one(st, "api_call", path, 7)) == "${fileApiPrefix}${fileApiHost}:${filePort}/file/upload"
+    assert _addr(_one(st, "api_call", path, 8)) == "${param}/x"  # parenthesised: one value
+
+
+def test_a_bare_middleware_is_still_no_mount(analyze_files) -> None:
+    st = analyze_files({SERVER: """const express = require('express');
+const app = express();
+app.use(loggerMiddleware);
+app.use('/api', apiRouter);
+"""})
+    assert [(s.startLine, s.endpoint) for s in st if s.semanticType == "route"] == [(4, "/api")]
+
+
+def test_a_verb_on_a_request_builder_takes_the_body(analyze_files) -> None:
+    st = analyze_files({"app/Calls.scala": """package example
+import play.api.libs.ws.WSClient
+class Calls(ws: WSClient) {
+  def run(uri: String, body: String): Unit = {
+    ws.url(uri).post(body)
+  }
+}
+"""})
+    assert [s.endpoint for s in st if s.semanticType == "api_call"] == ["${uri}"]
+
+
+def test_ktor_value_only_path_needs_a_route_block(analyze_files) -> None:
+    st = analyze_files({"src/App.kt": """import io.ktor.server.routing.*
+import io.ktor.server.websocket.*
+fun Route.delete(dao: Any, hash: (String) -> String) { }
+fun Application.module(path: String, dao: Any) {
+  routing {
+    webSocket(path) { }
+    delete(dao, { it })
+  }
+}
+"""})
+    eps = {s.text.split("(")[0].strip(): s.endpoint for s in st if s.semanticType == "route"}
+    assert eps.get("webSocket") == "${path}"  # a route block: its path named
+    assert eps.get("delete") is None  # the repo's own `delete(dao, …)`: no path named after `dao`

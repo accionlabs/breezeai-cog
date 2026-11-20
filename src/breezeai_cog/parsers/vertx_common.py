@@ -26,7 +26,7 @@ from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
 from .index_common import record_distinct
-from .addresses import inbound_template, mark_runtime, runtime_name, runtime_part
+from .addresses import inbound_template, informative, mark_runtime, runtime_name, runtime_part
 from .statements_common import render_concat
 from .treesitter import node_text
 
@@ -148,8 +148,9 @@ def classify_call(
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call
-                  (event-bus addresses never fall back to it: unresolved → empty).
+    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call,
+                  and what an event-bus address on the bus itself is named after when it does
+                  not render (``${config:a}``, ``${address}``; :func:`event_template`).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``service_vars`` variable → service-proxy builder type (:func:`service_builder_vars`), so a
                   ``setAddress`` on a builder held in a variable still finds its side.
@@ -172,9 +173,13 @@ def classify_call(
         is_router = bool(path) and "/" in (path or "")
 
     if method in EVENTBUS and is_bus_receiver(obj):
-        # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
-        # consumer and its senders on the same unresolved symbol both stay empty.
-        return EVENTBUS[method], None, _known_path(path) if path else None, None
+        # The address as written: its value when it folds, else each part read at runtime
+        # marked ${…} where it stands (addresses.py) — the source of the address, never a
+        # value it is joined on.
+        # a bare argument is named only on the event bus itself: a wrapper whose name merely
+        # holds "bus" (`EventBusUtil.send(container, …)`) takes other arguments first
+        named = first_arg if _EVENT_BUS_ITSELF.search(obj) else None
+        return EVENTBUS[method], None, event_template(path, named), None
     if method in TIMERS:
         delay = (first_arg or "").replace("_", "").rstrip("lL")
         return "timer", TIMERS[method], delay if delay.isdigit() else None, None
@@ -184,7 +189,8 @@ def classify_call(
         side = _service_side(obj, service_vars)
         if side is None:
             return None
-        return side, None, _known_path(path) if path else None, None
+        # the service's event-bus address: its one argument (`setAddress(addr)`)
+        return side, None, event_template(path, first_arg), None
     if method in HTTP_VERBS and path and (is_router or route_scope):
         return "route", method.upper(), _known_path(path), "route"
     if method == "route" and path and is_router:
@@ -197,6 +203,19 @@ def _known_path(path: str) -> str | None:
     ``{…}`` in a rendered path is a placeholder for an unresolved code value (a GString
     interpolation or a runtime concatenation): the address is unknown — never a code name."""
     return None if "{" in path else path
+
+
+#: A receiver that is the event bus itself: ``vertx.eventBus()``, ``eb``, ``bus``, ``eventBus``.
+_EVENT_BUS_ITSELF = re.compile(r"(?:^|\.)\s*(?:eventBus\s*\(\s*\)|eventBus|eb|bus)\s*$", re.IGNORECASE)
+
+
+def event_template(path: str | None, first_arg: str | None) -> str | None:
+    """An event-bus address: the rendered ``path`` with its ``{name}`` parts marked ``${name}``,
+    or, when the argument does not render (a bare variable or lookup), ``${…}`` named after
+    its text (``first_arg``); None when it says nothing (:func:`addresses.informative`)."""
+    if path is None and first_arg:
+        path = "{" + runtime_name(first_arg) + "}"
+    return informative(mark_runtime(path)) if path else None
 
 
 def route_template(path: str | None) -> str | None:
