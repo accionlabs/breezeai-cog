@@ -10,12 +10,13 @@ relevant) that the pipeline aggregates into ``projectMetaData.configs``.
 from __future__ import annotations
 
 import configparser
-import json
 import re
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+from ...utils.jsonc import load_json
 
 try:  # PyYAML is a core dep; degrade gracefully if somehow absent
     import yaml
@@ -145,7 +146,7 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
 
 # ── JSON family ───────────────────────────────────────────────────────────────
 def _package_json(text: str) -> dict[str, Any]:
-    d = json.loads(text)
+    d, mode = load_json(text)
     # Keep name → specifier (not just names) so an internal `workspace:*` / `file:` / `link:`
     # dependency is distinguishable from an npm one, and surface the internal ones directly.
     deps = dict(d.get("dependencies") or {})
@@ -154,7 +155,7 @@ def _package_json(text: str) -> dict[str, Any]:
         name for name, spec in {**deps, **dev}.items()
         if isinstance(spec, str) and spec.startswith(("workspace:", "file:", "link:"))
     )
-    return {
+    return _with_mode({
         "kind": "package.json",
         "category": "json",
         "packageManager": "npm",
@@ -170,13 +171,13 @@ def _package_json(text: str) -> dict[str, Any]:
         "workspaceDependencies": workspace_deps,  # internal monorepo deps (workspace:/file:/link:)
         "dependencyCount": len(deps),
         "devDependencyCount": len(dev),
-    }
+    }, mode)
 
 
 def _tsconfig(name: str, text: str) -> dict[str, Any]:
-    d = json.loads(text)
+    d, mode = load_json(text)
     co = d.get("compilerOptions") or {}
-    return {
+    return _with_mode({
         "kind": name,
         "category": "json",
         "buildTool": "typescript",
@@ -192,16 +193,16 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
             "include": d.get("include"),
             "exclude": d.get("exclude"),
         },
-    }
+    }, mode)
 
 
 def _project_json(text: str) -> dict[str, Any]:
     """Nx per-project config — retains the module-boundary values a generic top-level-keys pass
     would discard: declared inter-project deps, tags, and target names. Values are kept as the
     file writes them; one that is missing or of the wrong type is left empty."""
-    d = json.loads(text)
+    d, mode = load_json(text)
     name = d.get("name")
-    return {
+    return _with_mode({
         "kind": "project.json",
         "category": "json",
         "buildTool": "nx",
@@ -211,16 +212,16 @@ def _project_json(text: str) -> dict[str, Any]:
             "implicitDependencies": _strings(d.get("implicitDependencies")),
             "targets": list(_dict(d.get("targets"))),
         },
-    }
+    }, mode)
 
 
 def _nx_json(text: str) -> dict[str, Any]:
     """Nx workspace config — keep the declared target defaults and plugins, not just keys, and
     the project map older Nx versions keep here."""
-    d = json.loads(text)
+    d, mode = load_json(text)
     raw_plugins = d.get("plugins") if isinstance(d.get("plugins"), list) else []
     plugins = [p.get("plugin") if isinstance(p, dict) else p for p in raw_plugins]
-    return {
+    return _with_mode({
         "kind": "nx.json",
         "category": "json",
         "buildTool": "nx",
@@ -229,18 +230,18 @@ def _nx_json(text: str) -> dict[str, Any]:
             "targetDefaults": list(_dict(d.get("targetDefaults"))),
             "plugins": [p for p in plugins if isinstance(p, str)],
         },
-    }
+    }, mode)
 
 
 def _workspace_json(text: str) -> dict[str, Any]:
     """Legacy Nx workspace config: its project-name-to-root map."""
-    d = json.loads(text)
-    return {
+    d, mode = load_json(text)
+    return _with_mode({
         "kind": "workspace.json",
         "category": "json",
         "buildTool": "nx",
         "projectInfo": {"projects": _project_map_info(d.get("projects"))},
-    }
+    }, mode)
 
 
 def _project_map_info(value: Any) -> dict[str, Any]:
@@ -286,55 +287,27 @@ def _pnpm_workspace(text: str) -> dict[str, Any]:
 
 
 def _generic_json(text: str) -> dict[str, Any]:
-    d = json.loads(text)
-    return {
+    d, mode = load_json(text)
+    return _with_mode({
         "kind": "json",
         "category": "json",
         "topLevelKeys": list(d.keys()) if isinstance(d, dict) else [],
-    }
+    }, mode)
 
 
-def _strip_json_comments(text: str) -> str:
-    """Remove ``//`` line and ``/* */`` block comments, ignoring ``/`` inside string literals
-    (so a value like ``"http://…"`` is untouched). Used for JSONC configs (e.g. Vert.x
-    ``mod.json``) that standard ``json`` rejects."""
-    out: list[str] = []
-    i, n, in_str, esc = 0, len(text), False, False
-    while i < n:
-        ch = text[i]
-        if in_str:
-            out.append(ch)
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            i += 1
-        elif ch == '"':
-            in_str = True
-            out.append(ch)
-            i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
+def _with_mode(meta: dict[str, Any], mode: str | None) -> dict[str, Any]:
+    """``meta`` plus ``parseMode`` when a fallback read the file; strict JSON is unchanged."""
+    if mode is not None:
+        meta["parseMode"] = mode
+    return meta
 
 
 def _mod_json(text: str) -> dict[str, Any]:
     """Vert.x module descriptor (``mod.json``) — a JSONC file whose ``main`` names the entry
     verticle class. Surface it as ``verticleMain`` (a leading ``groovy:``/``java:`` language
     prefix stripped so the FQN matches the captured class). Honest-null when ``main`` is absent."""
-    data = json.loads(_strip_json_comments(text))
-    meta: dict[str, Any] = {"kind": "mod.json", "category": "json"}
+    data, mode = load_json(text)
+    meta: dict[str, Any] = _with_mode({"kind": "mod.json", "category": "json"}, mode)
     main = data.get("main") if isinstance(data, dict) else None
     if isinstance(main, str) and main:
         meta["verticleMain"] = main.split(":", 1)[-1] if ":" in main else main

@@ -42,6 +42,7 @@ from ..additive import (
 )
 from ..emits import Emit, apply
 from ..treesitter import node_text, parse_source
+from ..typescript.imports import runtime_path_template
 from ..typescript_sdk_common import emit_outbound, walk_calls
 
 _NAMES = frozenset({"$", "jQuery"})
@@ -240,6 +241,18 @@ def _verb(node: Node | None, source: bytes) -> str | None:
     return upper if upper in _VERBS else None
 
 
+def _runtime_url(node: Node | None, source: bytes) -> str | None:
+    """A URL whose base is read at runtime, with the values read at runtime marked
+    (``config.contextRoot + "/orders/" + id`` → ``${contextRoot}/orders/{id}``, addresses.py);
+    never across server-side code. A URL whose base is literal and only a later part is a
+    variable (``"/api/" + id``) stays unresolved here, as before."""
+    node = _unwrap(node)
+    if node is None or not _delimited(node) or _SERVER_EXPR.search(node_text(node, source)):
+        return None
+    url = runtime_path_template(node, source, {}, outbound=True)
+    return url if url is not None and url.startswith("${") else None
+
+
 def _ajax(call_args: list[Node], source: bytes) -> tuple[str | None, str | None, bool] | None:
     """``(endpoint, method, options_have_url)`` for ``$.ajax(options)`` /
     ``$.ajax(url, options)`` / ``$.ajax(url)``, or ``None`` when the request is not statically
@@ -274,7 +287,7 @@ def _ajax(call_args: list[Node], source: bytes) -> tuple[str | None, str | None,
     else:
         method = "GET"
     url = _literal_url(url_node, source)
-    return url, method, has_url_option
+    return url or _runtime_url(url_node, source), method, has_url_option
 
 
 def _url_like(node: Node | None, source: bytes) -> bool:
@@ -319,7 +332,7 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
             if sel in ("window", "document"):  # $(window).load(fn) is the legacy load event
                 continue
             first = args[0] if args else None
-            url = _literal_url(first, source)
+            url = _literal_url(first, source) or _runtime_url(first, source)
             if url is None and not _url_like(first, source):
                 continue  # a function / handler / no argument is the event form, not a request
             emit_outbound(call, url or "", "jquery", out, method="GET", enrich="own", reclassify_db=True)
@@ -340,9 +353,9 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
             emit_outbound(call, endpoint or "", "jquery", out, method=method, enrich="own", reclassify_db=True)
         elif method_name in _STATIC_VERB and scope.is_jquery(recv):
             first = args[0] if args else None
-            endpoint = _literal_url(first, source)
-            if endpoint is None and first is not None and first.type == "object":
-                endpoint = _literal_url(_pairs(first, source).get("url"), source)
+            url_node = _pairs(first, source).get("url") \
+                if first is not None and first.type == "object" else first
+            endpoint = _literal_url(url_node, source) or _runtime_url(url_node, source)
             emit_outbound(call, endpoint or "", "jquery", out,
                            method=_STATIC_VERB[method_name], enrich="own", reclassify_db=True)
     return out

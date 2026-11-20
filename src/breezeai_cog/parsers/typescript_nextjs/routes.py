@@ -190,8 +190,9 @@ def _default_export_handler(
 
 def served(endpoint: str, path: str, index: object | None) -> str | None:
     """The route's address under its app's ``next.config`` ``basePath``: joined in front when it
-    is a literal; unknown (None) when it is set but cannot be resolved; unchanged when the app
-    sets none or no ``next.config`` was seen."""
+    is a literal or a template with a value read at runtime (``${BASE_PATH}/page``, see
+    ``addresses``); unknown (None) when the app's values disagree; unchanged when the app sets
+    none or no ``next.config`` was seen."""
     found, base = app_base_path(next_base_paths(index), path)
     if not found or base == "":
         return endpoint

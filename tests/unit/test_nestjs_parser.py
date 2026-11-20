@@ -617,15 +617,15 @@ def test_global_prefix_from_a_constant(analyze_files) -> None:
     assert _http(st) == {("GET", "list"): "/v1/users"}
 
 
-def test_unresolvable_global_prefix_leaves_endpoint_empty(analyze_files) -> None:
-    # The prefix exists but comes from runtime config: the address is unknown (decision Q8).
+def test_unresolvable_global_prefix_is_a_runtime_part(analyze_files) -> None:
+    # The prefix comes from runtime config: marked ${name} where it stands, never guessed.
     st = analyze_files({
         "package.json": _NEST_PKG,
         "src/main.ts": _main("app.setGlobalPrefix(config.values.globalPrefix);"),
         "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
     })
     [r] = [s for s in st if s.semanticType == "route"]
-    assert (r.method, r.endpoint, r.handler) == ("GET", None, "list")
+    assert (r.method, r.endpoint, r.handler) == ("GET", "${globalPrefix}/users", "list")
 
 
 def test_global_prefix_per_app_in_a_monorepo(analyze_files) -> None:

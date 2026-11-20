@@ -18,9 +18,11 @@ from collections.abc import Callable, Mapping
 
 from tree_sitter import Node
 
+from ..addresses import join_runtime, runtime_part, with_literal
 from ..emits import Emit
 from ..kotlin.constants import PATH_EXPRS, ConstantScope, resolve_expr, string_constants
 from ..treesitter import node_text
+
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
 #: ``webSocket("/ws") { … }`` / ``webSocketRaw(…)``: a WebSocket upgrade (method ``WEBSOCKET``,
@@ -50,6 +52,47 @@ def _first_arg(call: Node, source: bytes, lookup: Callable[[str], str | None]) -
         value = resolve_expr(expr, source, lookup)
         return _UNKNOWN if value is None else value
     return _SENTINEL_NO_ARGS
+
+
+def _first_arg_node(call: Node) -> Node | None:
+    """A call's first argument expression (``"${env.base}/x"``, ``prefixFromEnv()``)."""
+    for suffix in call.named_children:
+        if suffix.type != "call_suffix":
+            continue
+        val_args = next((c for c in suffix.named_children if c.type == "value_arguments"), None)
+        first = next((c for c in val_args.named_children if c.type == "value_argument"), None) \
+            if val_args is not None else None
+        if first is not None:
+            return first.named_children[-1] if first.named_children else first
+    return None
+
+
+def _path_template(call: Node, source: bytes, lookup: Callable[[str], str | None]) -> str:
+    """A route path argument with the parts read at runtime marked (addresses.py): literal text
+    and constants as their value, anything else as ``${name}`` (``"${env.base}/x"`` →
+    ``${base}/x``, ``prefixFromEnv()`` → ``${prefixFromEnv}``). Ktor's own ``{id}`` parameters
+    are string text and stay as written."""
+    def render(node: Node) -> str:
+        value = resolve_expr(node, source, lookup) if node.type in PATH_EXPRS else None
+        if value is None and node.type == "interpolated_identifier":
+            value = lookup(node_text(node, source))  # `$API`: a constant by name
+        if value is not None:
+            return value
+        if node.type == "string_literal":
+            out: list[str] = []
+            for child in node.named_children:
+                if child.type == "string_content":
+                    out.append(node_text(child, source))
+                elif child.type in ("interpolated_expression", "interpolated_identifier"):
+                    out.append(render(child))  # `${env.base}` / `$API`
+                # the `${` / `$` / `}` delimiters carry no text of the path
+            return "".join(out)
+        if node.type == "additive_expression" and len(node.named_children) == 2:
+            return render(node.named_children[0]) + render(node.named_children[1])
+        return runtime_part(node_text(node, source))
+
+    first = _first_arg_node(call)
+    return render(first) if first is not None else runtime_part("")
 
 
 def _lambda_body(call: Node) -> Node | None:
@@ -146,10 +189,17 @@ def _collect_routes(
         if verb == "route":
             # Prefix block — push path segment and recurse into lambda body. An unresolved
             # segment — a path expression that does not resolve, or an argument that is not one
-            # (``route(prefixFromEnv())``) — makes every nested address unknown (prefix None).
+            # (``route(prefixFromEnv())``) — is a value read at runtime: a ``${name}`` part of
+            # every nested address (addresses.py).
             sub = _first_arg(child, source, consts)
-            new_prefix = (None if prefix is None or sub is _UNKNOWN or sub is None
-                          else prefix + (sub if isinstance(sub, str) else ""))
+            new_prefix: str | None
+            if prefix is None:
+                new_prefix = None
+            elif sub is _UNKNOWN or sub is None:
+                part = _path_template(child, source, consts)
+                new_prefix = join_runtime(prefix, part) if prefix.strip("/") else part
+            else:
+                new_prefix = prefix + (sub if isinstance(sub, str) else "")
             body = _lambda_body(child)
             if body is not None:
                 out.extend(
@@ -172,8 +222,12 @@ def _collect_routes(
             full_endpoint = prefix
         elif arg is None:
             continue
-        elif arg is _UNKNOWN or prefix is None:
+        elif prefix is None:
             full_endpoint = None  # the address exists but is not known (decision Q8)
+        elif arg is _UNKNOWN:
+            # A path with a part read at runtime: marked `${name}` (addresses.py); none literal
+            # left (`get(Config.EXTERNAL)`) → unknown.
+            full_endpoint = with_literal(prefix + _path_template(child, source, consts))
         else:
             full_endpoint = prefix + str(arg)
 

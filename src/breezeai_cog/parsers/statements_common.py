@@ -187,16 +187,6 @@ def url_placeholder(expr_text: str) -> str:
     return "{" + simple + "}" if simple and simple.replace("_", "").isalnum() else "{param}"
 
 
-def strip_leading_base(url: str) -> str:
-    """Drop a leading interpolated base/host segment so the path matches inbound routes:
-    ``{base}/users/{id}`` -> ``/users/{id}`` (a leading ``{...}`` with no ``/`` is kept)."""
-    if url.startswith("{"):
-        slash = url.find("/")
-        if slash != -1:
-            return url[slash:]
-    return url
-
-
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
 #: left-associative, so ``a + b + … + z`` is a deeply *nested* tree; folding it recurses
 #: once per ``+`` (``render_concat`` ↔ the language ``_render_url``). Generated HTML/JS

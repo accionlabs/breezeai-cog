@@ -32,8 +32,17 @@ def test_wrong_values_are_errors() -> None:
     assert _rules(_route(routeKind=None)) == [("routeKind", "error")]
     assert _rules(_route(routeKind="rest")) == [("routeKind", "error")]
     assert _rules(_route(framework=None)) == [("framework", "error")]
-    assert _rules(_route(endpoint="${BASE}/x")) == [("endpoint", "error")]
+    # source text, not an address: an expression, Ruby interpolation, a template literal
+    assert _rules(_route(endpoint="${a + b}/x")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="#{base}/x")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="`/x`")) == [("endpoint", "error")]
     assert _rules(_route(endpoint="")) == [("endpoint", "error")]
+
+
+def test_a_value_read_at_runtime_is_marked_not_an_error() -> None:
+    # the contract's marker: ${name} stands for a value cog cannot read (addresses.py)
+    assert _rules(_route(endpoint="${BASE}/x")) == []
+    assert _rules(_route(endpoint="/api/${version}/orders/:id")) == []
     assert _rules(_route(guards=[])) == [("guards", "error")]
     assert _rules(_route(guards=["auth", "auth"])) == [("guards", "error")]
 
@@ -108,7 +117,7 @@ def test_consumers_and_timers_have_their_own_route_kinds() -> None:
 
 def test_outbound_addresses_are_written_like_entry_points() -> None:
     assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/users/{id}")) == []
-    assert _rules(_route(routeKind="navigation", endpoint="${BASE}/x")) == [("outbound", "error")]
+    assert _rules(_route(routeKind="navigation", endpoint="${a.b()}/x")) == [("outbound", "error")]
     assert _rules(_route(semanticType="eventbus_send", endpoint="")) == [("outbound", "error")]
 
 

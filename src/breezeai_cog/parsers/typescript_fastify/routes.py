@@ -187,10 +187,12 @@ def detect_fastify(root: Node, source: bytes, path: str, record: FileRecord,
         before = [name for off, name in scope.hooks if off < call.start_byte]
         for method, route_path, handler, line, hooks, kind in _routes(
                 call, mc[1], source, consts, lines):
+            # A prefix read at runtime is a ``${name}`` part of it (addresses.py).
+            endpoint = _join_path(prefix, route_path)
             found.append(Emit(
                 call,
                 {"semanticType": "route", "framework": "fastify", "routeKind": kind,
-                 "method": method, "endpoint": _join_path(prefix, route_path)},
+                 "method": method, "endpoint": endpoint},
                 fill={"handler": handler, "handlerLine": line,
                       "guards": compose_guards(list(outer), list(scope.guards), before, hooks),
                       # A hook — the route's own too — may validate, log or parse as well as

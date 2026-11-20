@@ -96,7 +96,11 @@ class Statement(BaseModel):
     # route-only
     framework: str | None = None
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)
-    endpoint: str | None = None  # route path (route) or outbound URL (api_call)
+    #: Route path (route) or outbound URL (api_call). A part cog cannot read (a prefix or base
+    #: from config, env or a variable) is written ``${name}`` and may stand for any text, a host
+    #: included: ``${contextRoot}/orders/{id}``. ``{name}`` / ``:id`` / ``<id>`` stay path
+    #: parameters (one segment). Empty when no literal path part is known.
+    endpoint: str | None = None
     handler: str | None = None
     #: Line of the handler's declaration — in ``handlerPath`` when that is set, else in this file.
     handlerLine: int | None = None

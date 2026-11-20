@@ -300,6 +300,15 @@ reports `analyzedLanguages` from `record.language`, *not* the parser name.
   `framework` to the toolchain (e.g. `"terraform"`). This separates *what the
   file is* from *how it's used*, and lets multiple toolchains share the same
   grammar.
+- **Reading a JSON file** (a config, a manifest, `tsconfig.json`, an Nx file) goes through
+  `utils/jsonc.py`: `load_json` reads strict JSON first, then JSON with comments, trailing
+  commas or raw control characters in strings, the way the tools that read these files
+  accept them; `load_json_object` returns None for anything but an object. Nothing beyond that
+  is read (single quotes, unquoted keys and the other JSON5 forms stay errors). A captured
+  file read by a fallback records `metadata.parseMode`: `jsonc` (comments or trailing commas)
+  or `lenient` (only raw control characters); a file that still fails records `parseError`
+  with the fault's true line and column. Never write another comment stripper: a regex one
+  mistakes the `/*` in a glob string such as `"src/**/*"` for a comment.
 
 ### Step 9 — Test + dogfood + validate
 - Unit tests: instantiate the parser directly (`GoParser().parse_file(ctx)`); assert

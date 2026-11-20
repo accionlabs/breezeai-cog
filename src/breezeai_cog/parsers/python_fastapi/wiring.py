@@ -30,6 +30,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import parse_source
 from ..python_common import module_constants
+from ..addresses import runtime_part
 from .file_facts import FileFacts, PrefixSpec, file_facts
 
 FACT = "fastapi.wiring"
@@ -86,12 +87,14 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
                      if s[0] == "const" and s[1] not in consts})
     consts.update(dict(_constants(root, rel) for rel in wanted))
 
-    def value(spec: PrefixSpec) -> str | None:
+    def value(spec: PrefixSpec) -> str:
+        """The prefix text; a ``${name}`` part for one read at runtime (a settings value, or a
+        name that is not a string constant; see ``addresses``)."""
         if spec[0] == "lit":
             return spec[1]
         if spec[0] == "const":
-            return consts.get(spec[1], {}).get(spec[2])
-        return None
+            return consts.get(spec[1], {}).get(spec[2]) or runtime_part(spec[2])
+        return runtime_part(spec[1] if len(spec) > 1 else "")
 
     own: dict[Node_, tuple[str | None, tuple[str, ...]]] = {}
     for rel, f in facts.items():

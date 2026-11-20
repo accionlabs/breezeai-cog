@@ -299,12 +299,12 @@ def test_base_path_per_app_in_a_monorepo(analyze_files) -> None:
     assert got == {"apps/web/app/ping/route.ts": "/web/ping", "apps/admin/app/ping/route.ts": "/ping"}
 
 
-def test_unresolvable_base_path_leaves_endpoint_empty(analyze_files) -> None:
-    # Set from the environment / a conditional: the address is unknown (contract §8, decision Q8).
-    for cfg in ("module.exports = { basePath: process.env.BASE_PATH };\n",
-                "module.exports = { basePath: isProd ? '/docs' : '' };\n"):
+def test_unresolvable_base_path_is_a_runtime_part(analyze_files) -> None:
+    # Set from the environment / a conditional: a value read at runtime, marked where it stands.
+    for cfg, want in (("module.exports = { basePath: process.env.BASE_PATH };\n", "${BASE_PATH}/users"),
+                      ("module.exports = { basePath: isProd ? '/docs' : '' };\n", "${value}/users")):
         got = _next_endpoints(analyze_files, {"next.config.js": cfg, "app/users/route.ts": _ROUTE})
-        assert got == {"app/users/route.ts": None}, cfg
+        assert got == {"app/users/route.ts": want}, cfg
 
 
 def test_base_path_from_a_constant(analyze_files) -> None:

@@ -141,7 +141,7 @@ the route-table entry, or — for a registered container — the member.
 | `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) · `mcp_tool` (a tool an MCP server exposes to AI clients) | Yes |
 | `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` · `TOOL` (an `mcp_tool`, whose `endpoint` is the tool name) | When the trigger has one |
 | `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
-| `endpoint` | **The address, fully resolved** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)) | If any part can't be determined: **empty**. Never guessed, never a code name |
+| `endpoint` | **The address** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)); a part read at runtime is marked `${name}` where it stands ([§6](#a-part-read-at-runtime-name)) | If a part can't be determined and isn't marked, or no literal path part is known: **empty**. Never guessed |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
 | `handler` | The handler's name: method, function or component | Yes, unless the handler is anonymous ([below](#anonymous-handlers)) |
 | `handlerLine` | Line of the handler's declaration — the start line of its `Function` record, which for C# / Java includes attributes and annotations (for an anonymous handler, the line where the function starts); a line of `handlerPath` when that is set | Yes |
@@ -291,6 +291,43 @@ match.
 | Schedule | Cron or interval expression | `0 2 * * *` |
 | Page | URL path, with parent prefixes applied | `/settings/profile` |
 
+### A part read at runtime (`${name}`)
+
+Many apps build an HTTP address from a value read at runtime — a context root, base path or
+prefix from a config file, env var or settings object — plus a literal path. cog cannot read the
+value and never guesses it; it keeps the address with the value **marked where it stands**:
+
+- **`${name}`** — a value from code or config that cog cannot read. It may be empty, one path
+  segment, several, or a scheme and host. Fixed for a deployment, never filled by a caller.
+  `name` is the value's own name (`config.contextRoot` → `contextRoot`), the key it is read with
+  (`config.getString("pathPrefix")` → `pathPrefix`), the called function
+  (`prefixFromEnv()` → `prefixFromEnv`), else `value`.
+- **`{name}`, `:name`, `<name>`** — a path parameter, unchanged: one segment, filled per request.
+
+Which one a runtime part becomes:
+
+- in an **inbound** route path, every part cog cannot read is `${name}` (a request value
+  enters a route only through the framework's own parameter syntax, kept as written);
+- in an **outbound** URL, a part in the base — before the path's first `/`, the scheme and host
+  included — is `${name}`; a part after it is a request value, `{name}`.
+
+| Code | Direction | `endpoint` |
+|---|---|---|
+| `router.get(pathPrefix + "/request")` (Vert.x), ``app.get(`${BASE}/users/:id`)`` (Express) | inbound | `${pathPrefix}/request`, `${BASE}/users/:id` |
+| `router.get("/api/" + version + "/orders")` | inbound | `/api/${version}/orders` |
+| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath` from env (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | inbound | `${base}/…`, `${x}/…`, `${X}/…`, `${prefixFromEnv}/…`, `${BASE_PATH}/…` |
+| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + id })` — and the same shapes in every language's HTTP calls | outbound | `${contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{id}` |
+| `` fetch(`${host}${path}`) ``, ``app.get(`${BASE}`)`` | both | empty: no literal path part |
+
+A reader comparing a call with a route drops the leading `${…}`, compares the rest (treating
+`{id}`, `:id` and `<id>` alike), and gets a **candidate**, never a certain match: `${…}` can be any
+text. The unknown part is never written `{name}`: that would read as one segment a caller fills
+in. Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS application
+path, a literal or constant), a real path parameter (`/api/orders/{id}`), an address that is only
+a variable (`router.get(path)`, `$.get(url)`: empty), and a router mounted at two known prefixes
+(empty). Every outbound URL and every route address goes through `parsers/addresses.py` once per
+file, so the notation is the same in every language.
+
 ## 7. Examples
 
 ```java
@@ -329,9 +366,10 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
 ## 8. Accuracy rules
 
 - **Wrong is worse than missing.** If the address can't be resolved, record the entry point with
-  an empty `endpoint` — never a guess. This includes a prefix that exists but can't be resolved
-  (`include_router(r, prefix=settings.X)`, `setGlobalPrefix(config.x)`): the bindings behind it
-  get an empty `endpoint`, not the part that is known. A message address that can't be resolved
+  an empty `endpoint` — never a guess. A part read at runtime (`include_router(r,
+  prefix=settings.X)`, `setGlobalPrefix(config.x)`) is not guessed either: it is marked
+  `${name}` where it stands ([§6](#a-part-read-at-runtime-name)), never dropped (a partial path
+  would read as the whole address) and never written `{name}` (a path parameter). A message address that can't be resolved
   is empty on both sides — consumer and sender — rather than the symbol it was read from.
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
