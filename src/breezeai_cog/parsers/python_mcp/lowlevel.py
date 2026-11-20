@@ -27,7 +27,8 @@
   import Server``). A local class named ``Server``, or a function that binds the name
   ``Server`` itself (``from socketio import Server`` inside it), is not one — importing the
   SDK's ``Server`` inside the function is; a nearer binding of the name that is not a server
-  hides it.
+  hides it, and a function that declares the name ``global`` (``nonlocal``) and binds it
+  breaks the module's (the enclosing function's) proof.
 * **Tools** — each ``Tool(…)`` call (``Tool`` imported from ``mcp.types``, or ``types.Tool`` with
   ``types`` bound to ``mcp.types``; the standard library's ``types`` is not it) that is a direct
   element of a list literal returned by the ``@<server>.list_tools()`` function
@@ -257,6 +258,9 @@ def _bindings(
     #: a server module, the server module itself, or the ``mcp`` package): such a binding of the
     #: class's name means another class there; an SDK import of it does not.
     other: dict[tuple[int, int], set[str]] = {}
+    #: Names a function declares ``global`` / ``nonlocal`` and binds: they rebind the name of
+    #: the module / an enclosing function, whatever they assign.
+    rebound: list[tuple[Node, str, bool]] = []
 
     def bind(
         scope: Node | None,
@@ -276,7 +280,12 @@ def _bindings(
 
     for node in _walk(root):
         t = node.type
-        if t == "assignment":
+        if t in ("global_statement", "nonlocal_statement"):
+            scope = _scope_of(node)
+            for ident in node.named_children:
+                if ident.type == "identifier" and scope is not None:
+                    rebound.append((scope, node_text(ident, source), t == "global_statement"))
+        elif t == "assignment":
             left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
             if left is None:
                 continue
@@ -352,6 +361,18 @@ def _bindings(
                         else text.split(".")[0] == "mcp"
                     )
                     bind(scope, text.split(".")[0], False, from_import, sdk)
+    for scope, name, is_global in rebound:
+        if name not in out.get(_scope_key(scope), {}):
+            continue  # declared but never bound there: the outer binding is unchanged
+        # `global server; server = other()`: the module's (or, for `nonlocal`, the nearest
+        # enclosing function's) binding is no longer proven to be a server.
+        cur = None if is_global else _scope_of(scope)
+        while cur is not None and name not in out.get(_scope_key(cur), {}):
+            cur = _scope_of(cur)
+        if is_global:  # a module binding besides the import: the fact no longer proves it
+            counts.setdefault(name, [0, 0])[0] += 1
+        if name in out.get(_scope_key(cur), {}):
+            out[_scope_key(cur)][name] = False
     for scope, name, head in servers:
         cur = scope
         while cur is not None:  # the module's own bindings of the class are checked already
