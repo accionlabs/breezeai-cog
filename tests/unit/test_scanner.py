@@ -64,6 +64,27 @@ def test_scan_filter_chain(tmp_path) -> None:
     assert not any(p.startswith("link/") for p in found)
 
 
+def test_logs_source_is_scanned_but_log_output_is_ignored(tmp_path) -> None:
+    source_dir = tmp_path / "src" / "logs"
+    source_dir.mkdir(parents=True)
+    (source_dir / "log.ts").write_text("export class LogComponent {}\n")
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "application.log").write_text("log output\n")
+
+    entries = list(
+        scan(
+            tmp_path,
+            lambda path: "typescript" if path.endswith(".ts") else None,
+            engine=IgnoreEngine.build(),
+            max_file_size=10_000,
+        )
+    )
+
+    assert [entry.path for entry in entries] == ["src/logs/log.ts"]
+
+
 def _classify_any(path: str) -> str | None:
     """Claims every extension used in the template tests, so a dropped file is provably
     dropped by ``skip_rule`` and not by the extension allow-list."""
