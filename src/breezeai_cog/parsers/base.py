@@ -66,7 +66,8 @@ class ParseContext:
     parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
     #: The indexes of the languages in the parser's ``related_languages`` that were built for
-    #: this run, by language name. Empty when the language declares none.
+    #: this run, by language name. Empty when the language declares none. A related language
+    #: with files whose index failed is there as None; one without files is absent.
     related_indexes: Mapping[str, Any] = field(default_factory=dict)
 
 

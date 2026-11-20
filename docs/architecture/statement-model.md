@@ -40,7 +40,7 @@ The other fields depend on the meaning:
 | Fields | Used by |
 |---|---|
 | `id`, `parentId`, `nodeType`, `text`, `startLine`, `endLine`, `path` | Every statement |
-| `name` | Declarations (`int retries = 3` → `retries`), enum members |
+| `name` | Declarations (`int retries = 3` → `retries`), enum members; an MCP tool's or prompt's name (= `endpoint`), an MCP resource's declared literal name, else its URI |
 | `method`, `endpoint`, `framework` | Routes, API calls, events |
 | `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
 | `dataAccessHint` | `db_method_call` (which ORM / database) |
@@ -393,6 +393,12 @@ Which statement an emit may enrich is its `enrich` mode:
 | `same` | the statement captured on this very node, whatever its type |
 | `any` | whatever statement is there |
 
+An emit that sets `skip` (node types never enriched; the MCP client's `mcp_call` sets the
+control-flow statements) finds its statement through the tree instead of by line: the innermost
+captured statement that contains the node. When that one is of a `skip` type (the call is in a
+control-flow header) or not eligible under its `enrich` mode, the emit is appended. So on a line
+with two statements (`x = 1; call()`, `with c as s: call()`) the one the call is in is enriched.
+
 `apply` also gives each appended statement its id (`path:line:col`, disambiguated in emit
 order) and its parent, and enriches a statement at most once per run, so a second route in one
 statement (`route(p).get(a).post(b)`) gets its own record.
@@ -528,5 +534,3 @@ routes, calls, events, comments or enum members. Files, classes, functions, impo
 - Don't truncate text in the parser; splitting happens at output.
 
 The step-by-step is in the [Parser Reference](../parser-reference.md).
-</content>
-</invoke>

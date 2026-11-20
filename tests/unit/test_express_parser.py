@@ -969,6 +969,44 @@ def test_loop_switch_and_catch_bindings_shadow_only_their_own_body(analyze_files
     assert got["/catch"][1:] == (None, None)
 
 
+def test_a_var_in_a_sibling_block_shadows_the_whole_function() -> None:
+    """A ``var`` is its function's, wherever in the body it is written: a handler named after
+    it is that local even outside the block that declares it, and the shared locator gives it no
+    line. A ``let`` in a sibling block, a ``var`` in a nested function and a function that binds
+    nothing keep the top-level line."""
+    from breezeai_cog.parsers.treesitter import parse_source
+    from breezeai_cog.parsers.typescript.handlers import handler_locator
+
+    src = (
+        b"async function list(req, res) {}\n"  # 1
+        b"function a(ok) {\n"
+        b"  if (ok) { var list = make(); }\n"
+        b"  use(list);\n"  # 4: the hoisted `var`
+        b"}\n"
+        b"function b(xs) {\n"
+        b"  for (var list of xs) {}\n"
+        b"  use(list);\n"  # 8: `for (var …)` is hoisted too
+        b"}\n"
+        b"function c(ok) {\n"
+        b"  if (ok) { let list = make(); }\n"
+        b"  use(list);\n"  # 12: block-scoped elsewhere
+        b"}\n"
+        b"function d() {\n"
+        b"  function inner() { var list = 1; }\n"
+        b"  use(list);\n"  # 16: a nested function's var
+        b"}\n"
+        b"function e() {\n"
+        b"  use(list);\n"  # 19: nothing binds it
+        b"}\n"
+    )
+    root = parse_source("typescript", src).root_node
+    locate = handler_locator(root, src, "src/app.ts", None, None)
+    assert locate("list", 4) is None
+    assert locate("list", 8) is None
+    for line in (12, 16, 19):
+        assert locate("list", line) == ("list", ("src/app.ts", 1)), line
+
+
 def test_es_export_of_a_require_is_never_the_require_line(analyze_files) -> None:
     got = _handler_locations(analyze_files, {
         "src/users.ts": "export function list(req, res) {\n  res.json([]);\n}\n",
@@ -980,3 +1018,36 @@ def test_es_export_of_a_require_is_never_the_require_line(analyze_files) -> None
     })
     assert got["/p"][1:] == (None, None)
     assert got["/u"] == ("users.list", None, None)  # never the `require` line of src/index.ts
+
+
+def test_a_mount_collector_failing_on_one_file_keeps_the_other_files_mounts(analyze_files) -> None:
+    """A fact collector that raises on one file costs only that file's value: the mounts read
+    from the other files still prefix their routes (dropping the whole fact would strip every
+    route's prefix)."""
+    from breezeai_cog.parsers import additive
+    from breezeai_cog.parsers.typescript_express import mounts
+
+    spec = next(s for s in additive.facts_for("typescript") if s.name == mounts.FACT)
+    original = spec.collect
+
+    def _boom(root, source, rel, repo_root):
+        if b"BOOM" in source:
+            raise ValueError("collector bug")
+        return original(root, source, rel, repo_root)
+
+    object.__setattr__(spec, "collect", _boom)
+    try:
+        routes = _routes(analyze_files, {
+            "src/index.js": (
+                "import express from 'express'; import users from './users.js'; "
+                "const app = express(); app.use('/users', users);"
+            ),
+            "src/users.js": (
+                "import express from 'express'; const router = express.Router(); "
+                "router.get('/:id', getUser); export default router;"
+            ),
+            "src/util.js": "import { Router } from 'express'; // BOOM\nconst x = 1; x.use;",
+        })
+    finally:
+        object.__setattr__(spec, "collect", original)
+    assert routes[("src/users.js", "GET")] == "/users/:id"

@@ -16,11 +16,11 @@ built with the standalone ``fastmcp`` package, wherever the tool is declared.
 from __future__ import annotations
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
-from ..python_mcp_common import FASTMCP, detect_tools
+from ..python_mcp_common import FASTMCP, detect_decorated
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    return detect_tools(dc, FASTMCP)
+    return detect_decorated(dc, FASTMCP)
 
 
 # An entry-point emitter, so fixture/test files are skipped.

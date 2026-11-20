@@ -138,8 +138,8 @@ the route-table entry, or — for a registered container — the member.
 
 | Field | Content | Required |
 |---|---|---|
-| `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) · `mcp_tool` (a tool an MCP server exposes to AI clients) | Yes |
-| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` · `TOOL` (an `mcp_tool`, whose `endpoint` is the tool name) | When the trigger has one |
+| `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) · `mcp_tool` / `mcp_resource` / `mcp_prompt` (a tool, resource or prompt an MCP server exposes to AI clients) | Yes |
+| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` · `TOOL` (an `mcp_tool`, whose `endpoint` is the tool name) · `RESOURCE` (an `mcp_resource`, whose `endpoint` is the URI or URI template) · `PROMPT` (an `mcp_prompt`, whose `endpoint` is the prompt name) | When the trigger has one |
 | `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
 | `endpoint` | **The address** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)); a part read at runtime is marked `${name}` where it stands ([§6](#a-part-read-at-runtime-name)) | If a part can't be determined and isn't marked, or no literal path part is known: **empty**. Never guessed |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
@@ -229,8 +229,9 @@ Records filed under `route` that are not entry points:
 | `mount` | A router mount whose routes aren't in the repo, in the spec's current form (§5); `layout` is no longer written | Names no handler of its own |
 | `navigation` | A link | Outbound |
 
-The entry points are the `mcp_tool` records, and the `route`, `eventbus_consumer` and `timer`
-records whose `routeKind` is not `field_resolver`, `mount`, `layout` or `navigation`.
+The entry points are the `mcp_tool`, `mcp_resource` and `mcp_prompt` records, and the `route`,
+`eventbus_consumer` and `timer` records whose `routeKind` is not `field_resolver`, `mount`,
+`layout` or `navigation`.
 
 > **Decision —** the entry-point record lives at the binding construct, never at the wiring.
 > **Why:** the binding is the one construct that names exactly one handler, so one binding is
@@ -248,10 +249,11 @@ A tool an MCP server exposes is an entry point an AI client calls by name. Every
 |---|---|
 | `method` | `TOOL` |
 | `endpoint` | The name clients call, after any rename. A name that is not a literal → **no record** (the tool exists, but its name is unknown) |
-| `framework` | The SDK the tool is declared with: `fastmcp`, `python-mcp`, `typescript-mcp`, `spring-ai-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp`, `mcp-go` (`go-mcp` is kept for the official Go SDK, not read yet) |
+| `framework` | The SDK the tool is declared with: `fastmcp`, `python-mcp`, `typescript-mcp`, `spring-ai-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp`, `mcp-go`, `go-mcp` |
 | `handler` / `handlerLine` | The function that runs the tool; a lambda gives only its line ([above](#anonymous-handlers)) |
 | `description` | The description the server gives the client, when it is a literal |
 | `params` | The input parameters, in the shape of a function's `params`: `[{name, type, default, decorators, required, description}]` |
+| `nodeType` | The construct's own node: `decorator` (Python), `attribute` (C#), `annotation` / `marker_annotation` (Spring AI), otherwise the call or object that declares it. Never `synthetic`: the construct is a real node. The same holds for `mcp_resource` and `mcp_prompt` |
 
 - **Only on a proven MCP server.** A tool counts only when the code shows that the object it is
   declared on is an MCP server: a server object of the SDK, the SDK's own annotation or
@@ -260,6 +262,17 @@ A tool an MCP server exposes is an entry point an AI client calls by name. Every
   entry points. Each framework's proof is in its role table.
 - **Once.** A file can use two MCP frameworks; each tool is recorded once, by the package of
   the framework its construct belongs to.
+- **One record per site in the code, not per server.** The record sits where the tool is
+  written, so how many records a tool gets follows the construct each SDK reads:
+  - Go SDK: one per `AddTool` call — a tool variable registered twice gives two records.
+  - TypeScript low-level `Server`: one per tool object. A module-level `const` named in the
+    `tools` arrays of two servers is one record, whose `handler` is the `CallToolRequestSchema`
+    callback of the first server that lists it.
+  - Kotlin SDK `addTools`: one per `RegisteredTool` element of the list, however many
+    `addTools` calls receive it.
+  - Java / Kotlin tool specifications: one per specification built, wherever it is passed
+    (`.tools(spec…)` is not read); a builder shortcut `.tool(…)` is one per call.
+  - Python low-level `Server`: one per `Tool(…)` literal in a `list_tools` function.
 - **`params` is all or nothing.** `[]` means the tool takes no input (no schema, or an empty
   one). A schema that cannot be read whole (a variable, a spread, an unknown helper) leaves
   `params` unset, never a partial list. `required` is `true` / `false` when the schema says so
@@ -273,11 +286,103 @@ A tool an MCP server exposes is an entry point an AI client calls by name. Every
   tools, and a sync that adds or removes such a proof leaves the unchanged tool files as they
   were. A full analysis restores them.
 
+### MCP resources and prompts
+
+A resource is data an AI client reads by URI; a prompt is a template it fetches by name. Both are
+entry points held to the tool rules above (a proven server, a literal address, recorded once,
+`params` all or nothing and within 15 KB), at the construct that declares them:
+
+| Field | `mcp_resource` | `mcp_prompt` |
+|---|---|---|
+| `method` | `RESOURCE` | `PROMPT` |
+| `endpoint` | The URI (`config://app`) or URI template (`users://{id}/profile`), as written | The prompt name |
+| `name` | The resource's declared name when the SDK gives one as a literal (`"Profile"` beside its URI); otherwise (no name, or one that is not a literal) the URI | The prompt name (= `endpoint`) |
+| `handler` / `handlerLine` | The function that reads it | The function that renders it |
+| `description` | The description the server gives the client, when it is a literal | Same |
+| `params` | A template's variables: each simple `{name}` → `{name, type: "string", required: true}`; `[]` for a fixed URI; unset when the template uses an RFC 6570 operator (`{?q}`, `{+path}`, `{#f}`, `{/s}`, `{.x}`, `{;x}`, `{&x}`), an explode (`{x*}`), a prefix (`{x:3}`) or several variables in one expression | Its arguments: `{name, required, description}`, never a `type` or `default` (an MCP prompt argument is a string), for every SDK; where the SDK builds them from a function's parameters (FastMCP, C#), those parameters' names, required (no default) and descriptions |
+
+```python
+@mcp.resource("users://{user_id}/profile", description="A user's profile")  # → mcp_resource, params [user_id]
+def profile(user_id: str) -> str: ...
+
+@mcp.prompt(name="review")                                                   # → mcp_prompt, params [code]
+def review_code(code: str) -> str: ...
+```
+
+- A server API that lists them in one function (Python's low-level `@server.list_resources()` /
+  `list_prompts()`, TypeScript's `ListResourcesRequestSchema` / `ListPromptsRequestSchema`
+  handlers) gives one record per literal entry of the returned list; its handler is the server's
+  single `read_resource` / `get_prompt` dispatcher in the same file (none, or several → unset).
+- A fixed resource's URI is literal even with braces in it: `params` is `[]`.
+- A resource's `name` is the name the code gives it — TypeScript `server.resource("Profile", uri,
+  …)` / `registerResource("Profile", …)` and a low-level list entry's `name`, Python
+  `types.Resource(name="Profile", …)` / `ResourceTemplate(name=…)` and FastMCP
+  `@mcp.resource(uri, name="Profile")`, Spring AI `@McpResource(name = "Profile")`, the Java SDK's
+  second `Resource` / `ResourceTemplate` constructor or builder argument (or `.name(…)`), the
+  Kotlin SDK's `addResource(uri, name, …)`, C# `[McpServerResource(Name = "Profile")]`, mcp-go
+  `NewResource(uri, "Profile")` and the Go SDK's `&mcp.Resource{Name: "Profile"}` — only when it
+  is a literal; a name the SDK would derive (a FastMCP or C# method name) is not read, and the
+  record keeps the URI as its `name`. A tool's and a prompt's `name` is their `endpoint`.
+- A URI the SDK derives from a method (C# `[McpServerResource]` without `UriTemplate`) is not read:
+  no record.
+
+### MCP client calls
+
+An `mcp_call` is outbound: a proven MCP **client** calls a tool, reads a resource or gets a
+prompt, by a literal name or URI.
+
+| Field | Content |
+|---|---|
+| `semanticType` | `mcp_call` |
+| `method` | `TOOL` / `RESOURCE` / `PROMPT` |
+| `endpoint` | The tool name, URI or prompt name, written like the server's `mcp_tool` / `mcp_resource` / `mcp_prompt` `endpoint` it reaches; a value that is not a literal → **no record** |
+| `framework` | The client SDK: `python-mcp`, `fastmcp`, `typescript-mcp`, `mcp-go`, `go-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp` |
+| `name` | Not set by the detector: the enriched call statement keeps the name it already has (an assignment target like `result`), an appended one has none — as for an `api_call` |
+| `handler`, `description`, `params` | Never set |
+
+```python
+async with ClientSession(read, write) as session:
+    await session.call_tool("search", {"q": "x"})   # → mcp_call  TOOL  search
+```
+
+- **Only on a proven client.** The receiver must be the SDK's client (constructed, typed, or
+  returned by the SDK's factory). Agent frameworks that wrap MCP servers
+  (`MCPServerStdio.call_tool`, LlamaIndex `BasicMCPClient`, LangChain `MultiServerMCPClient`), the
+  AI SDK's `experimental_createMCPClient`, an `aiohttp` `ClientSession`, a `pg` `Client`, and a
+  client taken from a list (`clients.get(0).callTool(…)`) are not.
+- **The call's own statement.** The record enriches the innermost captured statement that
+  contains the call when it is unclassified and starts on the call's line (keeping its `name`),
+  so that line keeps one statement. It is the statement the call is in, not just any statement
+  on its line: `x = 1; await s.call_tool("t")` enriches the call's statement, `async with
+  ClientSession(r, w) as s: await s.call_tool("x")` and `} catch (e) { await
+  client.callTool(…) }` enrich the body's statement and leave the `with` / `catch` unclassified.
+  A call inside a statement that starts on an earlier line — an argument of a multi-line
+  `gather(…)` / `Promise.all([…])`, the second line of an `if` condition — or in a control-flow
+  header (`if (await s.call_tool("x")).isError:`) gets a record of its own on its line instead.
+- **No file framework.** A file with only client calls keeps `framework` unset: it is not an MCP
+  server.
+- **A spread after the literal** (`client.callTool({ name: "x", ...req })`) may override it at
+  runtime: no record. A spread before it is overridden by it and changes nothing.
+- **Java, Kotlin and C# clients are proven by name within their class.** A name declared in a
+  class as a client (typed, or assigned the SDK's factory), and as nothing else in that class,
+  is a client wherever that name is called in the same class (the innermost `class`, `object`,
+  `struct`, `record` or `interface` around the call; the file's top level outside them). A
+  same-named `client` in another class — inherited from a base class, or declared in an outer
+  class — is not taken for it (no record). Within the class, a Kotlin `with` / scope-function
+  receiver with a member of the same name can still be taken for it. Python and TypeScript
+  resolve the call's nearest binding instead.
+- **Client detectors also run on fixture and test files**, unlike the server detectors (an
+  `mcp_call` is outbound, not an entry point): a test that calls a tool through a real client
+  records that call.
+- The contract checks an `mcp_call` like other outbound records (no empty or placeholder
+  `endpoint`), and also that it has a `method` of `TOOL` / `RESOURCE` / `PROMPT`, a `framework`, an
+  `endpoint` and no handler.
+
 ## 6. Address format (`endpoint`)
 
 The same format is used on both sides: an outbound record's `endpoint` (`api_call`,
-a `route` link, `eventbus_send`) is written exactly like the entry point it reaches, so the two
-match.
+a `route` link, `eventbus_send`, `mcp_call`) is written exactly like the entry point it reaches,
+so the two match.
 
 | Trigger | `endpoint` contains | Example |
 |---|---|---|

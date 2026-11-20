@@ -389,12 +389,31 @@ def collect_additive(
     """Run every fact ``collect`` registered for ``language`` on one file, from the language's
     ``build_index`` per-file pass. Returns fact name → collected value, for the facts whose
     gate matched and that found something. ``root`` is None for a language whose index reads
-    bytes only (``config``)."""
+    bytes only (``config``).
+
+    A ``collect`` that raises costs only its own value for this file: the file's other facts
+    and the other files' values for the same fact are kept, and the fact is still resolved.
+    Dropping the whole fact instead would empty it for every file (a router-mount fact with no
+    mounts strips the prefix from every route), which is worse than one file's value missing.
+    A file the language cannot parse at all (a parse error, a ``RecursionError``) is skipped by
+    the language's per-file index worker the same way: it adds no fact value. A
+    :class:`~breezeai_cog.errors.ParserTimeout` still propagates."""
     out: dict[str, Any] = {}
     for spec in facts_for(language):
         if not any(g in source for g in spec.gate):
             continue
-        value = spec.collect(root, source, rel, repo_root)
+        try:
+            value = spec.collect(root, source, rel, repo_root)
+        except ParserTimeout:
+            # Nothing raises it today; kept so one raised later is handled like any parse
+            # timeout (as in run_additive), never skipped as one fact's failure.
+            raise
+        except Exception as exc:  # one fact never drops the file's other facts or the index
+            from ..logging import get_logger
+            get_logger("breezeai_cog.index").warning(
+                "index.fact.skipped", path=rel, fact=spec.name,
+                error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
         if value is not None:
             out[spec.name] = value
     return out
@@ -404,7 +423,8 @@ def resolve_additive(language: str, collected: dict[str, list[Any]], index: Any)
     """Resolve every fact for ``language`` once, after the language's index is reduced.
     ``collected`` maps fact name → its per-file values in file order. Returns fact name →
     fact (a fact that resolved to ``None`` is left out), to be stored on the index for
-    :func:`index_fact`."""
+    :func:`index_fact`. A file whose ``collect`` raised contributed no value
+    (:func:`collect_additive`); the fact is resolved from the other files."""
     facts = {spec.name: spec.resolve(collected.get(spec.name, []), index)
              for spec in facts_for(language)}
     return {name: fact for name, fact in facts.items() if fact is not None}

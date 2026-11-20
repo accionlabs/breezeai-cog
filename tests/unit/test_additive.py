@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from breezeai_cog.errors import RegistryError
 from breezeai_cog.parsers import additive
@@ -55,14 +56,17 @@ def test_inventory_in_run_order() -> None:
     inventory = {lang: [d.name for d in ds] for lang, ds in all_detectors().items()}
     assert inventory == {
         "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots", "aspnet-web-projects",
-                   "generic-handlers", "hangfire", "quartz", "aws-sdk-calls", "graphql-client", "csharp-mcp"],
+                   "generic-handlers", "hangfire", "quartz", "aws-sdk-calls", "graphql-client", "csharp-mcp",
+                   "csharp-mcp-client"],
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",
-               "go-lambda", "go-mcpgo"],
-        "java": ["quartz", "struts2", "java-springai", "java-mcp", "apache-httpclient", "vertx"],
-        "kotlin": ["kotlin-springai", "kotlin-mcp"],
+               "go-lambda", "go-mcpgo", "go-mcpgo-client", "go-mcp", "go-mcp-client"],
+        "java": ["quartz", "struts2", "java-springai", "java-mcp", "java-mcp-client", "apache-httpclient",
+                 "vertx"],
+        "kotlin": ["kotlin-springai", "kotlin-mcp", "kotlin-mcp-client"],
         "mdx": ["nextjs-mdx-pages"],
-        "python": ["celery", "flask", "drf-routers", "django-channels", "python-fastmcp", "python-mcp"],
+        "python": ["celery", "flask", "drf-routers", "django-channels", "python-fastmcp", "python-mcp",
+                   "python-mcp-client"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
@@ -72,7 +76,7 @@ def test_inventory_in_run_order() -> None:
                        "graphql-client",
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",
-                       "react-navigation", "angularjs", "typescript-mcp"],
+                       "react-navigation", "angularjs", "typescript-mcp", "typescript-mcp-client"],
         "vb": ["aws-sdk-calls", "graphql-client"],
     }
 
@@ -294,6 +298,62 @@ def test_typescript_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> N
     index = build_ts_index(tmp_path, paths, jobs)
     assert index_fact(index, "test.marked") == ["a.ts"]
 
+
+
+def _collect_fails(root, source: bytes, rel: str, repo_root) -> str:
+    if b"BOOM" in source:
+        raise ValueError("collector bug")
+    return rel
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_failing_fact_collector_skips_only_that_fact_and_file(isolated, tmp_path, jobs) -> None:
+    """A collector that raises costs only its own value for that file: the file's other facts,
+    the other files' values for the same fact and the index are kept, and the failure is
+    logged."""
+    from breezeai_cog.parsers.additive import collect_additive
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    register_fact(_marked(name="test.failing", collect=_collect_fails,
+                          resolve=lambda values, index: sorted(values)))
+    register_fact(_marked(resolve=lambda values, index: sorted(values)))
+    paths = []
+    for rel, src in {"a/Boom.cs": b"// MARK BOOM\nclass Boom {}", "b/Ok.cs": b"// MARK\nclass Ok {}"}.items():
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(src)
+        paths.append(f)
+    index = build_csharp_index(tmp_path, paths, jobs)
+    assert index_fact(index, "test.failing") == ["b/Ok.cs"]
+    assert index_fact(index, "test.marked") == ["a/Boom.cs", "b/Ok.cs"]
+    assert {"Boom", "Ok"} <= set(index.types)
+    with capture_logs() as logs:
+        assert collect_additive("csharp", None, b"// MARK BOOM", "x.cs", None) == {
+            "test.marked": "x.cs"}
+    assert any(e["event"] == "index.fact.skipped" and e["fact"] == "test.failing" for e in logs)
+
+
+def test_a_parse_timeout_in_a_fact_collector_is_not_swallowed(isolated) -> None:
+    from breezeai_cog.errors import ParserTimeout
+    from breezeai_cog.parsers.additive import collect_additive
+
+    def _timeout(root, source, rel, repo_root):
+        raise ParserTimeout("x.cs")
+
+    register_fact(_marked(collect=_timeout))
+    with pytest.raises(ParserTimeout):
+        collect_additive("csharp", None, b"// MARK", "x.cs", None)
+
+
+def test_a_failing_fact_source_collector_skips_only_that_file(isolated, tmp_path) -> None:
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    register_fact(_marked(name="test.hosts", gate=(b"ServiceHost",), sources=(".svc",),
+                          collect=_collect_fails, resolve=lambda values, index: sorted(values)))
+    (tmp_path / "Ok.svc").write_bytes(b'<%@ ServiceHost Service="A.Ok" %>')
+    (tmp_path / "Boom.svc").write_bytes(b'<%@ ServiceHost Service="A.Boom" %> BOOM')
+    index = build_csharp_index(tmp_path, [tmp_path / "Ok.svc", tmp_path / "Boom.svc"], 1)
+    assert index_fact(index, "test.hosts") == ["Ok.svc"]
 
 
 def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:
