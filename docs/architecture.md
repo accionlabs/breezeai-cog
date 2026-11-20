@@ -663,6 +663,9 @@ the file:
   │                  33   apollo           typescript_apollo/calls.py                │
   │                  34   aws-sdk-calls    typescript_aws/sdk_calls.py               │
   │                  35   jquery-calls     typescript_jquery/calls.py                │
+  │                  36   axios-calls      typescript_axios/calls.py                 │
+  │                  37   fetch-calls      typescript_fetch/calls.py                 │
+  │                  38   angular-http…    typescript_angular/http_client.py         │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │

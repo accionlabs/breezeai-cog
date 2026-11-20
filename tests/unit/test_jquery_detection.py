@@ -100,15 +100,16 @@ def test_non_selection_load_is_not_jquery() -> None:
 
 
 def test_generic_detection_is_unchanged_for_http_clients(tmp_path) -> None:
-    # axios keeps its generic classification (no framework from this detector); a bare `$.get`
-    # with no jQuery evidence is not promoted to an api_call by the generic classifier either.
+    # axios keeps its generic classification (its framework comes from the axios detector, not
+    # this one); a bare `$.get` with no jQuery evidence is not promoted to an api_call by the
+    # generic classifier either.
     src = b"import axios from 'axios';\naxios.get('/api/a');\n$.get('/api/b');\n"
     p = tmp_path / "a.ts"
     p.write_bytes(src)
     ctx = ParseContext(path="a.ts", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
     api = [s for s in rec.statements if s.semanticType == "api_call"]
-    assert [(s.startLine, s.method, s.framework) for s in api] == [(2, "GET", None)]
+    assert [(s.startLine, s.method, s.framework) for s in api] == [(2, "GET", "axios")]
     assert _jquery(rec) == []
 
 

@@ -201,6 +201,23 @@ first argument when the verb is not first (`exchange(url, HttpMethod.GET, …)`)
 later argument that reads as a path or URL (`request(HttpMethod.PUT, 8080, "host", "/orders")`
 → `/orders`).
 
+`framework` on an `api_call` names the HTTP client, and only from evidence; the shared
+classifier matches clients by name, so on its own it leaves `framework` empty. An additive
+detector labels the statement afterwards — never adding one — when the file binds the client
+and **every** HTTP call in the statement goes through it:
+
+| Client | Evidence in the file | `framework` |
+|---|---|---|
+| jQuery | jQuery imported or loaded by the page | `jquery` |
+| axios | `axios` imported or required, or an instance from its `create(…)`; called as `axios(…)` / `axios.get(…)` / `api.post(…)` | `axios` |
+| Fetch API | `fetch(…)` / `window.fetch(…)` / `globalThis.fetch(…)`, with `fetch` bound by nothing in the file or only by an import from a Fetch implementation (`node-fetch`, `cross-fetch`, `undici`, …) | `fetch` |
+| Angular `HttpClient` | `this.<field>.get(…)` etc., the field a constructor parameter property, typed field or `inject(…)` of `HttpClient` imported from `@angular/common/http`; or `http.get(…)` on a local bound once to `inject(HttpClient)` or typed `HttpClient` | `angular` |
+| Vert.x `HttpClient`, vendor SDKs | the client type | `vertx`, `hubspot`, … |
+
+No evidence — `this.http.get(…)` with no visible type, a wrapper of unknown origin, a name
+bound twice or shadowed by a parameter, `Promise.all([axios.get(a), fetch(b)])` — leaves
+`framework` empty.
+
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
 2. **The receiver:** `orderRepository.findOne` → `typeorm`. A repository name counts only where it
