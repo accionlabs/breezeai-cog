@@ -202,6 +202,26 @@ function f(client: Other) { return client.callTool({ name: "y" }); }
     assert not [s for s in analyze_files(files) if s.semanticType == "mcp_call"]
 
 
+def test_typescript_spread_after_the_name_may_override_it(analyze_files) -> None:
+    """``{ name: "x", ...req }``: the spread may carry its own ``name`` / ``uri``, which wins at
+    runtime → no record. A spread before the literal key is overridden by it → recorded."""
+    src = """
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+const client = new Client({ name: "app", version: "1.0.0" });
+await client.callTool({ name: "search", ...req });
+await client.readResource({ uri: "memo://a", ...opts });
+await client.getPrompt({ name: "review", arguments: {}, ...rest });
+await client.callTool({ ...defaults, name: "kept" });
+await client.readResource({ ...opts, uri: "memo://kept" });
+await client.getPrompt({ ...rest, name: "keptPrompt" });
+"""
+    assert _calls(analyze_files({"client.ts": src})) == [
+        ("TOOL", "kept", "typescript-mcp"),
+        ("RESOURCE", "memo://kept", "typescript-mcp"),
+        ("PROMPT", "keptPrompt", "typescript-mcp"),
+    ]
+
+
 MCPGO_CLIENT = """
 package main
 

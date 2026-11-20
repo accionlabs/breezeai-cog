@@ -22,7 +22,8 @@
   not one. The ``pg`` / ``redis`` ``Client``, and the AI SDK's ``experimental_createMCPClient``
   (not this class), are not MCP clients.
 * ``endpoint`` — ``name`` (``uri`` for ``readResource``) of the object literal passed first, a
-  string literal; anything else → no record.
+  string literal; anything else → no record. A spread after it (``{ name: "x", ...req }``) may
+  override it at runtime → no record; a spread before it is overridden by it.
 * The record is the call's own statement, with no handler. A client-only file gets no
   file-level framework.
 """
@@ -134,6 +135,14 @@ def block_declarations(
                     found.setdefault(bound, value)
         cache[key] = found
     return found
+
+
+def _spread_after(obj: Node, value: Node) -> bool:
+    """True when a spread follows the pair whose value is ``value`` in the object literal
+    ``obj``: it may override the key at runtime (a spread before it is overridden by it)."""
+    return any(
+        c.type == "spread_element" and c.start_byte > value.end_byte for c in obj.named_children
+    )
 
 
 def _detect(dc: DetectContext) -> Detection | None:
@@ -362,6 +371,8 @@ def _detect(dc: DetectContext) -> Detection | None:
         if request is None or request.type != "object":
             continue
         value = _pairs(request, source).get(kind[1])
+        if value is not None and _spread_after(request, value):
+            continue  # `{ name: "x", ...req }`: the spread may carry its own name
         endpoint = (
             _string(value, source)
             if value is not None and value.type in ("string", "template_string")
