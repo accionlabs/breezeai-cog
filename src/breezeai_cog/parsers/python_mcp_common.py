@@ -53,7 +53,8 @@ Resources and prompts, on a server proven as above::
   ``description`` as for a tool.
 * ``mcp_prompt`` — ``endpoint`` is ``name=`` (or the first positional string), else the function
   name; ``params`` are the function's parameters, read as for a tool (the SDK builds the
-  prompt's arguments from them); ``description`` as for a tool.
+  prompt's arguments from them) but with name, required and description only: a prompt
+  argument has no type or default; ``description`` as for a tool.
 * ``enabled=False`` (a literal) → no record, for each kind.
 """
 
@@ -77,10 +78,12 @@ from .mcp_common import (
     RESOURCE,
     TOOL,
     clean_doc,
+    guarded_one,
     mcp_emit,
     param,
     param_json_bytes,
     params_json_bytes,
+    prompt_params,
     uri_template_params,
 )
 from .treesitter import node_text
@@ -737,11 +740,17 @@ def detect_decorated(dc: DetectContext, framework: str) -> Detection | None:
             if hit is None or hit[1] in done or server_framework(hit[0]) != framework:
                 continue  # not a server, or one the other package's detector owns
             _, method, call = hit
-            emit = (
-                _resource(decorator, fn, call, source, framework, functions)
-                if method == "resource"
-                else _tool(decorator, fn, call, source, framework, functions, _KINDS[method])
-            )
+            if method == "tool":
+                emit = _tool(decorator, fn, call, source, framework, functions, TOOL)
+            elif method == "resource":
+                # A failing resource / prompt reader never drops the file's tools.
+                emit = guarded_one(
+                    dc.path, _resource, decorator, fn, call, source, framework, functions
+                )
+            else:
+                emit = guarded_one(
+                    dc.path, _tool, decorator, fn, call, source, framework, functions, PROMPT
+                )
             if emit is _SKIP:
                 continue  # a computed name: the record's name is unknown
             done.add(method)
@@ -767,7 +776,8 @@ def _tool(
     kind: tuple[str, str],
 ) -> Emit | None:
     """The ``mcp_tool`` of ``@x.tool`` or the ``mcp_prompt`` of ``@x.prompt`` (``kind``): both
-    are named and described alike and take the function's parameters; None when
+    are named and described alike and take the function's parameters (a prompt's with no type
+    or default: an MCP prompt argument is a string); None when
     ``enabled=False``; :data:`_SKIP` for a non-literal name."""
     fn_name = node_text(fn.child_by_field_name("name"), source)  # type: ignore[arg-type]
     endpoint: str | None = fn_name
@@ -795,6 +805,8 @@ def _tool(
         params = None  # `exclude_args=` not a literal: which params remain is unknown
     elif excluded and params is not None:
         params = [p for p in params if p.name not in excluded]
+    if kind == PROMPT:
+        params = prompt_params(params)  # a prompt argument has no type or default
     line = fn.start_point[0] + 1
     owner = functions.get((fn_name, line))
     return mcp_emit(

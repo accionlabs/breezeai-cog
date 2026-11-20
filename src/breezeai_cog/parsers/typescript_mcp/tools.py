@@ -74,8 +74,10 @@ from ..mcp_common import (
     TOOL,
     function_lines,
     guarded,
+    guarded_one,
     mcp_emit,
     param,
+    prompt_params,
     uri_template_params,
 )
 from ..treesitter import node_text
@@ -432,10 +434,7 @@ def _prompt_params(shape: Node | None, source: bytes, zod: set[str]) -> list[Par
     """The arguments of a prompt's zod shape: no type or default, as the SDK lists them."""
     if shape is None:
         return []
-    params = _zod_shape(shape, source, zod)
-    if params is None:
-        return None
-    return [param(p.name, None, required=p.required, description=p.description) for p in params]
+    return prompt_params(_zod_shape(shape, source, zod))
 
 
 def _registration(
@@ -558,7 +557,12 @@ def _detect(dc: DetectContext) -> Detection | None:
         if len(args) < 2 or args[-1].type not in (*_CALLBACKS, "call_expression"):
             continue
         callback = _unwrap(args[-1], source, functions, scopes)
-        read = _registration(method, args, source, zod, templates)
+        read = (
+            _registration(method, args, source, zod, templates)
+            if _REGISTRATIONS[method] == TOOL
+            # A failing resource / prompt reader never drops the file's tools.
+            else guarded_one(dc.path, _registration, method, args, source, zod, templates)
+        )
         if read is None:
             continue
         endpoint, description, params = read

@@ -134,7 +134,10 @@ def test_csharp_resources_and_prompts_with_no_tool(analyze_files) -> None:
     assert set(prompts) == {"complex_prompt", "simple_prompt_async"}
     complex_ = prompts["complex_prompt"]
     assert complex_.method == "PROMPT" and complex_.description == "A prompt with arguments"
-    assert [(p.name, p.required, p.description) for p in complex_.params or []] == [
-        ("temperature", True, "Temperature"),
-        ("style", False, None),
+    # A prompt argument has no type or default: only name, required and description.
+    assert [
+        (p.name, p.type, p.required, p.default, p.description) for p in complex_.params or []
+    ] == [
+        ("temperature", None, True, None, "Temperature"),
+        ("style", None, False, None, None),
     ]

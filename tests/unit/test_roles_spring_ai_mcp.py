@@ -453,6 +453,39 @@ def test_spring_ai_kotlin_resources_and_prompts_with_no_tool(analyze_files) -> N
     assert _p(explain) == [("topic", None, True, "Topic")]
 
 
+def test_spring_ai_prompt_map_parameters_are_not_arguments(analyze_files) -> None:
+    """A map parameter of any ``…Map`` type receives the whole arguments map: not an argument."""
+    java = """
+package demo;
+
+import java.util.*;
+import java.util.concurrent.*;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+
+public class Prompts {
+    @McpPrompt(name = "maps")
+    public Object maps(String topic, Map<String, Object> a, TreeMap<String, Object> b,
+                       SortedMap<String, Object> c, NavigableMap<String, Object> d,
+                       ConcurrentMap<String, Object> e, java.util.concurrent.ConcurrentHashMap<String, Object> f) {
+        return null;
+    }
+}
+"""
+    kotlin = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpPrompt
+
+class Prompts {
+    @McpPrompt(name = "maps")
+    fun maps(topic: String, a: MutableMap<String, Any>, b: java.util.TreeMap<String, Any>, c: SortedMap<String, Any>?): Any = TODO()
+}
+"""
+    for path, src in (("src/Prompts.java", java), ("src/Prompts.kt", kotlin)):
+        prompt = _of(analyze_files({path: src}), "mcp_prompt")["maps"]
+        assert _p(prompt) == [("topic", None, False, None)], path
+
+
 def test_spring_ai_resource_look_alikes(analyze_files) -> None:
     src = """
 package demo;

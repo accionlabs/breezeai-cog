@@ -297,7 +297,7 @@ entry points held to the tool rules above (a proven server, a literal address, r
 | `endpoint` | The URI (`config://app`) or URI template (`users://{id}/profile`), as written | The prompt name |
 | `handler` / `handlerLine` | The function that reads it | The function that renders it |
 | `description` | The description the server gives the client, when it is a literal | Same |
-| `params` | A template's variables: each simple `{name}` → `{name, type: "string", required: true}`; `[]` for a fixed URI; unset when the template uses an RFC 6570 operator (`{?q}`, `{+path}`, `{#f}`, `{/s}`, `{.x}`, `{;x}`, `{&x}`), an explode (`{x*}`), a prefix (`{x:3}`) or several variables in one expression | Its arguments: `{name, required, description}` (no `type` or `default`); where the SDK builds them from a function's parameters (FastMCP, C#), those parameters as for a tool |
+| `params` | A template's variables: each simple `{name}` → `{name, type: "string", required: true}`; `[]` for a fixed URI; unset when the template uses an RFC 6570 operator (`{?q}`, `{+path}`, `{#f}`, `{/s}`, `{.x}`, `{;x}`, `{&x}`), an explode (`{x*}`), a prefix (`{x:3}`) or several variables in one expression | Its arguments: `{name, required, description}`, never a `type` or `default` (an MCP prompt argument is a string), for every SDK; where the SDK builds them from a function's parameters (FastMCP, C#), those parameters' names, required (no default) and descriptions |
 
 ```python
 @mcp.resource("users://{user_id}/profile", description="A user's profile")  # → mcp_resource, params [user_id]
@@ -345,6 +345,16 @@ async with ClientSession(read, write) as session:
   the second line of an `if` condition — gets a record of its own on its line instead.
 - **No file framework.** A file with only client calls keeps `framework` unset: it is not an MCP
   server.
+- **A spread after the literal** (`client.callTool({ name: "x", ...req })`) may override it at
+  runtime: no record. A spread before it is overridden by it and changes nothing.
+- **Java, Kotlin and C# clients are proven by name across the file.** A name declared once in
+  the file as a client (typed, or assigned the SDK's factory) is a client wherever that name is
+  called in the file, so a same-named variable reached another way in another class of the same
+  file (inherited, or a Kotlin `with` / scope-function receiver) can be taken for it. Python
+  and TypeScript resolve the call's nearest binding instead.
+- **Client detectors also run on fixture and test files**, unlike the server detectors (an
+  `mcp_call` is outbound, not an entry point): a test that calls a tool through a real client
+  records that call.
 - The contract checks an `mcp_call` like other outbound records (no empty or placeholder
   `endpoint`), and also that it has a `method` of `TOOL` / `RESOURCE` / `PROMPT`, a `framework`, an
   `endpoint` and no handler.

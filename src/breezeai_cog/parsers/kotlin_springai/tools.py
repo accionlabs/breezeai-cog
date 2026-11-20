@@ -52,7 +52,15 @@ from ..jvm_mcp_common import (
     kotlin_type_name,
     walk,
 )
-from ..mcp_common import PROMPT, RESOURCE, mcp_emit, param, tool_emit, uri_template_params
+from ..mcp_common import (
+    PROMPT,
+    RESOURCE,
+    guarded,
+    mcp_emit,
+    param,
+    tool_emit,
+    uri_template_params,
+)
 from ..treesitter import node_text
 
 _MAX_DEFAULT = 200
@@ -161,8 +169,15 @@ def _spring_tool(ann: Node, source: bytes, imported: bool, aliases: dict[str, st
     return text == SPRING_TOOL_FQN or (imported and text == "Tool")
 
 
-#: Parameter types the annotations library does not list as prompt arguments.
-_PROMPT_SKIPPED = INJECTED | {"GetPromptRequest", "Map", "HashMap", "LinkedHashMap", "MutableMap"}
+#: Parameter types the annotations library does not list as prompt arguments; any ``…Map``
+#: (``MutableMap``, ``TreeMap``, ``ConcurrentHashMap``, …) is skipped too: it receives the
+#: arguments map.
+_PROMPT_SKIPPED = INJECTED | {"GetPromptRequest"}
+
+
+def _prompt_skipped(name: str) -> bool:
+    simple = name.rsplit(".", 1)[-1]
+    return simple in _PROMPT_SKIPPED or simple.endswith("Map")
 
 
 def _prompt_params(
@@ -187,7 +202,7 @@ def _prompt_params(
         if name_node is None or type_node is None:
             continue
         base = type_node.named_children[0] if type_node.type == "nullable_type" else type_node
-        if kotlin_type_name(base, source, aliases) in _PROMPT_SKIPPED:
+        if _prompt_skipped(kotlin_type_name(base, source, aliases)):
             continue
         name = node_text(name_node, source)
         ann = _annotations(p_mods, source, aliases).get("McpArg")
@@ -344,7 +359,8 @@ def _annotated_tools(dc: DetectContext) -> list[Emit]:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = _annotated_tools(dc) + _annotated_entries(dc)
+    # A failing resource / prompt reader never drops the file's tools.
+    found = _annotated_tools(dc) + guarded(dc.path, _annotated_entries, dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

@@ -741,9 +741,10 @@ def test_prompts_in_a_file_with_no_tool(analyze_files) -> None:
         "review_code",
         8,
     )
+    # A prompt argument is a string with no default: only name, required and description.
     assert _params(review) == [
-        ("code", "str", True, None, None),
-        ("focus", "str", False, '"bugs"', None),
+        ("code", None, True, None, None),
+        ("focus", None, False, None, None),
     ]
     assert prompts["Explain"].description == "Explain a concept"
     assert prompts["short"].params == []

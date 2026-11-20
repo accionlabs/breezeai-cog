@@ -167,6 +167,136 @@ def test_a_failing_resource_and_prompt_reader_keeps_every_tool(
     assert not [e for e in logs if e["event"] == "additive.detector.failed"]
 
 
+SPRING_JAVA = """
+package demo;
+
+import org.springaicommunity.mcp.annotation.McpTool;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+import org.springaicommunity.mcp.annotation.McpResource;
+
+public class Entries {
+    @McpTool(name = "search", description = "Search")
+    public String search(String q) { return q; }
+
+    @McpResource(uri = "config://app")
+    public String config() { return ""; }
+
+    @McpPrompt(name = "review")
+    public Object review(String code) { return null; }
+}
+"""
+
+SPRING_KOTLIN = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpTool
+import org.springaicommunity.mcp.annotation.McpPrompt
+import org.springaicommunity.mcp.annotation.McpResource
+
+class Entries {
+    @McpTool(name = "search", description = "Search")
+    fun search(q: String): String = q
+
+    @McpResource(uri = "config://app")
+    fun config(): String = ""
+
+    @McpPrompt(name = "review")
+    fun review(code: String): Any = TODO()
+}
+"""
+
+PYTHON_ENTRIES = """
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("demo")
+
+
+@mcp.tool()
+def search(query: str) -> str:
+    return query
+
+
+@mcp.resource("config://app")
+def config() -> str:
+    return ""
+
+
+@mcp.prompt(name="review")
+def review(code: str) -> str:
+    return code
+"""
+
+TYPESCRIPT_ENTRIES = """
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+const mcp = new McpServer({ name: "demo", version: "1" });
+mcp.tool("search", async () => ({ content: [] }));
+mcp.resource("config", "config://app", async () => ({ contents: [] }));
+mcp.prompt("review", { code: z.string() }, async () => ({ messages: [] }));
+"""
+
+CSHARP_ENTRIES = """
+using ModelContextProtocol.Server;
+
+[McpServerToolType]
+public static class Entries
+{
+    [McpServerTool(Name = "search")]
+    public static string Search(string q) => q;
+
+    [McpServerResource(UriTemplate = "config://app")]
+    public static string Config() => "";
+
+    [McpServerPrompt(Name = "review")]
+    public static string Review(string code) => code;
+}
+"""
+
+#: (module, a function only the resource or prompt reader calls, path, source, kind it drops)
+ENTRY_CASES = [
+    ("java_springai.tools", "_annotated_entries", "src/Entries.java", SPRING_JAVA, None),
+    ("kotlin_springai.tools", "_annotated_entries", "src/Entries.kt", SPRING_KOTLIN, None),
+    ("python_mcp_common", "_resource", "srv.py", PYTHON_ENTRIES, "mcp_resource"),
+    ("python_mcp_common", "prompt_params", "srv.py", PYTHON_ENTRIES, "mcp_prompt"),
+    ("typescript_mcp.tools", "_resource_uri", "src/index.ts", TYPESCRIPT_ENTRIES, "mcp_resource"),
+    ("typescript_mcp.tools", "prompt_params", "src/index.ts", TYPESCRIPT_ENTRIES, "mcp_prompt"),
+    ("csharp_mcp.tools", "uri_template_params", "Entries.cs", CSHARP_ENTRIES, "mcp_resource"),
+    ("csharp_mcp.tools", "prompt_params", "Entries.cs", CSHARP_ENTRIES, "mcp_prompt"),
+]
+
+
+@pytest.mark.parametrize(("module", "reader", "path", "src", "dropped"), ENTRY_CASES)
+def test_a_failing_resource_or_prompt_read_in_the_tool_detector_keeps_its_tools(
+    analyze_files, monkeypatch, module, reader, path, src, dropped
+) -> None:
+    """Resources and prompts read inside a tool detector (Spring AI, the Python decorators, the
+    TypeScript ``McpServer`` methods, C# attributes) run guarded: forced to fail, the file's
+    tools stay, and so does the other kind (``dropped`` None: the one reader reads both)."""
+    kinds = ("mcp_tool", "mcp_resource", "mcp_prompt")
+
+    def names(statements) -> dict[str, set[str | None]]:
+        return {k: {s.endpoint for s in statements if s.semanticType == k} for k in kinds}
+
+    everything = names(analyze_files({path: src}))
+    assert everything == {
+        "mcp_tool": {"search"},
+        "mcp_resource": {"config://app"},
+        "mcp_prompt": {"review"},
+    }
+
+    def boom(*args, **kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(f"breezeai_cog.parsers.{module}.{reader}", boom)
+    with capture_logs() as logs:
+        kept = names(analyze_files({path: src}))
+    gone = {dropped} if dropped else {"mcp_resource", "mcp_prompt"}
+    assert kept == {k: set() if k in gone else everything[k] for k in kinds}
+    assert [e for e in logs if e["event"] == "mcp.subreader.failed"]
+    assert not [e for e in logs if e["event"] == "additive.detector.failed"]
+
+
 def test_a_parse_timeout_in_a_subreader_is_not_swallowed() -> None:
     """``guarded`` turns a sub-reader's failure into a warning, but not a ``ParserTimeout``: the
     file's parse budget is spent, and the file is handled like any parse timeout. Nothing

@@ -33,20 +33,31 @@ Resources and prompts, the same way::
   and the parameters, which is not read → no record. ``params`` are the template's simple
   ``{variables}`` (``[]`` for a fixed URI; None with an RFC 6570 operator).
 * ``mcp_prompt`` — ``Name =`` when a literal, else the name derived as for a tool; ``params`` are
-  the method's parameters, read as for a tool (the SDK builds the prompt's arguments from them).
+  the method's parameters, read as for a tool (the SDK builds the prompt's arguments from them)
+  but with name, required and description only: a prompt argument has no type or default.
 * ``description`` — as for a tool.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from tree_sitter import Node
 
 from ...schemas import Parameter
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
-from ..mcp_common import PROMPT, RESOURCE, TOOL, mcp_emit, param, uri_template_params
+from ..mcp_common import (
+    PROMPT,
+    RESOURCE,
+    TOOL,
+    guarded_one,
+    mcp_emit,
+    param,
+    prompt_params,
+    uri_template_params,
+)
 from ..treesitter import node_text
 
 FRAMEWORK = "csharp-mcp"
@@ -214,6 +225,52 @@ _ATTRIBUTES = (
 )
 
 
+def _entry(
+    method: Node,
+    method_name: str,
+    attr: Node,
+    attrs: dict[str, Node],
+    kind: tuple[str, str],
+    source: bytes,
+    functions: dict[tuple[str, int], Any],
+) -> Emit | None:
+    """The record ``attr`` (``[McpServerTool]`` / ``Resource`` / ``Prompt``) declares on
+    ``method``; None for a computed name or URI."""
+    params: list[Parameter] | None
+    if kind == RESOURCE:
+        endpoint = _string(_named_arg(attr, "UriTemplate", source), source)
+        params = uri_template_params(endpoint) if endpoint else None
+    else:
+        named = _named_arg(attr, "Name", source)
+        endpoint = (
+            _string(named, source)
+            if named is not None
+            else _derived_name(method, method_name, source)
+        )
+        params = _params(method, source)
+        if kind == PROMPT:
+            params = prompt_params(params)  # a prompt argument has no type or default
+    if not endpoint:
+        return None  # a computed name: the record exists, but its name is unknown
+    line = method.start_point[0] + 1
+    owner = functions.get((method_name, line))
+    description = _positional_string(attrs.get("Description"), source) or _xml_summary(
+        method, source
+    )
+    return mcp_emit(
+        attr,
+        source,
+        kind=kind,
+        endpoint=endpoint,
+        framework=FRAMEWORK,
+        handler=method_name,
+        handler_line=line,
+        description=description,
+        params=params,
+        parent=owner.id if owner is not None else None,
+    )
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     functions = {(f.name, f.startLine): f for f in dc.record.functions}
@@ -230,39 +287,11 @@ def _detect(dc: DetectContext) -> Detection | None:
             attr = attrs.get(attr_name)
             if attr is None:
                 continue
-            params: list[Parameter] | None
-            if kind == RESOURCE:
-                endpoint = _string(_named_arg(attr, "UriTemplate", source), source)
-                params = uri_template_params(endpoint) if endpoint else None
-            else:
-                named = _named_arg(attr, "Name", source)
-                endpoint = (
-                    _string(named, source)
-                    if named is not None
-                    else _derived_name(method, method_name, source)
-                )
-                params = _params(method, source)
-            if not endpoint:
-                continue  # a computed name: the record exists, but its name is unknown
-            line = method.start_point[0] + 1
-            owner = functions.get((method_name, line))
-            description = _positional_string(attrs.get("Description"), source) or _xml_summary(
-                method, source
-            )
-            found.append(
-                mcp_emit(
-                    attr,
-                    source,
-                    kind=kind,
-                    endpoint=endpoint,
-                    framework=FRAMEWORK,
-                    handler=method_name,
-                    handler_line=line,
-                    description=description,
-                    params=params,
-                    parent=owner.id if owner is not None else None,
-                )
-            )
+            args = (method, method_name, attr, attrs, kind, source, functions)
+            # A failing resource / prompt reader never drops the file's tools.
+            emit = _entry(*args) if kind == TOOL else guarded_one(dc.path, _entry, *args)
+            if emit is not None:
+                found.append(emit)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

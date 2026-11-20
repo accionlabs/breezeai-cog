@@ -64,7 +64,15 @@ from ..jvm_mcp_common import (
     java_string,
     walk,
 )
-from ..mcp_common import PROMPT, RESOURCE, mcp_emit, param, tool_emit, uri_template_params
+from ..mcp_common import (
+    PROMPT,
+    RESOURCE,
+    guarded,
+    mcp_emit,
+    param,
+    tool_emit,
+    uri_template_params,
+)
 from ..treesitter import node_text
 
 
@@ -135,8 +143,13 @@ def _spring_tool(ann: Node, source: bytes, imported: bool) -> bool:
     return text == SPRING_TOOL_FQN or (imported and text == "Tool")
 
 
-#: Parameter types the annotations library does not list as prompt arguments.
-_PROMPT_SKIPPED = INJECTED | {"GetPromptRequest", "Map", "HashMap", "LinkedHashMap"}
+#: Parameter types the annotations library does not list as prompt arguments; any ``…Map``
+#: (``TreeMap``, ``ConcurrentHashMap``, …) is skipped too: it receives the arguments map.
+_PROMPT_SKIPPED = INJECTED | {"GetPromptRequest"}
+
+
+def _prompt_skipped(simple_name: str) -> bool:
+    return simple_name in _PROMPT_SKIPPED or simple_name.endswith("Map")
 
 
 def _prompt_params(method: Node, source: bytes) -> list[Parameter] | None:
@@ -150,7 +163,7 @@ def _prompt_params(method: Node, source: bytes) -> list[Parameter] | None:
         type_node, name_node = p.child_by_field_name("type"), p.child_by_field_name("name")
         if type_node is None or name_node is None:
             continue
-        if node_text(type_node, source).split("<")[0].rsplit(".", 1)[-1] in _PROMPT_SKIPPED:
+        if _prompt_skipped(node_text(type_node, source).split("<")[0].rsplit(".", 1)[-1]):
             continue
         name = node_text(name_node, source)
         ann = _annotations(p, source).get("McpArg")
@@ -287,7 +300,8 @@ def _annotated_tools(dc: DetectContext) -> list[Emit]:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = _annotated_tools(dc) + _annotated_entries(dc)
+    # A failing resource / prompt reader never drops the file's tools.
+    found = _annotated_tools(dc) + guarded(dc.path, _annotated_entries, dc)
     if not found:
         return None
     found.sort(key=lambda e: (e.start_line, e.node.start_point[1]))

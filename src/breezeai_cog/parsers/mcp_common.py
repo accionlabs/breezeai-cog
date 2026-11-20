@@ -19,6 +19,7 @@ imported from where it is constructed) and its name is a literal: an agent frame
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import re
@@ -152,6 +153,26 @@ def guarded(path: str, reader: Callable[..., list[_T]], *args: Any) -> list[_T]:
             error=f"{type(exc).__name__}: {exc}"[:500],
         )
         return []
+
+
+def guarded_one(path: str, reader: Callable[..., _T], *args: Any) -> _T | None:
+    """``reader(*args)`` — a reader of one record (or None) — under :func:`guarded`: None when
+    it fails. For a resource or prompt read inside a tool detector's loop."""
+
+    @functools.wraps(reader)
+    def one(*a: Any) -> list[_T]:
+        return [reader(*a)]
+
+    found = guarded(path, one, *args)
+    return found[0] if found else None
+
+
+def prompt_params(params: list[Parameter] | None) -> list[Parameter] | None:
+    """A prompt's arguments: name, required and description only. An MCP prompt argument is a
+    string with no type or default (``PromptArgument``), whatever the signature declares."""
+    if params is None:
+        return None
+    return [param(p.name, None, required=p.required, description=p.description) for p in params]
 
 
 def clean_doc(text: str | None) -> str | None:
