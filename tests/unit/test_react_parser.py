@@ -10,6 +10,7 @@ from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import BaseParser, ParseContext
 from breezeai_cog.parsers.typescript_react.parser import ReactParser
+from breezeai_cog.parsers.typescript_react.routes import _collect_route_modules
 from breezeai_cog.schemas import FileRecord
 
 # Declarative JSX <Route> form (with nesting).
@@ -552,6 +553,72 @@ def test_react_only_file_has_no_routes(analyze_files) -> None:
         ),
     })
     assert [s for s in st if s.semanticType == "route" and s.routeKind == "page"] == []
+
+
+def _routes_by_file(st) -> set[tuple[str, str | None, str | None]]:
+    return {(s.path, s.endpoint, s.handler) for s in st
+            if s.semanticType == "route" and s.framework == "react"}
+
+
+def test_split_route_file_passed_to_the_router_has_routes(analyze_files) -> None:
+    st = analyze_files({
+        "src/main.tsx": RR + "import routes from './routes';\n"
+                             "export const r = createBrowserRouter(routes);\n",
+        # a second router over the same list: still one record per route
+        "src/test-router.tsx": RR + "import routes from './routes';\n"
+                                    "export const r = createBrowserRouter(routes);\n",
+        "src/routes.tsx": (
+            "export default [ { path: '/a', element: <A /> },\n"
+            "  { path: '/b', element: <B />, children: [ { path: 'c', element: <C /> } ] } ];\n"
+        ),
+    })
+    assert _routes_by_file(st) == {("src/routes.tsx", "/a", "A"), ("src/routes.tsx", "/b", "B"),
+                                   ("src/routes.tsx", "/b/c", "C")}
+
+
+def test_split_routes_followed_through_spreads_barrels_and_layouts(analyze_files) -> None:
+    st = analyze_files({
+        "src/main.tsx": (
+            "import { useRoutes } from 'react-router-dom';\n"
+            "import { adminRoutes } from './routes';\n"
+            "const userRoutes = require('./user');\n"
+            "export function App() { return useRoutes([ ...adminRoutes,\n"
+            "  { element: <Shell />, children: userRoutes }, { path: '/', element: <Home /> } ]); }\n"
+        ),
+        "src/routes/index.ts": "export { adminRoutes } from './admin';\n",
+        "src/routes/admin.tsx": (
+            "import { reportRoutes } from './reports';\n"
+            "export const adminRoutes = [ { path: '/admin', element: <Admin /> }, ...reportRoutes ];\n"
+        ),
+        "src/routes/reports.tsx": "export const reportRoutes = [ { path: '/reports', element: <Rep /> } ];\n",
+        "src/user.tsx": "module.exports = [ { path: '/me', element: <Me /> } ];\n",
+    })
+    assert _routes_by_file(st) == {
+        ("src/main.tsx", "/", "Home"), ("src/routes/admin.tsx", "/admin", "Admin"),
+        ("src/routes/reports.tsx", "/reports", "Rep"), ("src/user.tsx", "/me", "Me")}
+
+
+def test_split_lists_the_router_does_not_take_have_no_routes(analyze_files) -> None:
+    st = analyze_files({
+        "src/main.tsx": RR + (
+            "import { menu } from './menu';\n"
+            "import { adminChildren } from './admin';\n"
+            "import { buildRoutes } from './build';\n"
+            "export const r = createBrowserRouter([\n"
+            "  { path: '/admin', element: <Admin />, children: adminChildren } ]);\n"
+            "export const r2 = createBrowserRouter(buildRoutes());\n"
+            "export const nav = menu.map((m) => m.path);\n"
+        ),
+        # a list a function returns: what it returns is not read
+        "src/build.tsx": "export const buildRoutes = () => [ { path: '/b', element: <B /> } ];\n",
+        # a menu the router file reads but never routes through
+        "src/menu.tsx": "export const menu = [ { path: '/t1', component: T1 } ];\n",
+        # children of `/admin`: their file doesn't know the parent's path, so never `/users`
+        "src/admin.tsx": "export const adminChildren = [ { path: 'users', element: <U /> } ];\n",
+    })
+    assert _routes_by_file(st) == {("src/main.tsx", "/admin", "Admin")}
+    # with no repo to resolve imports against, nothing is collected
+    assert _collect_route_modules(None, b"react-router", "src/main.tsx", None) is None
 
 
 def test_vue_router_holding_the_text_react_has_no_react_routes(analyze_files) -> None:

@@ -21,8 +21,11 @@ also imports a ``@nestjs/…`` DTO in a monorepo is the NestJS parser's — so t
 TypeScript file that mentions ``react-router`` (``react-router-dom``, ``@react-router/dev``),
 whatever parser owns it. A file that never mentions it has no routes, whatever its arrays look
 like: a plain component's tab or menu list (``[{ path, component }]``) is data, and so is a Vue
-router that holds the text ``'react'``. A route list split into a file without the import (no
-``RouteObject`` type, a wouter ``<Route>``) is not recorded either (when unsure, record less).
+router that holds the text ``'react'``. A route list split into a file without the import counts
+when a React Router call takes it, through imports (:data:`ROUTE_MODULES_FACT`): passed in,
+spread in, as a pathless layout's ``children``, or through a barrel that re-exports it. A list
+mounted as the ``children`` of a route with a path is not followed (its paths hang off a parent
+that file doesn't know), and a wouter ``<Route>`` is not React Router (when unsure, record less).
 
 Paths: a nested path that starts with ``/`` is absolute (React Router requires it to repeat its
 parents' path), so it is not joined onto them. A constant path (``PATHS.home``, a `${…}` template
@@ -41,15 +44,32 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection
+from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
 from ...emit import file_id
-from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..additive import (
+    DetectContext,
+    Detection,
+    Detector,
+    FactSpec,
+    Gate,
+    index_fact,
+    register_detector,
+    register_fact,
+)
 from ..emits import Emit
 from ..navigation_common import literal
 from ..treesitter import entry_text, node_text
-from ..typescript.imports import resolve_const_value
+from ..typescript.imports import (
+    _imported_names,
+    _module_of,
+    _resolve,
+    relative_requires,
+    resolve_const_value,
+)
 
 
 def _join(base: str, sub: str) -> str:
@@ -516,8 +536,110 @@ def detect_react_routes(root: Node, source: bytes, path: str, *,
 REACT_GUARDS = (b"react-router", b"'react'", b'"react"')
 
 
+# ---- route modules: a route list split into a file without the import ----------
+
+#: The React Router calls that take a route list.
+_ROUTER_CALLS = frozenset({
+    "createBrowserRouter", "createHashRouter", "createMemoryRouter", "createStaticRouter",
+    "useRoutes",
+})
+#: ``react.route-modules``: files whose route lists reach a React Router call through imports.
+ROUTE_MODULES_FACT = "react.route-modules"
+
+
+def _list_refs(node: Node, source: bytes) -> set[str]:
+    """Names a route list takes top-level routes from: the list itself
+    (``createBrowserRouter(routes)``), a ``...spread`` in it, or the ``children`` of a pathless
+    layout in it. ``children`` under a route with a path are not followed: their paths hang off a
+    parent the other file doesn't know (when unsure, record less)."""
+    if node.type == "identifier":
+        return {node_text(node, source)}
+    refs: set[str] = set()
+    if node.type != "array":
+        return refs  # createBrowserRouter(buildRoutes()): not a list to follow
+    for e in node.named_children:
+        if e.type == "spread_element" and e.named_children \
+                and e.named_children[0].type == "identifier":
+            refs.add(node_text(e.named_children[0], source))
+        elif e.type == "object" and "path" not in _keys(e, source):
+            children = _pairs(e, source).get("children")
+            if children is not None:
+                refs |= _list_refs(children, source)
+    return refs
+
+
+def _import_modules(root: Node, source: bytes) -> dict[str, str]:
+    """Local name → the module specifier it is imported (or required) from."""
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type == "import_statement":
+            module = _module_of(node, source)
+            if module is not None:
+                for name in _imported_names(node, source):
+                    out[name] = module
+    for name, (module, _) in relative_requires(root, source).items():
+        out.setdefault(name, module)
+    return out
+
+
+def _collect_route_modules(root: Node, source: bytes, rel: str,
+                           repo_root: Path | None) -> tuple[str, str, list[str], list[str]] | None:
+    """One file's part of :data:`ROUTE_MODULES_FACT`: the modules whose lists it passes to a
+    React Router call (only in a file that mentions ``react-router``), and the modules its own
+    lists and re-exports take routes from (followed only once the file is a route module)."""
+    if repo_root is None:
+        return None
+    imports = _import_modules(root, source)
+    calls: list[Node] = []
+    _walk(root, "call_expression", calls)
+    router: set[str] = set()
+    if b"react-router" in source:
+        for call in calls:
+            args = _call_args(call)
+            if _callee_name(call, source) in _ROUTER_CALLS and args:
+                router |= {imports[n] for n in _list_refs(args[0], source) if n in imports}
+    arrays: list[Node] = []
+    _walk(root, "array", arrays)
+    listed = {imports[n] for arr in arrays for n in _list_refs(arr, source) if n in imports}
+    listed |= {m for node in root.named_children
+               if node.type == "export_statement" and node.child_by_field_name("source") is not None
+               and (m := _module_of(node, source)) is not None}
+    if not router and not listed:
+        return None
+    return rel, str(repo_root), sorted(router), sorted(listed)
+
+
+def _resolve_route_modules(values: list[tuple[str, str, list[str], list[str]]],
+                           index: Any) -> frozenset[str] | None:
+    """The files a React Router call takes routes from, through any chain of imports. A file's
+    own lists are resolved only once it is reached."""
+    def files(rel: str, root: str, modules: list[str]) -> set[str]:
+        return {f for m in modules if (f := _resolve(m, rel, Path(root), index)) is not None}
+
+    listed = {rel: (root, mods) for rel, root, _, mods in values}
+    found: set[str] = set()
+    todo = [f for rel, root, router, _ in values for f in files(rel, root, router)]
+    while todo:
+        f = todo.pop()
+        if f in found:
+            continue
+        found.add(f)
+        if f in listed:
+            todo.extend(files(f, *listed[f]))
+    return frozenset(found) or None
+
+
+register_fact(FactSpec(
+    # `export *` / `export {…} from`: a barrel that re-exports a route list has no `path` itself
+    name=ROUTE_MODULES_FACT, language="typescript",
+    gate=(b"react-router", b"path", b"export *", b"export {"),
+    collect=_collect_route_modules, resolve=_resolve_route_modules,
+))
+
+
 def _detect(dc: DetectContext) -> Detection | None:
-    if b"react-router" not in dc.source:
+    if b"react-router" not in dc.source and dc.path not in (
+            index_fact(dc.ctx.resolution_index, ROUTE_MODULES_FACT) or ()):
         return None  # a component's `{ path, component }` list, or a Vue / Angular router
     routes = detect_react_routes(
         dc.root, dc.source, dc.path,

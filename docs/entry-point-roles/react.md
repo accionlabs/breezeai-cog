@@ -23,7 +23,9 @@ a `@nestjs/…` DTO in a monorepo) keeps its routes.
 | Nested path starting with `/` (`/p/kid` under `/p`) | Binding | `endpoint` = the path as written, not joined onto the parent | React Router requires an absolute child to repeat its parents' path |
 | `path` a constant (`PATHS.home`, `HOME`, a `${…}` template of consts), in this file or imported | Binding | `endpoint` = the constant's value | Folded through the repo-wide constants, as for v7 `route()` |
 | `path` not a literal and not a constant that folds (`undefined`, `'/a/' + id`, a missing key, shorthand `path`) | Binding | `endpoint` empty, and the relative paths under it too | The address is unknown; never the expression's text |
-| `{ path, … }` arrays in a file that never mentions `react-router` (a component's tab or menu list, a Vue router, a route list split into a file without the import) | None | — | Not router config; when unsure, record less |
+| `{ path, … }` arrays in a file that never mentions `react-router` and whose lists no React Router call takes (a component's tab or menu list, a Vue router) | None | — | Not router config; when unsure, record less |
+| A route list split into a file without the import, that a React Router call takes through imports: passed in (`createBrowserRouter(routes)`, `useRoutes(routes)`), spread in, as a pathless layout's `children`, or through a re-exporting barrel | Binding (in the list's file) | as a route in the router file | Followed through any chain of imports, tsconfig/Vite aliases and `require` |
+| A split list mounted as the `children` of a route with a path (`{ path: '/admin', children: adminChildren }`) | None | — | Its paths hang off a parent its file doesn't know; never a guessed URL |
 | v7 `route(path, file)` / `index(file)` | Binding | `route`, `page`; `handler` = the module's component, never the file path | One route module |
 | v7 `layout(file, [...])` | Wiring | statement stays plain | A layout around its children |
 | v7 `prefix(base, [...])` | Wiring | statement stays plain; `base` prefixes the children | Prefix only |
