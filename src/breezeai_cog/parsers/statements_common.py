@@ -471,7 +471,7 @@ def classify_statement(
         # SQL built up in a local and passed to a data-access call: checked like a literal
         # argument would be, so the call reads as it would with the query written inline.
         if (built is not None and (classified is None or classified[0] == "db_method_call")
-                and (classified is not None or is_sql_sink(det[1])
+                and (classified is not None or is_sql_sink(det[1], det[0])
                      or is_sql_command_type(det[1]))
                 and is_query(det[1], built)):
             classified = ("query_statement", det[1], None)

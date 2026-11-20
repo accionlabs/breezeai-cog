@@ -83,23 +83,34 @@ _SQL_VERB = re.compile(r"\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|MERGE)\b
 
 def built_string_has_query(parts: "list[str]") -> bool:
     """True if a string built from ``parts`` (a local's literals, joined as
-    ``string_has_query`` joins them) starts with SQL. Built SQL starts with its verb in the
+    ``string_has_query`` joins them) starts with SQL — the check a call's literal argument gets
+    (``is_query``), so ``WITH … AS (…) SELECT`` counts. Built SQL starts with its verb in the
     first piece, so a verb further in (HTML or prose appended later) never counts."""
-    joined = " ".join(parts)
-    return bool(_SQL_VERB.match(joined) and _SQL_AT_START.match(joined))
+    return bool(_SQL_RE.match(" ".join(parts)))
 
 
-# Calls that run the SQL string they are given: DB-API ``execute``/``executemany``, PHP
-# ``query``/``exec``/``prepare``, Dapper ``Query*``/``Execute*``, ADO.NET ``Execute*``,
-# pandas ``read_sql``, Django ``raw``, Laravel ``DB::select``/``statement``, ``$wpdb``
-# ``get_results``/``get_var``/``get_row``/``get_col``, node-sqlite ``run``/``all``.
-_SQL_SINK_PREFIXES = ("query", "execute", "exec")
+# Calls that run the SQL string they are given, on any receiver: DB-API and ADO.NET
+# ``execute*``, ``prepare*``, pandas ``read_sql``, EF ``FromSqlRaw``, JPA/Hibernate native
+# queries, ``$wpdb`` ``get_results``/``get_var``/``get_row``/``get_col``, JDBC ``addBatch``.
+_SQL_SINK_PREFIXES = ("execute",)
 _SQL_SINKS = frozenset({
-    "prepare", "preparestatement", "preparecall", "read_sql", "read_sql_query", "raw",
-    "rawquery", "fromsqlraw", "fromsql", "sqlquery", "createnativequery", "createsqlquery",
-    "nativequery", "statement", "unprepared", "select", "get_results", "get_var", "get_row",
-    "get_col", "run", "all", "addbatch",
+    "prepare", "preparestatement", "preparecall", "read_sql", "read_sql_query", "rawquery",
+    "fromsqlraw", "fromsql", "sqlquery", "createnativequery", "createsqlquery", "nativequery",
+    "get_results", "get_var", "get_row", "get_col", "addbatch",
 })
+# Names that run SQL only on a database handle (PHP/node ``db.query``, Dapper ``conn.Query*``,
+# node-sqlite ``db.run``/``db.all``, Laravel ``DB::select``/``statement``, Django ``raw``):
+# elsewhere they are an LLM chain's ``run``, an index's ``query``, a process's ``exec``.
+_HANDLE_SINK_PREFIXES = ("query", "exec")
+_HANDLE_SINKS = frozenset({"run", "all", "select", "statement", "raw", "unprepared"})
+_NEVER_SINK_PREFIXES = ("queryselector",)  # DOM ``querySelector*``
+# A receiver that names a database handle: ``db``, ``conn``, ``cursor``, ``pool``, ``$wpdb``,
+# ``DB::``, ``jdbcTemplate``, ``session``, ``client``…
+_DB_HANDLE = re.compile(
+    r"^(?:con|cnn|cur|pg|tx|trx|client|pool|session|stmt|statement|knex|sequelize|template"
+    r"|transaction|adapter)$|db|conn|sql|cursor|jdbc|database|pdo",
+    re.IGNORECASE,
+)
 # Database command types whose constructor takes the SQL (``new SqlCommand(sql, conn)``).
 _SQL_COMMAND = re.compile(
     r"^(?:\w+\.)*(?:Sql|SqlCe|OleDb|Odbc|Oracle|MySql|Npgsql|Sqlite|SQLite|DB2|Db2|Fb|Ifx|Db)"
@@ -116,10 +127,20 @@ _SQL_ARGUMENT = {
 }
 
 
-def is_sql_sink(method: str) -> bool:
-    """Whether a call by this name runs the SQL string passed to it (see ``sql_argument``)."""
+def is_sql_sink(method: str, callee: str = "") -> bool:
+    """Whether a call runs the SQL string passed to it (see ``sql_argument``). ``callee`` is
+    the call's full target (``self.db.query``); a generic name counts only when the receiver
+    just before it names a database handle."""
     m = method.lower()
-    return m.startswith(_SQL_SINK_PREFIXES) or m in _SQL_SINKS or m in _SQL_ARGUMENT
+    if m.startswith(_NEVER_SINK_PREFIXES):
+        return False
+    if m.startswith(_SQL_SINK_PREFIXES) or m in _SQL_SINKS or m in _SQL_ARGUMENT:
+        return True
+    if not (m.startswith(_HANDLE_SINK_PREFIXES) or m in _HANDLE_SINKS):
+        return False
+    words = re.findall(r"[A-Za-z_]\w*", callee)
+    at = max((i for i, w in enumerate(words) if w.lower() == m), default=-1)
+    return at > 0 and bool(_DB_HANDLE.search(words[at - 1]))
 
 
 def sql_argument(method: str, count: int) -> int:

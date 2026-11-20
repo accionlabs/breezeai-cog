@@ -253,7 +253,8 @@ class _Pass:
         for node in nodes:
             if node.type in _BINDING_NAMES:
                 self.out.add(self.key(node))
-            elif node.type in _NAMES and node.id not in self.handled and self.binds(node):
+            elif node.type in _NAMES and (self.referenced(node) or (
+                    node.id not in self.handled and self.binds(node))):
                 self.out.add(self.key(node))
         self.leave_out_mentioned(nested)
         return self.result()
@@ -356,6 +357,8 @@ class _Pass:
             self.check_command_text(target, value)
             return  # a field, an element, a property — not a local
         self.handled.add(_strip(target).id)
+        if name in self.out:
+            return  # already left out: nothing more to follow
         if op in ("let", "decl") and name in self.locals:
             self.out.add(name)  # declared again (a JS block scope): a different local
             return
@@ -376,6 +379,7 @@ class _Pass:
                 self.out.add(name)
                 return
             parts, deps, built = got
+            built = built or bool(deps)  # ``sql = base + "FROM t"``: base was set before
             if local is None:
                 local = self.locals[name] = _Local(parts=parts, built=built, deps=deps,
                                                    recorded=self.holds_query(value))
@@ -406,6 +410,7 @@ class _Pass:
     def cap(self, name: str, local: _Local) -> None:
         if len(local.parts) > _MAX_PARTS or sum(map(len, local.parts)) > _MAX_CHARS:
             self.out.add(name)
+            local.parts = []
 
     def parts_of(self, value: Node) -> tuple[list[str], set[str], bool] | None:
         """``(pieces, locals read, built)`` of a value, or ``None`` when a piece is not a
@@ -461,7 +466,8 @@ class _Pass:
         """``(receiver, method name, arguments)`` for ``x.m(…)`` in the six grammars."""
         if call.type not in _CALLS:
             return None
-        obj, name = call.child_by_field_name("object"), call.child_by_field_name("name")
+        obj = call.child_by_field_name("object") or call.child_by_field_name("scope")  # PHP ``A::m``
+        name = call.child_by_field_name("name")
         if obj is None or name is None:
             fn = call.child_by_field_name("function") or call.child_by_field_name("target")
             if fn is None:
@@ -509,6 +515,8 @@ class _Pass:
         return self.key(n), list(reversed(args))
 
     def apply_appends(self, name: str, args: list[tuple[Node, bool]]) -> None:
+        if name in self.out:
+            return
         local = self.locals.get(name)
         if local is None or not local.builder:
             self.out.add(name)
@@ -546,9 +554,10 @@ class _Pass:
             sink = type_node is not None and is_sql_command_type(self.text(type_node))
         else:
             fn = node.child_by_field_name("function") or node.child_by_field_name("target")
-            method = call[1] if call is not None else (
-                self.text(fn).rsplit(".", 1)[-1] if fn is not None else "")
-            sink = is_sql_sink(method) or is_sql_command_type(method)
+            callee = self.text(fn) if fn is not None else (
+                f"{self.text(call[0])}.{call[1]}" if call is not None else "")
+            method = call[1] if call is not None else callee.rsplit(".", 1)[-1]
+            sink = is_sql_sink(method, callee) or is_sql_command_type(method)
             if self.language == "php" and method.lower() == "extract":
                 self.unknowable = True
         named = args.named_children
@@ -594,6 +603,18 @@ class _Pass:
                 owner = owner.parent
             if owner is not None:
                 self.uses.append(_Use(name, list(local.parts), owner, direct=True))
+
+    @staticmethod
+    def referenced(node: Node) -> bool:
+        """A PHP reference to the name (``$r = &$sql``, ``[&$sql]``, ``f(&$sql)``,
+        ``foreach (… as &$sql)``): anything may change it through the alias."""
+        parent = node.parent
+        if parent is None:
+            return False
+        if parent.type in ("by_ref", "reference_assignment_expression"):
+            return True
+        return parent.type == "argument" and any(
+            c.type == "reference_modifier" for c in parent.named_children)
 
     # ── bindings the pass did not recognise ──────────────────────────────────
     def binds(self, node: Node) -> bool:
