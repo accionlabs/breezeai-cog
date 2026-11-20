@@ -35,6 +35,7 @@ from ..typescript.imports import (
     _module_of,
     _relative_import_map,
     _path_pieces,
+    _require_module,
     _resolve_pieces,
     _string_literal,
     _try_paths,
@@ -68,10 +69,62 @@ def _is_require_express(node: Node | None, source: bytes) -> bool:
             and _string_literal(first, source) == "express")
 
 
-def is_router_call(node: Node | None, source: bytes) -> bool:
+#: Packages whose ``Router`` is an Express router: Express, the ``router`` package Express is built
+#: on, and drop-in async wrappers of it.
+EXPRESS_PACKAGES = frozenset({"express", "router", "express-promise-router", "@awaitjs/express"})
+
+
+def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """Local name → (package, the export it binds; ``*`` for the default / namespace) for the
+    file's package imports and top-level ``require``s: ``import swaggerUi from
+    'swagger-ui-express'`` → ``swaggerUi: ('swagger-ui-express', '*')``; ``const { graphqlHTTP }
+    = require('express-graphql')`` → ``graphqlHTTP: ('express-graphql', 'graphqlHTTP')``.
+    Relative imports are left out (they are the repo's own code)."""
+    out: dict[str, tuple[str, str]] = {}
+    for node in root.named_children:
+        if node.type == "import_statement":
+            module = _module_of(node, source)
+            clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+            if module is None or module.startswith(".") or clause is None:
+                continue
+            for c in clause.named_children:
+                if c.type == "identifier":
+                    out[node_text(c, source)] = (module, "*")
+                elif c.type == "namespace_import":
+                    ident = next((x for x in c.named_children if x.type == "identifier"), None)
+                    if ident is not None:
+                        out[node_text(ident, source)] = (module, "*")
+                elif c.type == "named_imports":
+                    for spec in c.named_children:
+                        idents = [x for x in spec.named_children if x.type == "identifier"]
+                        if spec.type == "import_specifier" and idents:
+                            out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
+        elif node.type in ("lexical_declaration", "variable_declaration"):
+            for d in node.named_children:
+                name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
+                value = d.child_by_field_name("value")
+                module = _require_module(value, source) \
+                    if name is not None and value is not None and value.type == "call_expression" \
+                    else None
+                if name is None or module is None or module.startswith("."):
+                    continue
+                if name.type == "identifier":
+                    out[node_text(name, source)] = (module, "*")
+                elif name.type == "object_pattern":
+                    for prop in name.named_children:
+                        if prop.type == "shorthand_property_identifier_pattern":
+                            out[node_text(prop, source)] = (module, node_text(prop, source))
+    return out
+
+
+def is_router_call(
+    node: Node | None, source: bytes, packages: dict[str, tuple[str, str]] | None = None,
+) -> bool:
     """``Router(...)`` / ``express.Router(...)`` / ``require('express').Router(...)`` (optionally
     ``new``) — an Express router instance. The constructor decides, never the variable it is
-    bound to: ``$.Router()`` or ``require('other').Router()`` is not one."""
+    bound to: ``$.Router()`` or ``require('other').Router()`` is not one, and neither is a
+    ``Router`` imported from a package other than Express (``packages``: the file's
+    :func:`package_locals`; ``import { Router } from '@koa/router'``)."""
     if node is not None and node.type == "new_expression":
         fn = node.child_by_field_name("constructor")
     elif node is not None and node.type == "call_expression":
@@ -81,7 +134,8 @@ def is_router_call(node: Node | None, source: bytes) -> bool:
     if fn is None:
         return False
     if node_text(fn, source) in {"Router", "express.Router"}:
-        return True
+        origin = (packages or {}).get(node_text(fn, source).split(".", 1)[0])
+        return origin is None or origin[0] in EXPRESS_PACKAGES
     prop = fn.child_by_field_name("property") if fn.type == "member_expression" else None
     return (prop is not None and node_text(prop, source) == "Router"
             and _is_require_express(fn.child_by_field_name("object"), source))
@@ -91,12 +145,13 @@ def router_locals(root: Node, source: bytes) -> set[str]:
     """Variables bound to an Express router instance anywhere in the file
     (``const r = Router()`` / ``express.Router()`` / ``require('express').Router()``)."""
     out: set[str] = set()
+    packages = package_locals(root, source)
 
     def walk(node: Node) -> None:
         if node.type == "variable_declarator":
             name = node.child_by_field_name("name")
             if (name is not None and name.type == "identifier"
-                    and is_router_call(node.child_by_field_name("value"), source)):
+                    and is_router_call(node.child_by_field_name("value"), source, packages)):
                 out.add(node_text(name, source))
         for c in node.named_children:
             walk(c)

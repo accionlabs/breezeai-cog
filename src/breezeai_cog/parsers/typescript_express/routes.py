@@ -25,11 +25,14 @@ from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
     _path_pieces, _resolve_pieces,
-    _module_of, _require_module, relative_requires, resolve_const_value,
+    _require_module, relative_requires, resolve_const_value,
     runtime_path_template,
 )
 from ..wiring import compose_guards
-from .mounts import _PATH_EXPRESSIONS, express_mounts, is_router_call, mw_name, router_locals
+from .mounts import (
+    _PATH_EXPRESSIONS, EXPRESS_PACKAGES, express_mounts, is_router_call, mw_name, package_locals,
+    router_locals,
+)
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -44,10 +47,17 @@ def _invocations(root: Node) -> list[Node]:
     out: list[Node] = []
 
     def walk(n: Node) -> None:
+        # A call's callee comes before the call: in ``app.route(p).get(a).post(b)`` the ``.get``
+        # call is inside the ``.post`` call's callee, so the chain comes out in source order. Its
+        # arguments (a handler's own calls) still come after it.
+        fn = n.child_by_field_name("function") if n.type == "call_expression" else None
+        if fn is not None:
+            walk(fn)
         if n.type == "call_expression":
             out.append(n)
         for c in n.named_children:
-            walk(c)
+            if fn is None or c != fn:
+                walk(c)
 
     walk(root)
     return out
@@ -73,10 +83,13 @@ _PLAIN_VALUES = frozenset({
 })
 
 
-def plain_locals(root: Node, source: bytes) -> frozenset[str]:
+def plain_locals(
+    root: Node, source: bytes, packages: dict[str, tuple[str, str]] | None = None,
+) -> frozenset[str]:
     """Names every binding of which in this file is a plain value (:data:`_PLAIN_VALUES`, or
-    ``new X()`` of a class other than ``Router``). A name bound to a call (``createApp()``,
-    ``express()``) or never bound here (a parameter, an import) is not in the set."""
+    ``new X()`` of a class other than an Express ``Router``). A name bound to a call
+    (``createApp()``, ``express()``) or never bound here (a parameter, an import) is not in the
+    set."""
     kinds: dict[str, set[bool]] = {}
 
     def walk(node: Node) -> None:
@@ -84,10 +97,115 @@ def plain_locals(root: Node, source: bytes) -> frozenset[str]:
             name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
             if name is not None and name.type == "identifier" and value is not None:
                 plain = value.type in _PLAIN_VALUES or (
-                    value.type == "new_expression" and not is_router_call(value, source))
+                    value.type == "new_expression" and not is_router_call(value, source, packages))
                 kinds.setdefault(node_text(name, source), set()).add(plain)
         for c in node.named_children:
             walk(c)
+
+    walk(root)
+    return frozenset(n for n, k in kinds.items() if k == {True})
+
+
+#: Packages whose values are never an Express app or router: Node's own servers and sockets, and
+#: HTTP clients. A variable bound only to a value made from one is not a route receiver, whatever
+#: its name (``const api = axios.create(); api.post('/y', data)``). A deny-list, not an allow-list:
+#: an app made by any other package may be Express (``NestFactory.create()``,
+#: ``asyncify(express())``, a workspace package's ``createApp()``).
+_NON_EXPRESS_PACKAGES = frozenset({
+    "http", "https", "http2", "net",
+    "axios", "got", "ky", "superagent", "node-fetch", "undici", "ofetch",
+})
+
+#: Expressions that only wrap a value: ``await x``, ``x as App``, ``x satisfies App``, ``x!``, ``(x)``.
+_WRAPPERS = frozenset({
+    "await_expression", "as_expression", "satisfies_expression", "non_null_expression",
+    "parenthesized_expression",
+})
+
+
+def _value_package(value: Node, source: bytes, packages: dict[str, tuple[str, str]]) -> str | None:
+    """The package a value is made from — ``axios.create()`` → ``axios``,
+    ``require('http').createServer()`` → ``http``, ``new Router()`` → ``Router``'s package — through
+    awaits, casts and parentheses. None when it is not made from a package import (a local
+    function, a relative import, a literal)."""
+    node: Node | None = value
+    while node is not None:
+        if node.type in _WRAPPERS:
+            node = node.named_children[0] if node.named_children else None
+        elif node.type == "call_expression":
+            module = _require_module(node, source)
+            if module is not None:
+                return module
+            node = node.child_by_field_name("function")
+        elif node.type == "new_expression":
+            node = node.child_by_field_name("constructor")
+        elif node.type == "member_expression":
+            node = node.child_by_field_name("object")
+        elif node.type == "identifier":
+            origin = packages.get(node_text(node, source))
+            return origin[0] if origin is not None else None
+        else:
+            return None
+    return None
+
+
+def _constructs_router(value: Node, source: bytes) -> bool:
+    """``Router()`` / ``new Router()`` / ``x.Router()``, through awaits, casts and parentheses."""
+    while value.type in _WRAPPERS and value.named_children:
+        value = value.named_children[0]
+    field = {"call_expression": "function", "new_expression": "constructor"}.get(value.type)
+    fn = value.child_by_field_name(field) if field is not None else None
+    return fn is not None and node_text(fn, source).rsplit(".", 1)[-1] == "Router"
+
+
+def foreign_locals(
+    root: Node, source: bytes, packages: dict[str, tuple[str, str]],
+) -> frozenset[str]:
+    """Names every binding of which in this file is a value that is certainly not Express: made
+    from a :data:`_NON_EXPRESS_PACKAGES` package (``axios.create()``, ``http.createServer()``), or
+    a ``Router`` of a package other than Express (``import { Router } from 'other'``). A parameter,
+    a destructured variable, a ``catch`` or a ``for … of`` binding of the same name is another
+    binding, so the name heuristic still decides there."""
+    kinds: dict[str, set[bool]] = {}
+
+    def walk(node: Node) -> None:
+        if node.type == "variable_declarator":
+            name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            if name is not None and name.type == "identifier" and value is not None:
+                pkg = _value_package(value, source, packages)
+                foreign = pkg is not None and (
+                    pkg.removeprefix("node:") in _NON_EXPRESS_PACKAGES
+                    or (pkg not in EXPRESS_PACKAGES and _constructs_router(value, source)))
+                kinds.setdefault(node_text(name, source), set()).add(foreign)
+            elif name is not None and name.type != "identifier":  # ``const { api } = deps``
+                parameter(name)
+        elif node.type in ("required_parameter", "optional_parameter"):
+            parameter(node.child_by_field_name("pattern"))
+        elif node.type == "arrow_function":  # a bare ``api => …`` parameter
+            parameter(node.child_by_field_name("parameter"))
+        elif node.type == "catch_clause":
+            parameter(node.child_by_field_name("parameter"))
+        elif node.type == "for_in_statement":  # ``for (const api of apps)``
+            parameter(node.child_by_field_name("left"))
+        for c in node.named_children:
+            walk(c)
+
+    def parameter(pattern: Node | None) -> None:
+        """Every name a binding pattern binds (``api``, ``{ api }``, ``[api]``) is another
+        binding."""
+        if pattern is None:
+            return
+        if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
+            kinds.setdefault(node_text(pattern, source), set()).add(False)
+        elif pattern.type in ("object_pattern", "array_pattern", "pair_pattern",
+                              "object_assignment_pattern", "assignment_pattern", "rest_pattern"):
+            for c in pattern.named_children:
+                if pattern.type == "pair_pattern" and c == pattern.child_by_field_name("key"):
+                    continue
+                if pattern.type in ("object_assignment_pattern", "assignment_pattern") \
+                        and c == pattern.child_by_field_name("right"):
+                    continue
+                parameter(c)
 
     walk(root)
     return frozenset(n for n, k in kinds.items() if k == {True})
@@ -236,49 +354,6 @@ _SERVING_MIDDLEWARE: dict[tuple[str, str], str] = {
 }
 
 
-def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
-    """Local name → (package, the export it binds; ``*`` for the default / namespace) for the
-    file's package imports and top-level ``require``s: ``import swaggerUi from
-    'swagger-ui-express'`` → ``swaggerUi: ('swagger-ui-express', '*')``; ``const { graphqlHTTP }
-    = require('express-graphql')`` → ``graphqlHTTP: ('express-graphql', 'graphqlHTTP')``.
-    Relative imports are left out (they are the repo's own code)."""
-    out: dict[str, tuple[str, str]] = {}
-    for node in root.named_children:
-        if node.type == "import_statement":
-            module = _module_of(node, source)
-            clause = next((c for c in node.named_children if c.type == "import_clause"), None)
-            if module is None or module.startswith(".") or clause is None:
-                continue
-            for c in clause.named_children:
-                if c.type == "identifier":
-                    out[node_text(c, source)] = (module, "*")
-                elif c.type == "namespace_import":
-                    ident = next((x for x in c.named_children if x.type == "identifier"), None)
-                    if ident is not None:
-                        out[node_text(ident, source)] = (module, "*")
-                elif c.type == "named_imports":
-                    for spec in c.named_children:
-                        idents = [x for x in spec.named_children if x.type == "identifier"]
-                        if spec.type == "import_specifier" and idents:
-                            out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
-        elif node.type in ("lexical_declaration", "variable_declaration"):
-            for d in node.named_children:
-                name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
-                value = d.child_by_field_name("value")
-                module = _require_module(value, source) \
-                    if name is not None and value is not None and value.type == "call_expression" \
-                    else None
-                if name is None or module is None or module.startswith("."):
-                    continue
-                if name.type == "identifier":
-                    out[node_text(name, source)] = (module, "*")
-                elif name.type == "object_pattern":
-                    for prop in name.named_children:
-                        if prop.type == "shorthand_property_identifier_pattern":
-                            out[node_text(prop, source)] = (module, node_text(prop, source))
-    return out
-
-
 #: express-jwt's factory: ``expressjwt`` (v7+) or the module itself (``require('express-jwt')``,
 #: v6 and earlier).
 _JWT_PACKAGE = "express-jwt"
@@ -379,11 +454,13 @@ def _classify(
     # ``route(path)`` itself only adds the path (wiring — no record).
     route_call = _route_root(obj, source) if method in _HTTP_VERBS else None
     if route_call is not None:
-        return _classify_route_verb(call, route_call, method, source, routers, decl_lines, consts)
+        return _classify_route_verb(
+            call, route_call, method, source, routers, decl_lines, consts, plain)
     obj_text = node_text(obj, source)
     if not _is_router_obj(obj_text) and obj_text not in routers:
         return None
-    if obj_text in (plain or frozenset()):  # bound here to an object / value: not a router
+    # Bound here to an object / value, or to one of a package that is not Express: not a router.
+    if obj_text in (plain or frozenset()):
         return None
 
     args = call.child_by_field_name("arguments")
@@ -480,6 +557,7 @@ def _chain_middleware(call: Node, route_call: Node, source: bytes) -> list[Node]
 def _classify_route_verb(
     call: Node, route_call: Node, method: str, source: bytes, routers: frozenset[str],
     decl_lines: dict[str, int | None] | None, consts: dict[str, str | None] | None,
+    plain: frozenset[str] | None = None,
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """One verb of an ``X.route(path).get(...)`` chain → a route at ``path`` with the verb's
     handler (last argument) and guards (the arguments before it). An ``.all(...)`` followed by
@@ -494,6 +572,8 @@ def _classify_route_verb(
         return None
     robj_text = node_text(robj, source)
     if not _is_router_obj(robj_text) and robj_text not in routers:
+        return None
+    if robj_text in (plain or frozenset()):
         return None
     rargs = route_call.child_by_field_name("arguments")
     first = rargs.named_children[0] if rargs is not None and rargs.named_children else None
@@ -782,7 +862,7 @@ def detect_express(
 
     packages = package_locals(root, source)
     auth = certain_auth(root, source, packages) if _JWT_PACKAGE.encode() in source else frozenset()
-    plain = plain_locals(root, source)
+    plain = plain_locals(root, source, packages) | foreign_locals(root, source, packages)
     # Routers mounted in this file whose base resolved: their routes carry the mount's prefix.
     local_served = {r for r in routers if r in receiver_base and r not in imported}
     for call in _invocations(root):
