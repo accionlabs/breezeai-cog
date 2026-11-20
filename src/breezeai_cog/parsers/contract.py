@@ -28,7 +28,8 @@ Rule            Severity Violation
                          (§6, §8)
 ``one-record``  error    two entry points with the same file, line, method, endpoint and
                          handler (§8); one address serving several handlers (a Vert.x
-                         service proxy's methods) is several bindings
+                         service proxy's methods) is several bindings, and so are two
+                         records with no endpoint whose text differs
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
 ``handlerPath`` error    an empty string, the record's own file, or an absolute path (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
@@ -147,7 +148,7 @@ def _check(s: Statement) -> list[tuple[str, str]]:
 def validate(record: FileRecord) -> list[Violation]:
     """Contract violations among ``record``'s entry points, in statement order."""
     out: list[Violation] = []
-    seen: Counter[tuple[int, str | None, str | None, str | None]] = Counter()
+    seen: Counter[tuple[int, str | None, str | None, str | None, str | None]] = Counter()
     for s in record.statements:
         if s.semanticType in OUTBOUND_TYPES or s.routeKind == "navigation":
             bad = _bad_address(s.endpoint)
@@ -160,7 +161,10 @@ def validate(record: FileRecord) -> list[Violation]:
             Violation(rule, "gap" if rule in _GAPS else "error", s.id, detail)
             for rule, detail in _check(s)
         )
-        key = (s.startLine, s.method, s.endpoint, s.handler)
+        # An unknown address is not a shared one: two such records on a line are one binding
+        # only when their text matches too.
+        key = (s.startLine, s.method, s.endpoint, s.handler,
+               s.text if s.endpoint is None else None)
         seen[key] += 1
         if seen[key] == 2:
             out.append(Violation(
