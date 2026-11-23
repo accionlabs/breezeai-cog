@@ -35,6 +35,7 @@ from .markup import (
     resolve_codebehind,
     resolve_control_mounts,
 )
+from .data_sources import collect_data_sources
 from .handler_links import link_page_handlers
 from .server_code import read_server_code
 from ..webforms_common.mounts import (
@@ -60,6 +61,9 @@ class WebFormsParser(CSharpParser):
     template_extensions: tuple[str, ...] = _MARKUP_EXT  # the markup half only — .cs stays
     priority = 10  # framework parser > base csharp (0); disjoint claims from csharp-aspnet
     frameworks = ["aspnet-webforms"]
+    # A markup file's base parser is this one, so its own index holds only markup: the repo's
+    # C# index locates the methods a page names (ObjectDataSource SelectMethod).
+    related_languages: tuple[str, ...] = ("csharp",)
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).
     # ``synthetic``: a ``<%@ Register %>`` directive, which the html grammar never sees.
     statement_types = [*CSharpParser.statement_types, "element", "attribute", "synthetic"]
@@ -115,6 +119,7 @@ class WebFormsParser(CSharpParser):
                     register_controls(ctx.source, ctx.path, ctx.repo_root),
                 )
             )
+            record.statements.extend(collect_data_sources(root, ctx, fid, seen_ids))
             read_page_markup(record, markup, ctx.path, ctx.parse_timeout_micros,
                              links=not self.is_fixture_file(ctx.path))
             read_page_scripts(record, ctx, server_code=[(i.start, i.end) for i in islands])

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -1060,3 +1061,76 @@ def test_vb_code_behind_gives_no_location(tmp_path) -> None:
     (tmp_path / "Orders.aspx.vb").write_text("Partial Class Orders\nEnd Class\n")
     got = _host(tmp_path, host=vb.replace(b'Language="C#"', b'Language="VB"'), host_cs=None)
     assert got["Save_Click"] == (None, None)
+
+
+# --- data sources: SqlDataSource commands and ObjectDataSource methods ---------------------
+
+_DS_PAGE = """<%@ Page Language="C#" %>
+<asp:SqlDataSource ID="OrdersDS" runat="server"
+    SelectCommand="SELECT Id FROM Orders"
+    UpdateCommand="UPDATE Orders SET Total = @Total" />
+<asp:SqlDataSource ID="ProcDS" runat="server" SelectCommandType="StoredProcedure"
+    SelectCommand="usp_GetOrders" DeleteCommand="<%$ AppSettings:DeleteSql %>" />
+<asp:ObjectDataSource ID="RepoDS" runat="server" TypeName="Shop.OrderRepo"
+    SelectMethod="GetAll" UpdateMethod="Missing" />
+"""
+_REPO_CS = "namespace Shop\n{\n    public class OrderRepo\n    {\n        public object GetAll() { return null; }\n    }\n}\n"
+
+
+def _data_sources(tmp_path: Path, files: dict[str, str]) -> list[tuple]:
+    from breezeai_cog import iter_file_records
+
+    for rel, text in files.items():
+        (tmp_path / rel).write_text(text)
+    [page] = [r for r in iter_file_records(tmp_path, capture_templates=True)
+              if r.path == "Orders.aspx"]
+    return [(s.startLine, s.semanticType, s.name, s.handler, s.handlerPath, s.handlerLine)
+            for s in page.statements if s.semanticType == "query_statement" or s.handler]
+
+
+def test_sql_data_source_commands_are_queries(tmp_path) -> None:
+    got = _data_sources(tmp_path, {"Orders.aspx": _DS_PAGE, "OrderRepo.cs": _REPO_CS})
+    queries = [(line, name) for line, kind, name, *_ in got if kind == "query_statement"]
+    # one per command, named by the control's ID; a stored procedure counts; <%$ %> is not a query
+    assert queries == [(3, "OrdersDS"), (4, "OrdersDS"), (6, "ProcDS")]
+
+
+def test_object_data_source_method_points_at_its_declaration(tmp_path) -> None:
+    got = _data_sources(tmp_path, {"Orders.aspx": _DS_PAGE, "OrderRepo.cs": _REPO_CS})
+    methods = {handler: (path, line) for _, _, name, handler, path, line in got
+               if name and name.endswith("Method")}
+    assert methods == {"GetAll": ("OrderRepo.cs", 5), "Missing": (None, None)}
+
+
+def test_object_data_source_with_two_classes_of_that_name_gets_no_location(tmp_path) -> None:
+    other = _REPO_CS.replace("namespace Shop", "namespace Old")
+    got = _data_sources(tmp_path, {"Orders.aspx": _DS_PAGE, "OrderRepo.cs": _REPO_CS,
+                                   "OldRepo.cs": other})
+    assert [(h, p, ln) for *_, h, p, ln in got if h == "GetAll"] == [("GetAll", None, None)]
+
+
+# --- unbalanced markup: tags split across <% if %> / <% else %> -----------------------------
+
+@pytest.mark.parametrize(("body", "expected"), [
+    # one opening tag per branch, one shared closing tag
+    ('<% if (w) { %><div class="a"><% } else { %><div class="b"><% } %>\n'
+     '<asp:TextBox ID="N" runat="server" />\n<a href="/one.aspx">one</a>\n</div>\n',
+     [(2, "asp:TextBox"), (3, "/one.aspx")]),
+    # a row closed in one branch, a table closed in the other, inside a loop
+    ('<table>\n<% foreach (var r in Rows) { %>\n<tr><td><asp:Label ID="L" runat="server" /></td>\n'
+     '<% if (r.Last) { %></tr></table><% } else { %></tr><% } %>\n<% } %>\n'
+     '<form action="/send" method="post"><asp:TextBox ID="T" runat="server" /></form>\n',
+     [(3, "asp:Label"), (6, "/send"), (6, "asp:TextBox")]),
+    # server controls opened in both branches and closed once (plus stray closing tags)
+    ('<% if (x) { %><asp:Panel ID="P1" runat="server"><% } else { %>'
+     '<asp:Panel ID="P2" runat="server"><% } %>\n<asp:TextBox ID="In" runat="server" />\n'
+     '</asp:Panel>\n</asp:Panel></div></td>\n<a href="/end.aspx">end</a>\n',
+     [(1, "asp:Panel"), (1, "asp:Panel"), (2, "asp:TextBox"), (5, "/end.aspx")]),
+])
+def test_unbalanced_markup_still_records_every_element(tmp_path, body, expected) -> None:
+    page = b'<%@ Page Language="C#" %>\n' + body.encode()
+    rec = _parse_markup(tmp_path, "Page.aspx", page)
+    got = sorted((s.startLine - 1, s.name if s.nodeType == "element" else s.endpoint)
+                 for s in rec.statements if s.nodeType == "element" or s.routeKind
+                 or s.semanticType == "api_call")
+    assert got == expected
