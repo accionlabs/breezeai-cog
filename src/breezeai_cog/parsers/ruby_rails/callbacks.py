@@ -37,7 +37,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
-from ..ruby.models import _class_name, _iter_classes, _qualified_name
+from ..ruby.models import class_name, iter_classes, qualified_name
 from ..treesitter import node_text
 
 FACT = "rails.controller-callbacks"
@@ -229,7 +229,7 @@ def _lexical_scopes(cls: Node, source: bytes) -> tuple[str, ...]:
     current = cls.parent
     while current is not None:
         if current.type in {"class", "module"}:
-            outer = _class_name(current, source)
+            outer = class_name(current, source)
             if outer is None:
                 return ()  # an enclosing scope we cannot name — resolving would be a guess
             names.append(outer)
@@ -243,8 +243,8 @@ def _lexical_scopes(cls: Node, source: bytes) -> tuple[str, ...]:
 def controller_callbacks(root: Node, source: bytes) -> list[tuple[str, Declared]]:
     """``(qualified controller name, declaration)`` for every ``*Controller`` class in one file."""
     out: list[tuple[str, Declared]] = []
-    for cls in _iter_classes(root):
-        name = _qualified_name(cls, source)
+    for cls in iter_classes(root):
+        name = qualified_name(cls, source)
         if name is None or not name.endswith("Controller"):
             continue
         out.append((name, (_parent_constant(cls, source), _lexical_scopes(cls, source),
