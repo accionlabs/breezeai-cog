@@ -278,6 +278,10 @@ def _in_arguments(node: Node) -> bool:
     return False
 
 
+#: An endpoint that is one whole value and nothing else (``{API}``).
+_WHOLE_VALUE = re.compile(r"\{[A-Za-z_$][\w$]*\}")
+
+
 def _fold_constants(
     record: FileRecord,
     root: Node,
@@ -285,7 +289,8 @@ def _fold_constants(
     server_lines: set[int],
     server_expr: re.Pattern[str],
 ) -> None:
-    """Give an ``api_call`` with no endpoint the page constant its URL argument names."""
+    """Give an ``api_call`` the page constant its URL argument names, when its endpoint is empty
+    or only that name as a value read at runtime (``$.post(API)`` → ``{API}``)."""
     consts = _page_constants(root, source, server_lines, server_expr)
     if not consts:
         return
@@ -294,7 +299,8 @@ def _fold_constants(
         if node.type == "call_expression" and not _in_arguments(node):
             calls.setdefault(node.start_point[0] + 1, []).append(node)
     for stmt in record.statements:
-        if stmt.semanticType != "api_call" or stmt.endpoint is not None:
+        if stmt.semanticType != "api_call" or (
+                stmt.endpoint is not None and not _WHOLE_VALUE.fullmatch(stmt.endpoint)):
             continue
         if any(line in server_lines for line in range(stmt.startLine, stmt.endLine + 1)):
             continue
@@ -302,7 +308,8 @@ def _fold_constants(
         for call in calls.get(stmt.startLine, ()):
             arg = _url_argument(call, source) if _callee_name(call, source) in _URL_FIRST else None
             if (arg is not None and arg.type == "identifier" and node_text(call, source) in stmt.text
-                    and node_text(arg, source) in consts):
+                    and node_text(arg, source) in consts
+                    and stmt.endpoint in (None, "{" + node_text(arg, source) + "}")):
                 found.add(consts[node_text(arg, source)])
         if len(found) == 1:
             stmt.endpoint = found.pop()

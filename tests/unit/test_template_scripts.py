@@ -54,7 +54,7 @@ PAGE = """<html>
 
 def test_every_detector_runs_over_every_script_block() -> None:
     assert _calls(_read(PAGE)) == [
-        (5, None, "GET", "/api/stock"),
+        (5, "fetch", "GET", "/api/stock"),
         (9, "jquery", "GET", "/shop/api/orders"),
         (10, None, "POST", "/api/c"),
     ]
@@ -93,28 +93,28 @@ def test_nothing_without_statement_capture() -> None:
 def test_server_code_inside_a_url_leaves_the_endpoint_empty() -> None:
     page = "<script>\nfetch('/api/user/<%= id %>');\nfetch('/api/ok');\n</script>"
     record = _read(page, "page.jsp", server=["<%= id %>"])
-    assert _calls(record) == [(2, None, "GET", None), (3, None, "GET", "/api/ok")]
+    assert _calls(record) == [(2, "fetch", "GET", None), (3, "fetch", "GET", "/api/ok")]
     assert _by_line(record, 2).text == "fetch('/api/user/<%= id %>');"
 
 
 def test_server_code_is_not_read_as_javascript() -> None:
     page = '<script>\n<% http.post("/api/server"); %>\nfetch("/api/browser");\n</script>'
     record = _read(page, "page.jsp", server=['<% http.post("/api/server"); %>'])
-    assert _calls(record) == [(3, None, "GET", "/api/browser")]
+    assert _calls(record) == [(3, "fetch", "GET", "/api/browser")]
 
 
 def test_a_server_expression_the_caller_did_not_pass_still_empties_the_endpoint() -> None:
     record = _read("<script>\nfetch('/api/<%= id %>');\n</script>", "page.aspx")
-    assert _calls(record) == [(2, None, "GET", None)]
+    assert _calls(record) == [(2, "fetch", "GET", None)]
 
 
 def test_server_expressions_follow_the_page_dialect() -> None:
     twig = _read("<script>\nfetch('/api/{{ id }}');\n</script>", "page.html.twig")
     razor = _read("<script>\nfetch('/api/@Model.Id');\n</script>", "page.cshtml")
     html = _read("<script>\nfetch('/api/user@host');\n</script>", "page.html")
-    assert _calls(twig) == [(2, None, "GET", None)]
-    assert _calls(razor) == [(2, None, "GET", None)]
-    assert _calls(html) == [(2, None, "GET", "/api/user@host")]
+    assert _calls(twig) == [(2, "fetch", "GET", None)]
+    assert _calls(razor) == [(2, "fetch", "GET", None)]
+    assert _calls(html) == [(2, "fetch", "GET", "/api/user@host")]
 
 
 def test_a_template_value_in_an_html_page_empties_the_endpoint() -> None:
@@ -123,7 +123,7 @@ def test_a_template_value_in_an_html_page_empties_the_endpoint() -> None:
     page = ("<script>\nfetch('/api/orders/{{ order.id }}');\n"
             "fetch('/api/{% url_for x %}');\nfetch('/api/static');\n</script>")
     assert _calls(_read(page, "orders.html")) == [
-        (2, None, "GET", None), (3, None, "GET", None), (4, None, "GET", "/api/static"),
+        (2, "fetch", "GET", None), (3, "fetch", "GET", None), (4, "fetch", "GET", "/api/static"),
     ]
     record = _read(page, "orders.html")
     assert _by_line(record, 2).text == "fetch('/api/orders/{{ order.id }}');"
@@ -161,7 +161,7 @@ def test_constants_reach_fetch_axios_and_settings_objects() -> None:
     assert [c[3] for c in _calls(_read(page))] == ["/api/u", "/api/s", "/api/u", "/api/s"]
 
 
-def test_a_name_that_is_not_a_page_constant_stays_empty() -> None:
+def test_a_name_that_is_not_a_page_constant_stays_a_runtime_value() -> None:
     page = (
         "<script>\n"
         "var A = '/a'; A = '/a2';\n"           # reassigned
@@ -173,12 +173,13 @@ def test_a_name_that_is_not_a_page_constant_stays_empty() -> None:
         "fetch(A);\nfetch(B);\nfetch(E);\nfetch(F);\n"
         "</script>"
     )
-    assert [c[3] for c in _calls(_read(page))] == [None] * 6
+    # each stays the name of a value read at runtime, never the string it was first given
+    assert [c[3] for c in _calls(_read(page))] == ["{C}", "{D}", "{A}", "{B}", "{E}", "{F}"]
 
 
 def test_a_call_passed_as_an_argument_is_not_the_url() -> None:
     page = "<script>\nvar K = '/k';\nfetch(cache.get(K));\n</script>"
-    assert _calls(_read(page)) == [(3, None, "GET", None)]
+    assert _calls(_read(page)) == [(3, "fetch", "GET", "{param}")]  # not '/k'
 
 
 def test_a_module_block_has_its_own_scope() -> None:
@@ -191,7 +192,7 @@ def test_a_module_block_has_its_own_scope() -> None:
         "<script type=\"module\">fetch(C);</script>"
     )
     assert _calls(_read(page)) == [
-        (1, None, "GET", "/api/m"), (2, None, "GET", None), (4, None, "GET", None),
+        (1, "fetch", "GET", "/api/m"), (2, "fetch", "GET", "{M}"), (4, "fetch", "GET", "{C}"),
     ]
 
 
@@ -202,11 +203,11 @@ def test_a_module_block_is_a_program_of_its_own() -> None:
     assert b"b()" in module and b"a()" not in module
 
 
-def test_a_constant_holding_server_code_stays_empty() -> None:
+def test_a_constant_holding_server_code_is_not_folded() -> None:
     page = "<script>\nvar API = '/api/<%= id %>';\nfetch(API);\n</script>"
-    assert _calls(_read(page, "page.aspx", server=["<%= id %>"])) == [(3, None, "GET", None)]
+    assert _calls(_read(page, "page.aspx", server=["<%= id %>"])) == [(3, "fetch", "GET", "{API}")]
     twig = "<script>\nvar API = '/api/{{ id }}';\nfetch(API);\n</script>"
-    assert _calls(_read(twig, "page.html.twig")) == [(3, None, "GET", None)]
+    assert _calls(_read(twig, "page.html.twig")) == [(3, "fetch", "GET", "{API}")]
 
 
 # ── script files ─────────────────────────────────────────────────────────────────────────────

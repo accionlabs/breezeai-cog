@@ -270,7 +270,7 @@ def test_page_scripts_are_read_by_every_detector(tmp_path) -> None:
             '<button hx-get="/api/items">Go</button>\n')
     rec = _parse(tmp_path, {"page.html": page}, "page.html")
     assert _script_calls(rec) == [
-        (3, None, "GET", "/api/stock"),
+        (3, "fetch", "GET", "/api/stock"),
         (4, "jquery", "GET", "/shop/api/orders"),
         (5, None, "POST", "/api/c"),
     ]
@@ -293,7 +293,7 @@ def test_angular_template_script_calls_are_read(tmp_path) -> None:
         "order.component.html",
     )
     assert rec.framework == "angular"
-    assert _script_calls(rec) == [(7, None, "GET", "/api/audit")]
+    assert _script_calls(rec) == [(7, "fetch", "GET", "/api/audit")]
     assert {s.handler for s in rec.statements if s.nodeType == "event_binding"} == {"load", "remove"}
 
 
