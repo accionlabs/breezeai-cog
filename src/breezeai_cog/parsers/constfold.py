@@ -23,6 +23,7 @@ reference another (e.g. ``BUS_NAME = APP_ID + "/x"``).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from tree_sitter import Node
@@ -44,10 +45,15 @@ def init_tokens(node: Node, source: bytes) -> list[Token] | None:
         # a Groovy GString (any `*interpolation*` child) has no compile-time value
         if any("interpolation" in c.type for c in node.named_children):
             return None
+        if any(c.type == "escape_sequence" for c in node.named_children):
+            value = java_literal_value(node, source)  # Java splits a literal at each escape
+            return [("lit", value)] if value is not None else None
         frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
         if frag is not None:
             return [("lit", node_text(frag, source))]
         text = node_text(node, source)
+        if text[:3] in ('"""', "'''"):  # a text block / multi-line string: not read
+            return None
         return [("lit", text[1:-1] if len(text) >= 2 and text[0] in "\"'" else text)]
     if t == "binary_expression":  # only string `+` concatenation folds
         parts: list[Token] = []
@@ -66,6 +72,57 @@ def init_tokens(node: Node, source: bytes) -> list[Token] | None:
         simple = _class_simple_name(node, source)
         return [("lit", simple)] if simple is not None else None
     return None
+
+
+#: Java's single-character escapes (JLS 3.10.7).
+_JAVA_ESCAPES = {
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "f": "\f",
+    "r": "\r",
+    "s": " ",
+    '"': '"',
+    "'": "'",
+    "\\": "\\",
+}
+_OCTAL_ESCAPE = re.compile(r"[0-3][0-7]{0,2}|[4-7][0-7]?")
+_UNICODE_ESCAPE = re.compile(r"u([0-9A-Fa-f]{4})")
+
+
+def _java_escape(sequence: str) -> str | None:
+    """One Java ``escape_sequence`` (``\\"``, ``\\t``, ``\\101``, ``\\u00e9``) → its character,
+    or None when it is not a Java escape."""
+    body = sequence[1:]
+    if body in _JAVA_ESCAPES:
+        return _JAVA_ESCAPES[body]
+    if _OCTAL_ESCAPE.fullmatch(body):
+        return chr(int(body, 8))
+    hit = _UNICODE_ESCAPE.fullmatch(body)
+    return chr(int(hit.group(1), 16)) if hit else None
+
+
+def java_literal_value(node: Node, source: bytes) -> str | None:
+    """A Java one-line ``string_literal`` → its value, escapes decoded: the grammar splits the
+    literal into ``string_fragment`` and ``escape_sequence`` children, all of which make the value.
+    None for a text block (``\"\"\"``), an escape that is not Java's, or a lone surrogate."""
+    if node_text(node, source).startswith('"""'):
+        return None
+    parts: list[str] = []
+    for child in node.named_children:
+        if child.type == "string_fragment":
+            parts.append(node_text(child, source))
+        elif child.type == "escape_sequence":
+            char = _java_escape(node_text(child, source))
+            if char is None:
+                return None
+            parts.append(char)
+        else:
+            return None
+    try:  # `😀` is one character written as a UTF-16 surrogate pair
+        return "".join(parts).encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeError:
+        return None
 
 
 def _class_simple_name(call: Node, source: bytes) -> str | None:
