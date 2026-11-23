@@ -41,7 +41,7 @@ _MODEL_PRODUCERS = frozenset({
 })
 
 
-def _class_name(node: Node, source: bytes) -> str | None:
+def class_name(node: Node, source: bytes) -> str | None:
     """Declared name of a ``class`` node — ``User`` or ``Admin::User``."""
     name = node.child_by_field_name("name")
     if name is None or name.type not in {"constant", "scope_resolution"}:
@@ -62,14 +62,14 @@ def _superclass_name(node: Node, source: bytes) -> str | None:
     return text or None
 
 
-def _iter_classes(node: Node) -> Iterator[Node]:
+def iter_classes(node: Node) -> Iterator[Node]:
     if node.type == "class":
         yield node
     for child in node.named_children:
-        yield from _iter_classes(child)
+        yield from iter_classes(child)
 
 
-def _qualified_name(node: Node, source: bytes) -> str | None:
+def qualified_name(node: Node, source: bytes) -> str | None:
     """Declared name prefixed by every enclosing class/module scope.
 
     A nested class must not be recorded under its simple name: mastodon declares an
@@ -78,14 +78,14 @@ def _qualified_name(node: Node, source: bytes) -> str | None:
     ``MediaAttachment`` makes the name look ambiguous and drops the real model. Mirrors the
     nested-type qualification every other language parser applies to node ids.
     """
-    name = _class_name(node, source)
+    name = class_name(node, source)
     if name is None:
         return None
     scopes: list[str] = []
     current = node.parent
     while current is not None:
         if current.type in {"class", "module"}:
-            outer = _class_name(current, source)
+            outer = class_name(current, source)
             if outer is not None:
                 scopes.append(outer)
         current = current.parent
@@ -95,8 +95,8 @@ def _qualified_name(node: Node, source: bytes) -> str | None:
 def declared_parents(root: Node, source: bytes) -> list[tuple[str, str]]:
     """``(qualified_name, superclass_name)`` for every class in one file that names a base."""
     pairs: list[tuple[str, str]] = []
-    for node in _iter_classes(root):
-        name = _qualified_name(node, source)
+    for node in iter_classes(root):
+        name = qualified_name(node, source)
         parent = _superclass_name(node, source)
         if name is not None and parent is not None:
             pairs.append((name, parent))
