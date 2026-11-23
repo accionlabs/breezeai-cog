@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from pathlib import Path
 
 from tree_sitter import Node
 
 from ...emit import file_id
 from ...schemas import FileRecord
+from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
 from ..ruby.ownership import owner_id
 from ..handler_sites import handler_location, locate_method
@@ -17,6 +19,7 @@ from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for, is_auth_guard
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "match"}
+_SPLIT_ROUTES_FACT = "rails.split-routes"
 
 
 def _calls(root: Node) -> Iterator[Node]:
@@ -57,6 +60,51 @@ def _inside_routes_draw(call: Node, source: bytes) -> bool:
             return True
         current = current.parent
     return False
+
+
+def _collect_split_routes(
+    root: Node, source: bytes, rel: str, _repo_root: Path | None,
+) -> frozenset[str] | None:
+    if rel.replace("\\", "/") != "config/routes.rb":
+        return None
+    names: set[str] = set()
+    for call in _calls(root):
+        if (
+            _method(call, source) != "draw"
+            or call.child_by_field_name("receiver") is not None
+            or not _inside_routes_draw(call, source)
+        ):
+            continue
+        args = _arguments(call)
+        if len(args) != 1:
+            continue
+        name = _segment(args[0], source)
+        if name and "/" not in name and name not in {".", ".."}:
+            names.add(name)
+    return frozenset(names) if names else None
+
+
+def _resolve_split_routes(values: list[frozenset[str]], _index: object) -> frozenset[str] | None:
+    names = frozenset(name for value in values for name in value)
+    return names or None
+
+
+register_fact(FactSpec(
+    name=_SPLIT_ROUTES_FACT,
+    language="ruby",
+    gate=(b"draw",),
+    collect=_collect_split_routes,
+    resolve=_resolve_split_routes,
+))
+
+
+def _is_drawn_split_route_file(path: str, index: object) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) != 3 or parts[:2] != ["config", "routes"] or not parts[2].endswith(".rb"):
+        return False
+    name = parts[2][:-3]
+    names: frozenset[str] | None = index_fact(index, _SPLIT_ROUTES_FACT)
+    return names is not None and name in names
 
 
 def _arguments(call: Node) -> list[Node]:
@@ -127,15 +175,15 @@ _DEVISE_BLOCKS = {"authenticate", "authenticated"}
 
 #: The RESTful actions ``resources`` / ``resource`` declare: (action, verb, path suffix). ``{id}``
 #: is the member segment (``:id``, or ``:<param>``); singular resources have no index and no id.
+# Record ``update`` once using PATCH rather than duplicating the binding as PUT.
 _PLURAL_ACTIONS = (
     ("index", "GET", ""), ("create", "POST", ""), ("new", "GET", "/new"),
     ("edit", "GET", "/{id}/edit"), ("show", "GET", "/{id}"), ("update", "PATCH", "/{id}"),
-    ("update", "PUT", "/{id}"), ("destroy", "DELETE", "/{id}"),
+    ("destroy", "DELETE", "/{id}"),
 )
 _SINGULAR_ACTIONS = (
     ("create", "POST", ""), ("new", "GET", "/new"), ("edit", "GET", "/edit"),
-    ("show", "GET", ""), ("update", "PATCH", ""), ("update", "PUT", ""),
-    ("destroy", "DELETE", ""),
+    ("show", "GET", ""), ("update", "PATCH", ""), ("destroy", "DELETE", ""),
 )
 class _Resource:
     """One ``resources`` / ``resource`` declaration: the path segment, its controller, the
@@ -388,15 +436,19 @@ def detect_rails_routes(
 ) -> list[Emit]:
     """Explicit Rails route DSL bindings, for :func:`~..emits.apply`; unresolved values stay
     null. ``index`` (the Ruby repo index) supplies the controller callbacks
-    (``rails.controller-callbacks``) that become each route's guards.
+    (``rails.controller-callbacks``) that become each route's guards, and the declared split
+    route files (``rails.split-routes``).
 
     ``resources :photos`` / ``resource :profile`` expand to one binding per RESTful action
     (``only:`` / ``except:`` honoured) and nest the routes in their block; ``root`` is ``GET`` at
     its scope's path."""
     found: list[Emit] = []
     fallback = file_id(path)
+    split_route_file = _is_drawn_split_route_file(path, index)
 
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
+        if endpoint is not None:
+            endpoint = "/" + endpoint.strip("/")
         line = call.start_point[0] + 1
         module = _route_module(call, source)
         guards = _devise_guards(call, source)
@@ -430,12 +482,14 @@ def detect_rails_routes(
     endpoint: str | None
     for call in _calls(root):
         method = _method(call, source)
-        if method is None or not _inside_routes_draw(call, source):
+        if method is None or not (_inside_routes_draw(call, source) or split_route_file):
             continue
         args = _arguments(call)
         if method in _RESOURCE_SCOPES:
             prefix = _route_prefix(call, source)
             for name_node in [a for a in args if a.type != "pair"]:
+                if name_node.type != "simple_symbol" or _segment(name_node, source) is None:
+                    continue
                 resource = _Resource(call, name_node, source)
                 if resource.actions is None:
                     continue  # only:/except: not a literal list — which actions exist is unknown

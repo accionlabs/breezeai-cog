@@ -3,10 +3,29 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import re
 
 from tree_sitter import Node
 
 from ..treesitter import node_text
+
+_RUBY_INTERPRETER = re.compile(rb"ruby(?:[0-9]+(?:\.[0-9]+)*)?")
+
+
+def has_ruby_shebang(source: bytes) -> bool:
+    first_line = source.partition(b"\n")[0]
+    if not first_line.startswith(b"#!"):
+        return False
+    words = first_line[2:].split()
+    if not words:
+        return False
+    command = words[0].rsplit(b"/", 1)[-1]
+    if command == b"env":
+        words = words[1:]
+        if words and words[0] == b"-S":
+            words = words[1:]
+        command = words[0].rsplit(b"/", 1)[-1] if words else b""
+    return _RUBY_INTERPRETER.fullmatch(command) is not None
 
 
 def _nodes(root: Node) -> Iterator[Node]:

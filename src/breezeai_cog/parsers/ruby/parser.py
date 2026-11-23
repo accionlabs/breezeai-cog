@@ -13,6 +13,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..callresolve import CallResolver, make_resolver
 from ..treesitter import parse_source
+from .claims import has_ruby_shebang
 from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names
 from .imports import extract_imports
@@ -26,13 +27,15 @@ from .statement import extract_statements
 class RubyParser(BaseParser):
     name = "ruby"
     extensions = (".rb",)
-    claims_accepts_timeout = True
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
     def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return True
+
+    def claims_extensionless(self, path: str, source: bytes) -> bool:
+        return Path(path).suffix == "" and has_ruby_shebang(source)
 
     def build_index(
         self, repo_root: Path, files: Sequence[Path], jobs: int = 1

@@ -27,7 +27,11 @@ class RailsParser(RubyParser):
     frameworks = ["rails"]
 
     def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
-        return any(marker in source for marker in _CLAIM_MARKERS)
+        parts = path.replace("\\", "/").split("/")
+        split_route_file = (
+            len(parts) == 3 and parts[:2] == ["config", "routes"] and parts[2].endswith(".rb")
+        )
+        return split_route_file or any(marker in source for marker in _CLAIM_MARKERS)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
