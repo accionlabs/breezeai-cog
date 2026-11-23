@@ -310,14 +310,16 @@ def test_register_directive_is_a_synthetic_statement(site) -> None:
 
 def test_registered_tag_leads_to_its_control(site) -> None:
     [tag] = [s for s in site if s.path == "Orders.aspx" and s.name == "uc:Nav"]
-    assert (tag.nodeType, tag.handler, tag.handlerPath) == ("element", "Nav", "Controls/Nav.ascx")
+    # the class the .ascx inherits, declared once in its code-behind
+    assert (tag.nodeType, tag.handler, tag.handlerPath, tag.handlerLine) == (
+        "element", "Nav", "Controls/Nav.ascx.cs", 5)
 
 
 def test_registered_tag_matches_case_insensitively(analyze_files) -> None:
     files = {**_site(), "Orders.aspx": PAGE_MARKUP.replace("<uc:Nav", "<UC:nav")}
     stmts = analyze_files(files, templates=True)
     [tag] = [s for s in stmts if s.path == "Orders.aspx" and s.name == "UC:nav"]
-    assert (tag.handler, tag.handlerPath) == ("Nav", "Controls/Nav.ascx")
+    assert (tag.handler, tag.handlerPath) == ("Nav", "Controls/Nav.ascx.cs")
 
 
 def test_assembly_register_gives_the_statement_only(analyze_files) -> None:

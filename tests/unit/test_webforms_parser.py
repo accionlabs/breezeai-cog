@@ -984,3 +984,79 @@ def test_page_links_scripts_and_script_files(tmp_path) -> None:
              for s in rec.statements if s.semanticType == "api_call"]
     assert calls == [(7, "jquery", "POST", "/api/track")]
     assert "Scripts/jquery.js" in rec.importFiles  # <script src> in the repository → file link
+
+
+# --- event handlers and user controls lead to their C# declaration -------------------------
+
+_HOST = (b'<%@ Page Language="C#" CodeBehind="Orders.aspx.cs" Inherits="Shop.Orders" %>\n'
+         b'<%@ Register TagPrefix="uc" TagName="DateField" Src="~/Controls/DateField.ascx" %>\n'
+         b'<uc:DateField ID="Start" runat="server" />\n'
+         b'<asp:Button ID="Save" runat="server" OnClick="Save_Click" />\n'
+         b'<asp:Button ID="Mine" runat="server" OnClick="Own_Click" />\n'
+         b'<asp:Button ID="Twice" runat="server" OnClick="Twice_Click" />\n'
+         b'<asp:Button ID="Base" runat="server" OnClick="FromBase_Click" />\n'
+         b'<script runat="server">\n'
+         b'    void Own_Click(object s, EventArgs e) { }\n'
+         b'</script>\n')
+_HOST_CS = """namespace Shop
+{
+    public partial class Orders : BasePage
+    {
+        protected void Save_Click(object s, EventArgs e) { }
+        protected void Twice_Click(object s, EventArgs e) { }
+        protected void Twice_Click(object s) { }
+    }
+}
+namespace Other { public class Orders { void FromBase_Click() { } } }
+"""
+_CONTROL = '<%@ Control Language="C#" CodeBehind="DateField.ascx.cs" Inherits="Shop.Controls.DateField" %>\n'
+_CONTROL_CS = "namespace Shop.Controls\n{\n    public partial class DateField : TextBox { }\n}\n"
+
+
+def _host(tmp_path: Path, *, host: bytes = _HOST, host_cs: str | None = _HOST_CS,
+          control: str = _CONTROL, control_cs: str = _CONTROL_CS) -> dict[str, tuple]:
+    (tmp_path / "Controls").mkdir()
+    (tmp_path / "Controls" / "DateField.ascx").write_text(control)
+    (tmp_path / "Controls" / "DateField.ascx.cs").write_text(control_cs)
+    if host_cs is not None:
+        (tmp_path / "Orders.aspx.cs").write_text(host_cs)
+    (tmp_path / "Orders.aspx").write_bytes(host)
+    ctx = ParseContext(path="Orders.aspx", abs_path=tmp_path / "Orders.aspx", source=host,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = WebFormsParser().parse_file(ctx)
+    return {s.handler: (s.handlerPath, s.handlerLine) for s in rec.statements if s.handler}
+
+
+def test_event_handler_points_at_its_code_behind_method(tmp_path) -> None:
+    got = _host(tmp_path)
+    assert got["Save_Click"] == ("Orders.aspx.cs", 5)
+    assert got["Own_Click"] == (None, 9)  # in the page itself: a line, no other file
+
+
+def test_event_handler_with_two_or_no_declarations_gets_no_location(tmp_path) -> None:
+    got = _host(tmp_path)
+    assert got["Twice_Click"] == (None, None)  # overloads: which one is not known
+    assert got["FromBase_Click"] == (None, None)  # only in another namespace's class
+
+
+def test_user_control_points_at_its_class(tmp_path) -> None:
+    assert _host(tmp_path)["DateField"] == ("Controls/DateField.ascx.cs", 3)
+
+
+def test_user_control_class_declared_twice_keeps_the_ascx_link(tmp_path) -> None:
+    unqualified = _CONTROL.replace("Shop.Controls.DateField", "DateField")
+    twice = _CONTROL_CS + "namespace Old { public class DateField { } }\n"
+    got = _host(tmp_path, control=unqualified, control_cs=twice)
+    assert got["DateField"] == ("Controls/DateField.ascx", None)  # as before: no class link
+
+
+def test_a_qualified_inherits_picks_its_namespace(tmp_path) -> None:
+    twice = _CONTROL_CS + "namespace Old { public class DateField { } }\n"
+    assert _host(tmp_path, control_cs=twice)["DateField"] == ("Controls/DateField.ascx.cs", 3)
+
+
+def test_vb_code_behind_gives_no_location(tmp_path) -> None:
+    vb = _HOST.replace(b'CodeBehind="Orders.aspx.cs"', b'CodeBehind="Orders.aspx.vb"')
+    (tmp_path / "Orders.aspx.vb").write_text("Partial Class Orders\nEnd Class\n")
+    got = _host(tmp_path, host=vb.replace(b'Language="C#"', b'Language="VB"'), host_cs=None)
+    assert got["Save_Click"] == (None, None)

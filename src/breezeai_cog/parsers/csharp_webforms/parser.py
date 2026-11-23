@@ -35,6 +35,7 @@ from .markup import (
     resolve_codebehind,
     resolve_control_mounts,
 )
+from .handler_links import link_page_handlers
 from .server_code import read_server_code
 from ..webforms_common.mounts import (
     master_codebehind, read_sibling_markup, resolve_master, resolve_mounts,
@@ -119,6 +120,8 @@ class WebFormsParser(CSharpParser):
             read_page_scripts(record, ctx, server_code=[(i.start, i.end) for i in islands])
         # methods are structure (always built); their statements only under capture
         read_server_code(record, ctx, islands, seen_ids)
+        # On<Event> handlers and user controls → where their C# is declared
+        link_page_handlers(record, ctx)
         return record
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
