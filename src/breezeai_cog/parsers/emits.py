@@ -162,15 +162,17 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
         node = emit.node
         col = emit.col if emit.col is not None else node.start_point[1]
         new_id = disambiguate(statement_id(path, line, col), seen)
+        fields = dict(emit.fields)
+        last_line = fields.pop("endLine", emit.last_line)  # a record spanning several statements
         appended = Statement(
             id=new_id,
             parentId=emit.parent if emit.parent is not None else enclosing.function_id(line, fid),
             nodeType=emit.node_type or node.type,
             text=emit.text if emit.text is not None else first_line(node_text(node, source)),
             startLine=line,
-            endLine=emit.last_line,
+            endLine=last_line,
             path=path,
-            **emit.fields,
+            **fields,
             **emit.fill,
         )
         record.statements.append(appended)

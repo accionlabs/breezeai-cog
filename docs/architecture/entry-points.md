@@ -228,10 +228,12 @@ Records filed under `route` that are not entry points:
 | `field_resolver` (`method: RESOLVE_FIELD`) | A GraphQL data-type field resolver, e.g. `Book.author` | No address of its own (§3); recorded because it shows where a field's data comes from |
 | `mount` | A router mount whose routes aren't in the repo, in the spec's current form (§5); `layout` is no longer written | Names no handler of its own |
 | `navigation` | A link | Outbound |
+| `middleware` | A path-less registration that runs before many routes (Vert.x-web `router.route().handler(h)`); also a `scope: router` step of their `handlerChain` | A guard: no request is addressed to it |
+| `error_handler` (`statusCode`) | The handler a router answers a status with (Vert.x-web `router.errorHandler(404, h)`) | Error wiring: no request is addressed to it |
 
 The entry points are the `mcp_tool`, `mcp_resource` and `mcp_prompt` records, and the `route`,
 `eventbus_consumer` and `timer` records whose `routeKind` is not `field_resolver`, `mount`,
-`layout` or `navigation`.
+`layout`, `navigation`, `middleware` or `error_handler`.
 
 > **Decision —** the entry-point record lives at the binding construct, never at the wiring.
 > **Why:** the binding is the one construct that names exactly one handler, so one binding is

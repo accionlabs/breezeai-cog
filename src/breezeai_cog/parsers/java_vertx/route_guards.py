@@ -19,14 +19,14 @@ A ``.order(n)`` or ``.last()`` on either side makes the run order differ from th
 order: that path-less handler is then left out. A handler written inline (a lambda, an anonymous
 class) has no name and is left out, as Express does.
 
-Each registration keeps its own route record: the app's own handlers registered one after
-another on one path are steps of one endpoint, not guards, and no existing field holds them in
-order; they are not merged into one record here.
+The app's own handlers registered one after another on one path are steps of one endpoint,
+not guards: ``route_chains.py`` merges those registrations into one record with every step in
+its ``handlerChain``.
 """
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from tree_sitter import Node
 
@@ -49,18 +49,34 @@ _SINGLE = frozenset(
     }
 )
 #: ``router.route()`` serves every method.
-_ANY = "route"
+ANY = "route"
 #: Calls that change when a route runs relative to the others.
 _REORDER = frozenset({"order", "last"})
 #: The package of Vert.x-web's own handlers (``BodyHandler``, ``LoggerHandler``, ``CorsHandler`` …).
 _LIBRARY_PACKAGE = "io.vertx.ext.web.handler"
 #: A scope: the byte span of the statement list a registration is directly in.
 Scope = tuple[int, int]
-#: A path-less registration: (scope, router, method or "route", position, handler names).
-Middleware = tuple[Scope, str, str, int, list[str]]
 
 
-def _scope(node: Node) -> Scope:
+class Middleware(NamedTuple):
+    """A path-less registration (``router.route().handler(h)``, ``router.post().handler(h)``)."""
+
+    scope: Scope
+    router: str
+    #: ``route`` (every method) or the lower-case verb.
+    verb: str
+    position: int
+    #: The names of its named handlers.
+    names: list[str]
+    #: Its handler arguments, in order.
+    handlers: list[Node]
+    line: int
+    call: Node
+    #: ``.order(n)`` / ``.last()``: it does not run in registration order.
+    reordered: bool
+
+
+def scope_of(node: Node) -> Scope:
     """The statement list ``node`` is directly in (its braces)."""
     child, parent = node, node.parent
     while parent is not None:
@@ -91,10 +107,15 @@ def _chain(call: Node, source: bytes) -> list[tuple[str, Node | None]]:
     return out
 
 
-def _handlers(call: Node, source: bytes) -> list[Node]:
+def chained_handlers(call: Node, source: bytes) -> list[Node]:
     """The arguments of the ``.handler(…)`` / ``.blockingHandler(…)`` calls chained on ``call``
     (``failureHandler`` is not one: it runs only when a handler fails)."""
     return [arg for name, arg in _chain(call, source) if name in HANDLER_CALLS and arg is not None]
+
+
+def failure_args(call: Node, source: bytes) -> list[Node]:
+    """The arguments of the ``.failureHandler(…)`` calls chained on ``call``."""
+    return [arg for name, arg in _chain(call, source) if name == "failureHandler" and arg is not None]
 
 
 def reordered(call: Node, source: bytes) -> bool:
@@ -149,10 +170,10 @@ def library_handlers(
     return is_library
 
 
-def pathless_middleware(calls: list[Node], source: bytes, routers: frozenset[str]) -> list[Middleware]:
-    """``router.route().handler(h)`` / ``router.post().handler(h)``: path-less registrations,
-    run before every later route they match. One with ``.order(n)`` / ``.last()``, or with no
-    named ``.handler`` (only a failure handler, or an inline lambda), is left out."""
+def pathless_registrations(calls: list[Node], source: bytes,
+                           routers: frozenset[str]) -> list[Middleware]:
+    """Every ``router.route().handler(h)`` / ``router.post().handler(h)`` with at least one
+    ``.handler``: path-less registrations on a router receiver."""
     out: list[Middleware] = []
     for call in calls:
         name = call.child_by_field_name("name")
@@ -160,18 +181,24 @@ def pathless_middleware(calls: list[Node], source: bytes, routers: frozenset[str
         if name is None or (args is not None and args.named_children):
             continue
         verb = node_text(name, source)
-        if verb != _ANY and verb not in HTTP_VERBS:
+        if verb != ANY and verb not in HTTP_VERBS:
             continue
         obj = call.child_by_field_name("object")
         recv = router_name(node_text(obj, source)) if obj is not None else ""
         if not recv or not (is_route_receiver(recv.lower()) or recv in routers):
             continue
-        if reordered(call, source):
-            continue
-        names = [n for h in _handlers(call, source) if (n := handler_name(h, source)) is not None]
-        if names:
-            out.append((_scope(call), recv, verb, call.start_byte, names))
+        handlers = chained_handlers(call, source)
+        if handlers:
+            names = [n for h in handlers if (n := handler_name(h, source)) is not None]
+            out.append(Middleware(scope_of(call), recv, verb, call.start_byte, names, handlers,
+                                  call.start_point[0] + 1, call, reordered(call, source)))
     return out
+
+
+def pathless_middleware(registrations: list[Middleware]) -> list[Middleware]:
+    """The path-less registrations that run before every later route they match. One with
+    ``.order(n)`` / ``.last()``, or with no named handler (an inline lambda), is left out."""
+    return [m for m in registrations if not m.reordered and m.names]
 
 
 def route_guards(
@@ -184,11 +211,12 @@ def route_guards(
     names: list[str] = []
     if not reordered(call, source):
         scope_pos = call.start_byte
-        for (lo, hi), m_recv, m_verb, pos, hs in middleware:
-            if lo <= scope_pos < hi and m_recv == recv and pos < scope_pos and (
-                m_verb == _ANY or (method is not None and m_verb.upper() == method)
+        for m in middleware:
+            lo, hi = m.scope
+            if lo <= scope_pos < hi and m.router == recv and m.position < scope_pos and (
+                m.verb == ANY or (method is not None and m.verb.upper() == method)
             ):
-                names.extend(hs)
-    own = _handlers(call, source)[:-1]  # the last one is the route's handler
+                names.extend(m.names)
+    own = chained_handlers(call, source)[:-1]  # the last one is the route's handler
     names.extend(n for h in own if (n := handler_name(h, source)) is not None and is_library(n))
     return list(dict.fromkeys(names)) or None
