@@ -15,6 +15,10 @@ A detector finds things; it does not edit ``record.statements``. Each finding is
   already on the record, in emit order. Emit order is therefore part of the output.
 * **Parent.** A new statement's parent is ``parent`` when given, else the smallest function on
   its line, else the file.
+* **Containing statement.** An emit with ``skip`` set looks for the statement to enrich among
+  the captured statements that contain its node in the tree (the innermost one), not the
+  smallest statement on its line: on a line holding two statements (``x = 1; call()``, ``with
+  c as s: call()``, ``} catch (e) { call() }``) it is the one the call is in.
 
 ::
 
@@ -25,6 +29,7 @@ A detector finds things; it does not edit ``record.statements``. Each finding is
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -61,6 +66,11 @@ class Emit:
     enrich: Enrich = "never"
     #: With ``unclassified``: semantic types that may also be overwritten (a known mis-tag).
     reclassify: frozenset[str] = frozenset()
+    #: Node types never enriched (a control-flow statement, whose span is its whole body): the
+    #: emit is appended as its own statement instead. When set, the statement to enrich is the
+    #: innermost captured statement that contains the node (see :func:`apply`); when that one is
+    #: of a ``skip`` type (the node sits in a control-flow header), the emit is appended.
+    skip: frozenset[str] = frozenset()
     #: Overrides for an appended statement.
     parent: str | None = None
     text: str | None = None
@@ -81,11 +91,35 @@ class Emit:
 def _eligible(stmt: Statement, emit: Emit) -> bool:
     if emit.enrich in ("any", "same"):
         return True
+    if stmt.nodeType in emit.skip:
+        return False
     if emit.enrich == "own" and (stmt.startLine, stmt.endLine) != (emit.start_line, emit.last_line):
         return False
     if emit.enrich == "starts" and stmt.startLine != emit.start_line:
         return False
     return stmt.semanticType is None or stmt.semanticType in emit.reclassify
+
+
+#: ``path:line:col`` with an optional ``#n`` disambiguation suffix.
+_ID_POSITION = re.compile(r":(\d+):(\d+)(?:#\d+)?$")
+
+_Position = tuple[int, int, str]  # (line, column, node type) of a statement's node
+
+
+def _position(stmt: Statement) -> _Position | None:
+    m = _ID_POSITION.search(stmt.id)
+    return (int(m.group(1)), int(m.group(2)), stmt.nodeType) if m else None
+
+
+def _containing(node: Node, by_position: dict[_Position, Statement]) -> Statement | None:
+    """The innermost captured statement whose node is ``node`` or one of its ancestors."""
+    current: Node | None = node
+    while current is not None:
+        stmt = by_position.get((current.start_point[0] + 1, current.start_point[1], current.type))
+        if stmt is not None:
+            return stmt
+        current = current.parent
+    return None
 
 
 def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> None:
@@ -97,6 +131,7 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
     done: set[str] = set()  # statements enriched or appended by this run
     fid = file_id(path)
     by_id: dict[str, Statement] | None = None  # for ``same``, built on first use
+    by_position: dict[_Position, Statement] | None = None  # for ``skip``, built on first use
     for emit in emits:
         line = emit.start_line
         if emit.enrich == "same":
@@ -106,6 +141,14 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
             stmt = by_id.get(statement_id(path, line, col))
             if stmt is not None and stmt.nodeType != emit.node.type:
                 stmt = None
+        elif emit.skip and emit.enrich != "never":
+            if by_position is None:
+                by_position = {}
+                for s in record.statements:
+                    pos = _position(s)
+                    if pos is not None:
+                        by_position.setdefault(pos, s)
+            stmt = _containing(emit.node, by_position)
         else:
             stmt = enclosing.statement(line) if emit.enrich != "never" else None
         if stmt is not None and stmt.id not in done and _eligible(stmt, emit):
@@ -119,7 +162,7 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
         node = emit.node
         col = emit.col if emit.col is not None else node.start_point[1]
         new_id = disambiguate(statement_id(path, line, col), seen)
-        record.statements.append(Statement(
+        appended = Statement(
             id=new_id,
             parentId=emit.parent if emit.parent is not None else enclosing.function_id(line, fid),
             nodeType=emit.node_type or node.type,
@@ -129,5 +172,10 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
             path=path,
             **emit.fields,
             **emit.fill,
-        ))
+        )
+        record.statements.append(appended)
+        if by_position is not None:
+            pos = _position(appended)
+            if pos is not None:
+                by_position.setdefault(pos, appended)
         done.add(new_id)

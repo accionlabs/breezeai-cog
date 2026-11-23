@@ -61,6 +61,11 @@ class JavaIndex:
     #: (``class_declaration``, ``interface_declaration`` …); ``None`` when two files declare it.
     #: Tells an anonymous class whether the type it instantiates is a class or an interface.
     type_kinds: dict[str, str | None] = field(default_factory=dict)
+    #: Every class of the repository as ``(its file, its name below the package)`` —
+    #: ``("…/Getter.java", "Getter")``, ``("…/Getter.java", "Getter.Context")`` — built from the
+    #: same declarations as ``type_kinds``. Tells call resolution that a receiver typed
+    #: ``Getter.Context`` is the class declared inside ``Getter``'s file, whatever its methods.
+    declared_types: frozenset[tuple[str, str]] = frozenset()
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
@@ -140,13 +145,27 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     type_kinds: dict[str, str | None] = {}
     for _, cls in heritage:
         record_distinct(type_kinds, cls.fqcn, cls.kind)
+    declared = frozenset(t for t in (_declared_type(rel, c.fqcn, fqcn) for rel, c in heritage)
+                         if t is not None)
     index = JavaIndex(fqcn=fqcn, consts=consts, class_heritage=class_heritage,
                       unknown_methods=methods_where_unknown(
                           ((rel, c.fqcn.rsplit(".", 1)[-1], c.methods) for rel, c in heritage),
                           class_heritage),
-                      foreign_bases=foreign_bases(heritage, fqcn), type_kinds=type_kinds)
+                      foreign_bases=foreign_bases(heritage, fqcn), type_kinds=type_kinds,
+                      declared_types=declared)
     # Registered facts may need the whole index, so they resolve after it is built.
     return replace(index, facts=resolve_additive("java", collected, index))
+
+
+def _declared_type(rel: str, fqcn: str, top: FqcnIndex) -> tuple[str, str] | None:
+    """``(rel, "Outer.Inner")`` for the class ``pkg.Outer.Inner`` declared in ``rel``: its name
+    below the package, found as the longest top-level class of ``rel`` it starts with. None when
+    no top-level class of that file encloses it (a local or anonymous class)."""
+    parts = fqcn.split(".")
+    for k in range(len(parts), 0, -1):
+        if top.get(".".join(parts[:k])) == rel:
+            return rel, ".".join(parts[k - 1:])
+    return None
 
 
 def _package_of(root: Node, source: bytes) -> str:
@@ -175,6 +194,8 @@ def extract_imports(
     internal: dict[str, None] = {}
     external: dict[str, None] = {}
     bindings: dict[str, str] = {}  # simple class/member name → in-repo file (calls[].path)
+    imported: set[str] = set()  # simple names an in-repo import binds
+    shadowed: set[str] = set()  # simple names a library single-type import binds
 
     for node in root.named_children:
         if node.type != "import_declaration":
@@ -192,6 +213,14 @@ def extract_imports(
         (internal if resolved else external).setdefault(resolved or fqcn, None)
         if resolved:  # `import a.b.Foo` → receiver "Foo"; `import static a.b.U.f` → "f"
             bindings[fqcn.rsplit(".", 1)[-1]] = resolved
+            imported.add(fqcn.rsplit(".", 1)[-1])
+        elif not is_static:
+            shadowed.add(fqcn.rsplit(".", 1)[-1])
 
     seed_same_package(bindings, _package_of(root, source), index)  # same-package: no import needed
+    # A single-type import of a library class hides a same-package class of that name, as
+    # in Java: `import org.lib.Report;` means org.lib.Report, never this package's Report.
+    for name in shadowed:
+        if bindings.get(name) is not None and name not in imported:
+            del bindings[name]
     return list(internal), list(external), [], bindings  # Java has no explicit exports

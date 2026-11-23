@@ -12,12 +12,11 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
-from breezeai_cog.parsers.typescript_nextjs.routes import (
-    endpoint_from_path,
+from breezeai_cog.parsers.typescript_nextjs.routes import endpoint_from_path, pages_api_endpoint
+from breezeai_cog.parsers.typescript_nextjs_common import (
     is_app_router_route_file,
     is_pages_api_file,
     is_route_file,
-    pages_api_endpoint,
 )
 from breezeai_cog.schemas import FileRecord
 
@@ -301,7 +300,7 @@ def test_base_path_per_app_in_a_monorepo(analyze_files) -> None:
 
 def test_unresolvable_base_path_is_a_runtime_part(analyze_files) -> None:
     # Set from the environment / a conditional: a value read at runtime, marked where it stands.
-    for cfg, want in (("module.exports = { basePath: process.env.BASE_PATH };\n", "${BASE_PATH}/users"),
+    for cfg, want in (("module.exports = { basePath: process.env.BASE_PATH };\n", "${env:BASE_PATH}/users"),
                       ("module.exports = { basePath: isProd ? '/docs' : '' };\n", "${value}/users")):
         got = _next_endpoints(analyze_files, {"next.config.js": cfg, "app/users/route.ts": _ROUTE})
         assert got == {"app/users/route.ts": want}, cfg

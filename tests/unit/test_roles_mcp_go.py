@@ -233,3 +233,257 @@ func inlineHandler(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolRes
     assert (tools["inline"].handler, tools["inline"].handlerLine) == ("inlineHandler", 20)
     assert tools["pointer"].handler == "pointerHandler"
     assert tools["listed"].handler == "listedHandler"  # element of a []ServerTool literal
+
+
+# ── Resources and prompts ─────────────────────────────────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    for s in found:
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "mcp-go"
+    return {s.endpoint: s for s in found}
+
+
+MCPGO_RESOURCES = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddResource(mcp.NewResource("docs://readme", "README",
+        mcp.WithResourceDescription("The README"), mcp.WithMIMEType("text/markdown")), readmeHandler)
+    tpl := mcp.NewResourceTemplate("users://{id}/profile", "User",
+        mcp.WithTemplateDescription("A user"))
+    s.AddResourceTemplate(tpl, userHandler)
+    s.AddResource(mcp.NewResource("odd://{literal}", "Odd"), readmeHandler)
+    s.AddResources(server.ServerResource{Resource: mcp.NewResource("cfg://app", "Cfg"), Handler: cfgHandler})
+    s.AddResource(mcp.NewResource(uri, "computed"), readmeHandler)
+}
+
+func readmeHandler() {}
+func userHandler() {}
+func cfgHandler() {}
+"""
+
+
+def test_mcpgo_resources_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"main.go": MCPGO_RESOURCES}), "mcp_resource")
+    assert set(resources) == {
+        "docs://readme",
+        "users://{id}/profile",
+        "odd://{literal}",
+        "cfg://app",
+    }
+    readme = resources["docs://readme"]
+    assert (
+        readme.method,
+        readme.description,
+        readme.handler,
+        readme.handlerLine,
+        readme.params,
+    ) == ("RESOURCE", "The README", "readmeHandler", 21, [])
+    user = resources["users://{id}/profile"]
+    assert (user.description, user.handler, user.handlerLine) == ("A user", "userHandler", 22)
+    assert _params(user) == [("id", "string", True, None, None)]
+    assert resources["odd://{literal}"].params == []  # a fixed URI has no variables
+    assert resources["cfg://app"].handler == "cfgHandler"
+    # the declared name: `NewResource` / `NewResourceTemplate`'s second argument
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "docs://readme": "README",
+        "users://{id}/profile": "User",
+        "odd://{literal}": "Odd",
+        "cfg://app": "Cfg",
+    }
+
+
+def test_mcpgo_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+const name = "Named"
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddResource(mcp.NewResource("docs://const", name), h)
+    s.AddResource(mcp.NewResource("docs://raw", `Raw`), h)
+}
+
+func h() {}
+"""
+    resources = _of(analyze_files({"main.go": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "docs://const": "docs://const",
+        "docs://raw": "Raw",
+    }
+
+
+MCPGO_PROMPTS = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddPrompt(mcp.NewPrompt("review",
+        mcp.WithPromptDescription("Review code"),
+        mcp.WithArgument("code", mcp.ArgumentDescription("The code"), mcp.RequiredArgument()),
+        mcp.WithArgument("style"),
+    ), reviewHandler)
+    s.AddPrompt(mcp.NewPrompt("simple"), func() {})
+    s.AddPrompt(mcp.NewPrompt("opts", extraOpts...), reviewHandler)
+}
+
+func reviewHandler() {}
+"""
+
+
+def test_mcpgo_prompts_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"main.go": MCPGO_PROMPTS}), "mcp_prompt")
+    assert set(prompts) == {"review", "simple", "opts"}
+    review = prompts["review"]
+    assert (review.method, review.description, review.handler, review.handlerLine) == (
+        "PROMPT",
+        "Review code",
+        "reviewHandler",
+        20,
+    )
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("style", None, False, None, None),
+    ]
+    assert prompts["simple"].params == [] and prompts["simple"].handlerLine == 16
+    assert prompts["opts"].params is None  # an option the reader cannot see
+
+
+def test_mcpgo_resource_look_alike_package(analyze_files) -> None:
+    src = """
+package main
+
+import "example.com/other/mcp"
+
+func main() {
+    s.AddResource(mcp.NewResource("docs://x", "x"), h)
+    s.AddPrompt(mcp.NewPrompt("p"), h)
+}
+"""
+    statements = analyze_files({"main.go": src})
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+def test_go_handler_line_is_never_a_same_named_method(analyze_files) -> None:
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    s.AddTool(mcp.NewTool("hello"), helloHandler)
+    s.AddTool(mcp.NewTool("method_only"), lone)
+}
+
+func helloHandler(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+    return nil, nil
+}
+
+func (h *H) helloHandler() {}
+
+func (h *H) lone() {}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["hello"].handler, tools["hello"].handlerLine) == ("helloHandler", 15)
+    assert (tools["method_only"].handler, tools["method_only"].handlerLine) == ("lone", None)
+
+
+def test_mcp_go_handler_line_of_a_local_func_literal(analyze_files) -> None:
+    """``h := func(…) {…}`` bound once in the function gives the literal's line; a name bound
+    twice there gives none."""
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    h := func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        return nil, nil
+    }
+    s.AddTool(mcp.NewTool("local"), h)
+    if ok {
+        g := func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+            return nil, nil
+        }
+        _ = g
+    }
+    g := func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        return nil, nil
+    }
+    s.AddTool(mcp.NewTool("twice"), g)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["local"].handler, tools["local"].handlerLine) == ("h", 11)
+    assert (tools["twice"].handler, tools["twice"].handlerLine) == ("g", None)
+
+
+def test_mcp_go_select_receive_or_type_switch_alias_is_not_the_top_level_function(
+    analyze_files,
+) -> None:
+    """A type-switch alias or a ``select`` receive that binds the handler's name is that local,
+    not the top-level function of the name: no line. The top-level function still gives its
+    line where nothing binds the name."""
+    src = """
+package main
+
+import (
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
+)
+
+func Handle() {}
+
+func main() {
+    s := server.NewMCPServer("demo", "1.0.0")
+    for _, x := range xs {
+        switch Handle := x.(type) {
+        case func():
+            s.AddTool(mcp.NewTool("tswitch"), Handle)
+        }
+    }
+    select {
+    case Handle2 := <-ch:
+        s.AddTool(mcp.NewTool("recv"), Handle2)
+    }
+}
+
+func Handle2() {}
+
+func other(s *server.MCPServer) {
+    s.AddTool(mcp.NewTool("top"), Handle)
+}
+"""
+    tools = _tools(analyze_files({"main.go": src}))
+    assert (tools["tswitch"].handler, tools["tswitch"].handlerLine) == ("Handle", None)
+    assert (tools["recv"].handler, tools["recv"].handlerLine) == ("Handle2", None)
+    assert (tools["top"].handler, tools["top"].handlerLine) == ("Handle", 9)

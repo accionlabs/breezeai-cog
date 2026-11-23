@@ -239,7 +239,7 @@ def test_unresolvable_base_path_is_a_runtime_part(analyze_files) -> None:
     app = ("import { RestApplication } from '@loopback/rest';\n"
            "export class ShopApplication extends RestApplication {\n"
            "  constructor(opts) {\n    super({ rest: { basePath: opts.base } });\n  }\n}\n")
-    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == ["${base}/products"]
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == ["${opts.base}/products"]
 
 
 def test_no_base_path_leaves_routes_unchanged(analyze_files) -> None:

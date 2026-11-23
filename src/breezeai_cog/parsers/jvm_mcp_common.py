@@ -30,7 +30,8 @@ from tree_sitter import Node
 
 from ..schemas import Parameter
 from .additive import FactSpec, index_fact, register_fact
-from .mcp_common import param
+from .emits import Emit
+from .mcp_common import schema_params, tool_emit
 from .treesitter import node_text
 
 #: ``framework`` of a Spring AI ``@McpTool`` / ``@Tool`` method, in Java or Kotlin.
@@ -40,6 +41,12 @@ JAVA_MCP = "java-mcp"
 FACT = "spring-ai.mcp-server"
 #: Spring AI's ``@Tool``: the annotation counts only when it is this class.
 SPRING_TOOL_FQN = "org.springframework.ai.tool.annotation.Tool"
+#: Packages of the MCP annotations library (``@McpResource`` / ``@McpPrompt`` / ``@McpArg``): the
+#: community project and Spring AI's own copy of it.
+MCP_ANNOTATION_PACKAGES = (
+    "org.springaicommunity.mcp.annotation",
+    "org.springframework.ai.mcp.annotation",
+)
 _SERVER_DEPENDENCIES = (
     b"spring-ai-starter-mcp-server",
     b"spring-ai-mcp-server",
@@ -154,33 +161,162 @@ def concat_strings(
 
 def json_schema_params(text: str | None) -> list[Parameter] | None:
     """Params of a JSON schema's text (``properties`` / ``required``); None when it does not
-    parse (unknown)."""
+    parse (unknown). The schema itself is read by :func:`~.mcp_common.schema_params`."""
     if text is None:
         return None
     try:
         schema = json.loads(text)
     except (ValueError, RecursionError):  # a deeply nested literal must not fail the file
         return None
-    if not isinstance(schema, dict):
+    return schema_params(schema)
+
+
+# ── The McpServer builder shortcut ───────────────────────────────────────────
+
+#: ``.tool(`` / ``.toolCall(`` — a cheap byte check before any tree walk.
+SHORTCUT_CALL = re.compile(rb"\.\s*tool(?:Call)?\s*\(")
+#: The ``McpServer`` factories a shortcut chain starts from.
+SERVER_FACTORIES = frozenset({"sync", "async"})
+#: The builder methods that register a ``Tool`` with its handler.
+SHORTCUTS = frozenset({"tool", "toolCall"})
+#: The MCP Java SDK's server class, which the shortcut chain starts from.
+MCP_SERVER = "io.modelcontextprotocol.server.McpServer"
+_IMPORT = re.compile(
+    rb"^[ \t]*import[ \t]+([\w.]*\w(?:\.\*)?)(?:[ \t]+as[ \t]+(\w+))?", re.MULTILINE
+)
+
+
+#: A type named ``McpServer`` declared in the file (Java ``class`` / ``interface`` / ``enum`` /
+#: ``record`` / ``@interface``, Kotlin ``object`` / ``typealias``), at any depth.
+_DECLARES_MCP_SERVER = re.compile(
+    rb"\b(?:class|interface|enum|record|object|typealias)[ \t\r\n]+McpServer\b"
+)
+
+
+_PACKAGE = re.compile(rb"^[ \t]*package[ \t]+([\w.]*\w)", re.MULTILINE)
+
+
+#: Fact: the ``package.McpServer`` names that Java and Kotlin files declare (a class,
+#: interface, object or ``typealias``, at any depth). Registered for both languages, each on its
+#: own files (Kotlin also on ``.kts`` scripts): a Java file reads the Kotlin value from the Kotlin
+#: index the pipeline hands it (``related_languages``), and a Kotlin file the Java one, so no file
+#: is read twice; a language's own ``package.Type`` index has no Kotlin typealias.
+MCP_SERVER_TYPES = "jvm-mcp.mcp-server-types"
+
+
+def _collect_mcp_server_type(root: Any, source: bytes, rel: str, repo_root: Path | None) -> Any:
+    if not _DECLARES_MCP_SERVER.search(source):
         return None
-    props = schema.get("properties", {})
-    required = schema.get("required", [])
-    if not isinstance(props, dict) or not isinstance(required, list):
-        return None
-    out = []
-    for name, spec in props.items():
-        spec = spec if isinstance(spec, dict) else {}
-        type_ = spec.get("type")
-        desc = spec.get("description")
-        out.append(
-            param(
-                str(name),
-                type_ if isinstance(type_, str) else None,
-                required=name in required,
-                description=desc if isinstance(desc, str) else None,
-            )
+    pkg = _PACKAGE.search(source)
+    return f"{pkg.group(1).decode()}.McpServer" if pkg is not None else "McpServer"
+
+
+def _resolve_mcp_server_types(values: list[Any], index: object) -> frozenset[str]:
+    return frozenset(values)
+
+
+for _language, _other in (("java", ()), ("kotlin", (".kts",))):
+    register_fact(
+        FactSpec(
+            name=MCP_SERVER_TYPES,
+            language=_language,
+            gate=(b"McpServer",),
+            collect=_collect_mcp_server_type,
+            resolve=_resolve_mcp_server_types,
+            sources=_other,
+            grammar=None,
         )
+    )
+
+
+def index_types(ctx: Any) -> list[Any]:
+    """The ``package.Type`` collections a parse context holds: the ``package.Type → path`` maps
+    of its own language's and the related languages' indexes, and the Java and Kotlin
+    ``McpServer`` declarations (fact :data:`MCP_SERVER_TYPES`); empty when no index was
+    built, or when the file's own or the other JVM language's index failed (that language has
+    files, so its ``McpServer`` types are unknown)."""
+    if ctx.resolution_index is None or any(
+        lang in ctx.related_indexes and ctx.related_indexes[lang] is None
+        for lang in ("java", "kotlin")
+    ):
+        return []
+    out: list[Any] = []
+    for idx in (ctx.resolution_index, *ctx.related_indexes.values()):
+        fqcn = idx if isinstance(idx, dict) else getattr(idx, "fqcn", None)
+        if isinstance(fqcn, dict):
+            out.append(fqcn)
+    for idx in (ctx.resolution_index, *ctx.related_indexes.values()):
+        declared = index_fact(idx, MCP_SERVER_TYPES)
+        if declared is not None:
+            out.append(declared)
     return out
+
+
+def mcp_server_names(source: bytes, types: list[Any]) -> frozenset[str]:
+    """What the SDK's ``McpServer`` is called in this Java / Kotlin file: its fully qualified
+    name; ``McpServer`` when ``io.modelcontextprotocol.server.McpServer`` is imported by name, no
+    other ``McpServer`` is, and the file declares no type of that name itself (a class, nested or
+    not, shadows the import); a Kotlin ``import … as`` alias of it.
+
+    With only the package's ``*`` imported, a type ``McpServer`` of the file's own package (in
+    another file, Java or Kotlin, a Kotlin ``typealias`` included) wins over the wildcard in
+    Java and Kotlin: bare ``McpServer`` is the SDK's only when ``types`` (the indexes'
+    ``package.Type`` collections, :func:`index_types`) are there and none has
+    ``<package>.McpServer``. Without an index, or with a failed one, it is not proven."""
+    names = {MCP_SERVER}
+    by_name = wildcard = other = False
+    if _DECLARES_MCP_SERVER.search(source):
+        other = True
+    for m in _IMPORT.finditer(source):
+        path = m.group(1).decode()
+        alias = m.group(2).decode() if m.group(2) is not None else None
+        if alias is not None:
+            if path == MCP_SERVER:
+                names.add(alias)
+            elif alias == "McpServer":
+                other = True
+        elif path == MCP_SERVER:
+            by_name = True
+        elif path == MCP_SERVER.rsplit(".", 1)[0] + ".*":
+            wildcard = True
+        elif path.endswith(".McpServer"):
+            other = True
+    if wildcard and not by_name and not other:
+        pkg = _PACKAGE.search(source)
+        own = f"{pkg.group(1).decode()}.McpServer" if pkg is not None else "McpServer"
+        if not types or any(own in t for t in types):
+            other = True
+    if (by_name or wildcard) and not other:
+        names.add("McpServer")
+    return frozenset(names)
+
+
+def shortcut_emit(
+    node: Node,
+    name_node: Node,
+    fields: tuple[str, str | None, list[Parameter] | None],
+    handler: tuple[str | None, int | None],
+    source: bytes,
+) -> Emit:
+    """The record of a ``.tool(…)`` / ``.toolCall(…)`` shortcut: at the method's name, not at
+    the start of the chain (several tools of one chain get their own lines)."""
+    name, description, params = fields
+    emit = tool_emit(
+        node,
+        source,
+        endpoint=name,
+        framework=JAVA_MCP,
+        handler=handler[0],
+        handler_line=handler[1],
+        description=description,
+        params=params,
+    )
+    emit.line = name_node.start_point[0] + 1
+    emit.col = name_node.start_point[1]
+    line_end = source.find(b"\n", name_node.start_byte)
+    stop = node.end_byte if line_end < 0 else min(line_end, node.end_byte)
+    emit.text = source[name_node.start_byte : stop].decode("utf-8", "replace").rstrip()
+    return emit
 
 
 # ── Java literals ────────────────────────────────────────────────────────────

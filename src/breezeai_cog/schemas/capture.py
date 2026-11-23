@@ -40,8 +40,9 @@ class Decorator(BaseModel):
 
 
 class Parameter(BaseModel):
-    """One parameter of a function (``Function.params``) or one input parameter of an
-    ``mcp_tool`` statement (``Statement.params``, read from the tool's input schema)."""
+    """One parameter of a function (``Function.params``) or one input of an MCP statement
+    (``Statement.params``): an ``mcp_tool``'s input parameter, an ``mcp_resource`` template's
+    variable or an ``mcp_prompt``'s argument."""
 
     name: str
     type: str | None = None  # as written in the signature / schema; None when not declared
@@ -122,9 +123,11 @@ class Statement(BaseModel):
     # iac-only: cloud provider inferred from resource type prefix or provider name
     platform: str | None = None
     # Human description: the front-matter ``description`` of a skill / agent /
-    # command document, or the tool description / docstring of an ``mcp_tool``.
+    # command document, or the description / docstring of an ``mcp_tool`` / ``mcp_resource`` /
+    # ``mcp_prompt``.
     description: str | None = None
-    # mcp_tool-only: the tool's input parameters.
+    # MCP server statements only: an ``mcp_tool``'s input parameters, an ``mcp_resource``
+    # template's variables, an ``mcp_prompt``'s arguments.
     params: list[Parameter] | None = None
 
 

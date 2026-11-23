@@ -57,7 +57,9 @@ def fieldless_types(external: list[str]) -> frozenset[str]:
 class JavaParser(BaseParser):
     name = "java"
     extensions = (".java",)
-    related_languages = ("groovy",)  # Java imports, calls and extends the repo's Groovy classes
+    # Java imports, calls and extends the repo's Groovy classes; Kotlin's index only gives the
+    # MCP server types it declares (jvm_mcp_common.index_types)
+    related_languages = ("groovy", "kotlin")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -102,6 +104,8 @@ class JavaParser(BaseParser):
             unknown_methods=view.unknown_methods if view is not None else None,
             inherited_fields=True,
             fieldless_types=fieldless_types(external),
+            qualified_types=view.fqcn if view is not None else None,
+            declared_types=idx.declared_types if isinstance(idx, JavaIndex) else frozenset(),
         )
         functions: list[Function] = []
         classes = []

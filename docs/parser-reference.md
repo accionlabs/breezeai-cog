@@ -653,31 +653,50 @@ project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.
   `Gate("mdx", …)` detector in its own package (Next.js: `typescript_nextjs/mdx_pages.py`,
   see [Next.js MDX pages](entry-point-roles/nextjs.md#mdx-pages)).
 
-### MCP tool detectors (one package per framework)
-A tool an MCP server exposes is an entry point (`semanticType: mcp_tool`, `method: TOOL`,
-`endpoint` = the tool name), recorded by additive detectors under the
+### MCP detectors (one package per framework)
+What an MCP server exposes is an entry point — a tool (`semanticType: mcp_tool`, `method: TOOL`,
+`endpoint` = the tool name), a resource (`mcp_resource`, `RESOURCE`, the URI or URI template;
+`name` = its declared literal name, else the URI) or
+a prompt (`mcp_prompt`, `PROMPT`, the prompt name) — recorded by additive detectors under the
 [entry-point contract](architecture/entry-points.md#mcp-tools), which has the rules every MCP
 framework shares; the per-construct rules are in each framework's table in
 [`entry-point-roles/`](entry-point-roles/README.md). The shared fields (`description`, and
-`params` in the shape of a function's `params`) are built by `parsers/mcp_common.py`. A tool is
-emitted once, by the package of the framework its construct belongs to.
+`params` in the shape of a function's `params`) are built by `parsers/mcp_common.py`
+(`mcp_emit`; `tool_emit` is its `mcp_tool` form; `uri_template_params` reads a template's
+variables). A record is emitted once, by the package of the framework its construct belongs to.
+A client's call (`mcp_call`, outbound; `call_emit`) is read by a separate `…-client` detector in
+the same package ([MCP client calls](architecture/entry-points.md#mcp-client-calls)).
 
 | Package (detector) | Language | `framework` | Server proof |
 |---|---|---|---|
-| `python_fastmcp` (`python-fastmcp`) | Python | `fastmcp` | `@<server>.tool` on a name built with `FastMCP(…)` of the standalone `fastmcp` package, typed `FastMCP`, or imported from where it is built |
-| `python_mcp` (`python-mcp`) | Python | `python-mcp` | The same, the server built with the official SDK's `mcp.server.fastmcp` |
-| `typescript_mcp` (`typescript-mcp`) | TypeScript / JavaScript | `typescript-mcp` | `.tool(…)` / `.registerTool(…)` on `new McpServer(…)` or a parameter typed `McpServer` |
-| `java_springai` (`java-springai`) | Java | `spring-ai-mcp` | `@McpTool`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
-| `java_mcp` (`java-mcp`) | Java | `java-mcp` | `McpServerFeatures.Sync/AsyncToolSpecification` (constructor or builder) in a file using `io.modelcontextprotocol` |
+| `python_fastmcp` (`python-fastmcp`) | Python | `fastmcp` | `@<server>.tool` / `.resource(uri)` / `.prompt` on a name built with `FastMCP(…)` of the standalone `fastmcp` package, typed `FastMCP`, or imported from where it is built |
+| `python_mcp` (`python-mcp`) | Python | `python-mcp` | The same, the server built with the official SDK's `mcp.server.fastmcp`; and the `Tool(…)` / `Resource(…)` / `ResourceTemplate(…)` / `Prompt(…)` literals a low-level `Server`'s `@<server>.list_tools()` / `list_resources()` / `list_resource_templates()` / `list_prompts()` function returns, `Server` imported from `mcp.server[.lowlevel]` (fact `mcp.lowlevel-servers` for a server imported from another module) |
+| `typescript_mcp` (`typescript-mcp`) | TypeScript / JavaScript | `typescript-mcp` | `.tool` / `.registerTool` / `.resource` / `.registerResource` / `.prompt` / `.registerPrompt` on `new McpServer(…)` or a parameter typed `McpServer` (`ResourceTemplate` imported from the SDK); the objects of `setRequestHandler(List{Tools,Resources,ResourceTemplates,Prompts}RequestSchema, …)` on a low-level `Server` (both imported from the SDK) or `<mcpServer>.server` |
+| `java_springai` (`java-springai`) | Java | `spring-ai-mcp` | `@McpTool` / `@McpResource` / `@McpPrompt`; Spring AI `@Tool` only in a module whose build file declares an MCP server starter |
+| `java_mcp` (`java-mcp`) | Java | `java-mcp` | `McpServerFeatures.Sync/Async{Tool,Resource,ResourceTemplate,Prompt}Specification` (constructor, or builder for tools), or `.tool(tool, handler)` / `.toolCall(tool, handler)` on a chain starting at `McpServer.sync(…)` / `McpServer.async(…)`, `McpServer` imported from `io.modelcontextprotocol.server` or fully qualified |
 | `kotlin_springai` (`kotlin-springai`) | Kotlin | `spring-ai-mcp` | The `java_springai` rules in Kotlin syntax (`required` from the annotation only, as in Java); import aliases of Spring AI classes followed |
-| `kotlin_mcp` (`kotlin-mcp`) | Kotlin | `kotlin-mcp`, `java-mcp` | `addTool(name, description, inputSchema) { … }`, or `addTools(listOf(RegisteredTool(Tool(…)) { … }, …))` with the list written inline, in a file importing `io.modelcontextprotocol.kotlin.sdk.server` (`kotlin-mcp`); the MCP Java SDK's tool specifications in Kotlin syntax (`java-mcp`); import aliases of MCP classes followed |
-| `csharp_mcp` (`csharp-mcp`) | C# | `csharp-mcp` | `[McpServerTool]`; without `Name =` the endpoint is the SDK-derived name (snake_case, `Async` dropped on an async method) |
-| `go_mcpgo` (`go-mcpgo`) | Go | `mcp-go` | `mcp.NewTool(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `AddTool` / `server.ServerTool` literal that registers it. `go_mcp` and the value `go-mcp` are kept for the official Go SDK |
+| `kotlin_mcp` (`kotlin-mcp`) | Kotlin | `kotlin-mcp`, `java-mcp` | `addTool` / `addResource` / `addResourceTemplate` / `addPrompt` (named or positional, trailing lambda), or `addTools(listOf(RegisteredTool(Tool(…)) { … }, …))` with the list written inline, in a `val`, or returned by a same-file function, in a file importing `io.modelcontextprotocol.kotlin.sdk.server` (`kotlin-mcp`); the MCP Java SDK's specifications and `McpServer.sync/async(…).tool(…)` shortcut in Kotlin syntax (`java-mcp`); import aliases of MCP classes followed |
+| `csharp_mcp` (`csharp-mcp`) | C# | `csharp-mcp` | `[McpServerTool]` / `[McpServerPrompt]`; without `Name =` the endpoint is the SDK-derived name (snake_case, `Async` dropped on an async method); `[McpServerResource(UriTemplate = "…")]` (a derived URI is not read) |
+| `go_mcpgo` (`go-mcpgo`) | Go | `mcp-go` | `mcp.NewTool` / `NewResource` / `NewResourceTemplate` / `NewPrompt(…)` from `github.com/mark3labs/mcp-go/mcp`, handler from the `Add…` call or `server.Server…{…, Handler: …}` literal that registers it |
+| `go_mcp` (`go-mcp`) | Go | `go-mcp` | `mcp.AddTool(server, &mcp.Tool{…}, handler)` / `<server>.AddTool` / `AddResource` / `AddResourceTemplate` / `AddPrompt(&mcp.…{…}, handler)` from `github.com/modelcontextprotocol/go-sdk/mcp`, the server built by `mcp.NewServer(…)` or typed `*mcp.Server`; tool params from a literal `InputSchema` or the generic handler's input struct in the same file |
+
+Client detectors (`mcp_call`, no file framework): `python-mcp-client` (`ClientSession` from
+`mcp`, `fastmcp.Client`), `typescript-mcp-client` (`Client` from the SDK's `client/index.js`),
+`go-mcpgo-client` (mcp-go `client.New…Client`), `go-mcp-client` (go-sdk `ClientSession` from
+`<client>.Connect`), `java-mcp-client` / `kotlin-mcp-client` (`McpSyncClient` /
+`McpAsyncClient`, the Kotlin SDK `Client`), `csharp-mcp-client` (`McpClient` / `IMcpClient`).
 
 Code two packages share is in a common module next to them, not in either package:
-`python_mcp_common.py` (the `@<server>.tool` reader and the `mcp.servers` fact, for
-`python_fastmcp` and `python_mcp`) and `jvm_mcp_common.py` (the `spring-ai.mcp-server` fact, the
-JSON-schema reader and the string-literal readers, for the four Java / Kotlin packages).
+`python_mcp_common.py` (the `@<server>.tool` / `.resource` / `.prompt` reader and the
+`mcp.servers` fact, for `python_fastmcp` and `python_mcp`), `jvm_mcp_common.py` (the
+`spring-ai.mcp-server` fact, the `jvm-mcp.mcp-server-types` fact — the `package.McpServer`
+types Java and Kotlin files declare, a Kotlin `typealias` included, each language reading the
+other's index — the JSON-schema text reader, the `McpServer` shortcut record and the
+string-literal readers, for the four Java / Kotlin packages) and `go_mcp_common.py` (Go string
+literals, import names and the per-function bindings the client readers use, for `go_mcpgo` and
+`go_mcp`). The Python, Go, Java and Kotlin readers turn a JSON-schema literal into `params` with
+`mcp_common.schema_params` (a schema without `properties` → `[]`). TypeScript and C# keep their
+own readers; TypeScript's leaves `params` null for a JSON schema without `properties`.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

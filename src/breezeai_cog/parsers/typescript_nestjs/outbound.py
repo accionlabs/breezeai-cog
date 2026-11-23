@@ -29,6 +29,8 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 from ..typescript.declarations import import_bindings
+from ..typescript.imports import Consts
+from ..typescript.scopes import file_consts
 from .patterns import claims_nest, message_pattern
 
 _KIND: dict[str, SemanticType] = {"send": "eventbus_send", "emit": "eventbus_publish"}
@@ -93,7 +95,7 @@ def _client_members(root: Node, source: bytes) -> set[str]:
 
 
 def detect_client_proxy_calls(
-    root: Node, source: bytes, *, framework: str, index: object | None = None,
+    root: Node, source: bytes, *, framework: str, index: object | None = None, path: str = "",
 ) -> list[Emit]:
     """The ``eventbus_send`` / ``eventbus_publish`` calls of this file, for
     :func:`~..emits.apply`: each enriches the unclassified statement it sits on, or is a new one."""
@@ -102,8 +104,7 @@ def detect_client_proxy_calls(
     clients = _client_members(root, source)
     if not clients:
         return []
-    index_consts = getattr(index, "const_values", None)
-    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    consts: Consts = file_consts(index, root, source, path)
     found: list[Emit] = []
     for call in _walk(root, ("call_expression",)):
         fn = call.child_by_field_name("function")
@@ -145,7 +146,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         return None
     sends = detect_client_proxy_calls(
         dc.root, dc.source, framework=nest_framework(dc.source),
-        index=dc.ctx.resolution_index,
+        index=dc.ctx.resolution_index, path=dc.path,
     )
     return Detection(sends, label=nest_framework(dc.source)) if sends else None
 
