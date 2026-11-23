@@ -337,8 +337,9 @@ def _resolve(values: list[list[tuple[str, Declared]]], index: Any) -> Controller
     def callbacks(name: str, seen: frozenset[str]) -> list[Callback]:
         if name in resolved:
             return resolved[name]
-        declared = known[name]
-        assert declared is not None
+        declared = known.get(name)
+        if declared is None:  # declared ambiguously: no callbacks are known for it
+            return []
         parent = _parent_of(name, declared, known)
         inherited: list[Callback] = []
         if parent is not None and parent not in seen:  # a cycle ends the chain too
