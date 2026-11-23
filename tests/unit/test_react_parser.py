@@ -621,6 +621,76 @@ def test_split_lists_the_router_does_not_take_have_no_routes(analyze_files) -> N
     assert _collect_route_modules(None, b"react-router", "src/main.tsx", None) is None
 
 
+def test_split_file_routes_only_the_lists_the_router_takes(analyze_files) -> None:
+    st = analyze_files({
+        "src/main.tsx": RR + (
+            "import { publicRoutes, privateRoutes } from './routes';\n"
+            "import { adminRoutes } from './admin';\n"
+            "import { homeRoutes } from './config';\n"
+            "export const r = createBrowserRouter([ ...publicRoutes, ...adminRoutes, ...homeRoutes,\n"
+            "  { path: '/app', element: <App />, children: privateRoutes } ]);\n"
+        ),
+        # a sibling list mounted under `/app`: never `/dashboard`
+        "src/routes.tsx": (
+            "export const publicRoutes = [ { path: '/login', element: <Login /> } ];\n"
+            "export const privateRoutes = [ { path: 'dashboard', element: <D /> } ];\n"
+        ),
+        # a list spread into the children of `/admin`: its file never gives `/users`
+        "src/admin.tsx": (
+            "import { kids } from './kids';\n"
+            "export const adminRoutes = [ { path: '/admin', element: <A />, children: [...kids] } ];\n"
+        ),
+        "src/kids.tsx": "export const kids = [ { path: 'users', element: <U /> } ];\n",
+        # a barrel: only the name asked for is followed, never the menu beside it
+        "src/config/index.ts": "export * from './home';\nexport * from './navigation';\n",
+        "src/config/home.tsx": "export const homeRoutes = [ { path: '/home', element: <H /> } ];\n",
+        "src/config/navigation.ts": "export const NAV = [ { path: '/nav', component: NavIcon } ];\n",
+    })
+    assert _routes_by_file(st) == {
+        ("src/main.tsx", "/app", "App"), ("src/routes.tsx", "/login", "Login"),
+        ("src/admin.tsx", "/admin", "A"), ("src/config/home.tsx", "/home", "H")}
+
+
+def test_split_lists_through_local_names_and_export_forms(analyze_files) -> None:
+    st = analyze_files({
+        "src/main.tsx": RR + (
+            "import base from './base';\n"
+            "import named from './named';\n"
+            "import { renamed } from './renamed';\n"
+            "const routes = [ ...base, ...named, ...renamed ];\n"
+            "export const r = createBrowserRouter(routes);\n"
+        ),
+        # `export default name`, a list built from a local list
+        "src/base.tsx": (
+            "const shared = [ { path: '/s', element: <S /> } ];\n"
+            "const unused = [ { path: '/x', element: <X /> } ];\n"
+            "const list = [ ...shared, { path: '/b', element: <B /> } ] as const;\n"
+            "export default list;\n"
+        ),
+        # `export { list as default }`
+        "src/named.tsx": "const list = [ { path: '/n', element: <N /> } ];\nexport { list as default };\n",
+        # `export { a as b } from`
+        "src/renamed.ts": "export { inner as renamed } from './inner';\n",
+        "src/inner.tsx": "export const inner = [ { path: '/i', element: <I /> } ];\n",
+    })
+    assert _routes_by_file(st) == {
+        ("src/base.tsx", "/s", "S"), ("src/base.tsx", "/b", "B"), ("src/named.tsx", "/n", "N"),
+        ("src/inner.tsx", "/i", "I")}
+
+
+def test_constant_empty_path_fills_the_outlet(analyze_files) -> None:
+    st = analyze_files({
+        "src/paths.ts": "export const P = { root: '', users: '/users' } as const;\n",
+        "src/router.tsx": RR + (
+            "import { P } from './paths';\n"
+            "export const r = createBrowserRouter([ { path: P.users, element: <Layout />,\n"
+            "  children: [ { path: P.root, element: <List /> } ] } ]);\n"
+        ),
+    })
+    # `Layout` renders the outlet `List` fills: one record at `/users`, the page
+    assert _routes_by_file(st) == {("src/router.tsx", "/users", "List")}
+
+
 def test_vue_router_holding_the_text_react_has_no_react_routes(analyze_files) -> None:
     st = analyze_files({
         "package.json": '{"dependencies": {"vue": "3", "vue-router": "4"}}',

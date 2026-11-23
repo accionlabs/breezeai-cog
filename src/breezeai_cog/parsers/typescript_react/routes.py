@@ -23,7 +23,8 @@ whatever parser owns it. A file that never mentions it has no routes, whatever i
 like: a plain component's tab or menu list (``[{ path, component }]``) is data, and so is a Vue
 router that holds the text ``'react'``. A route list split into a file without the import counts
 when a React Router call takes it, through imports (:data:`ROUTE_MODULES_FACT`): passed in,
-spread in, as a pathless layout's ``children``, or through a barrel that re-exports it. A list
+spread in, as a pathless layout's ``children``, or through a barrel that re-exports it. Only
+the exported list taken counts, never the other lists in its file. A list
 mounted as the ``children`` of a route with a path is not followed (its paths hang off a parent
 that file doesn't know), and a wouter ``<Route>`` is not React Router (when unsure, record less).
 
@@ -65,7 +66,6 @@ from ..navigation_common import literal
 from ..treesitter import entry_text, node_text
 from ..typescript.imports import (
     Consts,
-    _imported_names,
     _module_of,
     _resolve,
     relative_requires,
@@ -207,10 +207,12 @@ def _jsx_attrs(el: Node, source: bytes) -> dict[str, Node]:
 _ELEMENT_KEYS = ("element", "Component", "component", "render", "lazy")
 
 
-def _fills_outlet(keys: Collection[str], path_value: Node | None, source: bytes) -> bool:
-    """An index route, or one with ``path=""`` — it renders at its parent's URL."""
+def _fills_outlet(keys: Collection[str], path_value: Node | None, source: bytes,
+                  const_values: Consts | None = None) -> bool:
+    """An index route, or one with ``path=""`` (a constant that folds to it too) — it renders at
+    its parent's URL."""
     return ("index" in keys and "path" not in keys) or (
-        "path" in keys and _path_literal(path_value, source) == "")
+        "path" in keys and _path_literal(path_value, source, const_values) == "")
 
 
 def _process_jsx(el: Node, prefix: str | None, source: bytes, path: str,
@@ -229,7 +231,7 @@ def _process_jsx(el: Node, prefix: str | None, source: bytes, path: str,
     # Wiring: nested routes under a path with no element, a layout (a child fills the outlet),
     # or a guard layout.
     wiring = bool(nested) and (guard_layout or not shows or any(
-        _fills_outlet(a, a.get("path"), source) for a in (_jsx_attrs(c, source) for c in nested)))
+        _fills_outlet(a, a.get("path"), source, const_values) for a in (_jsx_attrs(c, source) for c in nested)))
     if (has_path or is_index) and handler not in _REDIRECTS and not wiring:
         routes.append(Emit(el, dict(
             semanticType="route",
@@ -344,7 +346,7 @@ def _process_config(arr: Node, prefix: str | None, source: bytes, path: str,
         shows = any(k in keys for k in _ELEMENT_KEYS)
         guard_layout = bool(nested) and bool(handler) and _is_guard_element(handler)
         wiring = bool(nested) and (guard_layout or not shows or any(
-            _fills_outlet(_keys(c, source), _pairs(c, source).get("path"), source)
+            _fills_outlet(_keys(c, source), _pairs(c, source).get("path"), source, const_values)
             for c in nested))
         if wiring and children is not None:
             guards = (*inherited, handler) if guard_layout and handler else inherited
@@ -545,8 +547,10 @@ _ROUTER_CALLS = frozenset({
     "createBrowserRouter", "createHashRouter", "createMemoryRouter", "createStaticRouter",
     "useRoutes",
 })
-#: ``react.route-modules``: files whose route lists reach a React Router call through imports.
+#: ``react.route-modules``: ``{file: its route lists}`` — the lists (by local name, ``default``
+#: for an unnamed default export) that reach a React Router call through imports.
 ROUTE_MODULES_FACT = "react.route-modules"
+_DEFAULT = "default"
 
 
 def _list_refs(node: Node, source: bytes) -> set[str]:
@@ -570,65 +574,171 @@ def _list_refs(node: Node, source: bytes) -> set[str]:
     return refs
 
 
-def _import_modules(root: Node, source: bytes) -> dict[str, str]:
-    """Local name → the module specifier it is imported (or required) from."""
-    out: dict[str, str] = {}
+def _import_bindings(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """Local name → (module, the name it is exported under there): ``import r from`` and
+    ``const r = require(…)`` are ``default``, ``import { a as b }`` is ``a``."""
+    out: dict[str, tuple[str, str]] = {}
     for node in root.named_children:
-        if node.type == "import_statement":
-            module = _module_of(node, source)
-            if module is not None:
-                for name in _imported_names(node, source):
-                    out[name] = module
-    for name, (module, _) in relative_requires(root, source).items():
-        out.setdefault(name, module)
+        if node.type != "import_statement" or (module := _module_of(node, source)) is None:
+            continue
+        clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+        for c in clause.named_children if clause is not None else ():
+            if c.type == "identifier":
+                out[node_text(c, source)] = (module, _DEFAULT)
+            elif c.type == "named_imports":
+                for spec in c.named_children:
+                    name, alias = spec.child_by_field_name("name"), spec.child_by_field_name("alias")
+                    if spec.type == "import_specifier" and name is not None:
+                        out[node_text(alias or name, source)] = (module, node_text(name, source))
+    for local, binding in relative_requires(root, source).items():
+        out.setdefault(local, binding)
     return out
 
 
-def _collect_route_modules(root: Node, source: bytes, rel: str,
-                           repo_root: Path | None) -> tuple[str, str, list[str], list[str]] | None:
-    """One file's part of :data:`ROUTE_MODULES_FACT`: the modules whose lists it passes to a
-    React Router call (only in a file that mentions ``react-router``), and the modules its own
-    lists and re-exports take routes from (followed only once the file is a route module)."""
+def _list_value(node: Node | None) -> Node | None:
+    """An array, or a name, under ``as`` / ``satisfies`` / parentheses; else None."""
+    while node is not None and node.type in ("as_expression", "satisfies_expression",
+                                             "parenthesized_expression"):
+        node = node.named_children[0] if node.named_children else None
+    return node if node is not None and node.type in ("array", "identifier") else None
+
+
+def _file_lists(root: Node, source: bytes) -> tuple[dict[str, Node], dict[str, str]]:
+    """A file's top-level lists (local name, or ``default`` for an unnamed default export → the
+    array) and its exports (exported name → local name)."""
+    lists: dict[str, Node] = {}
+    exports: dict[str, str] = {}
+
+    def declare(decl: Node, exported: bool) -> None:
+        for d in decl.named_children:
+            name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
+            value = _list_value(d.child_by_field_name("value")) if name is not None else None
+            if name is None or name.type != "identifier":
+                continue
+            if value is not None and value.type == "array":
+                lists[node_text(name, source)] = value
+            if exported:
+                exports[node_text(name, source)] = node_text(name, source)
+
+    def default(value: Node | None) -> None:
+        value = _list_value(value)
+        if value is not None and value.type == "array":
+            lists[_DEFAULT] = value
+            exports[_DEFAULT] = _DEFAULT
+        elif value is not None:
+            exports[_DEFAULT] = node_text(value, source)
+
+    for node in root.named_children:
+        if node.type in ("lexical_declaration", "variable_declaration"):
+            declare(node, False)
+        elif node.type == "export_statement" and node.child_by_field_name("source") is None:
+            decl = node.child_by_field_name("declaration")
+            if decl is not None and decl.type in ("lexical_declaration", "variable_declaration"):
+                declare(decl, True)
+            elif node.child_by_field_name("value") is not None:
+                default(node.child_by_field_name("value"))
+            for clause in (c for c in node.named_children if c.type == "export_clause"):
+                for spec in clause.named_children:
+                    name, alias = spec.child_by_field_name("name"), spec.child_by_field_name("alias")
+                    if name is not None:
+                        exports[node_text(alias or name, source)] = node_text(name, source)
+        elif node.type == "expression_statement" and node.named_children \
+                and node.named_children[0].type == "assignment_expression":
+            assign = node.named_children[0]
+            left = assign.child_by_field_name("left")
+            if left is not None and node_text(left, source) == "module.exports":
+                default(assign.child_by_field_name("right"))
+    return lists, exports
+
+
+def _collect_route_modules(root: Node, source: bytes, rel: str, repo_root: Path | None) -> Any:
+    """One file's part of :data:`ROUTE_MODULES_FACT`: the lists it passes to a React Router call
+    (only in a file that mentions ``react-router``), and — followed only once a list is reached —
+    what its exports name, which lists each of its lists takes routes from, and its re-exports."""
     if repo_root is None:
         return None
-    imports = _import_modules(root, source)
-    calls: list[Node] = []
-    _walk(root, "call_expression", calls)
-    router: set[str] = set()
+    imports = _import_bindings(root, source)
+    lists, exports = _file_lists(root, source)
+    router: set[tuple[str, str]] = set()  # (module, exported name) or ("", local list)
     if b"react-router" in source:
+        calls: list[Node] = []
+        _walk(root, "call_expression", calls)
         for call in calls:
             args = _call_args(call)
             if _callee_name(call, source) in _ROUTER_CALLS and args:
-                router |= {imports[n] for n in _list_refs(args[0], source) if n in imports}
-    arrays: list[Node] = []
-    _walk(root, "array", arrays)
-    listed = {imports[n] for arr in arrays for n in _list_refs(arr, source) if n in imports}
-    listed |= {m for node in root.named_children
-               if node.type == "export_statement" and node.child_by_field_name("source") is not None
-               and (m := _module_of(node, source)) is not None}
-    if not router and not listed:
-        return None
-    return rel, str(repo_root), sorted(router), sorted(listed)
-
-
-def _resolve_route_modules(values: list[tuple[str, str, list[str], list[str]]],
-                           index: Any) -> frozenset[str] | None:
-    """The files a React Router call takes routes from, through any chain of imports. A file's
-    own lists are resolved only once it is reached."""
-    def files(rel: str, root: str, modules: list[str]) -> set[str]:
-        return {f for m in modules if (f := _resolve(m, rel, Path(root), index)) is not None}
-
-    listed = {rel: (root, mods) for rel, root, _, mods in values}
-    found: set[str] = set()
-    todo = [f for rel, root, router, _ in values for f in files(rel, root, router)]
-    while todo:
-        f = todo.pop()
-        if f in found:
+                for n in _list_refs(args[0], source):
+                    if n in lists:
+                        router.add(("", n))
+                    elif n in imports:
+                        router.add(imports[n])
+    refs = {name: (sorted(n for n in _list_refs(arr, source) if n in lists and n != name),
+                   sorted(imports[n] for n in _list_refs(arr, source)
+                          if n in imports and n not in lists))
+            for name, arr in lists.items()}
+    reexports: dict[str, tuple[str, str]] = {}
+    stars: list[str] = []
+    for node in root.named_children:
+        if node.type != "export_statement" or node.child_by_field_name("source") is None:
             continue
-        found.add(f)
-        if f in listed:
-            todo.extend(files(f, *listed[f]))
-    return frozenset(found) or None
+        module = _module_of(node, source)
+        clause = next((c for c in node.named_children if c.type == "export_clause"), None)
+        if module is None:
+            continue
+        if clause is None:
+            stars.append(module)  # export * from './m'
+            continue
+        for spec in clause.named_children:
+            name, alias = spec.child_by_field_name("name"), spec.child_by_field_name("alias")
+            if name is not None:
+                reexports[node_text(alias or name, source)] = (module, node_text(name, source))
+    if not (router or refs or reexports or stars):
+        return None
+    return (rel, str(repo_root), sorted(router), sorted(exports.items()),
+            sorted(refs.items()), sorted(reexports.items()), stars)
+
+
+def _resolve_route_modules(values: list[Any], index: Any) -> dict[str, frozenset[str]] | None:
+    """The lists a React Router call takes routes from, through any chain of imports, spreads,
+    pathless layouts and re-exports: only the exported names asked for, never a file's other
+    lists. ``export *`` passes on every name but ``default``."""
+    files = {v[0]: v for v in values}
+    found: dict[str, set[str]] = {}
+    todo: list[tuple[str, bool, str]] = []  # (file, is a local list, name)
+
+    def follow(rel: str, root: str, module: str, name: str) -> None:
+        if (f := _resolve(module, rel, Path(root), index)) is not None:
+            todo.append((f, False, name))
+
+    for rel, root, router, *_ in values:
+        for module, name in router:
+            if module:
+                follow(rel, root, module, name)
+            else:
+                todo.append((rel, True, name))
+    seen: set[tuple[str, bool, str]] = set()
+    while todo:
+        item = todo.pop()
+        if item in seen or item[0] not in files:
+            continue
+        seen.add(item)
+        f, local, name = item
+        rel, root, _, exports, refs, reexports, stars = files[f]
+        if local:
+            own = dict(refs).get(name)
+            if own is None:
+                continue
+            found.setdefault(f, set()).add(name)
+            todo.extend((f, True, n) for n in own[0])
+            for module, exported in own[1]:
+                follow(f, root, module, exported)
+        elif name in dict(exports):
+            todo.append((f, True, dict(exports)[name]))
+        elif name in dict(reexports):
+            follow(f, root, *dict(reexports)[name])
+        elif name != _DEFAULT:
+            for module in stars:
+                follow(f, root, module, name)
+    return {f: frozenset(names) for f, names in found.items()} or None
 
 
 register_fact(FactSpec(
@@ -640,13 +750,21 @@ register_fact(FactSpec(
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    if b"react-router" not in dc.source and dc.path not in (
-            index_fact(dc.ctx.resolution_index, ROUTE_MODULES_FACT) or ()):
-        return None  # a component's `{ path, component }` list, or a Vue / Angular router
-    routes = detect_react_routes(
-        dc.root, dc.source, dc.path,
-        const_values=file_consts(dc.ctx.resolution_index, dc.root, dc.source, dc.path),
-    )
+    consts = file_consts(dc.ctx.resolution_index, dc.root, dc.source, dc.path)
+    if b"react-router" in dc.source:
+        routes = detect_react_routes(dc.root, dc.source, dc.path, const_values=consts)
+    else:
+        # a list file: only the lists a React Router call takes (a component's
+        # `{ path, component }` list, or a Vue / Angular router, has none)
+        taken = (index_fact(dc.ctx.resolution_index, ROUTE_MODULES_FACT) or {}).get(dc.path)
+        if not taken:
+            return None
+        lists, _ = _file_lists(dc.root, dc.source)
+        routes = []
+        for name in sorted(taken):
+            arr = lists.get(name)
+            if arr is not None and _is_route_array(arr, dc.source):
+                _process_config(arr, "", dc.source, dc.path, routes, const_values=consts)
     return Detection(routes, label="react") if routes else None
 
 
