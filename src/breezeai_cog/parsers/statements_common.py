@@ -23,7 +23,7 @@ from __future__ import annotations
 import contextvars
 import re
 from collections.abc import Callable, Collection, Iterator, Mapping
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from tree_sitter import Node
 
@@ -32,7 +32,11 @@ from .addresses import source_kind, value_path
 from ..schemas import Decorator, Statement
 from ..schemas.enums import SemanticType
 from .detection import classify_call, string_has_query, text_has_query, vendor_from_imports
+from .detection.queries import is_query, is_sql_command_type, is_sql_sink
 from .treesitter import end_line, first_line, node_text
+
+if TYPE_CHECKING:
+    from .sql_variables import BuiltSql
 
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
 # the line of each; the executor resets it around each file and emits ONE human-readable
@@ -471,7 +475,10 @@ def classify_statement(
     local_names: Collection[str] = (),
     classify: ClassifyNode | None = None,
     closure_only: ClosureOnly | None = None,
+    built_sql: "BuiltSql | None" = None,
 ) -> list[Statement]:
+    # ``built_sql`` (``sql_variables.built_queries`` for the enclosing body): the calls and
+    # commands that run SQL built up in a local over several statements.
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
     # (``x = 5; // note``); a control-flow statement keeps only its header line (which already
@@ -513,6 +520,14 @@ def classify_statement(
             typed_receivers=_datastore_receivers.get() or None,
             closure_arg=closure_only is not None and closure_only(call),
         )
+        built = built_sql.calls.get((call.start_byte, call.end_byte)) if built_sql else None
+        # SQL built up in a local and passed to a data-access call: checked like a literal
+        # argument would be, so the call reads as it would with the query written inline.
+        if (built is not None and (classified is None or classified[0] == "db_method_call")
+                and (classified is not None or is_sql_sink(det[1], det[0])
+                     or is_sql_command_type(det[1]))
+                and is_query(det[1], built)):
+            classified = ("query_statement", det[1], None)
         if classified is None:
             continue
         sem, meth, dh = classified
@@ -577,6 +592,14 @@ def classify_statement(
         # Raw SQL in a string literal, no classified call: the text check is the cheap filter,
         # the strings confirm it.
         if text_has_query(code_text) and node_has_query(node, source):
+            semantic = "query_statement"
+        # A database command built from (or given as ``CommandText``) SQL built up in a local.
+        elif built_sql is not None and built_sql.direct and any(
+            (c.start_byte, c.end_byte) in built_sql.direct
+            for c in _calls_in_statement(
+                node, emit_types, built_sql.direct_types, stmt_expr, container_types
+            )
+        ):
             semantic = "query_statement"
     records.append(
         Statement(

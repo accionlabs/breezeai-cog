@@ -19,6 +19,7 @@ from ..statements_common import (
     url_placeholder,
     url_first,
 )
+from ..sql_variables import built_queries
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -138,6 +139,7 @@ def extract_statements(
     )
     if doc is not None:
         out.append(doc)
+    queries = built_queries(body, source, "python")
     for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(
@@ -145,6 +147,7 @@ def extract_statements(
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details,
                 stmt_expr=_STMT_EXPR, container_types=_CONTAINERS, language="python",
+                built_sql=queries,
             )
         )
     return out

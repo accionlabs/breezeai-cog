@@ -16,6 +16,7 @@ from ..statements_common import (
     url_placeholder,
     url_first,
 )
+from ..sql_variables import built_queries
 from ..treesitter import node_text
 from .decorators import extract_decorators
 from .imports import _imported_names, _module_of
@@ -399,6 +400,7 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    queries = built_queries(body, source, "typescript")
     for node in _iter_in_scope(body, descend_all, barriers, built):
         out.extend(
             classify_statement(
@@ -407,6 +409,7 @@ def extract_statements(
                 name_of=_name_of, call_details=_call_details, language="typescript",
                 typed_db_ids=typed_db_ids,
                 decorators=_field_decorators(node, source),
+                built_sql=queries,
             )
         )
     return out
