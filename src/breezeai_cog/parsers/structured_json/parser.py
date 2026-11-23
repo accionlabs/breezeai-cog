@@ -23,7 +23,6 @@ captured content lives only on the (unembedded) statement, reachable lexically b
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +30,7 @@ from ...emit import file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from ...utils.jsonc import load_json
 from ..config.extractors import NX_ONLY_JSON_NAMES, RICH_JSON_NAMES, extract_config
 from ..config.nx import in_nx_workspace
 from .toon import encode
@@ -69,7 +69,7 @@ class JsonParser(BaseParser):
     # ── parse ────────────────────────────────────────────────────────────────
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
-        data = self._parse(ctx.source)
+        data, mode = self._parse(text)
         loc = count_loc(text)
         # Named-rich configs, and empty/scalar JSON with nothing to capture, are config records
         # handled by the shared extractor; every other non-empty JSON is captured in full.
@@ -82,7 +82,7 @@ class JsonParser(BaseParser):
                 loc=loc,
                 metadata=extract_config(ctx.path, text),
             )
-        return self._capture(ctx, data, loc)
+        return self._capture(ctx, data, loc, mode)
 
     @staticmethod
     def _is_rich(ctx: ParseContext) -> bool:
@@ -101,7 +101,9 @@ class JsonParser(BaseParser):
         return isinstance(data, (dict, list)) and len(data) > 0
 
     # ── full capture ─────────────────────────────────────────────────────────
-    def _capture(self, ctx: ParseContext, data: Any, loc: int) -> FileRecord:
+    def _capture(
+        self, ctx: ParseContext, data: Any, loc: int, mode: str | None = None
+    ) -> FileRecord:
         # Full TOON serialization of the whole document (secret-redacted inside the encoder).
         # Nothing is truncated: the whole document is kept and an oversized TOON is split into
         # `#partNofN` statements downstream (emit.split). The content lives only on the
@@ -116,6 +118,8 @@ class JsonParser(BaseParser):
             "recordCount": self._record_count(data),
             "leafCount": toon.leaf_count,
         }
+        if mode is not None:  # read by a fallback (raw control characters or comments)
+            meta["parseMode"] = mode
 
         # The whole document is captured ONLY as this statement (TOON in `text`) — a semantic
         # capture, so gated behind statement capture. The text is not embedded; it is the
@@ -158,11 +162,14 @@ class JsonParser(BaseParser):
         )
 
     @staticmethod
-    def _parse(source: bytes) -> Any:
+    def _parse(text: str) -> tuple[Any, str | None]:
+        """``(data, parseMode)``: strict JSON, else the lenient / JSONC fallbacks of
+        ``load_json``; ``(None, None)`` when every attempt fails (the config route then records
+        the strict ``parseError``)."""
         try:
-            return json.loads(source.decode("utf-8", "replace"))
+            return load_json(text)
         except (ValueError, TypeError, RecursionError):
-            return None
+            return None, None
 
     @staticmethod
     def _is_record_array(value: Any) -> bool:

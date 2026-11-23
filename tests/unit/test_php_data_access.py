@@ -136,10 +136,10 @@ def test_codeigniter_builder_and_models(analyze_files) -> None:
         "app/Other.php": "<?php\nclass O { function f() { $this->db->table('x'); } }\n",
     })
     assert _db(stmts) == [
-        ("$builder = $this->db->table('items');", "table", "codeigniter-builder"),
-        ("$builder->where('item_id', $id);", "where", "codeigniter-builder"),
-        ("return $builder->get()->getResult();", "get", "codeigniter-builder"),
-        ("return $model->findAll();", "findAll", "codeigniter-builder"),
+        ("$builder = $this->db->table('items');", "table", "codeigniter"),
+        ("$builder->where('item_id', $id);", "where", "codeigniter"),
+        ("return $builder->get()->getResult();", "get", "codeigniter"),
+        ("return $model->findAll();", "findAll", "codeigniter"),
     ]
 
 

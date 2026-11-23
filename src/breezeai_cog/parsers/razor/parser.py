@@ -5,7 +5,8 @@ the ``razor`` grammar (in ``tree_sitter_language_pack`` — no new dependency) p
 the embedded C# in a single pass, so the template constructs are captured from real grammar
 nodes (see :mod:`.statements`).
 
-``.cshtml`` is an MVC / Razor-Pages **view** (``uiRole="template"``); ``.razor`` is a Blazor
+``.cshtml`` is an MVC / Razor-Pages **view** (``uiRole="template"``), and ``.vbhtml`` its VB
+counterpart (an MVC view, read by a text scan: the grammar is C# Razor — :mod:`.vbhtml`); ``.razor`` is a Blazor
 **component** (``uiRole="component"``, like a Vue SFC). ``language`` is ``html`` — a Razor file
 is an HTML dialect (the same reasoning as ``.aspx``); ``framework`` is ``razor``.
 
@@ -30,6 +31,7 @@ from ..treesitter import parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .page_models import page_model_locator
 from .statements import collect_razor_statements
+from .vbhtml import collect_vbhtml_statements
 
 #: C# member declarations inside an ``@code { }`` block that become Functions. The razor
 #: grammar embeds the C# grammar, so these are the same node types (and fields) the C# parser
@@ -39,15 +41,17 @@ _CODE_METHODS = ("method_declaration", "constructor_declaration", "local_functio
 
 class RazorParser(BaseParser):
     name = "razor"
-    extensions: tuple[str, ...] = (".cshtml", ".razor")
-    # Both are markup: .cshtml is a view, .razor a Blazor component. This parser owns
+    extensions: tuple[str, ...] = (".cshtml", ".razor", ".vbhtml")
+    # All are markup: .cshtml / .vbhtml are views, .razor a Blazor component. This parser owns
     # nothing else, so it goes idle entirely without --capture-templates.
-    template_extensions: tuple[str, ...] = (".cshtml", ".razor")
+    template_extensions: tuple[str, ...] = (".cshtml", ".razor", ".vbhtml")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
+        if ctx.path.lower().endswith(".vbhtml"):
+            return self._parse_vbhtml(ctx)
         fid = file_id(ctx.path)
         root = parse_source("razor", ctx.source, ctx.parse_timeout_micros).root_node
         # .razor is a Blazor component; .cshtml is a view template.
@@ -78,6 +82,21 @@ class RazorParser(BaseParser):
             # File, so an @onclick="Remove" handler resolves to the Remove method in this file.
             self._extract_code_methods(root, ctx, fid, seen_ids, record)
             # inline <script> jQuery AJAX calls → api_call (the markup grammar skips script bodies)
+            detect_inline_jquery(
+                record, ctx.source, ctx.path, ctx.parse_timeout_micros, ctx.repo_root)
+        return record
+
+    def _parse_vbhtml(self, ctx: ParseContext) -> FileRecord:
+        """A VB Razor view: the template statements from a text scan (:mod:`.vbhtml`), and its
+        inline ``<script>`` jQuery calls, as for ``.cshtml``."""
+        fid = file_id(ctx.path)
+        record = FileRecord(
+            id=fid, path=ctx.path, type="code", language="html", framework="razor",
+            uiRole="template", loc=count_loc(ctx.source.decode("utf-8", "replace")),
+        )
+        if ctx.capture_statements:
+            record.statements.extend(collect_vbhtml_statements(
+                ctx.source, ctx.path, fid, set(), ctx.statement_text_limit))
             detect_inline_jquery(
                 record, ctx.source, ctx.path, ctx.parse_timeout_micros, ctx.repo_root)
         return record

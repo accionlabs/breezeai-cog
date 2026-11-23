@@ -36,6 +36,9 @@ def _name_of(node: Node, source: bytes) -> str | None:
                 return node_text(ident, source)
             if decl.named_children:
                 return node_text(decl.named_children[0], source)
+    if node.type == "property_declaration":  # `Public Property Ok As Boolean` -> Ok
+        ident = next((c for c in node.named_children if c.type == "identifier"), None)
+        return node_text(ident, source) if ident is not None else None
     if node.type == "const_declaration":
         # `Public Const MaxRetries As Integer = 5` — name is a direct identifier child.
         nm = node.child_by_field_name("name")

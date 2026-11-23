@@ -160,7 +160,9 @@ framework must have the **higher** priority.
 | Claim too narrow | A claim on one import form only (`import io.vertx.core.Vertx`) misses wildcard imports, re-exports or fully-qualified use. | Gap — files fall back to the base parser and lose their routes. |
 
 How to check: for each pair of frameworks in the language, look for real files that match both
-claim strings (`grep -l` on a dogfood repo), and see which parser won (`FileRecord.framework`).
+claim strings (`grep -l` on a dogfood repo), and see which parser won (`registry.select(path, source).name`).
+`FileRecord.framework` is not the parser: it is a label a framework parser or an additive detector
+sets only when it finds its own entry points, so it can name a detector or be absent.
 
 ### 5. Derived data: no false positives
 
@@ -263,7 +265,7 @@ against it. Do not derive the list from the parser's own code.
 | **Decorators / annotations** | Every annotation on classes, methods **and parameters**, with arguments. One row per decorator form the framework uses. |
 | **Routes** | Every route form: annotations, router calls (`router.get(...)`), chained builders, sub-routers and mounts, path prefixes, regex routes, method-less routes. Fields: `method`, `endpoint`, `routeKind`, guards / auth, request / response DTOs. |
 | **Entry points** | The parser's role table in [`docs/entry-point-roles/`](entry-point-roles/README.md) ([entry-point contract](architecture/entry-points.md) §9) covers every inbound construct the framework documents — routes, message and event consumers, scheduled jobs, pages — and each record leads to its handler (`handler`, `handlerLine`, and `handlerPath` when it is in another file). |
-| **Statements with a `semanticType`** | `route`, `api_call`, `db_method_call`, `query_statement`, `eventbus_send`, `eventbus_publish`, `eventbus_consumer`, `verticle_deploy`, `service_proxy`, `timer`, `graphql_entity`, `data_model`, `structured_data`, `comment`, `enum_member`, and the `iac_*` values for config parsers. Check each one that applies **wherever** it can appear — including inside lambdas and callbacks, which the base extraction skips as nested scopes. |
+| **Statements with a `semanticType`** | `route`, `api_call`, `db_method_call`, `query_statement`, `eventbus_send`, `eventbus_publish`, `eventbus_consumer`, `verticle_deploy`, `service_proxy`, `timer`, `graphql_entity`, `data_model`, `structured_data`, `comment`, `enum_member`, the `iac_*` values for config parsers, `mcp_tool` / `mcp_resource` / `mcp_prompt` (what an MCP server exposes, entry points) and `mcp_call` (an MCP client's call, outbound) — see the MCP tables in `docs/entry-point-roles/`, and the Markdown document kinds (`skill`, `agent`, `command`, `agent_instructions`, `doc`). Check each one that applies **wherever** it can appear — including inside lambdas and callbacks, which the base extraction skips as nested scopes. |
 | **Imports / calls** | Relative and internal imports resolved to repo-relative paths; external imports listed; `calls[]` resolved where the target is certain. |
 | **Configs** | Framework config files (YAML / JSON / properties / HCL) handled by the config parsers; values that drive routing (ports, base paths, event addresses). |
 | **Constants and enums** | Enum members (`enum_member` statements); constants used as route paths or event addresses, and whether they are folded into `endpoint`. |
@@ -441,5 +443,3 @@ Some fixes need a modelling decision first (a new `semanticType`, field, node or
 
 | Fix | Modelling choice it forces | Options | Decision needed from |
 |---|---|---|---|
-</content>
-</invoke>

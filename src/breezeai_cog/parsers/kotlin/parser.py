@@ -27,6 +27,7 @@ from ...schemas import (
 )
 from ...schemas.enums import ClassType
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import CallResolver, make_resolver, noop_resolver
 from ..statements_common import (
@@ -226,6 +227,7 @@ def _return_type(node: Node, source: bytes) -> str | None:
 class KotlinParser(BaseParser):
     name = "kotlin"
     extensions = (".kt",)
+    related_languages = ("java",)  # the MCP server types Java declares (jvm_mcp_common.index_types)
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -309,7 +311,7 @@ class KotlinParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -321,6 +323,10 @@ class KotlinParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors (parsers/additive.py) — layered on top of the base extraction, before
+        # any framework subclass adds its own (an MCP tool co-exists with a Ktor route).
+        run_additive("kotlin", root, ctx, record, is_fixture=self.is_fixture_file(path))
+        return record
 
     def _build_class(
         self,

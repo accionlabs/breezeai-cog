@@ -127,7 +127,7 @@ export enum BrandTab { Overview = 'overview', Products = 'products' }
 '''
 
 _ROUTING_SRC = b'''import { RouterModule, Routes } from '@angular/router';
-import { RouteNames } from './route-names';
+import { RouteNames, RouteParams } from './route-names';
 import { BrandTab } from './brand-tab';
 
 const LOCAL = 'admin';
@@ -333,7 +333,8 @@ def test_redirect_wildcard_and_empty_target(tmp_path) -> None:
 
 def test_redirect_const_target_resolved_and_unresolved(tmp_path) -> None:
     routing = _routes_src("{ path: '', redirectTo: RouteNames.DIAGNOSTICS }",
-                          "{ path: 'a', redirectTo: UNKNOWN.CONST }").decode()
+                          "{ path: 'a', redirectTo: UNKNOWN.CONST }").decode().replace(
+        "from '@angular/router';", "from '@angular/router'; import { RouteNames } from './route-names';", 1)
     rec = _parse_with_index({"route-names.ts": _CONSTS_SRC, "app-routing.module.ts": routing},
                             "app-routing.module.ts", tmp_path)
     navs = [(s.startLine, s.endpoint) for s in rec.statements if s.routeKind == "navigation"]

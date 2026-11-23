@@ -5,7 +5,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -62,20 +62,94 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         method = callee
     args = call.child_by_field_name("arguments")
     arg_nodes: list[Node] = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(arg_nodes, source, _render_url)
+    endpoint, override = resolve_endpoint(arg_nodes, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint
 
 
-def _iter_in_scope(node: Node, descend_all: bool = False) -> list[Node]:
+#: Declarations that bind names to values: ``var x = …`` (one ``var_spec`` each) and ``x := …``.
+_BINDING_OWNERS = ("var_spec", "short_var_declaration")
+
+
+def _pairs(owner: Node) -> list[tuple[Node, Node]] | None:
+    """(name, value) per binding of a ``var_spec`` / ``short_var_declaration``, or None when
+    the names and values do not pair up (``a, b := f()``) or there are no values."""
+    if owner.type == "var_spec":
+        names = owner.children_by_field_name("name")
+        values = owner.child_by_field_name("value")
+    else:
+        left = owner.child_by_field_name("left")
+        names = list(left.named_children) if left is not None else []
+        values = owner.child_by_field_name("right")
+    if values is None:
+        return None
+    vals = [v for v in values.named_children if v.type != "comment"]
+    if not names or len(names) != len(vals):
+        return None
+    return list(zip(names, vals))
+
+
+def bound_name(literal: Node, source: bytes) -> str | None:
+    """The variable a ``func_literal`` is stored in (``var notify = func…``, ``cb := func…``),
+    else None — an inline literal (an argument, a ``go``/``defer`` call, an assignment)."""
+    values = literal.parent
+    owner = values.parent if values is not None and values.type == "expression_list" else None
+    if owner is None or owner.type not in _BINDING_OWNERS:
+        return None
+    for name, value in _pairs(owner) or []:
+        if (value.start_byte, value.end_byte) == (literal.start_byte, literal.end_byte):
+            text = node_text(name, source)
+            return text if name.type == "identifier" and text != "_" else None
+    return None
+
+
+def bound_literals(statement: Node) -> list[Node] | None:
+    """The function literals a ``var`` / ``:=`` statement stores, when that is all it stores
+    (every value is a ``func_literal`` bound to a name), else None."""
+    if statement.type == "short_var_declaration":
+        owners = [statement]
+    elif statement.type == "var_declaration":
+        owners = [c for c in statement.named_children if c.type == "var_spec"]
+        for lst in (c for c in statement.named_children if c.type == "var_spec_list"):
+            owners.extend(c for c in lst.named_children if c.type == "var_spec")
+    else:
+        return None
+    literals: list[Node] = []
+    for owner in owners:
+        pairs = _pairs(owner)
+        if pairs is None:
+            return None
+        for name, value in pairs:
+            if value.type != "func_literal" or name.type != "identifier" or name.text == b"_":
+                return None
+            literals.append(value)
+    return literals or None
+
+
+def _duplicates_functions(node: Node, barriers: frozenset[tuple[int, int]]) -> bool:
+    """True for a ``var`` / ``:=`` statement that only stores function literals extracted as
+    Functions (their spans in ``barriers``): the statement would repeat them."""
+    literals = bound_literals(node) if barriers else None
+    return literals is not None and all((n.start_byte, n.end_byte) in barriers for n in literals)
+
+
+def _iter_in_scope(
+    node: Node, descend_all: bool = False, barriers: frozenset[tuple[int, int]] = frozenset(),
+) -> list[Node]:
+    """Statement nodes in ``node``. The walk stops at declared functions and methods (unless
+    ``descend_all``) and always at a function literal stored in a variable (``barriers``):
+    each is its own Function. Inline literals are walked, so their statements belong to the
+    enclosing function, or to the file at package level."""
     out: list[Node] = []
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
+        if (child.start_byte, child.end_byte) in barriers or _duplicates_functions(child, barriers):
+            continue
         if child.type in EMIT_TYPES:
             out.append(child)
-        out.extend(_iter_in_scope(child, descend_all))
+        out.extend(_iter_in_scope(child, descend_all, barriers))
     return out
 
 
@@ -89,11 +163,12 @@ def extract_statements(
     limit: int,
     seen_ids: set[str],
     descend_all: bool = False,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all):
+    for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(
                 node,

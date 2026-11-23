@@ -28,10 +28,11 @@ from typing import cast
 from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
+from .addresses import source_kind, value_path
 from ..schemas import Decorator, Statement
 from ..schemas.enums import SemanticType
 from .detection import classify_call, string_has_query, text_has_query, vendor_from_imports
-from .treesitter import first_line, node_text
+from .treesitter import end_line, first_line, node_text
 
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
 # the line of each; the executor resets it around each file and emits ONE human-readable
@@ -138,6 +139,9 @@ NameOf = Callable[[Node, bytes], "str | None"]
 # (semanticType, method, endpoint, dataAccessHint) or None for one call-like node. A language
 # whose constructs the shared heuristics cannot classify (Apex DML / inline SOQL) supplies this
 # instead of ``call_details``; it replaces ``classify_call`` for that language.
+# True when a call node's only argument is a closure/block — a collection iteration
+# (``items.findAll { … }``), never data access by a colliding name (see ``match_db``).
+ClosureOnly = Callable[[Node], bool]
 ClassifyNode = Callable[[Node, bytes], "tuple[str, str | None, str | None, str | None] | None"]
 
 
@@ -179,19 +183,17 @@ UrlRenderer = Callable[[Node, bytes], "str | None"]
 
 
 def url_placeholder(expr_text: str) -> str:
-    """A non-string URL sub-expression -> ``{name}`` (simple name) or ``{param}``."""
+    """A non-string URL sub-expression -> ``{name}``: a name or member path written whole
+    (``user.id`` → ``{user.id}``, ``addresses.value_path``), else the last part when it is a
+    plain name, else ``{param}``."""
+    kind = source_kind(expr_text)  # a configuration entry / environment variable: its key
+    if kind is not None:
+        return "{" + kind + "}"
+    path = value_path(expr_text)
+    if path is not None:
+        return "{" + path + "}"
     simple = expr_text.rsplit(".", 1)[-1].strip()
     return "{" + simple + "}" if simple and simple.replace("_", "").isalnum() else "{param}"
-
-
-def strip_leading_base(url: str) -> str:
-    """Drop a leading interpolated base/host segment so the path matches inbound routes:
-    ``{base}/users/{id}`` -> ``/users/{id}`` (a leading ``{...}`` with no ``/`` is kept)."""
-    if url.startswith("{"):
-        slash = url.find("/")
-        if slash != -1:
-            return url[slash:]
-    return url
 
 
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
@@ -242,25 +244,69 @@ def render_concat(node: Node, source: bytes, render: UrlRenderer) -> str | None:
     if not any(r is not None for r in rendered):
         return None
     return "".join(
-        r if r is not None else url_placeholder(node_text(c, source))
+        r if r is not None else _joined_values(c, node.type, source)
         for r, c in zip(rendered, node.named_children)
     )
 
 
+def _is_plus(node: Node) -> bool:
+    return any(not c.is_named and c.type == "+" for c in node.children)
+
+
+def _joined_values(node: Node, concat_type: str, source: bytes) -> str:
+    """Placeholders for a part of a string concatenation that holds no string: one per value
+    when it is itself an unparenthesised ``+`` of values (``prefix + host + ":"`` →
+    ``{prefix}{host}:``, the leading values joined as text), else one for the whole part
+    (``(page + 1)`` is a sum: ``{param}``)."""
+    if node.type == concat_type and _is_plus(node) and len(node.named_children) == 2:
+        return "".join(_joined_values(c, concat_type, source) for c in node.named_children)
+    return url_placeholder(node_text(node, source))
+
+
+#: Calls whose first argument is the URL itself, by method name (lower case): an HTTP verb,
+#: ``fetch``, a ``url`` / ``uri`` builder, scalaj ``Http(u)``, Spring RestTemplate's verbs. A
+#: call of another name (``send(backend)``, ``run(req)``) takes a request or a client.
+URL_FIRST = HTTP_VERB_ARGS | frozenset({
+    "fetch", "url", "uri", "http", "getforobject", "getforentity", "postforobject",
+    "postforentity", "postforlocation", "patchforobject", "headforheaders", "optionsforallow",
+})
+
+
+def url_first(callee: str, method: str) -> str | None:
+    """``method`` when a call takes its URL as the first argument: never a verb on a request
+    builder (the receiver is itself a call, ``newBuilder().uri(u).POST(body)``,
+    ``ws.url(u).post(body)``): there it takes the body."""
+    receiver = callee.rsplit(".", 1)[0] if "." in callee else ""
+    return None if ")" in receiver else method
+
+
 def resolve_endpoint(
-    arg_nodes: list[Node], source: bytes, render: UrlRenderer
+    arg_nodes: list[Node], source: bytes, render: UrlRenderer, *, method: str | None = None,
 ) -> tuple[str | None, str | None]:
     """(endpoint, override_method) for positional call args, given a language ``render``.
     Handles the verb-first form ``request('GET', url)`` — the verb is the method, the URL
-    is the next argument; otherwise resolves the first argument."""
+    is the next argument; otherwise resolves the first argument. A URL argument that does not
+    render (a variable, a lookup, a call) is one ``{name}`` part (:func:`url_or_value`) when
+    the call's ``method`` takes the URL first (:data:`URL_FIRST`), else None."""
     if not arg_nodes:
         return None, None
     first = arg_nodes[0]
     if len(arg_nodes) >= 2:
         verb = render(first, source)
         if verb and verb.lower() in HTTP_VERB_ARGS:
-            return render(arg_nodes[1], source), verb.lower()
+            return url_or_value(arg_nodes[1], source, render), verb.lower()
+    if method is not None and method.lower() in URL_FIRST:
+        return url_or_value(first, source, render), None
     return render(first, source), None
+
+
+def url_or_value(node: Node, source: bytes, render: UrlRenderer) -> str | None:
+    """A URL argument rendered, else one ``{name}`` placeholder for the whole argument
+    (``axios.get(url)`` → ``{url}``; the executor marks it ``${url}``, or clears it when it has
+    no name, ``addresses.informative``)."""
+    rendered = render(node, source)
+    # `base + suffix` (no string): one placeholder per value, as in a concatenation
+    return rendered if rendered is not None else _joined_values(node, node.type, source)
 
 
 def _call_type_set(call_type: str | Collection[str]) -> Collection[str]:
@@ -424,6 +470,7 @@ def classify_statement(
     decorators: "list[Decorator] | None" = None,
     local_names: Collection[str] = (),
     classify: ClassifyNode | None = None,
+    closure_only: ClosureOnly | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -435,7 +482,7 @@ def classify_statement(
     else:
         display_text = text_with_trailing_comment(node, source)
     start, col = node.start_point[0] + 1, node.start_point[1]
-    end = node.end_point[0] + 1
+    end = end_line(node)
 
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
     hits: list[tuple[str, str | None, str | None, str | None, Node]] = []
@@ -464,6 +511,7 @@ def classify_statement(
             http_client_ids=current_http_client_ids() or None,
             vendor=_datastore_vendor.get(),
             typed_receivers=_datastore_receivers.get() or None,
+            closure_arg=closure_only is not None and closure_only(call),
         )
         if classified is None:
             continue
@@ -509,7 +557,7 @@ def classify_statement(
                     endpoint=hit_endpoint,
                     dataAccessHint=hit_hint,
                     startLine=cs,
-                    endLine=call.end_point[0] + 1,
+                    endLine=end_line(call),
                     path=path,
                 )
             )
@@ -610,7 +658,7 @@ def member_statement(
     its source). ``name`` defaults to the member's declared name; ``semantic_type`` marks the
     member's role on the same record while ``nodeType`` stays the raw grammar type."""
     start, col = node.start_point[0] + 1, node.start_point[1]
-    end = node.end_point[0] + 1
+    end = end_line(node)
     return Statement(
         id=disambiguate(statement_id(path, start, col), seen_ids),
         parentId=parent_id,

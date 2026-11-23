@@ -4,7 +4,8 @@
   file under ``app/`` or ``pages/`` (its parent when that is ``src``) holding a
   ``next.config.*``, or whose ``package.json`` depends on ``next``. A file-based page counts
   only inside one of these — Gatsby also routes ``src/pages/*.tsx``, and Angular has
-  ``src/app``.
+  ``src/app``. ``.mdx`` files count by their path too (a fact source), so an app whose pages
+  are all MDX is an app.
 * ``next.middlewares`` — ``middleware.(ts|js)``, or ``proxy.(ts|js)`` (its Next.js 16 name):
   app directory → (the file's name — ``middleware`` / ``proxy``, the guard its routes get —
   its ``config.matcher`` patterns, or ``None`` when it has no matcher: runs on every route). A
@@ -85,15 +86,21 @@ def next_page_extensions(index: Any | None) -> dict[str, tuple[str, ...] | None]
     return index_fact(index, PAGE_EXTENSIONS) or {}
 
 
+def config_root(index: Any | None, path: str) -> str | None:
+    """The deepest directory above ``path`` holding a ``next.config`` (``""``: the repo root);
+    None when there is none."""
+    anchors = [d for d in next_base_paths(index) if d == "" or path.startswith(d + "/")]
+    return max(anchors, key=len) if anchors else None
+
+
 def page_extensions(index: Any | None, path: str) -> tuple[str, ...] | None:
     """The ``pageExtensions`` of the app a ``path`` belongs to — the deepest directory above it
     holding a ``next.config``: ``()`` when that config sets none (Next.js's default), None when
     it is set but unknown."""
-    configs = next_base_paths(index)
-    anchors = [d for d in configs if d == "" or path.startswith(d + "/")]
-    if not anchors:
+    anchor = config_root(index, path)
+    if anchor is None:
         return ()
-    return next_page_extensions(index).get(max(anchors, key=len), ())
+    return next_page_extensions(index).get(anchor, ())
 
 
 def page_stem(filename: str, extensions: tuple[str, ...]) -> str | None:
@@ -173,7 +180,7 @@ def _collect_base_path(
 ) -> BasePathRaw | None:
     if not rel.rsplit("/", 1)[-1].startswith("next.config."):
         return None
-    return collect_base_path(root, source, rel, "nextjs")
+    return collect_base_path(root, source, rel, "nextjs", repo_root)
 
 
 def _is_next_app(repo_root: str, root: str) -> bool:
@@ -314,6 +321,7 @@ def _resolve_middlewares(
 # Every file: where a file lives decides it, not what it says.
 register_fact(FactSpec(
     name=APPS, language="typescript", gate=(b"",), collect=_collect_app, resolve=_resolve_apps,
+    sources=(".mdx",), path_only=True,  # an .mdx file counts by its path: it is not read
 ))
 register_fact(FactSpec(
     name=MIDDLEWARES, language="typescript", gate=(b"export",),

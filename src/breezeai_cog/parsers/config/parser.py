@@ -12,12 +12,14 @@ default (they're in `default_ignores.txt` as secrets); a repo must opt in via
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Sequence
 
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from .extractors import extract_config, is_dotnet_config
+from .index import ConfigIndex, build_config_index
 
 
 class ConfigParser(BaseParser):
@@ -34,6 +36,8 @@ class ConfigParser(BaseParser):
         ".ini",
         ".xml",
         ".gradle",
+        "build.gradle.kts",  # Gradle Kotlin DSL; any other ``.kts`` is a Kotlin script
+        "settings.gradle.kts",
         ".sbt",
         ".csproj",
         ".vbproj",
@@ -49,8 +53,7 @@ class ConfigParser(BaseParser):
         ".gitignore",
         ".dockerignore",
         "LICENSE",
-        "README.md",
-        "README.rst",
+        # README.md / README.rst are owned by the Markdown parser (parsers/markdown).
         ".env",
     )
 
@@ -61,6 +64,10 @@ class ConfigParser(BaseParser):
         if name.startswith("Dockerfile.") or name.startswith(".env."):
             return True
         return is_dotnet_config(name)  # Web.config / App.config (+ transforms) — one source of truth
+
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> ConfigIndex | None:
+        """The facts registered for ``config`` (``config/index.py``); None when there are none."""
+        return build_config_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")

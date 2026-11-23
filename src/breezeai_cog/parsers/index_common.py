@@ -13,7 +13,7 @@ from __future__ import annotations
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Hashable, Sequence, TypeVar
+from typing import Callable, Hashable, Iterable, Mapping, Sequence, TypeVar
 
 from ..schemas import Decorator
 
@@ -84,6 +84,23 @@ def record_distinct(
         mapping[key] = None
 
 
+def methods_where_unknown(
+    classes: Iterable[tuple[str, str, Iterable[str]]],
+    heritage: Mapping[str, "ClassHeritage | None"],
+) -> dict[tuple[str, str], frozenset[str] | None]:
+    """``(file, class simple name)`` → the methods that class declares in that file, for each
+    class ``heritage`` cannot describe (``None``: two repository classes share its simple name,
+    or its methods are not all known). ``classes`` is every ``(file, simple name, methods)`` the
+    pre-pass read. A call on such a type keeps the file the import or package names only when
+    that class there declares the method (``callresolve.py``). Two classes of one simple name in
+    one file (nested in different classes) → ``None``: the file cannot tell them apart either."""
+    out: dict[tuple[str, str], frozenset[str] | None] = {}
+    for rel, simple, methods in classes:
+        if simple in heritage and heritage[simple] is None:
+            record_distinct(out, (rel, simple), frozenset(methods), same=lambda a, b: False)
+    return out
+
+
 @dataclass
 class ClassHeritage:
     """One class's heritage for cross-file resolution — its base *class* (simple name), the
@@ -92,14 +109,30 @@ class ClassHeritage:
     resolution walks the base chain to inherit a controller's ``[Route]`` / ``[Authorize]``,
     and the call resolver walks it to resolve inherited-method calls to the declaring file.
 
-    ``methods`` maps method name → declaring file, or ``None`` when the name is declared in
-    >1 file for this class (partial-class split / overload ambiguity → honest-null). It is
-    empty for builders that don't support inherited-call resolution, so the inheritance tier
-    stays inert for them."""
+    ``methods`` maps every method name callable on the class without following ``extends`` →
+    the file that declares it, or ``None`` when the name is declared in >1 file for this class
+    (partial-class split / overload ambiguity → honest-null). For most languages that is the
+    methods written in the class; a language whose classes get methods without writing them
+    adds those too, under its own rules, in its own builder (Groovy: generated property
+    accessors → the property's file, trait methods → the trait's file), so the shared walk
+    follows one ``extends`` chain only. It is empty for builders that don't support
+    inherited-call resolution, so the inheritance tier stays inert for them.
+
+    ``returns`` maps method name → the simple name of its declared return type, or ``None``
+    when overloads disagree; void and primitive returns are left out. It lets a call on a call
+    (``builder.dataApi().get()``) resolve through the first call's type. Empty for builders
+    that don't record it.
+
+    ``fields`` maps each field a subclass inherits (not ``private``) → the simple name of its
+    declared type when that type is a repository class as the declaring file sees it (its
+    imports and package), else ``None``. It lets ``helper.run()`` in a subclass resolve through
+    a ``helper`` field its in-repo base class declares. Empty for builders that don't record it."""
 
     extends: str | None
     decorators: list[Decorator]
     methods: dict[str, str | None] = field(default_factory=dict)
+    returns: dict[str, str | None] = field(default_factory=dict)
+    fields: dict[str, str | None] = field(default_factory=dict)
 
 
 def record_heritage(
@@ -191,7 +224,7 @@ class HeritageChain:
 
 
 def walk_heritage(
-    name: str, extends: str | None, heritage_map: dict[str, ClassHeritage | None]
+    name: str, extends: str | None, heritage_map: Mapping[str, ClassHeritage | None]
 ) -> HeritageChain:
     """Follow ``extends`` up through a ``class_heritage`` index, collecting each in-repo
     ancestor nearest-first. Cycle-guarded. Stops at the first base that is not an in-repo

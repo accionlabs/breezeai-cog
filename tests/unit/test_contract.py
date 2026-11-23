@@ -32,8 +32,17 @@ def test_wrong_values_are_errors() -> None:
     assert _rules(_route(routeKind=None)) == [("routeKind", "error")]
     assert _rules(_route(routeKind="rest")) == [("routeKind", "error")]
     assert _rules(_route(framework=None)) == [("framework", "error")]
-    assert _rules(_route(endpoint="${BASE}/x")) == [("endpoint", "error")]
+    # source text, not an address: an expression, Ruby interpolation, a template literal
+    assert _rules(_route(endpoint="${a + b}/x")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="#{base}/x")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="`/x`")) == [("endpoint", "error")]
     assert _rules(_route(endpoint="")) == [("endpoint", "error")]
+
+
+def test_a_value_read_at_runtime_is_marked_not_an_error() -> None:
+    # the contract's marker: ${name} stands for a value cog cannot read (addresses.py)
+    assert _rules(_route(endpoint="${BASE}/x")) == []
+    assert _rules(_route(endpoint="/api/${version}/orders/:id")) == []
     assert _rules(_route(guards=[])) == [("guards", "error")]
     assert _rules(_route(guards=["auth", "auth"])) == [("guards", "error")]
 
@@ -70,6 +79,12 @@ def test_a_framework_served_url_needs_no_handler() -> None:
                  "app.use('/static', express.static('public'));",
                  "->      /webjars                webjars.Routes"):
         assert _rules(_route(text=text, handler=None, handlerLine=None, method="ANY")) == []
+    # A Next.js MDX page (any suffix case): the file's content is the page.
+    for mdx in ("app/about/page.mdx", "app/about/page.MDX"):
+        page = _route(id=f"{mdx}:1:0", parentId=mdx, path=mdx, nodeType="synthetic", text="# About",
+                      framework="nextjs", method=None, routeKind="page", endpoint="/about",
+                      handler=None, handlerLine=None)
+        assert _rules(page) == []
     relay = _route(text="node(id: ID!): Node", handler=None, handlerLine=None, framework="graphql",
                    method="QUERY", routeKind="query", endpoint="node", responseDTO="Node")
     assert _rules(relay) == []
@@ -108,5 +123,91 @@ def test_consumers_and_timers_have_their_own_route_kinds() -> None:
 
 def test_outbound_addresses_are_written_like_entry_points() -> None:
     assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/users/{id}")) == []
-    assert _rules(_route(routeKind="navigation", endpoint="${BASE}/x")) == [("outbound", "error")]
+    assert _rules(_route(routeKind="navigation", endpoint="${a.b()}/x")) == [("outbound", "error")]
     assert _rules(_route(semanticType="eventbus_send", endpoint="")) == [("outbound", "error")]
+
+
+def test_django_views_used_directly_are_framework_served() -> None:
+    for handler in ("TemplateView", "RedirectView", "serve", "PasswordResetView"):
+        assert _rules(_route(handler=handler, handlerLine=None, framework="django")) == [], handler
+    # A repo view, or a library's that is not Django's, still leads somewhere: a gap when it can't.
+    assert _rules(_route(handler="HomeView", handlerLine=None, framework="django")) == [("handlerLine", "gap")]
+    assert _rules(_route(handler=None, handlerLine=None, framework="django")) == [("handler", "gap")]
+    # Only for Django records.
+    assert _rules(_route(handler="serve", handlerLine=None)) == [("handlerLine", "gap")]
+
+
+def _mcp(semantic_type: str, method: str, **fields) -> Statement:
+    base = dict(semanticType=semantic_type, method=method, routeKind=None, framework="fastmcp",
+                endpoint="x", handler="h", handlerLine=1)
+    base.update(fields)
+    return _route(**base)
+
+
+def test_every_entry_point_type_has_its_route_kinds() -> None:
+    from breezeai_cog.parsers.contract import ENTRY_POINT_TYPES, ROUTE_KINDS
+
+    assert set(ROUTE_KINDS) == ENTRY_POINT_TYPES
+
+
+def test_mcp_resources_and_prompts_are_entry_points() -> None:
+    assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint="users://{id}/profile")) == []
+    assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint="file:///logs/app.log")) == []
+    assert _rules(_mcp("mcp_prompt", "PROMPT", endpoint="review_code")) == []
+    # Held to the entry-point contract like a tool.
+    assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint="${BASE}/x")) == [("endpoint", "error")]
+    assert _rules(_mcp("mcp_prompt", "PROMPT", routeKind="route")) == [("routeKind", "error")]
+    assert _rules(_mcp("mcp_prompt", "PROMPT", framework=None)) == [("framework", "error")]
+    assert _rules(_mcp("mcp_prompt", "FETCH")) == [("method", "error")]
+    assert _rules(_mcp("mcp_resource", "RESOURCE", handler=None, handlerLine=None)) == [
+        ("handler", "gap")
+    ]
+
+
+def _call(**fields) -> Statement:
+    base = dict(semanticType="mcp_call", method="TOOL", routeKind=None, framework="python-mcp",
+                endpoint="add", handler=None, handlerLine=None)
+    base.update(fields)
+    return _route(**base)
+
+
+def test_an_mcp_call_names_what_it_calls() -> None:
+    for method in ("TOOL", "RESOURCE", "PROMPT"):
+        assert _rules(_call(method=method)) == []
+    assert _rules(_call(method="RESOURCE", endpoint="users://{id}")) == []
+    assert _rules(_call(method="GET")) == [("outbound", "error")]
+    assert _rules(_call(method=None)) == [("outbound", "error")]
+    assert _rules(_call(framework=None)) == [("outbound", "error")]
+    assert _rules(_call(endpoint=None)) == [("outbound", "error")]
+    assert _rules(_call(endpoint="")) == [("outbound", "error")]
+    assert _rules(_call(endpoint="${tool}")) == [("outbound", "error")]
+    assert _rules(_call(handler="h")) == [("outbound", "error")]
+    assert _rules(_call(handlerLine=3)) == [("outbound", "error")]
+    # Not an entry point: a call is never one record of a binding.
+    assert _rules(_call(), _call(id="a.ts:1:0#2")) == []
+
+
+def test_a_resource_uri_template_is_read_without_its_expressions() -> None:
+    """RFC 6570: ``page://doc#{anchor}`` is a literal ``#`` then an expression, not a ``#{…}``
+    placeholder. A ``${…}`` or a backtick outside an expression is still one."""
+    for uri in (
+        "page://doc#{anchor}",
+        "page://doc{#anchor}",
+        "files://{+path}",
+        "users://{ids*}/x#{a,b}",
+        "q://x{?page,size}",
+    ):
+        assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint=uri)) == [], uri
+        assert _rules(_call(method="RESOURCE", endpoint=uri)) == [], uri
+    for uri in ("${BASE}/x", "page://`x`", "page://{id}/${rest}", "page://#{a"):
+        assert _rules(_mcp("mcp_resource", "RESOURCE", endpoint=uri)) == [("endpoint", "error")]
+        assert _rules(_call(method="RESOURCE", endpoint=uri)) == [("outbound", "error")]
+    # Only a resource URI: a tool, a prompt, a route keep every placeholder.
+    assert _rules(_call(method="TOOL", endpoint="a#{b}")) == [("outbound", "error")]
+    assert _rules(_call(method="PROMPT", endpoint="a#{b}")) == [("outbound", "error")]
+    assert _rules(_mcp("mcp_prompt", "PROMPT", endpoint="a#{b}")) == [("endpoint", "error")]
+    assert _rules(_mcp("mcp_tool", "TOOL", endpoint="a#{b}")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="/x#{y}")) == [("endpoint", "error")]
+    assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/x#{y}")) == [
+        ("outbound", "error")
+    ]

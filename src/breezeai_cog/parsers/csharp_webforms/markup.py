@@ -35,7 +35,7 @@ from ...emit import disambiguate, statement_id
 from ...schemas import Statement
 from ..treesitter import node_text
 from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
-from .mounts import _REGISTER_SRC
+from ..webforms_common.mounts import _REGISTER_SRC, CODE_BEHIND_EXTS
 
 _NEWLINE = 0x0A
 _SPACE = 0x20
@@ -73,8 +73,8 @@ def shadow_markup(source: bytes) -> bytes:
 
 def resolve_codebehind(source: bytes, aspx_path: str, repo_root: Path) -> str | None:
     """The markup's code-behind, repo-relative — from the ``CodeBehind``/``CodeFile`` directive
-    (resolved beside the markup), else the sibling ``<name>.cs`` if it exists on disk. Honest-
-    null when neither resolves (no guess)."""
+    (resolved beside the markup), else the sibling ``<name>.cs`` / ``<name>.vb`` if it exists on
+    disk. Honest-null when neither resolves (no guess)."""
     cur_dir = aspx_path.rsplit("/", 1)[0] if "/" in aspx_path else ""
     m = _CODEBEHIND.search(source)
     if m is not None:
@@ -83,8 +83,9 @@ def resolve_codebehind(source: bytes, aspx_path: str, repo_root: Path) -> str | 
         hit = ci_resolve(repo_root, rel)
         if hit is not None:
             return hit
-    sibling = f"{aspx_path}.cs"  # Enrollment.aspx → Enrollment.aspx.cs
-    return sibling if (repo_root / sibling).is_file() else None
+    # Enrollment.aspx → Enrollment.aspx.cs, else Enrollment.aspx.vb
+    return next((f"{aspx_path}{ext}" for ext in CODE_BEHIND_EXTS
+                 if (repo_root / f"{aspx_path}{ext}").is_file()), None)
 
 
 def register_controls(

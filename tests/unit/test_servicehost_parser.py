@@ -196,8 +196,16 @@ def test_soap_and_rest_hosts_stay_plain() -> None:
         assert len(_routes(_parse(src, name))) == 1
 
 
-def test_svc_webservicehost_factory_reclassifies_to_wcf_rest() -> None:
-    assert _parse(SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc").framework == "wcf-rest"
+def test_svc_webservicehost_factory_stays_wcf() -> None:
+    assert _parse(SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc").framework == "wcf"
+
+
+def test_declared_frameworks_cover_every_factory_protocol() -> None:
+    # capabilities() lists a parser's declared frameworks; a value the factory map can emit
+    # must be among them, or consumers never learn it exists.
+    from breezeai_cog.parsers.dotnet_servicehost.routes import _PROTOCOL_FACTORIES
+
+    assert set(_PROTOCOL_FACTORIES.values()) <= set(ServiceHostParser.frameworks)
 
 
 def test_svc_unknown_factory_stays_soap() -> None:

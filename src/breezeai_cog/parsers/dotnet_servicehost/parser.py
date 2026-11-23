@@ -1,14 +1,15 @@
-"""ServiceHostParser — parses .NET endpoint-host markup: WCF ``.svc`` (``ServiceHost``) and
-ASMX ``.asmx`` (``WebService``) files.
+"""ServiceHostParser — parses .NET endpoint-host markup: WCF ``.svc`` (``ServiceHost``), ASMX
+``.asmx`` (``WebService``) and generic-handler ``.ashx`` (``WebHandler``) files.
 
-Both are a single ``<%@ … %>`` directive naming the concrete class behind an endpoint (with a
+Each is a single ``<%@ … %>`` directive naming the concrete class behind an endpoint (with a
 ``CodeBehind`` to its ``.cs``). The ``.svc.cs``/``.asmx.cs`` code-behind is ordinary C# (parsed
 by CSharpParser/WcfParser); the markup has no C# body, so this is a directive scan, not a
 tree-sitter parse — hence a standalone ``BaseParser`` (not a ``CSharpParser`` subclass). Its
 value is the class FQN (``Service=``/``Class=``): the concrete impl wired to the endpoint,
 which resolves the interface/URL → concrete-class ambiguity ``.cs`` alone cannot.
 
-This parser owns both extensions so the scanner stops dropping them as ``unsupported``. The
+This parser owns these extensions so the scanner stops dropping them as ``unsupported``, and
+the repo index reads their directives (:mod:`..dotnet_hosts`). The
 per-type differences live in :data:`~.routes.DIRECTIVES`; the directive is wiring, recorded as a
 plain statement (:mod:`.routes`).
 """
@@ -26,15 +27,15 @@ _STATEMENT_TYPES: list[str] = []
 
 class ServiceHostParser(BaseParser):
     name = "dotnet-servicehost"
-    extensions = tuple(DIRECTIVES)  # (".svc", ".asmx")
+    extensions = tuple(DIRECTIVES)  # (".svc", ".asmx", ".ashx")
     schema_version = SCHEMA_VERSION
     statement_types = _STATEMENT_TYPES
-    frameworks = ["wcf", "asmx"]
+    frameworks = ["wcf", "asmx", "odata", "aspnet-webforms"]
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
         spec = spec_for(ctx.path)
-        # language is per-type (svc/asmx): a host file is its own artifact (markup, not C#), so
+        # language is per-type (svc/asmx/ashx): a host file is its own artifact (markup, not C#), so
         # it gets a distinct label rather than inflating the C# LOC/file rollups it sits beside.
         record = FileRecord(
             id=file_id(ctx.path),

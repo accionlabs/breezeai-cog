@@ -25,13 +25,12 @@ dependencies = [
   "tree-sitter-language-pack>=0.2",
   # Standalone Groovy grammar — the language-pack `groovy` grammar is a structureless
   # "command soup" (no class/method/import nodes); dekobon's is a real structural
-  # grammar. See .todo/groovy-grammar-evaluation.md and parsers/treesitter.py.
-  # Pinned to the Accionlabs fork's `groovy-grammar-upstream` branch, which adds
-  # nested-type / modifier-enum / enum-members-without-`;` / enhanced-for / typed-for-in /
-  # range / diamond-operator / untyped-catch support that stock dekobon 0.2.2 (and the
-  # fork's `main`) lack. Without these, real P3 Groovy classes fail to parse and their
-  # bodies collapse to the file root (BREEZEAI: groovy class-collapse). Move this back to a
-  # released `dekobon-tree-sitter-groovy` version once the PR merges.
+  # grammar. See parsers/treesitter.py and the README's Groovy note.
+  # Pinned to the Accionlabs fork's `groovy-grammar-upstream` branch: upstream v0.6.0 plus
+  # one fix not yet released upstream — a method whose annotation or modifier stands in for
+  # the return type (`@Memoized fib(n) { }`, `private <T> first(xs) { }`) keeps its name.
+  # The fork's `main` mirrors upstream without it. Move this back to a released
+  # `dekobon-tree-sitter-groovy` version once the fix releases.
   "dekobon-tree-sitter-groovy @ git+https://github.com/accionlabs/tree-sitter-groovy@groovy-grammar-upstream",
   "pyyaml>=6.0",
   # --upload (services/upload.py) and notify (services/notify.py) are first-class
@@ -56,7 +55,16 @@ all = [
 # Dev tooling (PEP 735). Installed by `uv sync` (the `dev` group is on by default),
 # unlike optional-dependencies extras which require `uv sync --extra <name>`.
 [dependency-groups]
-dev = ["pytest>=8", "pytest-timeout>=2.3", "jsonschema>=4.21", "ruff>=0.5", "mypy>=1.10"]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.3",
+    "jsonschema>=4.21",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    # starlette.testclient (server tests) uses httpx2 and warns when it falls back to
+    # httpx. Runtime code keeps using httpx (core dependency above).
+    "httpx2>=2.0",
+]
 
 [project.scripts]
 breezeai-cog = "breezeai_cog.cli:main"

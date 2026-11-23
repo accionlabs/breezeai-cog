@@ -10,7 +10,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
-from ..typescript_nextjs.routes import is_route_file
+from ..typescript_nextjs_common import is_route_file
 from .components import mark_react_components, mark_react_hooks
 from .routes import REACT_GUARDS as _REACT_GUARDS
 

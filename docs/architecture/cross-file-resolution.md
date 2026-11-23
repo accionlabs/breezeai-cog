@@ -88,19 +88,21 @@ How it works (`core/pipeline.py::_build_indexes`):
   C index, C reads the C++ index
   ([shared extensions and related languages](shared-extensions-and-related-languages.md)).
 - If an index build fails, a warning (`build_index.failed`) is logged and that language runs
-  **without** an index: fewer links, never a crash.
+  **without** an index: fewer links, never a crash. A parser that lists it in
+  `related_languages` gets it in `ctx.related_indexes` as `None`, so a failed index can be told
+  apart from a language the repo has no files of (absent).
 
 What each index holds:
 
 | Language | Holds | Used for |
 |---|---|---|
-| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`, Spring Security URL rules per module `spring.security-rules`, Vert.x 2 address forwarders (a method or constructor passing a parameter on as an EventBus address) `vertx.address-forwarders`; Java and Groovy: Vert.x router factories mounted as sub-routers `vertx.mounted-factories`) | imports, same-package types, event addresses / route paths |
+| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; class heritage incl. methods (Groovy: also property accessors and trait methods); **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`, Spring Security URL rules per module `spring.security-rules`, Vert.x address forwarders (a method or constructor passing a parameter on as an EventBus address) `vertx.address-forwarders`, Vert.x handler factories (a static method whose body is only `return new T(…)`) `vertx.handler-factories`; Java and Groovy: Vert.x router factories mounted as sub-routers `vertx.mounted-factories`) | imports, same-package types, event addresses / route paths |
 | Kotlin | fully-qualified class name → file; fully-qualified name → string constant (a top-level `val` / `const val`, or a `val` of an `object` / `companion object`, resolved within its own file; a name with two values is left out) | imports, same-package types, Ktor route paths written with another file's constant |
 | Scala | fully-qualified class name → file; **registered facts** (method declarations `scala.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes and handlers |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
-| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` — `const` / `static readonly` strings, literals joined with `+` folded — for area route prefixes, AWS SDK queue / topic addresses and GraphQL.Client documents, and MVC area registrations `aspnet.area-registrations`; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; minimal-API group extensions `aspnet.group-extensions` — an extension method on `RouteGroupBuilder` → the prefix of the one group it is called on; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
-| VB | class heritage (base class + attributes) | inherited controller routes |
-| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases and Vite `resolve.alias` entries (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, AngularJS controller / component registrations `angularjs.registrations` — `(kind, name)` → file and line, or the import (module, export) the registered function comes from and which the route's detector follows, for a route's `controller: 'Name'`, and ui-router states `angularjs.states` — name → url and parent, for the address of a nested state, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; GraphQL resolver objects `graphql.resolver-objects` — each top-level object whose properties are all functions, with the line each function starts at, for a root type given by a named import (`Query: queries`); module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.declarations.vue` (registered by the Vue package); AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` — `const` / `static readonly` strings, literals joined with `+` folded — for area route prefixes, AWS SDK queue / topic addresses and GraphQL.Client documents, and MVC area registrations `aspnet.area-registrations`; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; minimal-API group extensions `aspnet.group-extensions` — an extension method on `RouteGroupBuilder` → the prefix of the one group it is called on; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, ASP.NET host files `dotnet.host-files` — each `.svc` / `.asmx` / `.ashx` file's directive class and web host factory, read from those files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
+| VB | class heritage (base class + attributes); **registered facts** (`index.facts`: Web Forms `MapPageRoute` URLs `webforms.page-routes`; interface members and the methods whose `Implements` clause names them `vb.interface-members`; ASP.NET host files `dotnet.host-files` — read from the `.svc` / `.asmx` files the ServiceHost parser owns) | inherited controller routes, routes, WCF handlers |
+| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases and Vite `resolve.alias` entries (per config scope); constant values, keyed by the file that declares them ([§7](#7-constant-folding)); class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, AngularJS controller / component registrations `angularjs.registrations` — `(kind, name)` → file and line, or the import (module, export) the registered function comes from and which the route's detector follows, for a route's `controller: 'Name'`, and ui-router states `angularjs.states` — name → url and parent, for the address of a nested state, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; GraphQL resolver objects `graphql.resolver-objects` — each top-level object whose properties are all functions, with the line each function starts at, for a root type given by a named import (`Query: queries`); module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.declarations.vue` (registered by the Vue package); AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; each file's local includes and who includes each header; free functions (a `static` one outside a header is never a target and makes its name ambiguous; one in a header is a target only for files that can see the header); the free functions defined in `extern "C"`; `Class::method`, defined in or outside the class (one in a header is a target only for files that can see the header); `Class::field` types; heritage | `#include`, calls |
 | C | the same index as C++ (`cfamily_common/index.py`), built over C files with the C grammar | `#include`, calls |
 | CUDA | the same index as C++, built over `.cu` / `.cuh` files with the CUDA grammar | `#include`, calls |
@@ -108,7 +110,7 @@ What each index holds:
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
-| Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
+| Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Flask wiring `flask.wiring` — apps, blueprints and their `url_prefix`, `register_blueprint` sites (also inside `create_app()`), `before_request` hooks, class-based views and module-level functions, Flask-RESTful / RESTX `Api`s (`init_app`) and RESTX namespaces (`add_namespace`), Flask-Smorest blueprints registered through their `Api`; Django views `django.views` — module-level functions (decorators, `require_*` verbs) and classes (bases, methods, `method_decorator`s) of every view module, and what a package's `__init__.py` re-exports (names and star imports); Django urlconfs `django.urlconf` — `include()` sites (a module name matched to the one urlconf whose path ends with it, for an app folder on `sys.path`), `ROOT_URLCONF`, DRF routers (also made from a repo router class) and where they are included, `MIDDLEWARE` and DRF's `DEFAULT_PERMISSION_CLASSES` when every settings module agrees; Django Channels routing `django.channels` — the `URLRouter` lists a `ProtocolTypeRouter` routes, nested routers and their prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers, blueprints and urlconfs mounted in another file; views and their base classes declared in another file |
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — the folders holding a `.graphqlrc.json`, read from those files, which no GraphQL parser owns) | telling a client's copy of a remote schema from a server's own |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
@@ -138,11 +140,11 @@ How each language turns an import into a file:
 
 | Language | How | Goes to `externalImports` |
 |---|---|---|
-| Java, Groovy, Kotlin | Look up the fully-qualified name in the index. Same-package classes are bound without an import. Groovy `as` aliases are bound. | wildcards, unknown or ambiguous names |
+| Java, Groovy, Kotlin | Look up the fully-qualified name in the index. Same-package classes are bound without an import. Groovy `as` aliases are bound. Groovy looks in the Groovy classes, then the repository's Java classes, and Java in the Java classes, then the Groovy ones ([related languages](shared-extensions-and-related-languages.md#72-related-languages-mechanism-b)). | wildcards, unknown or ambiguous names |
 | Scala | As Java, plus selector groups `{A, B}`, renames `{A => B}` and relative package imports | wildcards, unknown names |
 | C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s, and `<Using Include>` from the project's `.csproj` or a `Directory.Build.props` above it). A type in another project counts only if this project references it (`<ProjectReference>`, transitively). Bound only if exactly one other file matches; on a tie between types, the one in the same `.csproj` wins. A type declared only in this file is ignored, so `class MassUpdate : SplendidCRM.MassUpdate` still links to the base. The same rules (`type_files`) bind additive detectors' names. | every namespace `using`; unresolved static / alias targets |
 | VB | Not resolved (`Imports` names namespaces) | every `Imports` |
-| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias or Vite `resolve.alias` entry. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
+| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias or Vite `resolve.alias` entry, then that config's `baseUrl` (`from 'src/x'` with `"baseUrl": "./"` → `src/x.ts`; only when the import's first segment names a file or folder there, so a package import is never looked for on disk). Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
 | Python | `import a.b` / `from a.b import x` from the repo root first; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. Then the folders Python could find it in from the file (an app run from its own folder): a dotted import under a non-package folder above the file (a `sys.path` entry), a single name only in a script's own folder; either under a declared project (`pyproject.toml` / `setup.py` / `setup.cfg`) and its `src/`. Only ancestors, never a sibling app; found at two places → not linked | anything not found, or ambiguous |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
 | C++, C | `#include "x.h"` looked up by file **basename** across the C and C++ indexes (a header is in one of them) | `<system>` includes; unknown or ambiguous basenames |
@@ -218,8 +220,23 @@ Vite configs of the **nearest folder that has any** decide together:
 ## 5. Call resolution
 
 Each function's `calls[]` lists the names it calls. `parsers/callresolve.py` fills
-`calls[].path` with the file that defines the callee, when that can be proven. Resolution stops
-at the first certain answer:
+`calls[].path` with the file that defines the callee, when that can be proven.
+
+In Java a name appears once per function, in order of first appearance, and its `path` comes
+from the first of its calls that resolves:
+
+```java
+void load(JsonObject o) {
+    String a = container.config().getString("a");  // a library call: no file
+    String b = JsonUtil.getString(o, "b");          // a repository class
+}
+// calls: [..., { name: "getString", path: ".../JsonUtil.java" }]
+```
+
+A call in a field initializer (`static final String BUS = Constant.of("ORDERS");`) belongs to no
+function, so it is in no `calls[]`.
+
+Resolution stops at the first certain answer:
 
 ```mermaid
 flowchart TD
@@ -268,13 +285,32 @@ class OrdersService {
 If the call were `this.items.map(...)`, `map` is a built-in array method, so `path` stays empty,
 even if `items` has an in-repo type.
 
+**Whose type a variable has.** Most languages keep one map of declared types per file. Java and
+Groovy look a variable up in the calling method first, because two methods often use one name for
+different types:
+
+| Rule | Example | `calls[].path` |
+|---|---|---|
+| The method's own parameters and locals (loop, `catch`, lambda and closure variables included) win | `void a(Order x) { x.ship() }` and `void b(Customer x) { x.ship() }` in one file | each its own type: `Order`, `Customer` |
+| A parameter hides a field of the same name | field `Repo repo`, `void run(Audit repo) { repo.save() }` | `Audit` |
+| A local hides a field only after it is declared, so a field and a local of different types → unknown | field `Repo repo`, `Audit repo = …; repo.save()` | null |
+| `this.name` is always the field | `this.repo.save()` in the same method | `Repo` |
+| A name declared two ways in one method, or untyped (`var x = f()`, `def x`, `x -> …`) → unknown | `x -> x.ship()` | null |
+| `var x = new T(…)` / `def x = new T(…)` is a `T` | `var a = new Audit(); a.save()` | `Audit` |
+| A field of the class and of its enclosing classes; not of another class in the file | inner class using an outer field | the field's type |
+| Java: a name the method and its classes never declare is a field an in-repo ancestor declares (any but `private`), its type read where that ancestor is declared; the nearest class declaring it decides, and one that gives it a library type, or a type name two repository classes share, adds nothing (the next row applies). The field's type replaces what another method's same-named variable would have suggested | `Base` declares `protected Helper helper`; `Child extends Base` calls `helper.run()` | `Helper` |
+| A name no in-repo ancestor declares (a field of a library base) takes the file's type for that name, only while every typed declaration of it in the file agrees | constructor `Service(Repo repo) { super(repo) }`, `run() { repo.save() }` | `Repo` |
+| Java, inside an anonymous class body: a bare name is an outer (or inherited outer) field only when the anonymous class's type is a JDK interface that declares no fields (`Runnable`, `Callable`); `this.name` there is the anonymous class's own | `new Runnable() { public void run() { helper.run(); } }` | `Helper`; under a framework's handler (`new Handler<Message>() { … }`) or `new org.lib.Task() { … }` the other rules apply |
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |
 |---|---|---|---|---|
 | TypeScript / JavaScript | ✓ | ✓ (+ built-in guard) | — | ✓ |
 | C# | ✓ (+ `using static`) | ✓ | ✓ | ✓ |
-| Java, Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
+| Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
+| Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | ✓ (+ a bare call is `this`; the class's own and its traits' methods first) |
+| Kotlin, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
@@ -303,11 +339,27 @@ decorators/attributes and, where supported, its methods. It is used for two thin
 
 | Use | Languages | Example |
 |---|---|---|
-| **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++ | `calls[].path` → the base class's file |
+| **Inherited calls** — `this.save()` where `save` is declared in a base class | TypeScript, C#, C++, Java | `calls[].path` → the base class's file |
+| **Declared methods on a typed receiver** (Java) — `param.getActor()` where `param` is an `OrderParam` | Java | `calls[].path` → the file that declares `getActor`: `OrderParam`'s own, else its nearest in-repo ancestor's; neither (a method from a library base, or a variable that has another type in this method) → null. A type whose simple name two repository classes share → the file its import (or package) names, only when the class of that name in that file declares the method itself; else null. The repository's Groovy classes count too (Java reads the Groovy index after its own), with the methods a Groovy class has without writing them (generated property accessors, trait methods), and a Java class extending a Groovy class continues its chain into the Groovy classes. A simple name a Java and a Groovy class share means the Java class, unless the file's import or package binds it to the Groovy one: then only the methods that Groovy class declares in its own file resolve |
+| **A receiver typed with a qualifier** (Java) — `ctx.setAppId(id)` where `ctx` is a `Getter.Context`, or `o.total()` where `o` is a `com.acme.api.Order` | Java | `calls[].path` → the file that declares the method on the class that name gives: `Getter.Context` is the `Context` declared inside the file of `Getter` (as this file binds `Getter`: itself, an import or its package); `com.acme.api.Order` is the class with that package and name. The class itself or its nearest in-repo ancestor declares the method. Never another class sharing the simple name — this file's own `Context`, or a same-package `Order`. A name that is no repository class (`java.util.Map.Entry`, a library outer class), or a nested class `Getter` only inherits → null. A call on such a receiver's call (`ctx.self().run()`) reads the return type from that class only |
+| **A bare or `this.` call** (Java) — `alert()` where the file also has a nested or anonymous class declaring `alert` | Java | `calls[].path` → this file only when the calling class (or a class enclosing it) declares `alert`; else the inherited method's file. A call written inside an anonymous or local class body keeps the file-wide answer, and its `this.m()` is not resolved through the outer class's bases. A call in an anonymous class's method is that method's (the anonymous class is a `Class` of its own), never the enclosing method's |
+| **`Outer.this.m()`** (Java) — inside an anonymous handler or an inner class | Java | `this.m()` written in `Outer`: `Outer`'s file when it (or a class enclosing it) declares `m`, else the nearest in-repo ancestor's; a method of a library base → null |
+| **A call on an inherited field** (Java) — `helper.run()` where `helper` is a field of an in-repo base class | Java | the file that declares `run` on the field's type (the field's type as the base's file names it); a `private` field, a field typed with a library class, or a base outside the repository → null |
+| **A call on an imported name** (Java) — `Mode.of(k)`, `Mode.valueOf(k)`, `NS.equals(x)` with `import static …Constants.NS` | Java | `calls[].path` → the file that declares the method: the class's own, else its nearest in-repo ancestor's; a method Java generates (an enum's `values` / `valueOf`), or a call on a statically imported member (a constant, not a class) → null. A class whose simple name two repository classes share → the import's file only when the class of that name there declares the method; else null |
+| **Declared methods in Groovy** — `context.getJobName()`, `context.stamp()`, `Book.findByTitle(…)` | Groovy | the same rule as Java for a typed receiver, an imported name (an `import … as Alias` is looked up as its class; the Groovy parser does this itself, and it belongs in the shared resolver once a second language needs it) and a call on a call. A property counts as declaring the accessors Groovy generates for it: `String jobName` → `getJobName` / `setJobName`, a `final` one only the getter, a primitive `boolean` also `isJobName`; a `private`, `protected`, `public` or `@PackageScope` field none. A method of an in-repo trait the class implements resolves to the trait's file, after the class's own methods (for an interface: of the in-repo interfaces it extends); one that two of its traits declare → null. A class whose body has a parse error anywhere may have lost members to it (an error inside one method can drop the methods after it), and so has a class with a constructor not named after it (a method the grammar read as a field and a constructor, such as an interface's `default String b()`); a call on such a class, or on one whose in-repo parent chain reaches it, resolves to the type's file only when that class declares the method among the members the parse kept (a method the grammar read as a constructor counts); else null, since an inherited method's file is not known. A method added at runtime (GORM's `save`, dynamic finders) or by an AST transformation → null. The repository's Java classes count too (Groovy reads the Java index after its own): a call on a Java type resolves to the Java file declaring the method, and a Groovy class extending a Java class continues its chain into the Java classes. A simple name a Groovy and a Java class share means the Groovy class, unless the file's import or package binds it to the Java one: then only the methods that Java class declares in its own file resolve. A bare call whose name the class declares and also imports statically → null (Groovy picks between them by the arguments) |
+| **Creating an object** (Java) — `new EmployeeApiHandler(vertx, c)` | Java | a call named after the class, `calls[].path` → the file declaring it, when the class name resolves as Java resolves it (a single-type import, else this package) to another repository file; the backend's CALLS edge then reaches the class's constructor (one per constructor when it has several; none when it declares none). A library class, a class of this file, a qualified name (`new a.b.X()`) and an anonymous class (`new X() { … }`, linked by its `extends`) add no call. A library single-type import (`import org.lib.Report;`) hides this package's class of the same name, for every call |
+| **A call on a call** (Java, Groovy) — `builder.dataApi().get(…)`, `Factory.create().run()`, `own().save()`, `a.b().c().d()`, `new Leaf().m()`, `((Leaf) o).m()` | Java, Groovy | `calls[].path` → the file that declares the method on the last call's declared return type (that type or its in-repo ancestors), each link of a chain read through the one before it. An object built or cast in place starts the chain at its class, when the file's imports or package bind that name to a repository class (`new org.lib.Leaf()`'s `Leaf` is not the repository's). A link whose return type is a library class, or whose simple name two repository classes share → null for it and every link after it |
 | **Inherited route settings** — a controller's route prefix and auth come from its base class | ASP.NET (C#, VB); HotChocolate root types | `[Route("api/[controller]")]` and `[Authorize]` on `BaseApiController` apply to `OrdersController : BaseApiController` |
 
 Walking the chain (`index_common.walk_heritage`) goes nearest ancestor first and stops at a
 cycle, at a parent outside the repo, or at an ambiguous name.
+
+In Java a bare call in a method, `save()`, is `this.save()` when it is not a static import or a
+method of the same file. Java names a parent through its imports, so a parent counts as the
+repository's class only when its import (or, without one, its package) names a class of the
+repository: `extends Base` with `import org.lib.Base` ends the chain even if the repository has a
+`Base` of its own. A class name declared twice in the repository is ambiguous, so nothing
+resolves through it.
 
 ```mermaid
 flowchart LR
@@ -357,10 +409,26 @@ How (`parsers/constfold.py`):
 
 Used by: the Java and Groovy indexes, and the Vert.x parsers (Java and Groovy). TypeScript has its
 own constant map in its index (top-level `const`s, enum members, `static readonly`), used for
-Angular, React and Express route paths, URLs and NestJS patterns and schedules. It holds strings,
-and numbers as JavaScript writes them in a string (`` `/api/v${VERSION}` `` with `const VERSION =
-2` → `/api/v2`) — a number only from a constant declaration (`const`, an enum member, a
-`readonly` field), as a `let` number is often a counter.
+Angular, React, Express, Fastify and NestJS route paths and prefixes, URLs, NestJS patterns and
+schedules, and Next.js / LoopBack base paths. It holds strings, and numbers as JavaScript writes
+them in a string (`` `/api/v${VERSION}` `` with `const VERSION = 2` → `/api/v2`) — both only from
+a constant declaration (`const`, an enum member, a `readonly` field): a `let` or `var` may be
+reassigned.
+
+The map is keyed by the file that declares each constant (`src/config.ts::BASE`), and a file reads
+it through its own view (`parsers/typescript/scopes.py`), so a name means a constant only where the
+file shows which one:
+
+| The name, in the file that uses it | Folds to |
+|---|---|
+| imported — `import { BASE } from './config'`, `const { BASE } = require('./config')`, `import * as c` then `c.BASE`, a tsconfig / Vite alias | the constant `./config` itself declares |
+| declared at the file's top level (`const BASE = '/v1'`) | its own value, even when another file declares `BASE` differently |
+| a parameter or local of an enclosing function, block or loop (a hoisted `var` included) | nothing: read at runtime |
+| anything else — `const BASE = process.env.X`, a `let`, a package import, a re-export, a name the file neither declares nor imports | nothing |
+
+"Nothing" leaves the part marked `${BASE}` ([entry-point contract §6](entry-points.md#a-part-read-at-runtime-name))
+or the address empty — never another file's `BASE`. A registered fact collects its pieces before
+the index exists, so there an import is followed only through a relative path.
 
 C# has the registered fact `csharp.string-constants` (`parsers/aspnet_areas.py`): `const` and
 `static readonly` string fields whose initialiser is built only from literals. A name is bound as
@@ -389,11 +457,14 @@ Some frameworks build a route from pieces in several files. These use the index 
 | Fastify | `app.register(users, { prefix: "/users" })` in one file + `fastify.get("/:id")` in the plugin's file → `/users/:id`; registrations chain, and a `fastify-plugin` plugin ignores the prefix. `@fastify/autoload` gives each file in its folder a prefix from the folder path, `options.prefix` and the file's `autoPrefix`, the same way the package walks the folder. A plugin registered at two prefixes, or with one that can't be read, has an empty endpoint | registered fact `fastify.plugin-prefixes` (`typescript_fastify/plugins.py`) |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
 | FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places is served at both: its routes' endpoint is empty, never its own path alone | Python index: `fastapi.wiring` fact |
+| Django | `ROOT_URLCONF = "project.urls"` in a settings module + `path("api/", include("shop.urls"))` in `project/urls.py` + `path("orders/", views.Orders.as_view())` in `shop/urls.py` → `/api/orders/`, one record per method `Orders` handles — found on its bases in other files, or from Django's generic views by their documented methods. A urlconf reached from no root, or from two places, → endpoint empty | Python index: `django.urlconf` and `django.views` facts (`python_django/`) |
+| Django REST framework | `router = DefaultRouter()` in `api/routers.py` + `router.register("orders", OrderViewSet)` in any file + `path("api/", include(router.urls))` in a urlconf → `/api/orders/`, `/api/orders/<pk>/`, one record per action the viewset has (its own, its DRF bases', its `@action`s). A router included twice or nowhere → endpoint empty. A router made from a repo subclass (`ApiRouter()`, the class in a third file) is a candidate in the urlconf fact and is kept only when the class chain, read from the views fact, keeps DRF's routes | Python index: `django.urlconf` (routers) and `django.views` facts |
+| Flask | `app.register_blueprint(auth_bp, url_prefix="/auth")` in `app/__init__.py` (often inside `create_app()`, with the import there too) + `bp = Blueprint("auth", __name__)` in `app/auth/__init__.py` + `@bp.route("/login")` in `app/auth/routes.py` → `/auth/login`. The registration's `url_prefix` replaces the blueprint's own; a blueprint registered on another joins the parent's prefix. A blueprint registered twice, nowhere the code shows (a loop) or under a non-literal prefix → endpoint empty | Python index: `flask.wiring` fact (`python_flask/wiring.py`) |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
-| WebForms | `MapPageRoute` URL → `.aspx` page | C# index: `webforms.page-routes` fact |
+| WebForms | `MapPageRoute` URL → `.aspx` page | C# and VB index: `webforms.page-routes` fact (a page reads its own language's) |
 | ASP.NET | a `.csproj` with `Sdk="Microsoft.NET.Sdk.Web"` (or the `Microsoft.AspNetCore.App` framework reference) → its `.cs` files are ASP.NET code even with no `using` line (implicit usings), so their routes are found | registered fact `aspnet.web-projects`, collected from `.csproj` files (`FactSpec.sources`); detector `aspnet-web-projects` |
 | HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |
-| WCF REST | `<%@ ServiceHost Service="Shop.OrderService" %>` in any `.svc` → the class's (or, for an interface contract, its one implementer's) `[WebGet]` operations are served under that `.svc` path. Matched by fully-qualified type name; a type named by two `.svc` files → no host | registered fact `wcf.svc-hosts`, collected from another parser's files (`FactSpec.sources`) |
+| WCF, ASMX, generic handlers | `<%@ ServiceHost Service="Shop.OrderService" %>` in any `.svc` → the class's (or, for an interface contract, its one implementer's) `[WebGet]` operations are served under that `.svc` path. Matched by fully-qualified type name; a type named by two `.svc` files → no host. A code-behind `X.svc.cs` / `X.asmx.cs` / `X.ashx.cs` (or `.vb`) is served by the `X.svc` / `X.asmx` / `X.ashx` beside it when its directive names the class; a `.svc` with a web host factory serves every operation over HTTP. Parsing never opens a host file | registered fact `dotnet.host-files` (`parsers/dotnet_hosts.py`) on the C# and VB indexes, collected from another parser's files (`FactSpec.sources`) |
 | Play | `-> /admin admin.Routes` in `conf/routes` + `GET /users …` in `conf/admin.routes` → `/admin/users`; `-> /v1/posts v1.post.PostRouter` + a SIRD `case GET(p"/$id")` in that class → `/v1/posts/{id}`. A routes file defines the router named after it (`conf/routes` → `router.Routes`, served at the root), so includes chain. A name is unique only within one Play project (`<project>/conf/…`): an include names its own project's router, else the one other project that defines it; two other projects → neither is tied to it, so their address is unknown. A router included at two prefixes is served at each: its bindings' endpoint is empty. A router not included at all keeps its own paths | `scala_play/includes.py`: the routes parser's own index for routes files; registered fact `play.router-includes` on the Scala index for SIRD classes (matched by fully-qualified name) |
 | AWS Lambda (TypeScript, C#) | `serverless.yml` `functions:` and SAM templates (`AWS::Serverless::Function`, YAML or JSON `serverless.template`) → each handler (`src/handler.onOrder`, `Assembly::Namespace.Type::Method`) gets its events' addresses (queue, topic, schedule, HTTP path); one record per event; a variable or reference leaves the address empty | registered fact `aws.deployed-handlers` (`parsers/aws_deploy.py`) on the TypeScript and C# indexes, collected from `.yml` / `.yaml` / `.json` / `.template` (`FactSpec.sources`) |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
@@ -529,7 +600,9 @@ route files per repo. A `.vue` SFC is never re-parsed: its script is not the who
 
 Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
 name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
-guessed file. Python, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
+guessed file. Flask reads a `MethodView` or a view function declared in another file from its own `flask.wiring` fact, and
+Django a view (or the base class a method is inherited from, also through a package that re-exports it) from `django.views`.
+Other Python handlers, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
 carry a `handlerLine` in the record's own file only.
 
 ---
@@ -556,11 +629,12 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | C and C++ `#include "x.h"` resolves to the file next to the includer, else to a unique basename | Two `util.h` files reached only through an include path → both unresolved |
 | Python resolves absolute imports from the repo root only | `src/`-layout projects (package under `src/`) resolve poorly |
 | Ruby `require_relative "x/y"` (no `./`) resolves from the repo root | It should resolve from the file's own folder |
+| TypeScript constants: a re-export is not followed; in a registered fact (Express / Angular mounts, NestJS prefixes, base paths) an alias import is not followed either | `import { BASE } from './barrel'` leaves `${BASE}`, never a guessed value |
 | TypeScript heritage: any class name used in two files → `None` | Even identical duplicates block inherited-call resolution |
-| Java, Kotlin, Groovy, Scala: no inherited-call resolution | `this.save()` from a base class has no `path` |
+| Kotlin, Scala: no inherited-call resolution; Groovy: a call inside a closure is resolved as the enclosing class's even where a builder would send it to its delegate (only when an in-repo ancestor declares that method); Java: class inheritance only (not an interface's `default` method) | `this.save()` from a base class has no `path` |
 | VB: no import resolution and no inherited calls | Few `CALLS` edges in VB repos |
 | The Scala index has a constants field that is never filled; Kotlin's is not followed through star imports or into a constant built from another file's constant | No cross-file constant folding in Scala; those Kotlin paths stay empty |
-| Values from config files / environment | Routes and addresses built from them stay empty |
+| Values from config files / environment | Not read: in an HTTP or event-bus address such a value is marked where it stands, named after its source (`${config:api-verticle.address}`, `${env:BASE_PATH}`; [contract §6](entry-points.md#a-part-read-at-runtime-name)) |
 | HotChocolate root registrations made inside a helper method in another file, or registered by name only (`AddQueryType(d => d.Name("Query"))` with no class) | Not bound to a class; such roots are found only through attributes or descriptors |
 | MSBuild conditions on `<Using>` / `<ProjectReference>` are not evaluated | A conditional using or reference is treated as always on |
 | The C++ resolver's docstring says `super`/`base` returns `None`, but the code resolves it | Docstring is out of date |
@@ -582,5 +656,3 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 
 The step-by-step for `build_index` is in
 [Parser Reference, Step 6](../parser-reference.md#step-6--build_index-only-if-cross-file-resolution-is-needed).
-</content>
-</invoke>

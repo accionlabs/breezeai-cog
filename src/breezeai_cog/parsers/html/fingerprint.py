@@ -15,9 +15,9 @@ measuring real repos:
   If two rendering frameworks match, the result is ambiguous → ``None`` (absent beats wrong).
 
 * **Behavior library** — progressive-enhancement sprinkled *on top of* whatever renders the
-  page (htmx / Alpine / Stimulus). It is not the rendering framework, so it never occupies the
-  ``framework`` field; it is an additive ``behaviors`` marker. A Django page with htmx is
-  ``framework`` (rendered elsewhere) + ``behaviors=["htmx"]`` — not a collision.
+  page (htmx / Alpine / Stimulus). It is not the rendering framework, so none of its markup is
+  a rendering marker (hence Vue's ``@``/``:`` shorthand is excluded above). htmx requests are
+  recorded as ``api_call`` statements by ``html_htmx``; the file carries no behavior marker.
 """
 
 from __future__ import annotations
@@ -44,19 +44,6 @@ _RENDERING: dict[str, re.Pattern[str]] = {
     "thymeleaf": re.compile(r"\bth:[a-z]+\s*=|xmlns:th"),
 }
 
-#: Behavior libraries — additive enhancement, NOT the rendering framework.
-#: Stimulus keys on ``data-controller`` ONLY — its unambiguous activation attribute. ``data-
-#: action`` / ``data-*-target`` are deliberately excluded: they collide with Bootstrap
-#: (``data-bs-target``) and generic ``data-action`` attributes (a confirmed false positive).
-_BEHAVIOR: dict[str, re.Pattern[str]] = {
-    "htmx": re.compile(
-        r"\bhx-(get|post|put|delete|patch|trigger|target|swap|boost|on|vals|push-url|select)\b"
-    ),
-    "alpine": re.compile(
-        r"\bx-(data|on|bind|model|for|if|show|text|html|init|ref|effect|cloak|transition)\b"
-    ),
-    "stimulus": re.compile(r"\bdata-controller\s*="),
-}
 
 #: Non-content regions stripped before fingerprinting: framework code shown *as an example*
 #: (inside ``<pre>``/``<code>``), script/style bodies, textarea contents, and comments. A docs
@@ -80,10 +67,3 @@ def detect_rendering_framework(text: str) -> str | None:
     body = _content(text)
     hits = [fw for fw, rx in _RENDERING.items() if rx.search(body)]
     return hits[0] if len(hits) == 1 else None
-
-
-def detect_behaviors(text: str) -> list[str]:
-    """Sorted behavior libraries layered on the markup (htmx / Alpine / Stimulus); ``[]`` if
-    none. Independent of the rendering framework — both can be present."""
-    body = _content(text)
-    return sorted(fw for fw, rx in _BEHAVIOR.items() if rx.search(body))

@@ -1,0 +1,658 @@
+"""MarkdownParser — one File + one whole-file Statement per Markdown document.
+
+Every ``.md`` / ``.mdc`` file (plus ``README.rst`` and ``.cursorrules``) becomes a
+``type="config"`` FileRecord — so it never counts as an analyzed language — whose ``metadata``
+holds ``{kind, category: "documentation", frontmatter, title, headings}``, and, under statement
+capture, one Statement:
+
+* ``nodeType="synthetic"`` (no grammar parses the file), ``semanticType`` = ``skill`` /
+  ``agent`` / ``command`` / ``agent_instructions`` / ``doc`` (see :mod:`.classify`; a README,
+  a changelog and a decision record are ``doc``, told apart by ``metadata.kind`` on the File)
+* ``text`` = the whole file, secrets masked
+* ``name`` / ``description`` from the front matter (name falls back to the title, the command
+  file name, then the file name)
+
+No size limit is specific to Markdown: a long document is split at emit time like any other
+statement (:mod:`breezeai_cog.emit.split`) into ordered ``#part{i}of{n}`` records, of which
+only part 1 keeps ``semanticType`` / ``name`` / ``description``. Like ``structured_data``, the
+statement is not embedded: it is found by exact filters (``semanticType``, ``name``, ``text``
+contains).
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from ...emit import file_id, statement_id
+from ...logging import get_logger
+from ...schemas import SCHEMA_VERSION, FileRecord, Statement
+from ...utils import count_loc
+from ..base import BaseParser, ParseContext
+from ..structured_json.redaction import redact_text
+from .classify import classify, statement_type
+from .frontmatter import (
+    load_front_matter,
+    secret_name,
+    split_front_matter,
+    string_field,
+    token_count,
+)
+
+log = get_logger("breezeai_cog.parsers.markdown")
+
+_MAX_HEADINGS = 200
+_MAX_HEADING_LEVEL = 3
+_MAX_HEADING_CHARS = 200
+
+# Linear: the closing ``#`` sequence is stripped in code, not by a backtracking regex tail.
+_ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+#: A fence at any indent, for secret masking: MkDocs and other renderers nest fenced blocks
+#: under list items, four or more spaces in.
+_ANY_FENCE = re.compile(r"^[ \t]*+(`{3,}+|~{3,}+)(.*)$")
+#: An indented code block line (four spaces or a tab), where snippets also live.
+_INDENTED_CODE = re.compile(r"^(?: {4}|[ \t]{0,3}\t)")
+_RST_UNDERLINE = re.compile(r"^([=\-~^\"'`#*+])\1{2,}\s*$")
+#: Inline base64 payloads (pasted images) carry no meaning for a reader.
+_DATA_URI = re.compile(r"data:([a-zA-Z0-9.+/\-]+);base64,[A-Za-z0-9+/=]{200,}")
+#: Env-style assignment of a variable (``export DB_PASSWORD=…``); masked when the name is
+#: secret-like (:func:`~.frontmatter.secret_name`). Upper-case names only, so prose ("the
+#: password = …") is untouched. The name is matched possessively and checked in code, so a long
+#: line cannot backtrack quadratically. A quoted value may hold spaces (``DB_PASSWORD="two words"``).
+_ENV_ASSIGN = re.compile(
+    r"(?m)^([ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]*+)[ \t]*[=:][ \t]*)"
+    r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"']+)"
+)
+#: A secret-named upper-case ``NAME=value`` in the middle of a prose line (``Run
+#: DB_PASSWORD=x and …``): no spaces around ``=``, the name behind a word boundary, so prose
+#: such as "my password is x" is untouched. Fenced, indented and inline code are masked by
+#: the code rules instead. Possessive name: linear time.
+_PROSE_ENV = re.compile(r"(?<![\w.\-$])([A-Z][A-Z0-9_]*+)=(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;)}\]]+)")
+#: An HTTP authentication scheme word before a credential (``Authorization: Bearer x``).
+_AUTH_SCHEME = (
+    r"(?i:bearer|basic|token|digest|negotiate|ntlm|hawk|apikey|api-key|jwt|oauth|key"
+    r"|aws4-hmac-sha256)"
+)
+#: An authorization-style header with a scheme word, anywhere in the text (prose, ``curl -H
+#: "Authorization: Bearer x"``): the scheme and the credential after it are masked.
+#: Without a scheme word the pair is left to the code masking below, so prose
+#: such as "Authorization: required" is kept.
+_AUTH_HEADER = re.compile(
+    r"(?<![\w\-])((?i:proxy-authorization|authorization|x-api-key|api-key|x-auth-token))"
+    r"([ \t]*:[ \t]*)" + _AUTH_SCHEME + r"[ \t]++(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;)}\]]+)"
+)
+#: A ``key = value`` / ``key: value`` / ``"key": "value"`` pair in a code block, any case
+#: (``password: x``, ``spring.datasource.password=x``, ``"apiKey": "x"``); masked when the key
+#: is secret-like (:func:`~.frontmatter.secret_name`). An authentication scheme word before
+#: the value (``Authorization: Bearer x``) is masked with it. Starts only at the start of a
+#: key-character run, matched possessively: linear time.
+_CODE_ASSIGN = re.compile(
+    r"(?<![\w.\-])([\"']?)([A-Za-z_][\w.\-]*+)\1([ \t]*[=:][ \t]*)"
+    r"(" + _AUTH_SCHEME + r"[ \t]++(?=[^\s,;)}\]]))?"
+    r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;)}\]]+)"
+)
+#: A single-backtick inline code span in prose (```DB_PASSWORD=x```). The body is matched
+#: possessively up to the next backtick on the line: linear time.
+_INLINE_CODE = re.compile(r"`([^`\n]*+)`")
+#: A pipe-table row (``| DB_PASSWORD | x |``) and its header delimiter row (``|---|:-:|``).
+_TABLE_ROW = re.compile(r"^[ \t]*\|")
+_TABLE_DELIMITER = re.compile(r"[ \t:|\-]*+")
+#: A table cell that is a bare key: a name, optionally in backticks.
+_TABLE_KEY = re.compile(r"`?([A-Za-z_][\w.\-]*+)`?")
+#: A dotted name (``settings.DB_PASSWORD``, ``process.env.TOKEN``): a lookup, not a literal.
+_DOTTED_NAME = re.compile(r"[A-Za-z_]\w*+(?:\.[A-Za-z_]\w*+)+")
+#: A ``key: value`` pair inside a YAML flow collection (``env: {API_TOKEN: x, DB: y}``). The
+#: unquoted value stops before a nested collection, so its pairs are scanned too.
+_FLOW_PAIR = re.compile(
+    r"(?<![\w.\-\"'])([\"']?)([A-Za-z_][\w.\-]*+)\1([ \t]*:[ \t]*)"
+    r"(\"[^\"\n]*\"|'[^'\n]*'|[^,{}\[\]\n]*)"
+)
+#: Values after a secret-named key that are a type or a placeholder, not a secret
+#: (``password: string;`` in a TypeScript interface).
+_TYPE_VALUES = frozenset(
+    {"string", "str", "String", "number", "int", "bool", "boolean", "any", "None", "null"}
+)
+#: Words after a secret-named key that start an expression, not a literal
+#: (``const token = await getToken();``, ``password = None``).
+_CODE_KEYWORDS = frozenset(
+    {
+        "await",
+        "new",
+        "async",
+        "function",
+        "yield",
+        "lambda",
+        "typeof",
+        "require",
+        "import",
+        "null",
+        "None",
+        "nil",
+        "true",
+        "false",
+        "True",
+        "False",
+        "undefined",
+    }
+)
+#: A ``key:`` line in YAML front matter (optionally a list item).
+_FM_KEY = re.compile(r"^([ \t]*(?:-[ \t]+)?)([\w.\-]+|\"[^\"]*\"|'[^']*')([ \t]*:)(.*)$")
+#: Suffixes the parser owns in any case (:meth:`MarkdownParser.matches`).
+_SUFFIXES_ANY_CASE = frozenset({".md", ".mdc"})
+#: Folders whose ``plugin.json`` marks a plugin root (Claude Code, Cursor).
+_PLUGIN_MANIFEST_DIRS = (".claude-plugin", ".cursor-plugin")
+
+
+class MarkdownParser(BaseParser):
+    name = "markdown"
+    schema_version = SCHEMA_VERSION
+    extensions = (".md", ".mdc", "README.rst", ".cursorrules")
+
+    def matches(self, path: str | Path) -> bool:
+        """The base suffix gate, and a Markdown suffix in any case (``README.MD``,
+        ``CHANGELOG.MD``): no other parser registers one."""
+        return super().matches(path) or PurePosixPath(path).suffix.lower() in _SUFFIXES_ANY_CASE
+
+    def parse_file(self, ctx: ParseContext) -> FileRecord:
+        rst = ctx.path.endswith(".rst")
+        doc = read_document(ctx, rst=rst)
+        record = FileRecord(
+            id=file_id(ctx.path),
+            path=ctx.path,
+            type="config",
+            language="rst" if rst else "markdown",
+            loc=count_loc(doc.text),
+            metadata=doc.metadata,
+        )
+        if doc.statement is not None:
+            record.statements.append(doc.statement)
+        return record
+
+
+@dataclass
+class Document:
+    """What :func:`read_document` reads from a document: the File ``metadata``, the
+    whole-file Statement (None without statement capture) and the decoded text."""
+
+    metadata: dict[str, Any]
+    statement: Statement | None
+    text: str
+
+
+def read_document(
+    ctx: ParseContext, *, rst: bool = False, code_lines: AbstractSet[int] = frozenset()
+) -> Document:
+    """The document reading of a Markdown file — ``metadata`` ``{kind, category:
+    "documentation", frontmatter, title, headings}`` and, under statement capture, the
+    whole-file ``doc`` / ``readme`` / … Statement with secrets masked.
+
+    Shared with the MDX parser, whose files are Markdown documents too. ``code_lines``
+    (1-based) are lines that are code, not Markdown — an MDX file's ESM ``import`` /
+    ``export`` lines — so a ``#`` line in them is never read as a heading."""
+    text = _decode(ctx.source)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    fm_text, body_start = (None, 0) if rst else split_front_matter(lines)
+    front_matter, fm_ok = load_front_matter(fm_text)
+    front_matter = _masked_values(front_matter)
+    # A leading ``---`` block that is not YAML at all (a thematic break around prose) is
+    # body: its headings are outline. A broken YAML header stays skipped.
+    outline_start = body_start if fm_ok or _looks_like_yaml(lines, body_start) else 0
+    headings = _rst_headings(lines) if rst else _atx_headings(lines, outline_start, code_lines)
+    title = string_field(front_matter, "title") or next(
+        (h["text"] for h in headings if h["level"] == 1), None
+    )
+    kind = classify(ctx.path, front_matter, headings, _plugin_check(ctx.repo_root))
+
+    metadata: dict[str, Any] = {
+        "kind": kind,
+        "category": "documentation",
+        "frontmatter": front_matter,
+        "title": title,
+        "headings": headings,
+    }
+    if not fm_ok:
+        log.warning("markdown.front_matter_unreadable", path=ctx.path)
+
+    if not ctx.capture_statements:
+        return Document(metadata, None, text)
+
+    # Secret-named front-matter values are masked in the text too, not only in metadata.
+    body = "\n".join(_mask_front_matter(lines, body_start)) if body_start else text
+    stem = PurePosixPath(ctx.path).name.split(".")[0]
+    statement = Statement(
+        id=statement_id(ctx.path, 1, 0),
+        parentId=file_id(ctx.path),
+        nodeType="synthetic",
+        semanticType=statement_type(kind),  # type: ignore[arg-type]
+        text=_clean(body),
+        startLine=1,
+        # A final newline ends the last line; it does not start another.
+        endLine=max(len(lines) - (1 if lines[-1] == "" else 0), 1),
+        path=ctx.path,
+        name=string_field(front_matter, "name")
+        or (stem if kind == "command" else None)
+        or title
+        or PurePosixPath(ctx.path).name,
+        description=string_field(front_matter, "description"),
+    )
+    return Document(metadata, statement, text)
+
+
+def _decode(source: bytes) -> str:
+    """Text of a document: UTF-16 when it opens with a UTF-16 byte-order mark,
+    else UTF-8 (a UTF-8 BOM dropped); undecodable bytes are replaced."""
+    if source[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return source.decode("utf-16", "replace").lstrip("\ufeff")
+    return source.decode("utf-8", "replace").lstrip("\ufeff")
+
+
+def _looks_like_yaml(lines: list[str], body_start: int) -> bool:
+    """True when the front-matter block ``lines[1 : body_start - 1]`` has a ``key:`` line."""
+    return any(_FM_KEY.match(line) for line in lines[1 : max(body_start - 1, 1)])
+
+
+def _clean(text: str) -> str:
+    text = redact_text(text)
+    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _ENV_ASSIGN.sub(_mask_env, text)
+    text = _mask_code_blocks(text)
+    return _DATA_URI.sub(lambda m: f"data:{m.group(1)};base64,…", text)
+
+
+def _masked_value(value: str) -> str:
+    quote = value[0] if value[:1] in ("'", '"') else ""
+    return f"{quote}***{quote}"
+
+
+def _mask_env(m: re.Match[str]) -> str:
+    name, value = m.group(2), m.group(3)
+    if not secret_name(name) or token_count(name, value):
+        return m.group(0)
+    return f"{m.group(1)}{_masked_value(value)}"
+
+
+def _lookup(value: str) -> bool:
+    """True when an unquoted value reads another value instead of holding one: a call or a
+    subscript (``get_token()``, ``os.environ['DB_PASSWORD']``; the value is cut at the bracket)
+    or a dotted name (``settings.DB_PASSWORD``). Masking it would hide code, not a secret."""
+    if value[:1] in ("'", '"'):
+        return False
+    return "(" in value or "[" in value or _DOTTED_NAME.fullmatch(value) is not None
+
+
+def _not_literal(value: str) -> bool:
+    """True when an unquoted value after a secret-named key is code, not a secret: a type
+    name, a lookup (:func:`_lookup`), a keyword that starts an expression (``await
+    getToken()``), a nested collection (``{"type": "string"}``) or a YAML tag (``!Ref x``)."""
+    return (
+        value in _TYPE_VALUES
+        or value in _CODE_KEYWORDS
+        or value[:1] in ("{", "!")
+        or _lookup(value)
+    )
+
+
+def _mask_code_assign(m: re.Match[str]) -> str:
+    key, scheme, value = m.group(2), m.group(4), m.group(5)
+    if (
+        not secret_name(key)
+        or (not scheme and _not_literal(value))
+        or value.strip("\"'") == "***"
+        or token_count(key, value)
+    ):
+        return m.group(0)
+    masked = "***" if scheme else _masked_value(value)
+    return f"{m.group(1)}{key}{m.group(1)}{m.group(3)}{masked}"
+
+
+def _mask_code_blocks(text: str) -> str:
+    """Mask secret-named ``key = value`` pairs on code lines, where config and code snippets
+    live: inside fenced blocks at any indent (a fence nested under a list item
+    included) and on indented code lines (four spaces or a tab). In other prose, only the
+    code it quotes in inline code spans (:func:`_mask_inline_code`). Pipe-table rows, in prose
+    or in a block, have the cell after a secret-named key cell masked (:func:`_mask_table_row`).
+
+    A fence closes only on a bare run of its own character at least as long as the opener, so
+    a shorter or labelled fence quoted inside a block does not end it; an unclosed fence masks
+    to the end of the document (more masked, never less)."""
+    lines = text.split("\n")
+    fence: str | None = None  # the opening run of the current fenced block
+    fence_start = 0
+    for i, line in enumerate(lines):
+        m = _ANY_FENCE.match(line)
+        if m:
+            run, rest = m.group(1), m.group(2)
+            if fence is None:
+                fence = run
+                fence_start = i + 1
+                continue
+            if run[0] == fence[0] and len(run) >= len(fence) and not rest.strip():
+                fence = None
+                _mask_name_value(lines, fence_start, i)
+                continue
+        if fence is not None or _INDENTED_CODE.match(line):
+            if "=" in line or ":" in line:
+                line = lines[i] = _CODE_ASSIGN.sub(_mask_code_assign, line)
+        else:
+            if "=" in line:
+                line = lines[i] = _mask_prose_env(line)
+            if "`" in line:
+                line = lines[i] = _mask_inline_code(line)
+        if _TABLE_ROW.match(line) and not (i + 1 < len(lines) and _delimiter_row(lines[i + 1])):
+            lines[i] = _mask_table_row(line)
+    if fence is not None:
+        _mask_name_value(lines, fence_start, len(lines))
+    return "\n".join(lines)
+
+
+def _delimiter_row(line: str) -> bool:
+    """True for a pipe table's header delimiter row (``|---|:-:|``)."""
+    return "-" in line and _TABLE_DELIMITER.fullmatch(line) is not None
+
+
+def _mask_prose_env(line: str) -> str:
+    """``line``, a prose line, with the values of secret-named upper-case ``NAME=value``
+    pairs outside its inline code spans masked (``Run DB_PASSWORD=x and …``). A placeholder
+    (``<password>``, ``$DB_PASSWORD``, ``${DB_PASSWORD}``) or an already masked value is kept."""
+    out: list[str] = []
+    pos = 0
+    for m in _INLINE_CODE.finditer(line):
+        out.append(_PROSE_ENV.sub(_mask_prose_pair, line[pos : m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_PROSE_ENV.sub(_mask_prose_pair, line[pos:]))
+    return "".join(out)
+
+
+def _mask_prose_pair(m: re.Match[str]) -> str:
+    name, value = m.group(1), m.group(2)
+    bare = value.strip("\"'")
+    if (
+        not secret_name(name)
+        or not bare
+        or bare == "***"
+        or bare[0] in "<$"
+        or token_count(name, value)
+    ):
+        return m.group(0)
+    return f"{name}={_masked_value(value)}"
+
+
+def _mask_inline_code(line: str) -> str:
+    """``line`` with secret-named ``KEY=value`` / ``key: value`` pairs inside its inline code
+    spans masked (``Set `DB_PASSWORD=x` first``), by the code-block rules."""
+
+    def span(m: re.Match[str]) -> str:
+        body = m.group(1)
+        if "=" not in body and ":" not in body:
+            return m.group(0)
+        return f"`{_CODE_ASSIGN.sub(_mask_code_assign, body)}`"
+
+    return _INLINE_CODE.sub(span, line)
+
+
+def _mask_table_row(line: str) -> str:
+    """``line``, a pipe-table body row, with the cell after a secret-named key cell masked
+    (``| DB_PASSWORD | x |``). Only a one-word value is a candidate (a sentence describing the
+    key is kept), and the code-block exemptions apply: type names, lookups, token counts."""
+    cells = line.split("|")
+    for k in range(1, len(cells) - 1):
+        key = _TABLE_KEY.fullmatch(cells[k].strip())
+        if key is None or not secret_name(key.group(1)):
+            continue
+        raw = cells[k + 1]
+        value = raw.strip()
+        tick = "`" if len(value) > 2 and value[0] == value[-1] == "`" else ""
+        bare = value[1:-1] if tick else value
+        if (
+            not bare
+            or any(c.isspace() for c in bare)
+            or "`" in bare
+            or bare.strip("\"'") in ("***", "-", "—", "")
+            or _not_literal(bare)
+            or token_count(key.group(1), bare)
+        ):
+            continue
+        lead = raw[: len(raw) - len(raw.lstrip())]
+        trail = raw[len(raw.rstrip()) :]
+        cells[k + 1] = f"{lead}{tick}{_masked_value(bare)}{tick}{trail}"
+    return "|".join(cells)
+
+
+def _mask_name_value(lines: list[str], start: int, end: int) -> None:
+    """Mask, in place, the ``value:`` of a YAML mapping whose ``name:`` is secret-named, in
+    ``lines[start:end]`` — the Kubernetes / Compose environment shape, where the secret's name
+    and its value are sibling keys::
+
+        - name: DB_PASSWORD
+          value: s3cr3t
+
+    Sibling keys are the keys at one column, from a list item's ``- `` (or the first key) to
+    the next item or a shallower key; deeper lines belong to a nested value and are skipped."""
+    col: int | None = None  # key column of the current mapping
+    secret = False
+    value_at: int | None = None
+
+    def flush() -> None:
+        if secret and value_at is not None:
+            m = _FM_KEY.match(lines[value_at])
+            if m is not None:
+                lines[value_at] = (
+                    f"{m.group(1)}{m.group(2)}{m.group(3)} {_masked_value(m.group(4).strip())}"
+                )
+
+    for i in range(start, end):
+        line = lines[i]
+        if ":" not in line or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = _FM_KEY.match(line)
+        if m is None:
+            continue
+        key_col = len(m.group(1))
+        dash = "-" in m.group(1)
+        if col is None or dash or key_col < col:
+            flush()
+            col, secret, value_at = key_col, False, None
+        elif key_col > col:
+            continue
+        key = m.group(2).strip("\"'")
+        value = m.group(4).strip()
+        if key == "name":
+            secret = bool(value) and secret_name(value.strip("\"'"))
+        elif key == "value" and value and value[0] not in "|>{[" and value.strip("\"'") != "***":
+            value_at = i
+    flush()
+
+
+def _mask_prose(text: str) -> str:
+    """``text`` — a heading, a title, a name, a description, a front-matter value — with
+    secrets masked by the rules for a prose line of the body: value-shaped secrets, an
+    authorization header, a secret-named ``NAME=value`` / ``NAME: value`` at a line start or
+    in the middle of the text, and the pairs inside inline code spans (``Deploy with
+    API_TOKEN=x`` → ``Deploy with API_TOKEN=***``). Their exemptions hold: token counts,
+    ``$VAR`` / ``<placeholder>`` values, expressions."""
+    text = redact_text(text)
+    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _ENV_ASSIGN.sub(_mask_env, text)
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if "=" in line:
+            line = _mask_prose_env(line)
+        if "`" in line:
+            line = _mask_inline_code(line)
+        lines[i] = line
+    return "\n".join(lines)
+
+
+def _masked_values(value: Any) -> Any:
+    """Loaded front matter with every string value (list items and nested values included)
+    masked by :func:`_mask_prose`; keys, and values that are not strings, unchanged."""
+    if isinstance(value, str):
+        return _mask_prose(value)
+    if isinstance(value, dict):
+        return {k: _masked_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_masked_values(v) for v in value]
+    return value
+
+
+def _mask_front_matter(lines: list[str], body_start: int) -> list[str]:
+    """``lines`` with the values of secret-named front-matter keys (``api_token: x``, and the
+    indented block under such a key) replaced by ``***``. Front matter is ``lines[1 :
+    body_start - 1]``, between the delimiters."""
+    out = list(lines)
+    block_indent: int | None = None  # indent of a secret key whose value is a nested block
+    for i in range(1, body_start - 1):
+        line = out[i]
+        indent = len(line) - len(line.lstrip(" \t"))
+        if block_indent is not None:
+            if line.strip() and indent > block_indent:
+                out[i] = line[:indent] + "***"
+                continue
+            block_indent = None
+        m = _FM_KEY.match(line)
+        key = m.group(2).strip("\"'") if m is not None else ""
+        if m is None or not secret_name(key) or token_count(key, m.group(4).strip().strip("\"'")):
+            # A flow collection (``env: {DB_PASSWORD: x}``, ``- {token: x}``) can hold
+            # secret-named pairs of its own.
+            if "{" in line:
+                out[i] = _mask_flow(line)
+            continue
+        if m.group(4).strip():
+            out[i] = f"{m.group(1)}{m.group(2)}{m.group(3)} ***"
+        # The lines indented under a secret key are its value too: a nested block, a block
+        # scalar (``api_token: |`` / ``>``) or a folded plain scalar. Measured
+        # from the key, so a list item's sibling keys are not.
+        block_indent = len(m.group(1))
+    _mask_name_value(out, 1, body_start - 1)
+    return out
+
+
+def _mask_flow(line: str) -> str:
+    """``line`` with the values of secret-named ``key: value`` pairs inside YAML flow
+    collections replaced by ``***``. A secret key whose value is itself a collection
+    (``tokens: [a, b]``) has the whole collection masked."""
+    out: list[str] = []
+    pos = 0
+    while (m := _FLOW_PAIR.search(line, pos)) is not None:
+        out.append(line[pos : m.start()])
+        key, value = m.group(2), m.group(4)
+        head = line[m.start() : m.start(4)]
+        pos = m.end()
+        bare = value.strip()
+        if not secret_name(key) or bare.strip("\"'") == "***" or token_count(key, bare):
+            out.append(m.group(0))
+        elif bare:
+            out.append(f"{head}{_masked_value(bare)}{value[len(value.rstrip()) :]}")
+        elif pos < len(line) and line[pos] in "{[":
+            out.append(f"{head}***")
+            pos = _collection_end(line, pos)
+        else:
+            out.append(m.group(0))
+    out.append(line[pos:])
+    return "".join(out)
+
+
+def _collection_end(line: str, start: int) -> int:
+    """Index just past the flow collection that opens at ``line[start]`` (bracket depth only;
+    quotes are not tracked), or the end of the line when it does not close there."""
+    depth = 0
+    for i in range(start, len(line)):
+        if line[i] in "{[":
+            depth += 1
+        elif line[i] in "}]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(line)
+
+
+def _atx_headings(
+    lines: list[str], start: int, code_lines: AbstractSet[int] = frozenset()
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    fence: str | None = None
+    for i in range(start, len(lines)):
+        if i + 1 in code_lines:
+            continue  # code, not Markdown: neither a heading nor a fence
+        line = lines[i]
+        m = _FENCE.match(line)
+        if m:
+            marker = m.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        h = _ATX.match(line)
+        heading = _without_closing_sequence(h.group(2)) if h else ""
+        if h and heading and len(h.group(1)) <= _MAX_HEADING_LEVEL:
+            out.append(
+                {
+                    "level": len(h.group(1)),
+                    "text": _heading_text(heading),
+                    "line": i + 1,
+                }
+            )
+            if len(out) >= _MAX_HEADINGS:
+                break
+    return out
+
+
+def _without_closing_sequence(text: str) -> str:
+    """ATX heading content without its optional closing ``#`` run, by the CommonMark rule: the
+    run counts only after a space or tab, or as the whole content (``Using C#`` keeps its
+    ``#``; ``Title ##`` → ``Title``)."""
+    text = text.strip(" \t")
+    bare = text.rstrip("#")
+    if bare == text or (bare and bare[-1] not in " \t"):
+        return text
+    return bare.rstrip(" \t")
+
+
+def _heading_text(text: str) -> str:
+    # Mask before the cut so a token is not split past its pattern; bound the input first.
+    return _mask_prose(text[: _MAX_HEADING_CHARS * 5])[:_MAX_HEADING_CHARS]
+
+
+def _rst_headings(lines: list[str]) -> list[dict[str, Any]]:
+    """reStructuredText section titles (a text line underlined by a repeated punctuation
+    character). Levels follow the order in which underline characters first appear."""
+    out: list[dict[str, Any]] = []
+    order: list[str] = []
+    for i in range(1, len(lines)):
+        m = _RST_UNDERLINE.match(lines[i])
+        prev = lines[i - 1].strip()
+        if not m or not prev or _RST_UNDERLINE.match(prev):
+            continue
+        if m.group(1) not in order:
+            order.append(m.group(1))
+        level = order.index(m.group(1)) + 1
+        if level <= _MAX_HEADING_LEVEL:
+            out.append({"level": level, "text": _heading_text(prev), "line": i})
+            if len(out) >= _MAX_HEADINGS:
+                break
+    return out
+
+
+def _plugin_check(repo_root: Path | str | None) -> Callable[[str], bool]:
+    """``plugin_root(dir)`` for :func:`classify`: True when the repo-relative ``dir`` itself
+    holds ``.claude-plugin/plugin.json`` or ``.cursor-plugin/plugin.json`` (a Cursor
+    plugin)."""
+
+    def plugin_root(rel_dir: str) -> bool:
+        if repo_root is None:
+            return False
+        folder = Path(repo_root).joinpath(*PurePosixPath(rel_dir).parts)
+        return any((folder / d / "plugin.json").is_file() for d in _PLUGIN_MANIFEST_DIRS)
+
+    return plugin_root

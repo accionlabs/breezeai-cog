@@ -53,7 +53,7 @@ from typing import Any, Callable
 
 from tree_sitter import Node
 
-from ..errors import RegistryError
+from ..errors import ParserTimeout, RegistryError
 from ..schemas import FileRecord
 from .base import ParseContext
 from .emits import Emit, apply
@@ -61,14 +61,15 @@ from .emits import Emit, apply
 #: Languages whose base parser calls :func:`run_additive`. Registering a detector for any
 #: other language is an error: nothing would ever run it.
 HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"typescript", "csharp", "java", "python", "scala", "php", "go", "c", "cpp", "cuda"})
+    {"typescript", "csharp", "java", "kotlin", "python", "scala", "php", "go", "c", "cpp", "cuda", "vb",
+     "mdx"})
 
 #: Languages whose ``build_index`` calls :func:`collect_additive` / :func:`resolve_additive`.
 #: A fact for any other language is an error: it would never be built, and the detector
 #: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"apex", "c", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "php", "python", "ruby",
-     "scala", "typescript"})
+    {"apex", "c", "config", "cpp", "csharp", "cuda", "go", "graphql", "groovy", "java", "kotlin", "php",
+     "python", "ruby", "scala", "typescript", "vb"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
 _MARKERS = (b"register_detector(", b"register_fact(")
@@ -172,11 +173,16 @@ class FactSpec:
     #: Extra file extensions to collect from, owned by another parser (``(".svc",)`` for a C#
     #: fact, ``(".graphql",)`` for a TypeScript one). The pipeline hands such files to this
     #: language's index too; they reach only this ``collect``, never the language's own
-    #: indexing, and the owning parser still emits their records.
+    #: indexing, and the owning parser still emits their records. On ``config``, whose files are
+    #: all its own, it limits the files the index reads to these types (when every ``config``
+    #: fact names some).
     sources: tuple[str, ...] = ()
     #: tree-sitter grammar ``collect`` gets those files parsed with; ``None`` = no tree (the
     #: fact reads the bytes, e.g. a ``<%@ ServiceHost %>`` directive).
     grammar: str | None = None
+    #: ``collect`` reads only the path of a ``sources`` file: it gets ``b""`` and no tree, the
+    #: file is not read and ``gate`` is not applied to it.
+    path_only: bool = False
 
 
 _DETECTORS: dict[str, list[Detector]] = {}
@@ -293,21 +299,27 @@ def split_fact_sources(language: str, files: list[Path]) -> tuple[list[Path], li
 def _collect_source_one(args: tuple[str, str, str, str]) -> dict[str, Any]:
     """Collect every fact of ``language`` that reads this fact-source file (picklable worker)."""
     language, file_s, rel, repo_root_s = args
-    try:
-        source = Path(file_s).read_bytes()
-    except OSError:
-        return {}
+    specs = [spec for spec in facts_for(language) if rel.lower().endswith(spec.sources)]
+    source = b""
+    if not all(spec.path_only for spec in specs):
+        try:
+            source = Path(file_s).read_bytes()
+        except OSError:
+            return {}
     out: dict[str, Any] = {}
     roots: dict[str, Node | None] = {}
-    for spec in facts_for(language):
-        if not rel.lower().endswith(spec.sources) or not any(g in source for g in spec.gate):
+    for spec in specs:
+        if not spec.path_only and not any(g in source for g in spec.gate):
             continue
         try:
-            if spec.grammar is not None and spec.grammar not in roots:
-                from .treesitter import parse_source
-                roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
-            value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
-                                 source, rel, Path(repo_root_s))
+            if spec.path_only:
+                value = spec.collect(None, b"", rel, Path(repo_root_s))
+            else:
+                if spec.grammar is not None and spec.grammar not in roots:
+                    from .treesitter import parse_source
+                    roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
+                value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
+                                     source, rel, Path(repo_root_s))
         except Exception as exc:  # a fact never takes the index down: this file adds nothing
             from ..logging import get_logger
             get_logger("breezeai_cog.index").warning(
@@ -352,7 +364,16 @@ def run_additive(
     for detector in detectors_for(language):
         if not detector.gate.admits(ctx.source, is_fixture=is_fixture):
             continue
-        found = detector.detect(dc)
+        try:
+            found = detector.detect(dc)
+        except ParserTimeout:
+            raise  # the file's parse budget is spent: handled like any parse timeout
+        except Exception as exc:  # one detector never drops the file's other records
+            from ..logging import get_logger
+            get_logger("breezeai_cog.additive").warning(
+                "additive.detector.failed", path=ctx.path, detector=detector.name,
+                error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
         if found is None:
             continue
         apply(record, found.emits, ctx.source, ctx.path)
@@ -363,16 +384,36 @@ def run_additive(
 
 
 def collect_additive(
-    language: str, root: Node, source: bytes, rel: str, repo_root: Path | None
+    language: str, root: Node | None, source: bytes, rel: str, repo_root: Path | None
 ) -> dict[str, Any]:
     """Run every fact ``collect`` registered for ``language`` on one file, from the language's
     ``build_index`` per-file pass. Returns fact name → collected value, for the facts whose
-    gate matched and that found something."""
+    gate matched and that found something. ``root`` is None for a language whose index reads
+    bytes only (``config``).
+
+    A ``collect`` that raises costs only its own value for this file: the file's other facts
+    and the other files' values for the same fact are kept, and the fact is still resolved.
+    Dropping the whole fact instead would empty it for every file (a router-mount fact with no
+    mounts strips the prefix from every route), which is worse than one file's value missing.
+    A file the language cannot parse at all (a parse error, a ``RecursionError``) is skipped by
+    the language's per-file index worker the same way: it adds no fact value. A
+    :class:`~breezeai_cog.errors.ParserTimeout` still propagates."""
     out: dict[str, Any] = {}
     for spec in facts_for(language):
         if not any(g in source for g in spec.gate):
             continue
-        value = spec.collect(root, source, rel, repo_root)
+        try:
+            value = spec.collect(root, source, rel, repo_root)
+        except ParserTimeout:
+            # Nothing raises it today; kept so one raised later is handled like any parse
+            # timeout (as in run_additive), never skipped as one fact's failure.
+            raise
+        except Exception as exc:  # one fact never drops the file's other facts or the index
+            from ..logging import get_logger
+            get_logger("breezeai_cog.index").warning(
+                "index.fact.skipped", path=rel, fact=spec.name,
+                error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
         if value is not None:
             out[spec.name] = value
     return out
@@ -382,7 +423,8 @@ def resolve_additive(language: str, collected: dict[str, list[Any]], index: Any)
     """Resolve every fact for ``language`` once, after the language's index is reduced.
     ``collected`` maps fact name → its per-file values in file order. Returns fact name →
     fact (a fact that resolved to ``None`` is left out), to be stored on the index for
-    :func:`index_fact`."""
+    :func:`index_fact`. A file whose ``collect`` raised contributed no value
+    (:func:`collect_additive`); the fact is resolved from the other files."""
     facts = {spec.name: spec.resolve(collected.get(spec.name, []), index)
              for spec in facts_for(language)}
     return {name: fact for name, fact in facts.items() if fact is not None}

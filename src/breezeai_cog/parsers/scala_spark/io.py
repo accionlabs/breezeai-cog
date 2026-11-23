@@ -1,15 +1,17 @@
-"""Spark .read / .write / .sql detection (D7 fallback: db_method_call / dataAccessHint=spark).
+"""Spark .read / .write / .sql detection (db_method_call / dataAccessHint=spark).
 
 Spark job code typically uses DataFrame reader/writer chains:
 - ``spark.read.format("csv").load("in.csv")`` / ``spark.read.parquet(...)`` -> read
 - ``df.write.format("parquet").save("out")`` / ``df.write.csv(...)`` -> write
 - ``spark.sql("SELECT ...")`` -> query_statement (handled by shared text_has_query fallback)
 
-Uses the D7 fallback: ``db_method_call`` + ``dataAccessHint="spark"`` + ``method="read"|"write"``.
-If D7 is approved later, only ``_SPARK_OPS`` mapping needs to change.
+A reader / writer chain is recorded as ``db_method_call`` + ``dataAccessHint="spark"`` +
+``method="read"|"write"``.
 """
 
 from __future__ import annotations
+
+import re
 
 from tree_sitter import Node
 
@@ -23,8 +25,6 @@ from ..scala.functions import type_map
 from ..scala.statements import _call_details, find_enclosing_parent_id
 
 # Mapping of Spark terminal operations -> (semanticType, dataAccessHint, method)
-# Currently using D7 fallback: ("db_method_call", "spark", <method>)
-# If D7 is approved later, swap "db_method_call" -> "data_source_read" / "data_sink_write"
 _SPARK_OPS: dict[str, tuple[SemanticType, str, str]] = {
     "read": ("db_method_call", "spark", "read"),
     "write": ("db_method_call", "spark", "write"),
@@ -33,6 +33,9 @@ _SPARK_OPS: dict[str, tuple[SemanticType, str, str]] = {
 _READ_METHODS = frozenset({"load", "csv", "parquet", "json", "orc", "table", "text", "textfile"})
 _WRITE_METHODS = frozenset({"save", "csv", "parquet", "json", "orc", "saveastable", "insertinto", "text"})
 
+
+#: An argument that is one value, not a path (``read.csv(path)`` → ``{path}``).
+_WHOLE_VALUE = re.compile(r"\{[^{}]*\}")
 
 def _spark_receiver(callee: str, operation: str) -> str | None:
     marker = f".{operation}"
@@ -129,6 +132,8 @@ def detect_spark_calls(
             details = _call_details(node, source)
             if details is not None:
                 callee, method, endpoint = details
+                if endpoint is not None and _WHOLE_VALUE.fullmatch(endpoint):
+                    endpoint = None  # a path held in a variable: not a data location
                 op = _spark_op_for_call(callee, method, spark_types)
                 if op is not None:
                     sem_type, hint, op_method = _SPARK_OPS[op]

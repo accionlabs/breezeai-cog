@@ -199,3 +199,24 @@ class Chat {
 }
 '''
     assert _calls(_parse(src)) == []
+
+
+def test_a_client_name_is_bound_in_its_own_class(tmp_path) -> None:
+    # Two classes in one file with the same field names: only the one typed as an AWS client
+    # calls AWS, whichever comes first, and its own constant is the address.
+    other = b'''public class OtherSender {
+  private const string QueueUrl = "local-queue";
+  private readonly IMyQueue _sqs;
+  public async Task Run() { await _sqs.SendMessageAsync(QueueUrl, "x"); }
+}
+'''
+    aws = b'''public class AwsSender {
+  private const string QueueUrl = "https://sqs.us-east-1.amazonaws.com/111/aws-queue";
+  private readonly IAmazonSQS _sqs;
+  public async Task Run() { await _sqs.SendMessageAsync(QueueUrl, "x"); }
+}
+'''
+    expected = [("eventbus_send", "aws-sqs", "SendMessageAsync", "aws-queue")]
+    for body in (other + aws, aws + other):
+        src = b"using Amazon.SQS;\n" + body
+        assert _calls(_parse_repo(tmp_path, {"Senders.cs": src}, "Senders.cs")) == expected

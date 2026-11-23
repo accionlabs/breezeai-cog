@@ -1,0 +1,15 @@
+# MCP C# SDK — entry-point roles
+
+Parser: `src/breezeai_cog/parsers/csharp_mcp/tools.py` (additive detector) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_csharp_mcp.py`
+
+A tool a C# MCP server declares with the `ModelContextProtocol` SDK's attribute. The fields of an `mcp_tool` record, how `params` is read and limited, and what an incremental sync does are the same for every MCP framework: [entry-point contract, MCP tools](../architecture/entry-points.md#mcp-tools).
+
+| Construct | Role | Record | Why |
+|---|---|---|---|
+| `[McpServerTool(Name = …)]` with `[Description(…)]` (`ModelContextProtocol`) | Binding | `mcp_tool`, `framework: csharp-mcp`, at the attribute; `endpoint` = `Name`, else the name the SDK derives from the method (SDK 0.3+): a trailing `Async` dropped when it returns `Task` / `ValueTask` / `IAsyncEnumerable`, other characters than ASCII letters and digits → `_`, then snake_case as `JsonNamingPolicy.SnakeCaseLower` (`GetWeatherAsync` → `get_weather`, `GetHTTPStatus` → `get_http_status`); `description` = `[Description]`, else the XML `<summary>`; a parameter is optional only with a default; `CancellationToken`, `IMcpServer` / `McpServer`, `RequestContext<…>`, `IProgress<…>`, `IServiceProvider`, `[FromServices]` skipped | The SDK's own attribute |
+| A computed tool name (`Name = Const`) | None | — | The tool exists, but its name is unknown |
+| `[McpServerResource(UriTemplate = "…", Name = …)]` + `[Description]` on a method | Binding | `mcp_resource`, `framework: csharp-mcp`, at the attribute; `endpoint` = `UriTemplate` (a literal); `name` = `Name =` when a literal, else the URI (not the method name); `params` = the template's simple `{variables}` (`[]` for a fixed URI); `description` as for a tool | Without `UriTemplate` the SDK derives the URI from the name and parameters: not read, no record |
+| `[McpServerPrompt(Name = …)]` + `[Description]`, parameters with `[Description]` | Binding | `mcp_prompt`; `endpoint` = `Name`, else the derived name (as for a tool); `params` = the method's parameters read as for a tool, with name, required (no default) and description only — no `type` or `default`, a prompt argument is a string | The SDK builds the arguments from the parameters |
+| A client: a name declared in the call's own class, typed `McpClient` / `IMcpClient` or `var c = await McpClient.CreateAsync(…)` / `McpClientFactory.CreateAsync(…)` → `c.CallToolAsync("x", …)` / `ReadResourceAsync("uri")` (or `new Uri("…")`, `uriTemplate:`) / `GetPromptAsync("x")` | Outbound | `mcp_call`, `framework: csharp-mcp`, on the call's own statement; no file framework | A `foreach` or lambda variable of the same name is another declaration (→ none); a `client` of another class (an inherited one, or the outer class's) is not proven (→ none). Detector `csharp-mcp-client` (`parsers/csharp_mcp/clients.py`) |
+
+Resource / prompt fields and `params`: [entry-point contract, MCP resources and prompts](../architecture/entry-points.md#mcp-resources-and-prompts); client calls: [MCP client calls](../architecture/entry-points.md#mcp-client-calls).

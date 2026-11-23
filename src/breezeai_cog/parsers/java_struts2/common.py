@@ -18,6 +18,7 @@ Every Struts2 version is read the same way: 2.0–2.5 and 6.x (``com.opensymphon
 
 from __future__ import annotations
 
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -48,7 +49,7 @@ STRUTS_ROOT = re.compile(rb"<struts[\s/>]")
 #: Where a constant is set, lowest precedence first.
 XML_LEVEL, PROPERTIES_LEVEL, WEB_XML_LEVEL = 0, 1, 2
 #: The Struts2 dispatcher filters (2.0's ``FilterDispatcher`` to 7.x), by class simple name.
-_STRUTS_FILTERS = ("StrutsPrepareAndExecuteFilter", "StrutsPrepareFilter",
+STRUTS_FILTERS = ("StrutsPrepareAndExecuteFilter", "StrutsPrepareFilter",
                    "StrutsExecuteFilter", "FilterDispatcher")
 
 
@@ -76,10 +77,9 @@ def read_properties(directory: Path) -> dict[str, str]:
         return {}
 
 
-def web_xml_constants(source: bytes) -> dict[str, str]:
-    """The ``struts.*`` init-params of the Struts filter in a ``web.xml`` (empty when none or
-    unreadable)."""
-    if b"struts." not in source:
+def _filter_params(source: bytes) -> dict[str, str]:
+    """Every init-param of the Struts filter in a ``web.xml`` (empty when none or unreadable)."""
+    if not any(f.encode() in source for f in STRUTS_FILTERS):
         return {}
     try:
         root = ET.fromstring(source)
@@ -88,13 +88,44 @@ def web_xml_constants(source: bytes) -> dict[str, str]:
     out: dict[str, str] = {}
     for item in root:
         if _local(item.tag) != "filter" or not any(
-                f in _text(item, "filter-class") for f in _STRUTS_FILTERS):
+                f in _text(item, "filter-class") for f in STRUTS_FILTERS):
             continue
         for param in (c for c in item if _local(c.tag) == "init-param"):
-            name = _text(param, "param-name")
-            if name.startswith("struts."):
-                out[name] = _text(param, "param-value")
+            out[_text(param, "param-name")] = _text(param, "param-value")
     return out
+
+
+def web_xml_constants(source: bytes) -> dict[str, str]:
+    """The ``struts.*`` init-params of the Struts filter in a ``web.xml`` (empty when none or
+    unreadable)."""
+    if b"struts." not in source:
+        return {}
+    return {k: v for k, v in _filter_params(source).items() if k.startswith("struts.")}
+
+
+def web_xml_lists_configs(source: bytes) -> bool:
+    """Whether the Struts filter names its own configuration files (the ``config`` init-param):
+    Struts then loads those instead of ``struts.xml``, and which files they are is not read."""
+    return b"config" in source and "config" in _filter_params(source)
+
+
+#: ``<include file="…"/>`` in a Struts configuration.
+_INCLUDE = re.compile(rb"""<include\s+file\s*=\s*["']([^"']+)["']""")
+
+
+def included_files(rel: str, source: bytes) -> tuple[str, ...]:
+    """The files a Struts configuration's ``<include file>`` elements name, as repo paths beside
+    the including file (both are on the classpath root); a placeholder, a path leaving the tree
+    or the file itself names none. Whether each exists is for the caller to know."""
+    out: list[str] = []
+    for ref in _INCLUDE.findall(source):
+        text = ref.decode("utf-8", "replace")
+        if "${" in text:
+            continue
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(rel), text.lstrip("/")))
+        if not target.startswith("../") and target != rel and target not in out:
+            out.append(target)
+    return tuple(out)
 
 
 def _local(tag: str) -> str:

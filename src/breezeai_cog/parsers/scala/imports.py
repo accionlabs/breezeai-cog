@@ -141,10 +141,10 @@ def _collect_top_level_types(root: Node, source: bytes) -> list[tuple[str, str]]
 
 
 def _fqcn_index_one(
-    args: tuple[str, str],
+    args: tuple[str, str, str],
 ) -> tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]] | None:
-    file_s, rel = args
-    repo_root = Path(file_s[: -len(rel) - 1]) if file_s.endswith("/" + rel) else None
+    file_s, rel, root_s = args
+    repo_root = Path(root_s)  # passed in, not derived from the path string ("\\" on Windows)
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -170,7 +170,7 @@ def _fqcn_index_one(
 
 def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> ScalaIndex:
     files, fact_files = split_fact_sources("scala", list(files))
-    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("scala", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}

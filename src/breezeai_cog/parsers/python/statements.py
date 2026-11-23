@@ -16,8 +16,8 @@ from ..statements_common import (
     classify_statement,
     render_concat,
     resolve_endpoint,
-    strip_leading_base,
     url_placeholder,
+    url_first,
 )
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -50,7 +50,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
             elif c.type == "interpolation":
                 expr = c.named_children[0] if c.named_children else None
                 parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-        return strip_leading_base("".join(parts))
+        return "".join(parts)
     if node.type == "binary_operator":  # string concatenation: '/a/' + str(id)
         return render_concat(node, source, _render_url)
     return None
@@ -62,7 +62,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     method = callee.rsplit(".", 1)[-1]
     args = call.child_by_field_name("arguments")
     named = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(named, source, _render_url)
+    endpoint, override = resolve_endpoint(named, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

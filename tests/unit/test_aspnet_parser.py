@@ -481,6 +481,62 @@ def test_vb_base_controller_route_and_auth_inherited(tmp_path) -> None:
     assert "Authorize" in routes["GetItem"].guards
 
 
+VB_NAMED = b'''Imports Microsoft.AspNetCore.Mvc
+<ApiController>
+<Route("api/products")>
+Public Class ProductsController
+    Inherits ControllerBase
+    <HttpGet("{id}", Name:="GetProduct")>
+    Public Function GetById(id As Integer) As IActionResult
+        Return Ok()
+    End Function
+    <HttpGet(Name:="ListProducts")>
+    Public Function List() As IActionResult
+        Return Ok()
+    End Function
+    <HttpPost(Order:=2)>
+    Public Function Create() As IActionResult
+        Return Ok()
+    End Function
+End Class'''
+
+
+def test_vb_named_attribute_args_keep_their_key_and_are_never_a_path() -> None:
+    rec = _parse(VbAspNetParser(), VB_NAMED, "Products.vb")
+    fns = {f.name: f for f in rec.functions}
+    assert fns["GetById"].decorators[0].args == ["{id}", 'Name:="GetProduct"']
+    routes = {s.handler: (s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert routes["GetById"] == ("GET", "/api/products/{id}")
+    assert routes["List"] == ("GET", "/api/products")    # a route name, not a path segment
+    assert routes["Create"] == ("POST", "/api/products")  # nor is an Order
+
+
+VB_STACKED = b'''Imports Microsoft.AspNetCore.Mvc
+<ApiController>
+<Route("api/orders")>
+Public Class OrdersController
+    Inherits ControllerBase
+    <HttpPost>
+    <Route("create")>
+    Public Function Create() As IActionResult
+        Return Ok()
+    End Function
+    <HttpGet("list")>
+    <Authorize>
+    Public Function List() As IActionResult
+        Return Ok()
+    End Function
+End Class'''
+
+
+def test_vb_attributes_on_separate_lines_all_count() -> None:
+    rec = _parse(VbAspNetParser(), VB_STACKED, "Orders.vb")
+    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    assert (routes["Create"].method, routes["Create"].endpoint) == ("POST", "/api/orders/create")
+    assert (routes["List"].method, routes["List"].endpoint) == ("GET", "/api/orders/list")
+    assert routes["List"].authRequired is True
+
+
 def test_non_controller_has_no_routes() -> None:
     src = b"using System;\nnamespace X { public class Plain { public int Add(int a){ return a; } } }"
     rec = _parse(AspNetCoreParser(), src, "Plain.cs")

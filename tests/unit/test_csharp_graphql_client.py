@@ -101,3 +101,19 @@ class People {
 '''
     assert [(e, h) for _, _, _, e, h, _ in _ops(_parse(tmp_path, src))] == [
         ("people", "GetPeople"), (None, "GetOther")]
+
+
+def test_a_client_name_is_bound_in_its_own_class(tmp_path) -> None:
+    # A same-named field of another type in the next class is not a GraphQL client.
+    src = b'''using GraphQL;
+using GraphQL.Client.Http;
+class Orders {
+  private readonly GraphQLHttpClient _gql;
+  async Task Run() { await _gql.SendQueryAsync<object>(new GraphQLRequest { Query = "query { orders { id } }" }); }
+}
+class Customers {
+  private readonly IMyGql _gql;
+  async Task Run() { await _gql.SendQueryAsync<object>(new GraphQLRequest { Query = "query { customers { id } }" }); }
+}
+'''
+    assert [(op[0], op[3]) for op in _ops(_parse(tmp_path, src))] == [(5, "orders")]
