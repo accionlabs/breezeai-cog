@@ -379,3 +379,23 @@ class G extends org.vertx.groovy.platform.Verticle {
     rec = _parse(tmp_path, src, "G.groovy")
     assert _routes(rec) == {("GET", "/g/x")}
     assert [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"] == ["p3.GW"]
+
+
+def test_groovy_regex_route_and_map_named_router(tmp_path) -> None:
+    src = b"""import org.vertx.groovy.core.http.RouteMatcher
+class V {
+  def start() {
+    def rm = new RouteMatcher()
+    rm.getWithRegEx("/g/.*") { req -> }
+    rm.all("/a") { req -> }
+    Map<String, String> router2 = [:]
+    router2.get("/n/router2")
+    container.deployVerticle(dyn)
+  }
+}
+"""
+    rec = _parse(tmp_path, src, "V.groovy")
+    routes = [(s.method, s.endpoint, s.isRegex) for s in rec.statements
+              if s.semanticType == "route"]
+    assert routes == [("GET", "/g/.*", True), (None, "/a", None)]
+    assert [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"] == [None]
