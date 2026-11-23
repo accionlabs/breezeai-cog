@@ -33,6 +33,7 @@ from ..base import BaseParser, ParseContext
 from ...utils.jsonc import load_json
 from ..config.extractors import NX_ONLY_JSON_NAMES, RICH_JSON_NAMES, extract_config
 from ..config.nx import in_nx_workspace
+from ..vertx_module import module_deploy
 from .toon import encode
 
 
@@ -43,6 +44,9 @@ class JsonParser(BaseParser):
     #: — the JSON CloudFormation template the AWS .NET Lambda tooling writes (its Lambda
     #: triggers are read by ``parsers/aws_deploy.py``).
     extensions = (".json", "serverless.template")
+    #: A Vert.x ``mod.json`` names its verticle class; the Java / Groovy indexes locate its
+    #: ``start()`` (``vertx_module.module_deploy``).
+    related_languages = ("java", "groovy")
     #: `framework` value carried on the statement to name the serialization. Keeps
     #: `semanticType` format-independent.
     serialization = "toon"
@@ -81,6 +85,7 @@ class JsonParser(BaseParser):
                 language="config",
                 loc=loc,
                 metadata=extract_config(ctx.path, text),
+                statements=self._config_statements(ctx, text, data),
             )
         return self._capture(ctx, data, loc, mode)
 
@@ -99,6 +104,15 @@ class JsonParser(BaseParser):
         (record array, lookup map, nested tree, heterogeneous config all qualify). Empty
         containers and scalar/None roots (malformed JSON) have nothing to capture."""
         return isinstance(data, (dict, list)) and len(data) > 0
+
+    @staticmethod
+    def _config_statements(ctx: ParseContext, text: str, data: Any) -> list[Statement]:
+        """A Vert.x 2 ``mod.json``'s ``verticle_deploy`` (the verticle its ``"main"`` names);
+        nothing for any other config, or without statement capture."""
+        if not ctx.capture_statements or Path(ctx.path).name != "mod.json":
+            return []
+        deploy = module_deploy(ctx.path, text, data, ctx.repo_root, ctx.related_indexes)
+        return [deploy] if deploy is not None else []
 
     # ── full capture ─────────────────────────────────────────────────────────
     def _capture(
