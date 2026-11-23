@@ -72,6 +72,7 @@ NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigat
 
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({
+    "TRACE", "CONNECT",  # HTTP verbs few frameworks route (Vert.x RouteMatcher / Router)
     "ANY", "WEBSOCKET",
     "QUERY", "MUTATION", "SUBSCRIPTION", "RESOLVE_FIELD", "RESOLVE_REFERENCE",
     "RPC",

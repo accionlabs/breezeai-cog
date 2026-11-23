@@ -602,3 +602,10 @@ public class M extends AbstractVerticle {
     routes = [(s.method, s.endpoint, s.isRegex, s.handler) for s in rec.statements
               if s.semanticType == "route"]
     assert routes == [("GET", "/items/[0-9]+", True, "item"), (None, "/any/.*", True, "any")]
+
+
+def test_trace_and_connect_routes_meet_the_contract(tmp_path) -> None:
+    from breezeai_cog.parsers.contract import validate
+
+    rec = _v2_edges(tmp_path)
+    assert [v for v in validate(rec) if v.rule == "method"] == []
