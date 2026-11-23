@@ -141,6 +141,39 @@ def test_unresolved_path_leaves_endpoint_empty(analyze_files) -> None:
     assert _routes(st) == {("GET", None, "health")}
 
 
+def test_concatenated_path_folds_its_constants(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\napp.get(BASE + '/concat', a);\n"
+              "app.get('/v1' + '/literal-concat', b);\napp.get(BASE + '/users/' + ':id', c);\n")
+    assert _routes(st) == {("GET", "/v1/concat", "a"), ("GET", "/v1/literal-concat", "b"),
+                           ("GET", "/v1/users/:id", "c")}
+
+
+def test_concatenated_path_with_a_runtime_part_leaves_endpoint_empty(analyze_files) -> None:
+    st = _app(analyze_files, "app.get(config.base + '/x', h);\n")
+    assert _routes(st) == {("GET", None, "h")}
+
+
+def test_template_path_still_resolves(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\napp.get(`${BASE}/tpl/:id`, a);\napp.get(`/v${1}/num`, b);\n")
+    assert _routes(st) == {("GET", "/v1/tpl/:id", "a"), ("GET", "/v1/num", "b")}
+
+
+def test_concatenated_url_in_route_object(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\n"
+              "app.route({ method: 'POST', url: BASE + '/items', handler: create });\n")
+    assert _routes(st) == {("POST", "/v1/items", "create")}
+
+
+def test_concatenated_path_under_a_plugin_prefix(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\n"
+              "app.register(async (r) => {\n  r.get(BASE + '/inner', h);\n}, { prefix: '/api' });\n")
+    assert _routes(st) == {("GET", "/api/v1/inner", "h")}
+
+
 def test_fastify_plugin_ignores_the_prefix(analyze_files) -> None:
     st = _app(analyze_files,
               "import fp from 'fastify-plugin';\nimport shared from './shared.js';\n"
