@@ -921,3 +921,66 @@ def test_page_handler_line_and_page_methods(analyze_files) -> None:
     assert routes[("POST", "/Orders/List.aspx/Search")] == ("Search", 6, "aspnet-webforms")
     assert not any(ep and ep.endswith("NotStatic") for _, ep in routes)
     assert not [s for s in st if s.framework == "asmx"]  # not also an ASMX operation
+
+
+# --- server code read as C#, page links and scripts (shared template readers) ----------------
+
+_SERVER_CODE_PAGE = b"""<%@ Page Language="C#" CodeBehind="Enrollment.aspx.cs" Inherits="Acme.Enrollment" %>
+<%-- <% if (commentedOut) { %> --%>
+<asp:Label ID="Hello" runat="server" Text='<%$ Resources:Main, Hello %>' />
+<% if (User.IsInRole("Admin")) { %> <a href="/Admin.aspx">Admin</a> <% } else { %> <p>no</p> <% } %>
+<p><%= Title %></p><p><%# Eval("Id") %></p>
+<script src="/Scripts/jquery.js"></script>
+<script>$.post('/api/track');</script>
+<script runat="server">
+    void Page_Load(object sender, EventArgs e)
+    {
+        if (!IsPostBack) { Bind(); }
+    }
+</script>
+"""
+
+
+def test_server_code_if_is_an_if_statement_at_its_line(tmp_path) -> None:
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    ifs = sorted((s.startLine, s.parentId) for s in rec.statements if s.nodeType == "if_statement")
+    # the page-level <% if %> hangs off the page; the one in Page_Load off its method
+    assert ifs == [(4, "Enrollment.aspx"), (11, "Enrollment.aspx#Page_Load@9")]
+    assert not any("commentedOut" in s.text for s in rec.statements)  # a comment is not code
+
+
+def test_server_script_methods_are_functions_of_the_page(tmp_path) -> None:
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    assert [(f.name, f.parentId, f.startLine, f.endLine) for f in rec.functions] == [
+        ("Page_Load", "Enrollment.aspx", 9, 12)]
+    # structure, not statements: the function is there without statement capture too
+    off = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE, capture=False)
+    assert [f.name for f in off.functions] == ["Page_Load"] and off.statements == []
+
+
+def test_server_expressions_cite_the_page_text(tmp_path) -> None:
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    texts = {s.text for s in rec.statements if s.nodeType == "expression_statement"
+             and s.parentId == "Enrollment.aspx"}
+    assert texts == {"<%= Title %>", '<%# Eval("Id") %>'}  # never the `_= x ;` wrapper
+    assert not any("Resources:Main" in s.text for s in rec.statements
+                   if s.nodeType == "expression_statement")  # <%$ %> is not code
+
+
+def test_a_vb_page_is_not_read_as_csharp(tmp_path) -> None:
+    vb = _SERVER_CODE_PAGE.replace(b'Language="C#"', b'Language="VB"')
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", vb)
+    assert rec.functions == []
+    assert not any(s.nodeType == "if_statement" for s in rec.statements)
+
+
+def test_page_links_scripts_and_script_files(tmp_path) -> None:
+    (tmp_path / "Scripts").mkdir()
+    (tmp_path / "Scripts" / "jquery.js").write_text("")
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    nav = [(s.startLine, s.endpoint) for s in rec.statements if s.routeKind == "navigation"]
+    assert nav == [(4, "/Admin.aspx")]
+    calls = [(s.startLine, s.framework, s.method, s.endpoint)
+             for s in rec.statements if s.semanticType == "api_call"]
+    assert calls == [(7, "jquery", "POST", "/api/track")]
+    assert "Scripts/jquery.js" in rec.importFiles  # <script src> in the repository → file link
