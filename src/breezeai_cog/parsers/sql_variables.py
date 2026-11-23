@@ -77,6 +77,10 @@ _NESTED = frozenset({
     "anonymous_function", "arrow_function", "function_declaration", "function_expression",
     "method_definition", "class", "generator_function", "generator_function_declaration",
     "multi_line_lambda", "single_line_lambda",
+    # C# members with a body of their own, and Java initializer blocks and record constructors
+    "accessor_declaration", "operator_declaration", "conversion_operator_declaration",
+    "destructor_declaration", "indexer_declaration", "static_initializer",
+    "compact_constructor_declaration",
 })
 
 #: Constants that only add a line break, joined as whitespace.

@@ -649,6 +649,13 @@ def f(cur, n):
                '    m += "from the list";\n    g.Select(m);\n  }\n}\n'),
     ("typescript", 'export function f() {\n  let s = "SELECT a ";\n  s += "FROM t";\n'
                    '  document.querySelectorAll(s);\n}\n'),
+    # a name that only contains the letters of a handle: a RegExp, a worker pool, an LLM client
+    ("typescript", 'export function f() {\n  let s = "SELECT a ";\n  s += "FROM t";\n'
+                   '  return sqlTokenRe.exec(s);\n}\n'),
+    ("typescript", 'export function f() {\n  let s = "SELECT a ";\n  s += "FROM t";\n'
+                   '  return workerPool.exec(s);\n}\n'),
+    ("typescript", 'export async function f(client: any) {\n  let p = "Select the best answer ";\n'
+                   '  p += "from these options";\n  return client.query(p);\n}\n'),
 ])
 def test_generic_names_count_only_on_a_database_handle(lang, src, tmp_path) -> None:
     assert _queries(lang, src, tmp_path) == []
@@ -770,13 +777,18 @@ def test_generic_sink_needs_a_database_handle() -> None:
                          ("conn.QueryAsync<int>", "QueryAsync"), ("cursor.query", "query"),
                          ("db.run", "run"), ("db.all", "all"), ("DB::select", "select"),
                          ("pool.query", "query"), ("jdbcTemplate.query", "query"),
-                         ("self.connection.exec", "exec")):
+                         ("self.connection.exec", "exec"), ("this._db.all", "all"),
+                         ("mainDb.query", "query"), ("dbConn.QueryFirst", "QueryFirst"),
+                         ("$wpdb->query", "query"), ("namedParameterJdbcTemplate.query", "query")):
         assert is_sql_sink(name, callee), callee
     for callee, name in (("chain.run", "run"), ("index.query", "query"),
                          ("subprocess.run", "run"), ("g.Select", "Select"),
                          ("document.querySelectorAll", "querySelectorAll"),
                          ("db.querySelector", "querySelector"), ("query", "query"),
-                         ("child_process.exec", "exec")):
+                         ("child_process.exec", "exec"), ("sqlTokenRe.exec", "exec"),
+                         ("workerPool.exec", "exec"), ("client.query", "query"),
+                         ("apolloClient.query", "query"), ("connector.query", "query"),
+                         ("sandbox.run", "run"), ("webdb.query", "query")):
         assert not is_sql_sink(name, callee), callee
 
 

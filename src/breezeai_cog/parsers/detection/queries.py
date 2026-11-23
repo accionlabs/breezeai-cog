@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 
+from .api_calls import _ends_with_word
+
 # Require structure, not just a leading verb, to avoid natural-language false positives.
 _SQL_RE = re.compile(
     r"^\s*\(?\s*("
@@ -104,13 +106,25 @@ _SQL_SINKS = frozenset({
 _HANDLE_SINK_PREFIXES = ("query", "exec")
 _HANDLE_SINKS = frozenset({"run", "all", "select", "statement", "raw", "unprepared"})
 _NEVER_SINK_PREFIXES = ("queryselector",)  # DOM ``querySelector*``
-# A receiver that names a database handle: ``db``, ``conn``, ``cursor``, ``pool``, ``$wpdb``,
-# ``DB::``, ``jdbcTemplate``, ``session``, ``client``…
-_DB_HANDLE = re.compile(
-    r"^(?:con|cnn|cur|pg|tx|trx|client|pool|session|stmt|statement|knex|sequelize|template"
-    r"|transaction|adapter)$|db|conn|sql|cursor|jdbc|database|pdo",
-    re.IGNORECASE,
+# A receiver that names a database handle: the whole name (``db``, ``cur``, ``pool``, ``DB::``,
+# ``$wpdb``), or a name ending in a handle word that starts a word there (``this.db``, ``mainDb``,
+# ``dbConn``, ``jdbcTemplate``) — never a name that only contains the letters (``sqlTokenRe``,
+# ``webdb``, ``connector``). ``client`` is left out (Apollo ``client.query``, an LLM client), and
+# ``pool`` counts only as the whole name (node-pg ``pool.query``, not ``workerPool.exec``), as
+# ``db_queries._DB_RECEIVER_SUFFIXES`` decides for ORM calls.
+_DB_HANDLE_NAMES = frozenset({
+    "db", "con", "cnn", "conn", "connection", "cur", "cursor", "pg", "tx", "trx", "pool",
+    "session", "stmt", "statement", "knex", "sequelize", "transaction", "adapter", "sql",
+    "pdo", "wpdb", "database", "jdbc",
+})
+_DB_HANDLE_WORDS = (
+    "db", "conn", "connection", "cursor", "database", "datasource", "jdbctemplate",
+    "transaction", "pdo",
 )
+
+
+def _is_db_handle(name: str) -> bool:
+    return name.lower() in _DB_HANDLE_NAMES or any(_ends_with_word(name, w) for w in _DB_HANDLE_WORDS)
 # Database command types whose constructor takes the SQL (``new SqlCommand(sql, conn)``).
 _SQL_COMMAND = re.compile(
     r"^(?:\w+\.)*(?:Sql|SqlCe|OleDb|Odbc|Oracle|MySql|Npgsql|Sqlite|SQLite|DB2|Db2|Fb|Ifx|Db)"
@@ -140,7 +154,7 @@ def is_sql_sink(method: str, callee: str = "") -> bool:
         return False
     words = re.findall(r"[A-Za-z_]\w*", callee)
     at = max((i for i, w in enumerate(words) if w.lower() == m), default=-1)
-    return at > 0 and bool(_DB_HANDLE.search(words[at - 1]))
+    return at > 0 and _is_db_handle(words[at - 1])
 
 
 def sql_argument(method: str, count: int) -> int:
