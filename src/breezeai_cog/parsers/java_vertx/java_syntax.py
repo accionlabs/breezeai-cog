@@ -8,6 +8,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ..addresses import informative, mark_runtime, runtime_name, source_kind
+from ..constfold import java_literal_value
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
 from ..vertx_common import render_address
@@ -38,9 +39,9 @@ def calls_and_creations(root: Node) -> tuple[list[Node], list[Node]]:
 
 
 def java_string(node: Node, source: bytes) -> str | None:
-    """A Java ``string_literal`` node → its text value (Java has no string interpolation)."""
-    frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
-    return node_text(frag, source) if frag is not None else node_text(node, source).strip('"')
+    """A Java ``string_literal`` node → its value, escapes decoded (Java has no string
+    interpolation); None for a text block or an undecodable escape."""
+    return java_literal_value(node, source)
 
 
 def local_value(at: Node, name: str, source: bytes) -> Node | None:

@@ -514,3 +514,92 @@ def test_this_as_handler_is_the_verticles_handle_method(tmp_path) -> None:
     rec = _v2_verticle(tmp_path)
     [c] = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
     assert (c.endpoint, c.handler, c.handlerLine) == ("wizard.load", "handle", 19)
+
+
+# A Java address with escapes is the decoded string, whole (it used to stop at the backslash);
+# a deploy of something that is not a constant string leaves the endpoint empty.
+_V2_EDGES = rb"""package p3;
+import org.vertx.java.core.http.RouteMatcher;
+import org.vertx.java.platform.Verticle;
+import java.util.Map;
+public class E extends Verticle {
+    static final String QUOTED = "p3.const\"q";
+    public void start() {
+        String dyn = container.config().getString("v");
+        vertx.eventBus().send("p3.with\"quote", "x");
+        vertx.eventBus().send("p3.tab\there", "x");
+        vertx.eventBus().send("p3.caf\u00e9", "x");
+        vertx.eventBus().send(QUOTED, "x");
+        vertx.eventBus().send("p3." + "back\\slash", "x");
+        container.deployVerticle(dyn);
+        container.deployWorkerVerticle(dyn, null, 2);
+        container.deployModule(dyn);
+        vertx.deployVerticle(new Worker());
+        container.deployVerticle("p3.Fixed");
+        RouteMatcher rm = new RouteMatcher();
+        rm.trace("/t", h);
+        rm.connect("/c", h);
+        rm.all("/a", h);
+        rm.getWithRegEx("/g/\\d{3}", h);
+        rm.allWithRegEx("/ar/.*", h);
+        Map<String, String> router2 = null;
+        router2.get("/n/router2");
+    }
+}
+"""
+
+
+def _v2_edges(tmp_path) -> FileRecord:
+    p = tmp_path / "E.java"
+    p.write_bytes(_V2_EDGES)
+    ctx = ParseContext(path="E.java", abs_path=p, source=_V2_EDGES,
+                       repo_root=tmp_path, capture_statements=True)
+    return VertxParser().parse_file(ctx)
+
+
+def test_java_escapes_in_an_address_are_decoded(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    sends = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert sends == ['p3.with"quote', "p3.tab\there", "p3.café", 'p3.const"q', "p3.back\\slash"]
+
+
+def test_deploy_of_a_variable_or_instance_has_no_endpoint(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    deploys = [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"]
+    assert deploys == [None, None, None, None, "p3.Fixed"]
+
+
+def test_routematcher_trace_connect_all_and_regex_routes(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    routes = [(s.method, s.endpoint, s.isRegex) for s in rec.statements
+              if s.semanticType == "route"]
+    assert routes == [("TRACE", "/t", None), ("CONNECT", "/c", None), (None, "/a", None),
+                      ("GET", None, True), (None, "/ar/.*", True)]
+
+
+def test_a_map_named_like_a_router_is_not_one(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    assert not any(s.endpoint == "/n/router2" for s in rec.statements)
+
+
+def test_modern_router_regex_routes(tmp_path) -> None:
+    src = b"""package a;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.ext.web.Router;
+public class M extends AbstractVerticle {
+    public void start() {
+        Router router = Router.router(vertx);
+        router.getWithRegex("/items/[0-9]+").handler(this::item);
+        router.routeWithRegex("/any/.*").handler(this::any);
+    }
+    void item(io.vertx.ext.web.RoutingContext c) { }
+    void any(io.vertx.ext.web.RoutingContext c) { }
+}
+"""
+    p = tmp_path / "M.java"
+    p.write_bytes(src)
+    rec = VertxParser().parse_file(ParseContext(path="M.java", abs_path=p, source=src,
+                                                repo_root=tmp_path, capture_statements=True))
+    routes = [(s.method, s.endpoint, s.isRegex, s.handler) for s in rec.statements
+              if s.semanticType == "route"]
+    assert routes == [("GET", "/items/[0-9]+", True, "item"), (None, "/any/.*", True, "any")]

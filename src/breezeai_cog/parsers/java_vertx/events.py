@@ -59,7 +59,9 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    non_router_vars,
     route_template,
+    route_verb,
     router_vars,
     service_builder_vars,
     sub_router_bases,
@@ -68,6 +70,13 @@ from ..vertx_common import (
 
 
 _NOT_MOUNTED = object()
+
+
+def _is_regex(call: Node, source: bytes, semantic: str) -> bool | None:
+    """True for a route registered with a regex path (``getWithRegEx``), else None (not set)."""
+    name = call.child_by_field_name("name")
+    regex = semantic == "route" and name is not None and route_verb(node_text(name, source))[1]
+    return True if regex else None
 
 
 def _root_receiver(receiver: Node, source: bytes) -> str:
@@ -107,11 +116,12 @@ def _classify(
     consts: dict[str, str],
     service_vars: dict[str, str] | None = None,
     routers: frozenset[str] = frozenset(),
+    non_routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """→ (semanticType, method, endpoint, routeKind) or None."""
     method, first_str, first_arg, obj = _parts(call, source, consts)
     return classify_call(method, first_str, first_arg, obj, service_vars=service_vars,
-                         routers=routers)
+                         routers=routers, non_routers=non_routers)
 
 
 def _value_route(
@@ -440,6 +450,7 @@ def detect_vertx(
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
+    non_routers = non_router_vars(source)
     # Vert.x 2 idioms (legacy.py): registration tables, HttpClient calls.
     if b"org.vertx" in source:
         tables, replaced = registration_tables(calls, source, consts, index, path, built_by)
@@ -464,14 +475,15 @@ def detect_vertx(
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        info = _classify(call, source, consts, service_vars, routers) \
+        info = _classify(call, source, consts, service_vars, routers, non_routers) \
             or _value_route(call, source, consts, routers)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
-        if semantic == "route" and endpoint is None:
+        is_regex = _is_regex(call, source, semantic)
+        if semantic == "route" and endpoint is None and not is_regex:  # `{3}` is a quantifier
             # A path with a part read at runtime (`pathPrefix + "/x"`): `${pathPrefix}/x`.
             endpoint = route_template(_parts(call, source, consts)[1])
         unknown_base = False
@@ -538,7 +550,8 @@ def detect_vertx(
             if semantic == "route" else None
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
-                                handler_path=first_path, guards=guards))
+                                handler_path=first_path, guards=guards,
+                                is_regex=is_regex))
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {
