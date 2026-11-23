@@ -651,3 +651,50 @@ def test_pathological_unterminated_script_tags_stay_fast(tmp_path) -> None:
     got = _calls(tmp_path, page, "p.html", HtmlParser())
     assert time.monotonic() - t0 < 10  # was minutes: the open-tag search was quadratic+
     assert got == [] or got == [(3, "GET", "/ok")]  # the junk run swallows the tail; never a crash
+
+
+# --- script order, jQuery library files, TypeScript ------------------------------------------
+
+@pytest.mark.parametrize(("parser", "name", "head"), [
+    (HtmlParser, "p.html", ""),
+    (WebFormsParser, "p.aspx", '<%@ Page Language="C#" %>\n'),
+    (RazorParser, "p.cshtml", ""),
+])
+def test_inline_script_before_the_jquery_tag_is_not_a_request(tmp_path, parser, name, head) -> None:
+    page = (head + '<script>$.get("/api/early"); jQuery.ajax({ url: "/api/early2" });</script>\n'
+            '<script src="/js/jquery.min.js"></script>\n<script>$.get("/api/late");</script>\n')
+    assert _src(tmp_path, page, name, parser()) == [("GET", "/api/late")]
+
+
+def test_a_layout_that_loads_jquery_covers_the_whole_view(tmp_path) -> None:
+    # The view's own jQuery tag comes after its first script, but the layout already loaded jQuery.
+    page = ('@page\n<script>$.get("/api/first");</script>\n'
+            '<script src="~/lib/jquery-ui.js"></script>\n<script>$.get("/api/second");</script>\n')
+    root = _repo(tmp_path, {
+        "Pages/_ViewStart.cshtml": '@{ Layout = "_Layout"; }\n',
+        "Pages/Shared/_Layout.cshtml": _LAYOUT,
+        "Pages/Index.cshtml": page,
+    })
+    assert _scan(root, templates=True)["Pages/Index.cshtml"] == [
+        (2, "GET", "/api/first"), (4, "GET", "/api/second"),
+    ]
+
+
+def test_a_jquery_library_file_gives_no_requests(tmp_path) -> None:
+    library = ('(function ($, window) {\n  $.ajax({ url: connection.url + "/negotiate", type: "GET" });\n'
+               '  $.ajax({ url: "/signalr/ping", type: "POST" });\n})(window.jQuery, window);\n')
+    root = _repo(tmp_path, {
+        "Scripts/jquery.signalR-2.2.1.js": library,
+        "Scripts/jquery-3.6.0.js": 'jQuery.get("/x");\n',
+        "Scripts/jquery.validate.unobtrusive.js": library,
+        "Scripts/app.js": library,  # the same code in the application's own file is its request
+    })
+    assert _scan(root, templates=False) == {
+        "Scripts/app.js": [(2, "GET", "${connection.url}/negotiate"), (3, "POST", "/signalr/ping")],
+    }
+
+
+def test_typescript_file_gives_jquery_requests(tmp_path) -> None:
+    src = ('import $ from "jquery";\nconst id: number = 1;\n$.get("/api/a");\n'
+           '$.ajax({ url: "/api/a", method: "DELETE" });\n$("#box").load("/api/a");\n')
+    assert _src(tmp_path, src, "a.ts") == [("GET", "/api/a"), ("DELETE", "/api/a"), ("GET", "/api/a")]

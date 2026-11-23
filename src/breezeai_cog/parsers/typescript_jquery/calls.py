@@ -16,7 +16,11 @@ type and the shared ``emit_outbound`` (``framework="jquery"``, real HTTP ``metho
   ``jquery``, an alias (``const $ = jQuery``), or a ``jquery*.js`` script reference. The name
   ``jQuery`` is distinctive enough to stand on its own;
 * the call shape matches (known method; for ``.load`` the receiver must be a ``$(…)``/``jQuery(…)``
-  selection).
+  selection);
+* in markup, an inline script runs after the page's jQuery ``<script src>`` (unless a bundle or
+  layout loads jQuery for the whole page);
+* the file is not jQuery itself or one of its plugins (``jquery*.js``, e.g. ``jquery.signalR.js``):
+  a library's own requests are not the application's.
 
 **Options-object exception:** ``$.ajax({ url: …, … })`` is recognised without evidence — an options
 object literal carrying a ``url`` property is a deliberate, narrow signal (the URL may be dynamic:
@@ -375,13 +379,16 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
 
 
 # --- inline <script> blocks in markup (.cshtml / .aspx / .html) -------------------------
-def _shadow_scripts(markup: bytes, path: str = "") -> tuple[bytes, bool]:
-    """``markup`` with everything except inline ``<script>`` bodies blanked (newlines kept), so
-    offsets, lines and columns stay true to the original file; plus whether the page loads jQuery
-    (the evidence for ``$`` calls in its inline scripts). Commented-out markup is dead: neither its
-    scripts nor its jQuery references count."""
-    shadow, clean = script_shadow(markup, path)
-    return shadow, _page_loads_jquery(clean)
+def _first_jquery_tag(clean: bytes) -> int | None:
+    """Where the first ``<script src>`` that loads jQuery starts in comment-free ``clean`` markup:
+    an inline script before it runs before jQuery is loaded."""
+    for tag in _SCRIPT_TAG.finditer(clean):
+        attrs = tag.group(1)
+        src = SRC_ATTR.search(attrs)
+        path = _JS_PATH.search(attrs, src.end()) if src is not None else None
+        if path is not None and _is_jquery_ref(path.group(0).decode("utf-8", "replace")):
+            return tag.start()
+    return None
 
 
 # --- project-level evidence: jQuery loaded by a page/layout, not by the file under analysis ---
@@ -562,21 +569,32 @@ def detect_inline_jquery(
 ) -> None:
     """Apply jQuery ``api_call`` statements for the inline ``<script>`` blocks of a markup file to
     ``record`` — the markup parsers' hook into this detector. Only called with statement capture.
-    ``repo_root`` (Razor) lets the view's layout chain supply the jQuery evidence."""
+    ``repo_root`` (Razor) lets the view's layout chain supply the jQuery evidence.
+
+    Scripts run in page order: when the page's own ``<script src>`` is what loads jQuery, a call in
+    an inline script above that tag runs before jQuery exists and is not a request. A bundle,
+    ``<asp:ScriptReference>`` or layout that loads jQuery covers the whole page. Commented-out
+    markup is dead: neither its scripts nor its jQuery references count."""
     if b"$" not in markup and b"jQuery" not in markup:
         return
-    shadow, evidence = _shadow_scripts(markup, path)
+    shadow, clean = script_shadow(markup, path)
     if not shadow:
         return
-    if not evidence and repo_root is not None:
-        evidence = layout_loads_jquery(markup, path, repo_root)
+    loaded_at = _first_jquery_tag(clean)
+    whole_page = _bundle_loads_jquery(clean)
+    if not whole_page and repo_root is not None:
+        whole_page = layout_loads_jquery(markup, path, repo_root)
     root = parse_source("typescript", shadow, timeout_micros).root_node
-    emits = detect_jquery_calls(root, shadow, evidence_hint=evidence)
+    emits = detect_jquery_calls(root, shadow, evidence_hint=whole_page or loaded_at is not None)
+    if loaded_at is not None and not whole_page:
+        emits = [e for e in emits if e.node.start_byte > loaded_at]
     if emits:
         apply(record, emits, shadow, path)
 
 
 def _detect(dc: DetectContext) -> Detection | None:
+    if _SCRIPT_REF.fullmatch(dc.path.rsplit("/", 1)[-1].encode()):
+        return None  # jQuery or a plugin of it (jquery.signalR.js): its own requests are not the app's
     loaded = index_fact(dc.ctx.resolution_index, _FACT)
     emits = detect_jquery_calls(
         dc.root, dc.source, evidence_hint=_loaded_with_jquery(dc.path, loaded)

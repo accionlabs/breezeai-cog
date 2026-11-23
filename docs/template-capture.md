@@ -301,8 +301,11 @@ discoverable. Skip `.vue` and all of that goes with it.
 inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
 `$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
 counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
-or a Razor layout / `_ViewStart` chain that loads it). `$.ajax({ url: … })` counts without that
-evidence. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
+or a Razor layout / `_ViewStart` chain that loads it). Scripts run in page order: when the page's
+own `<script src>` loads jQuery, an inline script above that tag gives no record; a bundle,
+`asp:ScriptReference` or layout covers the whole page. `$.ajax({ url: … })` counts without that
+evidence. A jQuery library file itself (`jquery*.js`, e.g. `jquery.signalR.js`) gives no `api_call`:
+its own requests are not the application's. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
 URL does (`/api/users/{user.id}`, [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name));
 a Razor or Web Forms expression in or beside the URL (`'@Url.Action("Save")'`,
 `"/a/" + <%= Id %>`) is server code, and the `endpoint` stays empty. No other inline-script code
