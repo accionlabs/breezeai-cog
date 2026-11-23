@@ -327,6 +327,30 @@ def resolve_const_value(node: Node, source: bytes, consts: Consts) -> str | None
     return None
 
 
+_NUMBER_LIKE_RE = re.compile(r"^-?[0-9]+(\.[0-9]+)?$")
+
+
+def _is_string_expr(node: Node) -> bool:
+    """A node JavaScript surely evaluates to a string: a string or template literal, or a ``+``
+    with one such side."""
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _is_string_expr(node.named_children[0])
+    if node.type in ("string", "template_string"):
+        return True
+    if node.type == "binary_expression":
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        return (left is not None and _is_string_expr(left)) \
+            or (right is not None and _is_string_expr(right))
+    return False
+
+
+def _is_number_like(parts: list[tuple[str | None, str]]) -> bool:
+    """Folded parts whose whole value reads as a number (``"2"``, ``"1.5"``)."""
+    if any(value is None for value, _ in parts):
+        return False
+    return bool(_NUMBER_LIKE_RE.match("".join(v for v, _ in parts if v is not None)))
+
+
 def _path_parts(
     node: Node, source: bytes, consts: Consts
 ) -> list[tuple[str | None, str]]:
@@ -340,7 +364,14 @@ def _path_parts(
         left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
         if op is not None and node_text(op, source) == "+" and left is not None \
                 and right is not None:
-            return _path_parts(left, source, consts) + _path_parts(right, source, consts)
+            lparts = _path_parts(left, source, consts)
+            rparts = _path_parts(right, source, consts)
+            # `A + B` with neither side a string adds numbers in JavaScript (1 + 2 → 3, not "12");
+            # constants keep no type, so two number-like sides are unknown rather than joined.
+            if not (_is_string_expr(left) or _is_string_expr(right)) \
+                    and _is_number_like(lparts) and _is_number_like(rparts):
+                return [(None, node_text(node, source))]
+            return lparts + rparts
         return [(None, node_text(node, source))]
     if node.type == "template_string":
         parts: list[tuple[str | None, str]] = []

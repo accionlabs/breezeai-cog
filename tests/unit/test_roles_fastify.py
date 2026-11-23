@@ -359,3 +359,16 @@ def test_helper_called_from_two_plugins_does_not_join_them(analyze_files) -> Non
                                    "export const b = async (s: FastifyInstance) => {\n"
                                    "  s.get('/y', async () => { await audit(s, 'b'); });\n};\n"})
     assert {(r.method, r.endpoint) for r in _eps(st)} == {("GET", "/a/x"), ("GET", "/b/y")}
+
+
+def test_concatenated_numbers_are_added_not_joined(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const A = 1;\nconst B = 2;\nconst BASE = '/v';\nconst SUFFIX = '/x';\n"
+              "app.get('/v' + (A + B), a);\napp.get('/v' + A + B, b);\napp.get(BASE + SUFFIX, c);\n")
+    assert _routes(st) == {("GET", None, "a"), ("GET", "/v12", "b"), ("GET", "/v/x", "c")}
+
+
+def test_parenthesized_string_side_keeps_joining(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const A = 1;\nconst B = 2;\napp.get(('/v' + A) + B, a);\napp.get(A + config.port, b);\n")
+    assert _routes(st) == {("GET", "/v12", "a"), ("GET", None, "b")}
