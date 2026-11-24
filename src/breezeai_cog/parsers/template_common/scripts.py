@@ -67,6 +67,9 @@ _RAZOR_EXPR = re.compile(r"(?<![\w.\-@])@(?=[A-Za-z_(\{])")
 #: ``{{ … }}`` / ``{% … %}``: Twig's, and in a ``.html`` page Django's, Jinja's or Handlebars'.
 #: Browsers never fill these in inside ``<script>``, so there they are always a template value.
 _CURLY_EXPR = re.compile(r"\{\{|\{%")
+#: JSP's EL (``${…}``, ``#{…}``) and custom-tag actions (``<c:url …/>``, ``<s:url …/>``).
+_JSP_EXPR = re.compile(r"[$#]\{|</?[A-Za-z_][\w.-]*:[A-Za-z_]")
+_JSP_PAGES = (".jsp", ".jspx", ".jspf", ".tag", ".tagx")
 
 
 def _server_expr(path: str) -> re.Pattern[str]:
@@ -78,6 +81,8 @@ def _server_expr(path: str) -> re.Pattern[str]:
         return re.compile(f"{_SERVER_TAG.pattern}|{_RAZOR_EXPR.pattern}")
     if low.endswith((".twig", ".html", ".htm")):
         return re.compile(f"{_SERVER_TAG.pattern}|{_CURLY_EXPR.pattern}")
+    if low.endswith(_JSP_PAGES):
+        return re.compile(f"{_SERVER_TAG.pattern}|{_JSP_EXPR.pattern}")
     return _SERVER_TAG
 
 
@@ -97,6 +102,10 @@ def read_page_scripts(
     detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros, repo_root=repo_root)
     server_lines = _lines_of(ctx.source, server_code)
     server_expr = _server_expr(ctx.path)
+    for stmt in record.statements:
+        # The jQuery detector knows only <% and Razor's @: a JSP EL or tag URL is not an endpoint.
+        if stmt.framework == "jquery" and stmt.endpoint and server_expr.search(stmt.endpoint):
+            stmt.endpoint = None
     for program in script_programs(ctx.source, ctx.path):
         buf = bytearray(program)
         for start, end in server_code:

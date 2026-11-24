@@ -22,5 +22,10 @@
 </c:forEach>
 <s:a action="listOrders">All orders</s:a>
 <script>$.get('/shop/api/orders');</script>
+<script>
+    var API = '/shop/api/orders';
+    fetch(API);
+    fetch('${pageContext.request.contextPath}/shop/api/count');
+</script>
 </body>
 </html>
