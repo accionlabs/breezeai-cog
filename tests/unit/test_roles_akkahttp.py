@@ -45,6 +45,7 @@ def test_verb_directive_is_binding(analyze_files) -> None:
         ("POST", "/orders", "route", "akka-http"),
         ("GET", "/orders/{id}", "route", "akka-http"),
     }
+    assert {r.nodeType for r in _eps(st)} == {"call_expression"}  # the directive tree-sitter returns
 
 
 def test_verb_directive_records_anonymous_handler(analyze_files) -> None:
