@@ -181,10 +181,16 @@ def _resolve(fqcn: str, is_static: bool, index: FqcnIndex | None) -> str | None:
     if index is None:
         return None
     hit = index.get(fqcn)  # None = absent or ambiguous → unresolved
-    if hit is not None:
+    if hit is not None or fqcn in index:
         return hit
-    if is_static and "." in fqcn:  # static import: strip the member to get the class
-        return index.get(fqcn.rsplit(".", 1)[0])
+    # A nested type (`import a.b.Outer.Inner;`) or a static member (`import static a.b.U.f;`,
+    # `a.b.Outer.Inner.f`): the file of the longest enclosing top-level class. The index holds
+    # top-level classes only, so a prefix found in it is a class, never a package.
+    parts = fqcn.split(".")
+    for k in range(len(parts) - 1, 0, -1):
+        outer = ".".join(parts[:k])
+        if outer in index:
+            return index[outer]  # None when two files declare it: unresolved
     return None
 
 

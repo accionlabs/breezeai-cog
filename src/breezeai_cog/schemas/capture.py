@@ -129,6 +129,12 @@ class Statement(BaseModel):
     # MCP server statements only: an ``mcp_tool``'s input parameters, an ``mcp_resource``
     # template's variables, an ``mcp_prompt``'s arguments.
     params: list[Parameter] | None = None
+    #: The calls a statement written outside any method makes (Java: a field initializer, a
+    #: ``static { … }`` or ``{ … }`` initializer block, an enum constant's arguments), in the
+    #: shape of ``Function.calls``: that code runs when the class loads or an object is built,
+    #: yet no Function holds it. Absent on a statement inside a method (its Function has the
+    #: calls) and on one that makes none.
+    calls: list[Call] | None = None
 
 
 class Function(BaseModel):

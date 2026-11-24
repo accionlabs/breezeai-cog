@@ -266,7 +266,9 @@ def test_a_call_inside_an_anonymous_class_keeps_the_file_wide_answer(tmp_path: P
     # in the anonymous Handler, `alert` may be its own: it stays credited to this file as before,
     # and `this.log` (the anonymous instance) is not resolved through Data's base class
     assert calls["Data$1.run"] == {"alert": f"{_ROOT}/Data.java", "log": None}
-    assert calls["d"] == {}  # d() itself makes no call
+    # d() builds the anonymous subclass — Handler's constructor runs — and makes no other call:
+    # the anonymous class's own calls stay its own
+    assert calls["d"] == {"Handler": f"{_ROOT}/Handler.java"}
 
 
 _MODE = """package com.acme;

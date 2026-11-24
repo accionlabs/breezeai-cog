@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, ConstructorParam, Function, Statement
+from ...schemas import Call, Class, ConstructorParam, Function, Statement
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
@@ -20,6 +20,7 @@ from .functions import (
     extract_annotations,
     extract_params,
     modifiers_node,
+    statement_calls,
 )
 from .statements import extract_statements
 
@@ -95,17 +96,21 @@ def build_class(
     for comp in components.named_children if components is not None else ():
         fields.update(declarations(comp, source))  # `record R(Repo repo)` — a field `repo`
     fields.update(class_fields(body, source))
+
+    def calls_for(stmt: Node) -> list[Call]:  # a field initializer, initializer block, enum constant
+        return statement_calls(stmt, source, resolve, name, fields, own_path=path, kind_of=kind_of)
+
     if body is not None:
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids,
-                               skip_anonymous=True)
+                               skip_anonymous=True, calls_for=calls_for)
         )
         for member in class_members(body):
             if member.type in ("method_declaration", "constructor_declaration"):
                 fn, fn_statements = build_method(
                     member, source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, fields=fields, own_anonymous=True,
+                    resolve=resolve, fields=fields, own_anonymous=True, kind_of=kind_of,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
@@ -139,13 +144,19 @@ def build_class(
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable). `NAME("value")` (constructor syntax) carries its value in the text;
     # gated by statement capture like every other statement.
+    # A constant's arguments (`NORMAL("1", new HttpClientImpl())`) run when the enum loads: its
+    # calls are the statement's.
     if capture and node.type == "enum_declaration" and body is not None:
-        statements.extend(
-            emit_enum_members(
-                body, source, path,
-                member_types={"enum_constant"}, parent_id=cid, limit=limit, seen_ids=seen_ids,
-            )
+        members = emit_enum_members(
+            body, source, path,
+            member_types={"enum_constant"}, parent_id=cid, limit=limit, seen_ids=seen_ids,
         )
+        constants = [c for c in body.named_children if c.type == "enum_constant"]
+        for i, (member_stmt, constant) in enumerate(zip(members, constants)):
+            calls = calls_for(constant)
+            if calls:
+                members[i] = member_stmt.model_copy(update={"calls": calls})
+        statements.extend(members)
 
     cls = Class(
         id=cid,

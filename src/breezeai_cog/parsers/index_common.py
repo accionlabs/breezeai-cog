@@ -126,13 +126,20 @@ class ClassHeritage:
     ``fields`` maps each field a subclass inherits (not ``private``) → the simple name of its
     declared type when that type is a repository class as the declaring file sees it (its
     imports and package), else ``None``. It lets ``helper.run()`` in a subclass resolve through
-    a ``helper`` field its in-repo base class declares. Empty for builders that don't record it."""
+    a ``helper`` field its in-repo base class declares. Empty for builders that don't record it.
+
+    ``member_types`` maps each type declared directly in the class body (Java: a nested class,
+    interface, enum or record) → ``(its declaration kind, the file declaring it)``. A subclass
+    names an inherited member type by its simple name without an import (``new Handler() { … }``
+    in a subclass of the class declaring ``Handler``): :func:`inherited_member_type` finds it.
+    Empty for builders that don't record it."""
 
     extends: str | None
     decorators: list[Decorator]
     methods: dict[str, str | None] = field(default_factory=dict)
     returns: dict[str, str | None] = field(default_factory=dict)
     fields: dict[str, str | None] = field(default_factory=dict)
+    member_types: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def record_heritage(
@@ -247,3 +254,20 @@ def walk_heritage(
         ancestors.append(heritage)
         base = heritage.extends
     return HeritageChain(ancestors, None, False)
+
+
+def inherited_member_type(
+    name: str, owner: str | None, heritage_map: Mapping[str, ClassHeritage | None] | None,
+) -> tuple[str, str] | None:
+    """``(kind, file)`` of the member type ``name`` that ``owner`` inherits from its nearest
+    in-repo ancestor declaring it, else None: ``owner`` unknown or ambiguous, or no in-repo
+    ancestor (up to the first library or ambiguous base) declares a member type of that name."""
+    if owner is None or not heritage_map:
+        return None
+    start = heritage_map.get(owner)
+    if start is None:
+        return None
+    for anc in walk_heritage(owner, start.extends, heritage_map).ancestors:
+        if name in anc.member_types:
+            return anc.member_types[name]
+    return None

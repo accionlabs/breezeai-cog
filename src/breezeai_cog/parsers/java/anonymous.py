@@ -33,11 +33,18 @@ from collections.abc import Callable, Mapping
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, Function, Statement
+from ...schemas import Call, Class, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
-from .functions import build_method, class_fields, class_members, extract_annotations, modifiers_node
+from .functions import (
+    build_method,
+    class_fields,
+    class_members,
+    extract_annotations,
+    modifiers_node,
+    statement_calls,
+)
 from .heritage import file_imports
 from .statements import anonymous_bodies, extract_statements, stored_field
 
@@ -91,8 +98,13 @@ _JDK_KINDS: dict[str, str] = {
     ),
 }
 
-#: A type as written in this file → its declaration's tree-sitter type, or None when not known.
-KindOf = Callable[[str], str | None]
+#: A type as written in this file (and, optionally, the simple name of the named class it is
+#: written in) → its declaration's tree-sitter type, or None when not known.
+KindOf = Callable[..., str | None]
+
+#: ``(simple type name, owner class simple name)`` → ``(kind, file)`` of the member type the owner
+#: inherits from an in-repo ancestor (``index_common.inherited_member_type``), else None.
+InheritedType = Callable[[str, str | None], tuple[str, str] | None]
 
 #: ``classes.build_class``, passed in (it imports this module): builds a type declared in an
 #: anonymous class body, named ``Outer$1.Inner``.
@@ -128,13 +140,18 @@ def _package(root: Node, source: bytes) -> str:
 
 
 def type_kinds(
-    root: Node, source: bytes, repo: Mapping[str, str | None] | None = None
+    root: Node, source: bytes, repo: Mapping[str, str | None] | None = None,
+    inherited: InheritedType | None = None,
 ) -> KindOf:
     """What a type written in this file is declared as, found the way Java finds the type: a type
     this file declares, a single-type import, the file's own package, then the on-demand imports
     and ``java.lang`` — each looked up among the repository's types (``repo``: FQCN → kind, from
     the Java index) and :data:`_JDK_KINDS`. A single-type import of a library type, a name two
-    on-demand candidates may mean, or a type known nowhere → None."""
+    on-demand candidates may mean, or a type known nowhere → None.
+
+    Given the ``owner`` it is written in, a simple name none of those finds is looked up last
+    among the member types the owner inherits (``inherited``): ``new Handler() { … }`` in a
+    subclass of the in-repo class that declares ``Handler``."""
     local = declared_kinds(root, source)
     imports, wildcards = file_imports(root, source)
     package = _package(root, source)
@@ -147,7 +164,16 @@ def type_kinds(
             return True, _JDK_KINDS[fqcn]
         return False, None
 
-    def kind_of(written: str) -> str | None:
+    def kind_of(written: str, owner: str | None = None) -> str | None:
+        kind = _kind_of(written)
+        if kind is None and owner is not None and inherited is not None:
+            name = "".join(written.split()).split("<", 1)[0]
+            if "." not in name and name not in local and name not in imports:
+                hit = inherited(name, owner)
+                kind = hit[0] if hit is not None else None
+        return kind
+
+    def _kind_of(written: str) -> str | None:
         name = "".join(written.split()).split("<", 1)[0]
         first, dot, rest = name.partition(".")
         suffix = dot + rest
@@ -172,13 +198,15 @@ def type_kinds(
     return kind_of
 
 
-def _heritage(creation: Node, created: str | None, kind_of: KindOf | None) -> tuple[str | None, list[str]]:
+def _heritage(
+    creation: Node, created: str | None, kind_of: KindOf | None, owner: str | None = None,
+) -> tuple[str | None, list[str]]:
     if created is None:
         return None, []
     args = creation.child_by_field_name("arguments")
     if args is not None and any(c.type not in _COMMENTS for c in args.named_children):
         return created, []  # an interface takes no constructor arguments
-    kind = kind_of(created) if kind_of is not None else None
+    kind = kind_of(created, owner) if kind_of is not None else None
     if kind == _CLASS:
         return created, []
     if kind == _INTERFACE:
@@ -261,7 +289,7 @@ def build_anonymous(
     else:
         type_node = creation.child_by_field_name("type")
         created = node_text(type_node, source) if type_node is not None else None
-        extends, implements = _heritage(creation, created, kind_of)
+        extends, implements = _heritage(creation, created, kind_of, owner_class)
     cid = disambiguate(class_id(path, qualified), seen_ids)
 
     # Stored in a field: the Class is that declaration (its span and annotations); a field
@@ -280,6 +308,11 @@ def build_anonymous(
 
     classes: list[Class] = []
     methods: list[Function] = []
+
+    def calls_for(stmt: Node) -> list[Call]:  # `new HashMap<>() {{ put(…); }}`, a field of it
+        return statement_calls(stmt, source, resolve, owner_class, own_fields, own_path=path,
+                               kind_of=kind_of, through=_through(stmt, stop, source))
+
     statements = extract_statements(
         body,
         source,
@@ -289,6 +322,7 @@ def build_anonymous(
         limit=limit,
         seen_ids=seen_ids,
         skip_anonymous=True,
+        calls_for=calls_for,
     )
     n = 0
     for member in class_members(body):
@@ -327,6 +361,7 @@ def build_anonymous(
                 through=_through(member, stop, source),
                 scope_node=anchor,
                 own_anonymous=True,
+                kind_of=kind_of,
             )
             methods.append(fn)
             statements.extend(fn_statements)
