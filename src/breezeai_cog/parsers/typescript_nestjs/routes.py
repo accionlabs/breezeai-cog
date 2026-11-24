@@ -619,7 +619,7 @@ def detect_nest_routes(
                                         responseDTO=(_response_dto(pending, source)
                                                      or return_dto(member, source)),
                                         **common,
-                                    ), parent=parent, node_type="synthetic"))
+                                    ), parent=parent))
                         continue
                     elif ref:  # @ResolveReference: the gateway's _entities fetch of this type
                         fields = dict(
@@ -690,6 +690,6 @@ def detect_nest_routes(
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                             )
-                    routes.append(Emit(dec, fields, parent=parent, node_type="synthetic"))
+                    routes.append(Emit(dec, fields, parent=parent))
             pending = []
     return routes

@@ -38,6 +38,7 @@ def test_verb_decorator_is_a_binding(analyze_files) -> None:
         "findOne",
         5,
     )
+    assert r.nodeType == "decorator"  # the decorator tree-sitter returns, not synthetic
 
 
 def test_controller_is_wiring(analyze_files) -> None:
