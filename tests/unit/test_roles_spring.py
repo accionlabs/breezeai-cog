@@ -698,3 +698,60 @@ def test_ignored_paths_bypass_security(analyze_files) -> None:
 def test_no_security_config_gives_no_guard(analyze_files) -> None:
     st = analyze_files(_java("C", WEB, ADMIN))
     assert {(r.guards, r.authRequired) for r in _eps(st)} == {(None, None)}
+
+
+def test_annotation_record_sits_at_its_annotation(analyze_files) -> None:
+    # A route, listener or timer is read from its annotation: the record is that annotation
+    # (its nodeType, line and span), not the whole method.
+    st = analyze_files(
+        _java(
+            "C",
+            WEB
+            + "\nimport org.springframework.scheduling.annotation.Scheduled;\n"
+            + LISTENERS,
+            """@RestController
+public class C {
+  @Deprecated
+  @GetMapping("/orders/{id}")
+  public String get(String id) {
+    return id;
+  }
+  @Scheduled(cron = "0 2 * * *")
+  public void nightly() {
+  }
+  @KafkaListener(topics = "orders.created")
+  public void onOrder(String m) {
+  }
+}""",
+        )
+    )
+    got = {
+        (r.semanticType, r.nodeType, r.startLine, r.endLine, r.text, r.handlerLine)
+        for r in _eps(st)
+    }
+    assert got == {
+        ("route", "annotation", 10, 10, '@GetMapping("/orders/{id}")', 9),
+        ("timer", "annotation", 14, 14, '@Scheduled(cron = "0 2 * * *")', 14),
+        ("eventbus_consumer", "annotation", 17, 17, '@KafkaListener(topics = "orders.created")', 17),
+    }
+
+
+def test_spring_data_query_sits_at_its_annotation(analyze_files) -> None:
+    st = analyze_files(
+        _java(
+            "R",
+            "import org.springframework.data.jpa.repository.Query;",
+            """public interface R {
+  @Deprecated
+  @Query("select o from Order o")
+  java.util.List<Object> all();
+}""",
+        )
+    )
+    [q] = [s for s in st if s.semanticType == "query_statement"]
+    assert (q.nodeType, q.startLine, q.endLine, q.text) == (
+        "annotation",
+        5,
+        5,
+        "select o from Order o",
+    )

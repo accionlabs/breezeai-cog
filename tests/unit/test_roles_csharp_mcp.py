@@ -48,6 +48,7 @@ def test_csharp_sdk_tools(analyze_files) -> None:
         "Echo",
         "Echoes the message",
     )
+    assert echo.nodeType == "attribute"  # the [McpServerTool] attribute tree-sitter returns
     assert _params(echo) == [
         ("message", "string", True, None, "The message"),
         ("times", "int", False, "1", None),

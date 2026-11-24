@@ -31,6 +31,7 @@ def test_event_handler_is_binding(analyze_files) -> None:
     [r] = _eps(stmts)
     assert r.semanticType == "eventbus_consumer"
     assert (r.handler, r.handlerLine) == ("FunctionHandler", 8)
+    assert r.nodeType == "method_declaration"  # a convention over the method: its own node
 
 
 def test_event_handler_framework_is_trigger(analyze_files) -> None:

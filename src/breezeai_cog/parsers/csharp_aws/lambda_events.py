@@ -163,7 +163,7 @@ def detect_lambda_handlers(
                          "method": "PERIODIC" if semantic == "timer" else None})
         for fields in ([{**base, **t.fields()} for t in triggers] or [base]):
             found.append(Emit(
-                method, fields, parent=file_id(path), node_type="synthetic",
+                method, fields, parent=file_id(path),
                 text=first_line(node_text(method, source))[:120],
             ))
     return found

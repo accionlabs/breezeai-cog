@@ -192,7 +192,7 @@ def detect_akkahttp_routes(
                 endpoint=endpoint,
                 routeKind="route",
                 isRegex=False,
-            ), parent=parent_id, node_type="synthetic", text=node_text(node, source))
+            ), parent=parent_id, text=node_text(node, source))
         )
 
     def walk_directives(

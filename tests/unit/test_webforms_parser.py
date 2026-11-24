@@ -919,5 +919,8 @@ def test_page_handler_line_and_page_methods(analyze_files) -> None:
               for s in st if s.semanticType == "route" and s.path == "Orders/List.aspx.cs"}
     assert routes[("GET", "/Orders/List.aspx")] == ("List", 4, "aspnet-webforms")
     assert routes[("POST", "/Orders/List.aspx/Search")] == ("Search", 6, "aspnet-webforms")
+    [search] = [s for s in st if s.endpoint == "/Orders/List.aspx/Search"]
+    assert (search.nodeType, search.startLine, search.endLine, search.text) == (
+        "attribute", 6, 6, "WebMethod")  # at its [WebMethod], not the whole method
     assert not any(ep and ep.endswith("NotStatic") for _, ep in routes)
     assert not [s for s in st if s.framework == "asmx"]  # not also an ASMX operation

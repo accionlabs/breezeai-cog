@@ -18,8 +18,8 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Function, Statement
-from ..treesitter import node_text
-from .modifiers import has_annotation, modifier_keywords, modifiers_node
+from ..treesitter import end_line, first_line, node_text
+from .modifiers import has_annotation, modifiers_node
 
 _REST_PREFIX = "/services/apexrest"
 _VERBS = {"httpget": "GET", "httppost": "POST", "httpput": "PUT",
@@ -46,28 +46,49 @@ def _response_dto(return_type: str | None) -> str | None:
     return return_type if return_type and return_type.lower() != "void" else None
 
 
-def webservice_methods(root: Node, source: bytes) -> set[tuple[str, int]]:
-    """``(name, startLine)`` of every method declared with the ``webservice`` keyword."""
-    found: set[tuple[str, int]] = set()
+def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
+    """``(name, startLine)`` → each method's declaration — the key its ``Function`` carries."""
+    found: dict[tuple[str, int], Node] = {}
     stack = [root]
     while stack:
         node = stack.pop()
-        if node.type == "method_declaration" and "webservice" in modifier_keywords(modifiers_node(node)):
+        if node.type == "method_declaration":
             name = node.child_by_field_name("name")
             if name is not None:
-                found.add((node_text(name, source), node.start_point[0] + 1))
+                found[(node_text(name, source), node.start_point[0] + 1)] = node
         stack.extend(node.named_children)
     return found
 
 
-def trigger_headers(root: Node, source: bytes) -> dict[int, str]:
-    """startLine → source header (``trigger T on Account (before insert)``) of each trigger."""
-    out: dict[int, str] = {}
+def _webservice(method: Node) -> Node | None:
+    """The ``webservice`` keyword's ``modifier`` node, when the method is declared with it."""
+    modifiers = modifiers_node(method)
+    for child in modifiers.named_children if modifiers is not None else []:
+        if child.type == "modifier" and child.children and child.children[0].type == "webservice":
+            return child
+    return None
+
+
+def _annotation(method: Node | None, fn: Function, index: int) -> Node | None:
+    """The ``annotation`` node ``fn.decorators[index]`` was read from (the decorators are the
+    named annotations, in order); None when they cannot be matched one to one."""
+    modifiers = modifiers_node(method) if method is not None else None
+    if modifiers is None:
+        return None
+    anns = [n for n in modifiers.named_children
+            if n.type == "annotation" and n.child_by_field_name("name") is not None]
+    return anns[index] if len(anns) == len(fn.decorators) else None
+
+
+def trigger_headers(root: Node, source: bytes) -> dict[int, tuple[Node, str]]:
+    """startLine → each trigger's declaration and source header
+    (``trigger T on Account (before insert)``)."""
+    out: dict[int, tuple[Node, str]] = {}
     for node in root.named_children:
         body = node.child_by_field_name("body") if node.type == "trigger_declaration" else None
         if body is not None:
             header = source[node.start_byte:body.start_byte].decode("utf-8", "replace")
-            out[node.start_point[0] + 1] = " ".join(header.split())
+            out[node.start_point[0] + 1] = (node, " ".join(header.split()))
     return out
 
 
@@ -77,7 +98,7 @@ def trigger_framework(sobject: str) -> str:
 
 def detect_apex_routes(record: FileRecord, root: Node, source: bytes) -> list[Statement]:
     by_id = {c.id: c for c in record.classes}
-    soap = webservice_methods(root, source)
+    methods = method_nodes(root, source)
     headers = trigger_headers(root, source)
 
     def in_test_class(cls_id: str) -> bool:
@@ -91,12 +112,21 @@ def detect_apex_routes(record: FileRecord, root: Node, source: bytes) -> list[St
     seen = {s.id for s in record.statements}
     out: list[Statement] = []
 
-    def add(fn: Function, text: str, semantic: str, method: str | None, endpoint: str,
-            framework: str, kind: str | None, *, dto: bool = True) -> None:
+    def add(fn: Function, node: Node | None, text: str, semantic: str, method: str | None,
+            endpoint: str, framework: str, kind: str | None, *, dto: bool = True) -> None:
+        """One record at ``node``, the construct it was read from (its own nodeType, span and
+        first line). Without one (it cannot be matched) the method stands in, as ``synthetic``
+        with ``text`` and the method's span."""
+        if node is not None:
+            line, col = node.start_point[0] + 1, node.start_point[1]
+            last, node_type = end_line(node), node.type
+            text = first_line(node_text(node, source)) if node.type != "trigger_declaration" else text
+        else:
+            line, col, last, node_type = fn.startLine, 0, fn.endLine, "synthetic"
         out.append(Statement(
-            id=disambiguate(statement_id(fn.path or "", fn.startLine, 0), seen),
+            id=disambiguate(statement_id(fn.path or "", line, col), seen),
             parentId=fn.id,
-            nodeType="synthetic",
+            nodeType=node_type,
             semanticType=semantic,  # type: ignore[arg-type]
             text=text,
             method=method,
@@ -107,17 +137,17 @@ def detect_apex_routes(record: FileRecord, root: Node, source: bytes) -> list[St
             routeKind=kind,
             isRegex=False if kind else None,
             responseDTO=_response_dto(fn.returnType) if dto else None,
-            startLine=fn.startLine,
-            endLine=fn.endLine,
+            startLine=line,
+            endLine=last,
             path=fn.path,
         ))
 
     for fn in record.functions:
         if fn.type == "trigger":
             sobject = (fn.metadata or {}).get("sObject")
-            header = headers.get(fn.startLine)
-            if sobject and header:
-                add(fn, header, "eventbus_consumer", "EVENT", sobject,
+            trigger = headers.get(fn.startLine)
+            if sobject and trigger:
+                add(fn, trigger[0], trigger[1], "eventbus_consumer", "EVENT", sobject,
                     trigger_framework(sobject), None, dto=False)
             continue
         cls = by_id.get(fn.parentId)
@@ -125,14 +155,21 @@ def detect_apex_routes(record: FileRecord, root: Node, source: bytes) -> list[St
             continue
         if has_annotation(fn.decorators, "IsTest"):
             continue
+        decl = methods.get((fn.name, fn.startLine))
         url = _url_mapping(cls.decorators)
         if url is not None:
-            for d in fn.decorators:
+            for i, d in enumerate(fn.decorators):
                 verb = _VERBS.get(d.name.lower())
                 if verb:
-                    add(fn, f"@{d.name}", "route", verb, _join(url), "apex-rest", "route")
-        if has_annotation(fn.decorators, "AuraEnabled"):
-            add(fn, "@AuraEnabled", "route", "RPC", f"{cls.name}.{fn.name}", "apex-aura", "rpc")
-        if (fn.name, fn.startLine) in soap:
-            add(fn, "webservice", "route", "RPC", f"{cls.name}/{fn.name}", "apex-soap", "rpc")
+                    add(fn, _annotation(decl, fn, i), f"@{d.name}", "route", verb, _join(url),
+                        "apex-rest", "route")
+        aura = next((i for i, d in enumerate(fn.decorators) if d.name.lower() == "auraenabled"),
+                    None)
+        if aura is not None:
+            add(fn, _annotation(decl, fn, aura), "@AuraEnabled", "route", "RPC",
+                f"{cls.name}.{fn.name}", "apex-aura", "rpc")
+        keyword = _webservice(decl) if decl is not None else None
+        if keyword is not None:
+            add(fn, keyword, "webservice", "route", "RPC", f"{cls.name}/{fn.name}", "apex-soap",
+                "rpc")
     return out
