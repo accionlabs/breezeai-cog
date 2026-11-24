@@ -72,7 +72,7 @@ def test_operations_detected() -> None:
     assert ("SUBSCRIPTION", "watchLocks") in ops
     for s in ops.values():
         assert s.framework == "graphql"
-        assert s.nodeType == "synthetic"  # decorator-derived route → synthetic sentinel
+        assert s.nodeType == "decorator"  # the decorator tree-sitter returns
     assert ops[("QUERY", "products")].routeKind == "query"
     assert rec.framework == "graphql"
 
