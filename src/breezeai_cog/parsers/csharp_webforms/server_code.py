@@ -24,16 +24,15 @@ import re
 from tree_sitter import Node
 
 from ...emit import file_id
-from ...schemas import FileRecord, Statement
+from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.functions import build_method
 from ..csharp.statements import extract_statements
-from ..template_common.server_code import ASPNET, CODE_KINDS, Island, shadow_code
+from ..template_common.server_code import (
+    ASPNET, CODE_KINDS, Island, expressions_as_written, shadow_code,
+)
 from ..treesitter import parse_source
-from ...utils.text import truncate
 
-#: Islands whose code is wrapped as ``_= x ;``.
-_EXPRESSIONS = frozenset({"expression", "binding"})
 #: Members of the page class: a method in ``<script runat="server">`` parses as a local function.
 _METHODS = frozenset({"local_function_statement", "method_declaration", "constructor_declaration"})
 #: ``<%@ Page Language="VB" %>`` / ``CodeBehind="X.aspx.vb"`` — a VB page.
@@ -74,22 +73,5 @@ def read_server_code(
         root, code, ctx.path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         barriers=frozenset((m.start_byte, m.end_byte) for m in methods),
     )
-    _expressions_as_written(top, ctx.source, islands, limit)
+    expressions_as_written(top, ctx.source, islands, ASPNET, limit)
     record.statements.extend(top)
-
-
-def _expressions_as_written(
-    statements: list[Statement], source: bytes, islands: list[Island], limit: int
-) -> None:
-    """An expression's statement cites the page (``<%= Title %>``), not the ``_= Title ;`` wrapper."""
-    by_line: dict[tuple[int, str], Island] = {}
-    for i in islands:
-        if i.kind in _EXPRESSIONS:
-            body = source[i.body_start:i.body_end].decode("utf-8", "replace").strip()
-            by_line[(source.count(b"\n", 0, i.start) + 1, body)] = i
-    for stmt in statements:
-        if not stmt.text.startswith("_="):
-            continue
-        island = by_line.get((stmt.startLine, stmt.text[2:].rstrip(" ;").strip()))
-        if island is not None:
-            stmt.text = truncate(source[island.start:island.end].decode("utf-8", "replace"), limit)

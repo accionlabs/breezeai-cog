@@ -528,3 +528,11 @@ def test_unbalanced_markup_keeps_every_element(tmp_path) -> None:
     assert [s.endpoint for s in rec.statements if s.routeKind == "navigation"] == [
         "/orders/save.do", "/orders/view.do"]
     assert "if_statement" in {s.nodeType for s in rec.statements}
+
+
+def test_expression_statement_cites_the_page(tmp_path) -> None:
+    page = '<p><%= request.getContextPath() %></p>\n<%= a(")") %>\n'
+    rec = _parse(_repo(tmp_path, {"a.jsp": page}), "a.jsp")
+    texts = {s.startLine: s.text for s in rec.statements if s.nodeType == "expression_statement"}
+    # The page as written, not the ( x ); wrapper the Java grammar parsed.
+    assert texts == {1: "<%= request.getContextPath() %>", 2: '<%= a(")") %>'}

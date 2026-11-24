@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 
 from tree_sitter import Node
 
+from ...schemas import Statement
+from ...utils.text import truncate
+
 #: ``bytes.translate`` table that blanks every byte except a newline.
 _BLANK = bytes(0x0A if i == 0x0A else 0x20 for i in range(256))
 
@@ -260,3 +263,25 @@ def code_outside(root: Node, text_type: str) -> list[tuple[int, int]]:
     if at < root.end_byte:
         spans.append((at, root.end_byte))
     return spans
+
+
+def expressions_as_written(
+    statements: list[Statement], source: bytes, islands: list[Island], dialect: Dialect,
+    limit: int,
+) -> None:
+    """An expression's statement cites the page (``<%= x %>``), not the wrapper the grammar
+    parsed (``(x);`` in Java, ``_= x ;`` in C#)."""
+    opener, closer = (part.decode() for part in dialect.wrap)
+    by_line: dict[tuple[int, str], Island] = {}
+    for i in islands:
+        if i.kind in _EXPRESSION_KINDS:
+            body = source[i.body_start:i.body_end].decode("utf-8", "replace").strip()
+            by_line[(source.count(b"\n", 0, i.start) + 1, body)] = i
+    for stmt in statements:
+        text = stmt.text.strip()
+        if not (text.startswith(opener) and text.endswith(closer)):
+            continue
+        body = text[len(opener):len(text) - len(closer)].strip()
+        island = by_line.get((stmt.startLine, body))
+        if island is not None:
+            stmt.text = truncate(source[island.start:island.end].decode("utf-8", "replace"), limit)

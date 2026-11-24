@@ -90,6 +90,7 @@ from ..java.mappings import COMMENT_TYPES, CONTROL_FLOW
 from ..java.statements import extract_statements
 from ..java_web_guards import servlet_match
 from ..template_common.scripts import link_page_scripts, read_page_scripts
+from ..template_common.server_code import JSP, expressions_as_written
 from ..java_struts2.common import ActionTable, action_endpoint, extension
 from ..java_struts2.facts import module_key
 from ..treesitter import node_text, parse_source
@@ -299,8 +300,10 @@ def _java(src: bytes, islands: list[Island], path: str, fid: str, ctx: ParseCont
             statements.extend(stmts)
     if not capture:
         return statements
-    statements.extend(extract_statements(root, code, path, parent_id=fid, capture=True,
-                                         limit=limit, seen_ids=seen_ids))
+    top = extract_statements(root, code, path, parent_id=fid, capture=True, limit=limit,
+                             seen_ids=seen_ids)
+    expressions_as_written(top, src, islands, JSP, limit)
+    statements.extend(top)
     statements.extend(comment_statements_for(
         root, code, path, file_id=fid, functions=functions, classes=classes,
         statements=statements, control_flow=CONTROL_FLOW, comment_types=COMMENT_TYPES,
