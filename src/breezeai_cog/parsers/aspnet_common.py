@@ -201,13 +201,15 @@ def _is_conventional_action(fn: Function) -> bool:
 
 
 def _route_statement(
-    root: Node, fn: Function, method: str, endpoint: str | None, text: str,
-    auth_required: bool | None, guards: list[str] | None,
+    root: Node, node: Node | None, fn: Function, method: str, endpoint: str | None,
+    text: str | None, auth_required: bool | None, guards: list[str] | None,
 ) -> Emit:
-    """One controller route (``nodeType="synthetic"`` — attribute/convention derived, read off
-    the record, so the file's root stands in for a node and the span is the action's). Shared
-    by the attribute-route and convention-route paths."""
-    return Emit(root, dict(
+    """One controller route, at the node it was read from: the verb attribute
+    (``nodeType: attribute``), or the action's ``method_declaration`` for a convention route.
+    Only when the action is not in ``root`` (a VB type nested in another, parsed apart) does
+    the file's root stand in, as ``synthetic`` with the action's span. Shared by the
+    attribute-route and convention-route paths."""
+    fields = dict(
         semanticType="route",
         method=method,
         endpoint=endpoint,
@@ -220,8 +222,41 @@ def _route_statement(
         guards=guards,
         requestDTO=_request_dto(fn),
         responseDTO=response_dto(fn.returnType),
-    ), parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
-        end_line=fn.endLine)
+    )
+    if node is None:
+        return Emit(root, fields, parent=fn.id, node_type="synthetic", text=text,
+                    line=fn.startLine, col=0, end_line=fn.endLine)
+    return Emit(node, fields, parent=fn.id, text=text)
+
+
+#: A method's attributes: C# groups them in ``attribute_list``, VB in ``attribute_block``.
+_ATTRIBUTE_GROUPS = ("attribute_list", "attribute_block")
+
+
+def _action_nodes(root: Node) -> dict[int, Node]:
+    """Method declarations by start line — the line an action's ``Function`` record starts at
+    (C# and VB). A line with two declarations maps to none: which one is unknown."""
+    out: dict[int, Node] = {}
+    clashes: set[int] = set()
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type in ("method_declaration", "constructor_declaration"):
+            line = n.start_point[0] + 1
+            if line in out:
+                clashes.add(line)
+            out[line] = n
+        stack.extend(n.named_children)
+    for line in clashes:
+        del out[line]
+    return out
+
+
+def _attribute_nodes(method: Node) -> list[Node]:
+    """A method's ``attribute`` nodes in declaration order — the order of its record's
+    ``decorators``."""
+    return [a for group in method.children if group.type in _ATTRIBUTE_GROUPS
+            for a in group.named_children if a.type == "attribute"]
 
 
 def _class_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
@@ -286,11 +321,15 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
     if not controllers:
         return []
 
+    actions = _action_nodes(root)
     routes: list[Emit] = []
     for fn in record.functions:
         info = controllers.get(fn.parentId)
         if info is None:
             continue
+        action = actions.get(fn.startLine)
+        attrs = _attribute_nodes(action) if action is not None else []
+        aligned = len(attrs) == len(fn.decorators)
         base, cls_guards, resolved, has_class_route, cls_name, is_api, area = info
         prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
@@ -300,9 +339,10 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
         auth_required = (not anonymous
                          and ("Authorize" in cls_guards or "Authorize" in fn_guards)) or None
         all_guards = (cls_guards + fn_guards) or None
-        verb_attrs = [d for d in fn.decorators if simple_attr_name(d.name) in _HTTP_ATTRS]
+        verb_attrs = [(i, d) for i, d in enumerate(fn.decorators)
+                      if simple_attr_name(d.name) in _HTTP_ATTRS]
         bound: set[tuple[str, str]] = set()  # one binding per (verb, endpoint): [HttpPost] twice is one
-        for dec in verb_attrs:
+        for i, dec in verb_attrs:
             verb = _HTTP_ATTRS[simple_attr_name(dec.name)]
             for sub in _method_templates(_first_arg(dec), method_route):
                 endpoint: str | None
@@ -322,8 +362,10 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
                 if (verb, endpoint) in bound:
                     continue
                 bound.add((verb, endpoint))
+                at = attrs[i] if aligned else action
                 routes.append(_route_statement(
-                    root, fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards))
+                    root, at, fn, verb, endpoint, None if aligned else f"[{dec.name}]",
+                    auth_required, all_guards))
         # Classic MVC convention: a public action with NO [HttpX] attribute defaults to a GET at
         # /{controller}/{action} (or a bare method-level [Route], if any). Skipped for
         # [ApiController] (attribute routing is required there) and when the inherited prefix is
@@ -338,7 +380,8 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
             else:
                 endpoint = _area_convention(area, cls_name, _action_name(fn))
             routes.append(_route_statement(
-                root, fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards))
+                root, action, fn, "GET", endpoint, f"(convention) {fn.name}", auth_required,
+                all_guards))
     return routes
 
 
