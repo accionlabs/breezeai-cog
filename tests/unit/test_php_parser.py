@@ -822,3 +822,90 @@ Route::get('/health', function () {
     assert ("h.php", "return_statement", "return DB::table('jobs')->count();") in got
     # The assignments that only store a closure are not repeated as statements.
     assert not any(s.text.startswith(("$notify", "$double")) for s in record.statements)
+
+
+_PHTML = """<script src="/js/jquery.min.js"></script>
+<script src="js/app.js"></script>
+<form action="/orders/save" method="post"></form>
+<form action="<?= $this->url('orders') ?>" method="post"></form>
+<?php if ($isAdmin): ?>
+  <a href="/admin">Admin</a>
+<?php endif; ?>
+<script>
+  var API = '/api/orders';
+  $.post(API, {});
+  fetch('/api/items');
+  fetch('<?= $base ?>/api/php');
+  $.get('<?php echo $base; ?>/api/echo');
+</script>
+"""
+
+_TWIG = """{% extends 'base.html.twig' %}
+{% block body %}
+<script src="/js/jquery.min.js"></script>
+<form action="/orders/save" method="post"></form>
+<form action="{{ path('order_save') }}" method="post"></form>
+{% if is_granted('ROLE_ADMIN') %}<a href="/admin">Admin</a>{% endif %}
+<script>
+  var API = '/api/orders';
+  $.post(API, {});
+  fetch('/api/items');
+  fetch('{{ path("api_php") }}');
+  $.get('{{ base }}/api/twig');
+</script>
+{% endblock %}
+"""
+
+
+def _page(parser, tmp_path: Path, path: str, source: str, capture: bool = True) -> FileRecord:
+    for rel, text in {path: source, "views/js/app.js": "fetch('/x');"}.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    return parser.parse_file(ParseContext(
+        path=path, abs_path=tmp_path / path, source=source.encode(), repo_root=tmp_path,
+        capture_statements=capture))
+
+
+def _page_records(rec: FileRecord) -> list[tuple[int, str, str | None, str | None]]:
+    return [(s.startLine, s.semanticType, s.method, s.endpoint) for s in rec.statements
+            if s.semanticType == "api_call" or s.routeKind == "navigation"]
+
+
+def test_phtml_page_scripts_forms_and_links(tmp_path) -> None:
+    rec = _page(PhpParser(), tmp_path, "views/orders.phtml", _PHTML)
+    found = _page_records(rec)
+    assert (3, "api_call", "POST", "/orders/save") in found
+    assert (4, "api_call", "POST", None) in found  # <?= ?> action: written by the server
+    assert (6, "route", None, "/admin") in found  # inside <?php if ?>
+    assert (10, "api_call", "POST", "/api/orders") in found  # a page constant
+    assert (11, "api_call", "GET", "/api/items") in found
+    # PHP in a script URL is server code: no endpoint, never the PHP text.
+    assert {line: endpoint for line, _, _, endpoint in found if line in (12, 13)} == {
+        12: None, 13: None}
+    assert rec.importFiles == ["views/js/app.js"]
+
+
+def test_twig_page_scripts_forms_and_links(tmp_path) -> None:
+    rec = _page(TwigParser(), tmp_path, "templates/orders.html.twig", _TWIG)
+    found = _page_records(rec)
+    assert (4, "api_call", "POST", "/orders/save") in found
+    assert (5, "api_call", "POST", None) in found  # {{ path() }} action
+    assert (6, "route", None, "/admin") in found  # inside {% if %}
+    assert (9, "api_call", "POST", "/api/orders") in found
+    assert (10, "api_call", "GET", "/api/items") in found
+    assert {line: endpoint for line, _, _, endpoint in found if line in (11, 12)} == {
+        11: None, 12: None}
+
+
+def test_plain_php_file_is_not_read_as_a_page(tmp_path) -> None:
+    source = "<?php $x = 1; ?>\n<form action=\"/a\" method=\"post\"></form>\n" \
+             "<script>fetch('/api/items');</script>\n"
+    rec = _page(PhpParser(), tmp_path, "views/orders.php", source)
+    assert _page_records(rec) == []
+
+
+def test_page_reading_needs_capture_but_script_files_still_link(tmp_path) -> None:
+    rec = _page(PhpParser(), tmp_path, "views/orders.phtml", _PHTML, capture=False)
+    assert _page_records(rec) == [] and rec.importFiles == ["views/js/app.js"]
+    rec = _page(TwigParser(), tmp_path, "templates/orders.html.twig", _TWIG, capture=False)
+    assert _page_records(rec) == []

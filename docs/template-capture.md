@@ -35,6 +35,7 @@ code half is captured either way.
 | `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind (VB code-behind, `.aspx.vb`, is `vb-webforms`'s) |
 | `.vue` | `typescript-vue` | `.ts` `.tsx` `.js` `.jsx` … |
 | `.jsp` `.jspx` `.jspf` `.tag` `.tagx` | `jsp` | — |
+| `.twig` | `twig` | — |
 
 For the live list, ask the tool — it is generated from the parsers, never hand-maintained:
 
@@ -70,7 +71,7 @@ like `.aspx` does, but they describe service and handler endpoints, so they stay
 **Never captured, flag or no flag** — these have no parser at all, so they are reported as
 `unsupported` in either mode:
 
-`.hbs` · `.mustache` · `.ejs` · `.erb` · `.twig` · `.blade.php` · `.vm` · `.ftl` ·
+`.hbs` · `.mustache` · `.ejs` · `.erb` · `.blade.php` · `.vm` · `.ftl` ·
 `.jinja` · `.pug` · `.svelte` · `.xhtml` · `.resx`
 
 If a Handlebars template is missing from your graph, `--capture-templates` will not
@@ -296,8 +297,10 @@ discoverable. Skip `.vue` and all of that goes with it.
 | `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
 | `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); directives, EL and JSP comments (`nodeType: synthetic` — there is no JSP grammar; directives keep their keyword in `name`, comments carry `semanticType: comment`), prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
 | `.tag` `.tagx` | `jsp` | `component` | same as a page |
+| `.phtml` | — | — | the PHP parser's records for its `<?php ?>` code; links and form posts in its markup (`navigation` / `api_call`) |
+| `.twig` | `twig` | `template` | `{{ }}` and `{% %}` statements; `extends` / `include` / `embed` / `import` targets as `importFiles`; links and form posts in its markup |
 
-**Inline scripts.** In `.html`, `.cshtml`/`.razor`/`.vbhtml`, `.aspx`/`.ascx`/`.master` and `.jsp`/`.jspx`/`.jspf`/`.tag`/`.tagx`, the bodies of
+**Inline scripts.** In `.html`, `.cshtml`/`.razor`/`.vbhtml`, `.aspx`/`.ascx`/`.master`, `.jsp`/`.jspx`/`.jspf`/`.tag`/`.tagx`, `.phtml` and `.twig`, the bodies of
 inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
 `$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
 counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
@@ -307,8 +310,8 @@ own `<script src>` loads jQuery, an inline script above that tag gives no record
 evidence. A jQuery library file itself (`jquery*.js`, e.g. `jquery.signalR.js`) gives no `api_call`:
 its own requests are not the application's. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
 URL does (`/api/users/{user.id}`, [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name));
-a Razor, Web Forms or JSP expression in or beside the URL (`'@Url.Action("Save")'`,
-`"/a/" + <%= Id %>`, `'${ctx}/a'`, `'<c:url value="/a"/>'`) is server code, and the `endpoint` stays empty. No other inline-script code
+a Razor, Web Forms, JSP, PHP or Twig expression in or beside the URL (`'@Url.Action("Save")'`,
+`"/a/" + <%= Id %>`, `'${ctx}/a'`, `'<c:url value="/a"/>'`, `'<?= $base ?>/a'`, `'{{ path("a") }}'`) is server code, and the `endpoint` stays empty. No other inline-script code
 is captured yet.
 
 `uiRole` separates a **template** (a view rendered by something else) from a **component** (a

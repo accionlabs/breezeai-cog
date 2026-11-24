@@ -13,5 +13,5 @@
     <p>{{ order.id }}</p>
 {% endfor %}
 {% include 'footer.html.twig' %}
-<script>$.post('/api/track', { page: 'orders' });</script>
+<script>$.post('/api/track', { page: 'orders' }); fetch('/api/orders');</script>
 {% endblock %}

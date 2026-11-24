@@ -10,4 +10,4 @@
 <?php foreach ($orders as $order): ?>
     <p><?= $order->id ?></p>
 <?php endforeach; ?>
-<script>$.post('/api/track', { page: 'orders' });</script>
+<script>$.post('/api/track', { page: 'orders' }); fetch('/api/orders');</script>

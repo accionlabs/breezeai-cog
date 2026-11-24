@@ -25,12 +25,17 @@ line and column taken from a tree parsed over a shadow is true for the page:
   (``java``, ``c_sharp``), which accepts statements and method declarations at the top level. An
   expression is wrapped so it parses as a statement: ``<%= x %>`` becomes ``  (x);`` in Java and
   ``_= x ;`` in C#.
+
+PHP pages (``.phtml``) and Twig have a grammar that already splits the page: its text parts are
+the markup, so :func:`code_outside` gives everything else as the server code.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+
+from tree_sitter import Node
 
 #: ``bytes.translate`` table that blanks every byte except a newline.
 _BLANK = bytes(0x0A if i == 0x0A else 0x20 for i in range(256))
@@ -233,3 +238,25 @@ def _xml_line(line: bytes) -> bytes:
     of the line so ``&amp;&amp;`` reads ``&&`` and the line keeps its length."""
     decoded = _XML_TEXT.sub(lambda m: _XML_CHAR.get(m.group(0), b""), line)
     return decoded + b" " * (len(line) - len(decoded))
+
+
+def code_outside(root: Node, text_type: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` spans of ``root``'s page that are not a ``text_type`` node (PHP's
+    ``text``, Twig's ``content``): the server code, with the whitespace between its parts."""
+    texts: list[tuple[int, int]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == text_type:
+            texts.append((node.start_byte, node.end_byte))
+        else:
+            stack.extend(node.children)
+    spans: list[tuple[int, int]] = []
+    at = root.start_byte
+    for start, end in sorted(texts):
+        if start > at:
+            spans.append((at, start))
+        at = max(at, end)
+    if at < root.end_byte:
+        spans.append((at, root.end_byte))
+    return spans

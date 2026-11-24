@@ -17,6 +17,10 @@ from ..comments_common import comment_statements_for
 from ..statements_common import emit_enum_members
 from ..treesitter import node_text, parse_source
 from ..php_route_common import walk
+from ..template_common.markup import read_page_markup
+from ..template_common.script_blocks import blank
+from ..template_common.scripts import link_page_scripts, read_page_scripts
+from ..template_common.server_code import code_outside
 from .classes import build_class
 from .functions import build_function, function_node_type, function_parent_id
 from .handlers import handler_locator
@@ -199,4 +203,19 @@ class PhpParser(BaseParser):
         run_additive(
             "php", root, ctx, record, is_fixture=self.is_fixture_file(path)
         )
+        if path.lower().endswith(self.template_extensions):
+            self._read_page(record, root, ctx)
         return record
+
+    def _read_page(self, record: FileRecord, root: Node, ctx: ParseContext) -> None:
+        """A ``.phtml`` page's links, form posts and inline scripts; its PHP is server code."""
+        server_code = code_outside(root, "text")
+        link_page_scripts(record, ctx)
+        if not ctx.capture_statements:
+            return
+        markup = bytearray(ctx.source)
+        for start, end in server_code:
+            blank(markup, start, end)
+        read_page_markup(record, bytes(markup), ctx.path, ctx.parse_timeout_micros,
+                         links=not self.is_fixture_file(ctx.path))
+        read_page_scripts(record, ctx, server_code=server_code)
