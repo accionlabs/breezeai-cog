@@ -139,11 +139,17 @@ def _merge(
     fid = file_id(record.path)
     enclosing = Enclosing(record)
     seen = {s.id for s in record.statements}
-    # One call is one statement: the jQuery path already wrote its own.
-    taken = {(s.startLine, s.semanticType) for s in record.statements if s.semanticType}
+    # One call is one statement (the jQuery path already wrote its own); another call on the
+    # same line is a statement of its own.
+    taken: dict[tuple[int, str], list[str]] = {}
+    for s in record.statements:
+        if s.semanticType:
+            taken.setdefault((s.startLine, s.semanticType), []).append(s.text)
     for stmt in statements:
-        if (stmt.semanticType not in _DETECTED or stmt.framework == "jquery"
-                or (stmt.startLine, stmt.semanticType) in taken):
+        if stmt.semanticType not in _DETECTED or stmt.framework == "jquery":
+            continue
+        key = (stmt.startLine, stmt.semanticType)
+        if any(stmt.text in t or t in stmt.text for t in taken.get(key, ())):
             continue
         stmt.parentId = enclosing.function_id(stmt.startLine, fid)
         stmt.id = disambiguate(stmt.id, seen)
@@ -151,7 +157,7 @@ def _merge(
         if any(line in server_lines for line in lines) or server_expr.search(stmt.text):
             stmt.endpoint = None
             stmt.text = _as_written(stmt.text, stmt.startLine, source, shadow)
-        taken.add((stmt.startLine, stmt.semanticType))
+        taken.setdefault(key, []).append(stmt.text)
         record.statements.append(stmt)
 
 

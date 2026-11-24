@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from breezeai_cog.emit import file_id
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.template_common.script_blocks import script_shadow
 from breezeai_cog.parsers.template_common.script_blocks import script_programs
@@ -251,3 +252,15 @@ def test_a_script_path_outside_the_repository_gets_no_link(tmp_path: Path) -> No
     (tmp_path / "x.js").write_text("x();")
     repo.mkdir()
     assert _linked(repo, [], "index.html", '<script src="../x.js"></script>') == []
+
+
+def test_two_calls_on_one_line_are_two_records(tmp_path) -> None:
+    page = ("<script src='/js/jquery.min.js'></script>\n"
+            "<script>$.get('/api/a'); fetch('/api/b'); axios.post('/api/c');</script>\n")
+    (tmp_path / "a.html").write_text(page)
+    rec = FileRecord(id=file_id("a.html"), path="a.html", type="code", language="html", loc=2)
+    ctx = ParseContext(path="a.html", abs_path=tmp_path / "a.html", source=page.encode(),
+                       repo_root=tmp_path, capture_statements=True)
+    read_page_scripts(rec, ctx)
+    calls = sorted(s.endpoint for s in rec.statements if s.semanticType == "api_call")
+    assert calls == ["/api/a", "/api/b", "/api/c"]
