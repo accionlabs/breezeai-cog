@@ -58,6 +58,7 @@ def test_spring_ai_tools_in_an_mcp_server(analyze_files) -> None:
         "weather",
         "Current weather for a city",
     )
+    assert w.nodeType == "annotation"  # the @Tool annotation tree-sitter returns
     assert _params(w) == [
         ("city", "String", True, None, "City name"),
         ("units", "String", False, None, "Units"),
