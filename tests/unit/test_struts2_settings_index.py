@@ -274,3 +274,39 @@ def test_the_config_index_reads_only_the_file_types_a_fact_reads(tmp_path: Path,
     build_config_index(tmp_path, sorted(tmp_path / r for r in files))
     assert "struts.xml" in read  # and the struts.properties beside it, if any
     assert not {"a.json", "app.yaml", "app.properties"} & set(read)
+
+
+# --- an extension value that is no extension ------------------------------------------------
+
+@pytest.mark.parametrize("value", ["a/../../x", "&amp;xxe;", "do x", "do,a/b", "${ext}"])
+def test_an_extension_no_url_can_end_with_leaves_the_address_empty(analyze_files, value) -> None:
+    eps = _endpoints(analyze_files, {
+        f"{RES}/struts.xml": _xml(_ACTION, '<include file="c.xml"/>\n'),
+        f"{RES}/c.xml": _xml("", _ext(value)),
+    })
+    assert eps == {f"{RES}/struts.xml": [None]}  # never `/n/a.a/../../x`
+
+
+@pytest.mark.parametrize(("value", "endpoint"), [
+    ("do", "/n/a.do"), ("json,,", "/n/a.json"), (",action", "/n/a"), ("my_ext-2", "/n/a.my_ext-2"),
+])
+def test_a_plain_extension_value_is_read(analyze_files, value, endpoint) -> None:
+    eps = _endpoints(analyze_files, {f"{RES}/struts.xml": _xml(_ACTION, _ext(value))})
+    assert eps == {f"{RES}/struts.xml": [endpoint]}
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
+def test_struts_properties_lines_end_at_any_line_ending(analyze_files, eol) -> None:
+    props = eol.join(["struts.action.extension=do", "struts.mapper.class=rest", ""])
+    eps = _endpoints(analyze_files, {f"{RES}/struts.xml": _xml(_ACTION),
+                                     f"{RES}/struts.properties": props})
+    assert eps == {f"{RES}/struts.xml": ["/n/a.do"]}  # a lone CR is a line end too
+
+
+def test_a_long_include_chain_is_followed_to_its_end(analyze_files) -> None:
+    depth = 400
+    files = {f"{RES}/struts.xml": _xml(_ACTION, '<include file="c0.xml"/>\n')}
+    for i in range(depth):
+        nxt = f'<include file="c{i + 1}.xml"/>\n' if i + 1 < depth else _ext("do")
+        files[f"{RES}/c{i}.xml"] = _xml("", nxt)
+    assert _endpoints(analyze_files, files) == {f"{RES}/struts.xml": ["/n/a.do"]}

@@ -511,6 +511,11 @@ def test_same_records_for_any_jobs(tmp_path, jobs) -> None:
              f"{JAVA}/com/shop/actions/admin/UserProfileAction.java": (
                  "package com.shop.actions.admin;\nimport com.opensymphony.xwork2.ActionSupport;\n"
                  "public class UserProfileAction extends ActionSupport {}\n"),
+             # struts2.heritage-clauses + class_heritage: no execute() up the chain, no route
+             f"{JAVA}/com/shop/actions/OrphanAction.java": (
+                 "package com.shop.actions;\npublic class OrphanAction extends Helper {}\n"),
+             f"{JAVA}/com/shop/actions/Helper.java": (
+                 "package com.shop.actions;\npublic class Helper { void run() {} }\n"),
              f"{JAVA}/com/shop/actions/report/package-info.java": (
                  '@Namespace("/reports")\npackage com.shop.actions.report;\n'
                  "import org.apache.struts2.convention.annotation.Namespace;\n"),
@@ -691,6 +696,31 @@ def test_plain_convention_action_without_a_struts_import_is_mapped(analyze_files
                            ("ThingAction.java", "ANY", "/thing.action", "execute")]
 
 
+def _child_of(base: str) -> dict[str, str]:
+    return {**POM, f"{JAVA}/org/app/action/ChildAction.java": (
+        "package org.app.action;\npublic class ChildAction extends BaseThing { }\n"),
+        f"{JAVA}/org/app/action/BaseThing.java": f"package org.app.action;\n{base}"}
+
+
+def test_a_parent_chain_without_execute_is_not_mapped(analyze_files) -> None:
+    # Every parent is a repository class, none declares execute(), the last extends nothing.
+    st = analyze_files(_child_of("public class BaseThing extends Root { }\n"
+                                 "class Root { public void helper() { } }\n"))
+    assert _routes(st) == []
+
+
+@pytest.mark.parametrize("base", [
+    "import com.lib.Base;\npublic class BaseThing extends Base { }\n",  # a library parent
+    "public class BaseThing implements Runner { }\n"  # an interface may give a default execute
+    "interface Runner { default String execute() { return \"x\"; } }\n",
+    "public class BaseThing extends Root { }\n"  # execute two levels up
+    "class Root { public String execute() { return \"x\"; } }\n",
+])
+def test_a_parent_chain_that_may_give_execute_is_mapped(analyze_files, base) -> None:
+    assert _routes(analyze_files(_child_of(base))) == [
+        ("ChildAction.java", "ANY", "/child.action", "execute")]
+
+
 def test_plain_class_without_the_convention_plugin_is_not_mapped(analyze_files) -> None:
     assert _routes(analyze_files({f"{JAVA}/org/app/action/ThingAction.java": THING})) == []
 
@@ -700,7 +730,7 @@ def test_plain_class_outside_a_convention_locator_is_not_mapped(analyze_files) -
                                   THING.replace("org.app.action", "org.app.util")})) == []
 
 
-@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
 def test_struts_properties_reads_the_same_with_any_line_ending(analyze_files, eol) -> None:
     props = eol.join(["struts.convention.action.suffix=Controller", "struts.mapper.class=rest",
                       ""])

@@ -13,6 +13,11 @@
   each with its own extension resolves each one.
 * ``struts2.package-namespaces`` — ``@Namespace`` / ``@Namespaces`` on a ``package-info.java``,
   the namespace of every action class in that package.
+* ``struts2.heritage-clauses`` — the simple names of the classes whose declaration has an
+  ``extends`` clause, and of those with an ``implements`` clause. With the Java index's
+  ``class_heritage`` it tells a Convention action whose in-repo parent chain ends at a class
+  extending and implementing nothing (so no ``execute`` can be inherited) from one whose chain
+  leaves the repository or passes an interface.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from .common import (
 
 SETTINGS = "struts2.settings"
 PACKAGE_NAMESPACES = "struts2.package-namespaces"
+HERITAGE_CLAUSES = "struts2.heritage-clauses"
 #: The constant keys the detector reads, and the build-file flag.
 _KEYS = (EXTENSION_KEY, LOCATORS_KEY, SUFFIX_KEY, RESULT_PATH_KEY, MAP_ALL_KEY, MAPPER_KEY)
 CONVENTION = "convention-plugin"
@@ -165,6 +171,38 @@ def _resolve_namespaces(values: list[tuple[str, tuple[str, ...]]],
     return out or None
 
 
+EXTENDS, IMPLEMENTS = "extends", "implements"
+
+
+def _collect_heritage_clauses(root: Node | None, source: bytes, rel: str,
+                              repo_root: Path | None) -> tuple[tuple[str, str], ...] | None:
+    if root is None:
+        return None
+    out: list[tuple[str, str]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        stack.extend(node.named_children)
+        name = node.child_by_field_name("name") if node.type == "class_declaration" else None
+        if name is None:
+            continue
+        for field, clause in (("superclass", EXTENDS), ("interfaces", IMPLEMENTS)):
+            if node.child_by_field_name(field) is not None:
+                out.append((clause, node_text(name, source)))
+    return tuple(out) or None
+
+
+def _resolve_heritage_clauses(values: list[tuple[tuple[str, str], ...]],
+                              index: Any) -> dict[str, frozenset[str]] | None:
+    """``{"extends": names, "implements": names}``: a simple name is in a set when any class of
+    that name has the clause (a name two classes share counts as having it)."""
+    found: dict[str, set[str]] = {EXTENDS: set(), IMPLEMENTS: set()}
+    for pairs in values:
+        for clause, name in pairs:
+            found[clause].add(name)
+    return {k: frozenset(v) for k, v in found.items()} if any(found.values()) else None
+
+
 def annotation_name(node: Node, source: bytes) -> str | None:
     if node.type not in ("annotation", "marker_annotation"):
         return None
@@ -237,4 +275,8 @@ register_fact(FactSpec(
 register_fact(FactSpec(
     name=PACKAGE_NAMESPACES, language="java", gate=(b"@Namespace",),
     collect=_collect_namespaces, resolve=_resolve_namespaces,
+))
+register_fact(FactSpec(
+    name=HERITAGE_CLAUSES, language="java", gate=(b"extends", b"implements"),
+    collect=_collect_heritage_clauses, resolve=_resolve_heritage_clauses,
 ))
