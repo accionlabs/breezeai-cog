@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.emit import to_line
@@ -564,9 +566,11 @@ def _api(tmp_path, body):
 
 
 def test_endpoint_template_string(tmp_path) -> None:
-    # #3: template literal -> path with {param}; leading base/host var dropped.
+    # #3: template literal -> path with {param}. A leading base/host var is not dropped (that
+    # would present the tail as the whole address): the parser keeps it as rendered, and the
+    # executor's address rule marks it as read at runtime: ${baseURL}/users/{id} (parsers.addresses).
     assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") == [
-        ("GET", "/users/{id}")
+        ("GET", "{baseURL}/users/{id}")
     ]
     assert _api(tmp_path, "function f(id){ axios.get(`/api/${id}`); }") == [("GET", "/api/{id}")]
 
@@ -589,7 +593,8 @@ def test_endpoint_verb_first_arg(tmp_path) -> None:
     # #3: request('GET', url) — verb is the method, URL is the 2nd arg (not the verb).
     assert _api(tmp_path, "function f(){ http.request('GET', '/orders'); }") == [("GET", "/orders")]
     # unresolvable URL (an identifier) yields no endpoint rather than the verb string
-    assert _api(tmp_path, "function f(u){ http.request('GET', u); }") == [("GET", None)]
+    # the URL argument, a variable: one placeholder (the executor marks it ${u})
+    assert _api(tmp_path, "function f(u){ http.request('GET', u); }") == [("GET", "{u}")]
 
 
 # --- inherited base-class call resolution (this.M() → base file) ----------------------
@@ -1307,3 +1312,82 @@ def test_commonjs_require_imports_and_bindings(tmp_path) -> None:
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls["helper"] == "lib/util.js"
     assert calls["connect"] == "lib/db.js"
+
+
+def _record(tmp_path, body: str) -> FileRecord:
+    p = tmp_path / "f.ts"
+    p.write_text(body)
+    ctx = ParseContext(
+        path="f.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
+    return TypeScriptParser().parse_file(ctx)
+
+
+def test_a_function_stored_in_a_variable_is_recorded_once(tmp_path) -> None:
+    rec = _record(tmp_path, (
+        "const save = (x: string) => db.insert(x);\n"
+        "class Mailer {\n"
+        "  private logErr = (e: Error): void => {\n"
+        "    this.logger.error(e.message);\n"
+        "  };\n"
+        "}\n"
+        "export function outer() {\n"
+        "  const local = (n: number) => {\n"
+        "    keep(n);\n"
+        "  };\n"
+        "  local(1);\n"
+        "}\n"
+    ))
+    fns = {f.name: f for f in rec.functions}
+    assert (fns["save"].type, fns["logErr"].type, fns["local"].type) == ("arrow_function",) * 3
+    # No declaration or field statement repeats a stored function.
+    assert not any(
+        s.nodeType in ("lexical_declaration", "public_field_definition") for s in rec.statements
+    )
+    by_parent = {(s.parentId, s.nodeType, s.text) for s in rec.statements}
+    # The expression body is the function's one statement, with the call under the function.
+    assert ("f.ts#save@1", "call_expression", "db.insert(x)") in by_parent
+    assert [c.name for c in fns["save"].calls] == ["insert"]
+    assert ("f.ts#local@8", "expression_statement", "keep(n);") in by_parent
+    assert (fns["outer"].id, "expression_statement", "local(1);") in by_parent
+
+
+def test_a_declaration_that_stores_more_than_functions_is_kept(tmp_path) -> None:
+    rec = _record(tmp_path, (
+        "const a = 1, f = () => go();\n"
+        "const resolvers = { Query: { user: () => db.find() } };\n"
+    ))
+    assert {f.name for f in rec.functions} == {"f", "resolvers.Query.user"}
+    assert [s.text for s in rec.statements if s.parentId == "f.ts"] == [
+        "const a = 1, f = () => go();",
+        "const resolvers = { Query: { user: () => db.find() } };",
+    ]
+    # Only a function whose declaration is not emitted gets its expression body as a statement:
+    # anything else would record the same call twice.
+    assert not any(s.parentId != "f.ts" for s in rec.statements)
+
+
+def _call_paths(tmp_path, files: dict[str, str], target: str) -> dict[str, str | None]:
+    from breezeai_cog import iter_file_records
+
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    rec = next(r for r in iter_file_records(tmp_path) if r.path == target)
+    return {c.name: c.path for f in rec.functions for c in f.calls}
+
+
+@pytest.mark.parametrize("decl", ["orders: Order[]", "orders: Array<Order>",
+                                  "orders: ReadonlyArray<Order>", "orders: readonly Order[]"])
+def test_a_call_on_an_array_is_never_its_element_types(tmp_path, decl) -> None:
+    # `orders.find(…)` is Array.prototype.find, not a method of Order's file
+    paths = _call_paths(tmp_path, {
+        "src/order.model.ts": "export class Order { find(x: string) { return x; } total() { return 1; } }\n",
+        "src/list.ts": "import { Order } from './order.model';\n"
+        f"export class List {{\n  {decl} = [];\n  one: Order = new Order();\n"
+        "  first(id: string) { return this.orders.find((o) => o.total() === 1); }\n"
+        "  sum() { return this.one.total(); }\n}\n",
+    }, "src/list.ts")
+    assert paths["find"] is None
+    assert paths["total"] == "src/order.model.ts"  # a single Order still resolves

@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     github_api_base_url: str = "https://api.github.com"
     gitlab_api_base_url: str = "https://gitlab.com/api/v4"
     bitbucket_api_base_url: str = "https://api.bitbucket.org/2.0"
+    # No bitbucket_server default: Data Center ships no public cloud, so the base is
+    # taken from scm_instance_base_url_mapping or derived from the repo URL's context
+    # path (see integrations/scm/factory.resolve_api_base_url).
     azure_devops_api_base_url: str = "https://dev.azure.com"
     # Per-request cap (seconds) on provider REST calls (tree / compare / file content).
     scm_api_timeout: float = Field(default=60.0, gt=0)
@@ -114,6 +117,22 @@ class Settings(BaseSettings):
     scm_token_gitlab: SecretStr | None = None
     scm_token_bitbucket: SecretStr | None = None
     scm_token_azure_devops: SecretStr | None = None
+    # Bitbucket Data Center has no scm_token_* fallback on purpose. Every host is a
+    # different customer's instance, so a deployment-wide credential would be sent to
+    # whichever host the request named — one customer's credential to another's server.
+    # The credential must arrive as `gitToken` on the request; without it the factory
+    # answers 400 (AbstractSCMClient.requires_credential).
+    # Hosts this deployment may send an authenticated request to. Empty (the default)
+    # allows any host except loopback, link-local and other reserved addresses — see
+    # integrations/scm/netguard.py. Set it to bound the reachable set properly.
+    scm_allowed_api_hosts: list[str] = Field(default_factory=list)
+    # Also refuse private ranges (10/8, 172.16/12, 192.168/16). Off by default: a
+    # self-hosted Bitbucket or GitHub Enterprise normally lives on one, so turning this
+    # on without an allow-list blocks the self-hosted providers entirely.
+    scm_block_private_networks: bool = False
+    # Connect-phase cap (seconds), separate from scm_api_timeout. A blackholed host
+    # otherwise holds a threadpool worker for timeout x attempts (60s x 4 by default).
+    scm_api_connect_timeout: float = Field(default=10.0, gt=0)
     # Self-hosted instances: host → provider slug, e.g. {"git.acme.com": "gitlab"}. A repo
     # URL on a listed host is parsed with that provider's grammar. (JSON in env.)
     scm_instances: dict[str, str] = Field(default_factory=dict)
@@ -135,7 +154,7 @@ class Settings(BaseSettings):
     )
     # Per-repo upload POST cap (seconds); the request fails/retries past this. Default 15 min —
     # large ontologies stream over a single request (services/upload.py). --upload-timeout.
-    upload_timeout: float = Field(default=900.0, gt=0)
+    upload_timeout: float = Field(default=900.0, ge=1.0)
     # Concurrent uploads in --batch mode. Default 1 (serial). --parallel-uploads.
     upload_parallelism: int = Field(default=1, ge=1)
     # Retries after a failed upload (total attempts = upload_max_retries + 1). Only transient
@@ -168,6 +187,14 @@ class Settings(BaseSettings):
     @field_validator("languages", mode="before")
     @classmethod
     def _split_languages(cls, v: object) -> object:
+        """Accept a comma-separated string (CLI / env) as a list."""
+        if isinstance(v, str):
+            return [part.strip() for part in v.split(",") if part.strip()]
+        return v
+
+    @field_validator("scm_allowed_api_hosts", mode="before")
+    @classmethod
+    def _split_allowed_hosts(cls, v: object) -> object:
         """Accept a comma-separated string (CLI / env) as a list."""
         if isinstance(v, str):
             return [part.strip() for part in v.split(",") if part.strip()]

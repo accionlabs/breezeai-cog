@@ -1,0 +1,697 @@
+"""MCP server tools of Spring AI (``@McpTool`` / ``@Tool``) in Java and Kotlin:
+one ``mcp_tool`` statement per tool.
+
+Every case runs the whole pipeline (``analyze_files``), which also fails on any entry-point
+contract error (``parsers/contract.py``).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from breezeai_cog.schemas import Statement
+
+
+def _tools(statements: list[Statement]) -> dict[str | None, Statement]:
+    tools = [s for s in statements if s.semanticType == "mcp_tool"]
+    for t in tools:
+        assert t.method == "TOOL" and t.nodeType
+    return {t.endpoint: t for t in tools}
+
+
+def _params(tool: Statement) -> list[tuple]:
+    return [(p.name, p.type, p.required, p.default, p.description) for p in tool.params or []]
+
+
+JAVA_TOOLS = """
+package demo;
+
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.ai.chat.model.ToolContext;
+
+public class WeatherTools {
+    @Tool(name = "current_weather", description = "Current weather for a city")
+    public String weather(@ToolParam(description = "City name") String city,
+                          @ToolParam(description = "Units", required = false) String units,
+                          ToolContext ctx) {
+        return "";
+    }
+
+    @Tool(description = "Server time")
+    public String now() { return ""; }
+}
+"""
+
+
+POM_MCP = "<project><dependencies><dependency><artifactId>spring-ai-starter-mcp-server-webmvc</artifactId></dependency></dependencies></project>"
+
+
+def test_spring_ai_tools_in_an_mcp_server(analyze_files) -> None:
+    tools = _tools(
+        analyze_files({"pom.xml": POM_MCP, "src/main/java/demo/WeatherTools.java": JAVA_TOOLS})
+    )
+    assert set(tools) == {"current_weather", "now"}  # `now`: default name = method name
+    w = tools["current_weather"]
+    assert (w.framework, w.handler, w.description) == (
+        "spring-ai-mcp",
+        "weather",
+        "Current weather for a city",
+    )
+    assert _params(w) == [
+        ("city", "String", True, None, "City name"),
+        ("units", "String", False, None, "Units"),
+    ]
+
+
+def test_spring_ai_tool_without_an_mcp_server_is_a_chat_tool(analyze_files) -> None:
+    pom = "<project><dependencies><dependency><artifactId>spring-ai-starter-model-openai</artifactId></dependency></dependencies></project>"
+    assert (
+        _tools(analyze_files({"pom.xml": pom, "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}))
+        == {}
+    )
+
+
+def test_mcp_tool_annotation_needs_no_build_evidence(analyze_files) -> None:
+    src = """
+package demo;
+
+import org.springaicommunity.mcp.annotation.McpTool;
+import org.springaicommunity.mcp.annotation.McpToolParam;
+
+public class Calc {
+    @McpTool(name = "add", description = "Add")
+    public int add(@McpToolParam(description = "First", required = true) int a, int b) { return a + b; }
+}
+"""
+    tools = _tools(analyze_files({"src/main/java/demo/Calc.java": src}))
+    assert _params(tools["add"]) == [
+        ("a", "int", True, None, "First"),
+        ("b", "int", True, None, None),
+    ]
+
+
+def test_spring_ai_tool_only_in_the_mcp_server_module(analyze_files) -> None:
+    files = {
+        "pom.xml": "<project><modules><module>mcp-server</module></modules></project>",
+        "mcp-server/pom.xml": POM_MCP,
+        "mcp-server/src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+        "chat-app/src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+    }
+    statements = analyze_files(files)
+    paths = {s.path for s in statements if s.semanticType == "mcp_tool"}
+    assert paths == {"mcp-server/src/main/java/demo/WeatherTools.java"}
+
+
+POM_BOM_PARENT = """<project>
+  <modules><module>chat</module></modules>
+  <dependencyManagement><dependencies>
+    <dependency><artifactId>spring-ai-starter-mcp-server-webmvc</artifactId></dependency>
+  </dependencies></dependencyManagement>
+  <!-- <dependency><artifactId>spring-ai-starter-mcp-server</artifactId></dependency> -->
+</project>"""
+
+
+def test_spring_ai_bom_entry_is_not_an_mcp_server(analyze_files) -> None:
+    files = {
+        "pom.xml": POM_BOM_PARENT,
+        "chat/pom.xml": "<project><dependencies><dependency><artifactId>spring-ai-starter-model-openai</artifactId></dependency></dependencies></project>",
+        "chat/src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+    }
+    assert _tools(analyze_files(files)) == {}
+
+
+def test_spring_ai_gradle_platform_is_not_an_mcp_server(analyze_files) -> None:
+    gradle = 'dependencies {\n  implementation platform("org.springframework.ai:spring-ai-mcp-server-bom:1.0.0")\n}\n'
+    files = {"build.gradle": gradle, "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}
+    assert _tools(analyze_files(files)) == {}
+
+
+def test_spring_ai_tool_needs_the_spring_import(analyze_files) -> None:
+    other = JAVA_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool;", "import com.acme.Tool;"
+    )
+    files = {"pom.xml": POM_MCP, "src/main/java/demo/WeatherTools.java": other}
+    assert _tools(analyze_files(files)) == {}
+    fqn = (
+        "package demo;\nimport org.springframework.ai.chat.model.ToolContext;\n"
+        'public class T {\n  @org.springframework.ai.tool.annotation.Tool(description = "D")\n'
+        '  public String now() { return ""; }\n}\n'
+    )
+    files = {"pom.xml": POM_MCP, "src/main/java/demo/T.java": fqn}
+    assert set(_tools(analyze_files(files))) == {"now"}
+
+
+KOTLIN_TOOLS = """
+package demo
+
+import org.springframework.ai.tool.annotation.Tool
+import org.springframework.ai.tool.annotation.ToolParam
+import org.springframework.ai.chat.model.ToolContext
+
+class WeatherTools {
+    @Tool(name = "current_weather", description = "Current weather for a city")
+    fun weather(
+        @ToolParam(description = "City name") city: String,
+        @ToolParam(description = "Units", required = false) units: String,
+        days: Int = 3,
+        lang: String?,
+        @ToolParam(description = "Region", required = true) region: String? = null,
+        ctx: ToolContext,
+    ): String = ""
+
+    @Tool
+    fun now(): String = ""
+}
+"""
+
+
+GRADLE_KTS_MCP = """dependencies {
+    implementation("org.springframework.ai:spring-ai-starter-mcp-server-webflux")
+}
+"""
+
+
+def test_kotlin_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None:
+    files = {
+        "build.gradle.kts": GRADLE_KTS_MCP,
+        "src/main/kotlin/demo/WeatherTools.kt": KOTLIN_TOOLS,
+    }
+    tools = _tools(analyze_files(files))
+    assert set(tools) == {"current_weather", "now"}  # `now`: default name = function name
+    w = tools["current_weather"]
+    assert (w.framework, w.handler, w.handlerLine, w.description) == (
+        "spring-ai-mcp",
+        "weather",
+        9,
+        "Current weather for a city",
+    )
+    assert w.parentId and w.parentId.endswith("#WeatherTools#weather@9")
+    assert _params(w) == [
+        ("city", "String", True, None, "City name"),
+        ("units", "String", False, None, "Units"),
+        # Spring AI reads `required` from the annotation only: a default or a nullable type
+        # does not make a parameter optional.
+        ("days", "Int", True, "3", None),
+        ("lang", "String?", True, None, None),
+        ("region", "String?", True, "null", "Region"),
+    ]
+    assert tools["now"].description is None and _params(tools["now"]) == []
+
+
+def test_kotlin_long_default_is_cut(analyze_files) -> None:
+    src = KOTLIN_TOOLS.replace("days: Int = 3,", 'days: String = "' + "x" * 300 + '",')
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": src}
+    days = next(
+        p for p in _tools(analyze_files(files))["current_weather"].params if p.name == "days"
+    )
+    assert len(days.default) == 200 and days.default.endswith("…")
+
+
+def test_java_spring_ai_tools_with_a_gradle_kts_starter(analyze_files) -> None:
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}
+    assert set(_tools(analyze_files(files))) == {"current_weather", "now"}
+
+
+def test_kotlin_spring_ai_tool_without_an_mcp_server_is_a_chat_tool(analyze_files) -> None:
+    gradle = 'dependencies {\n    implementation("org.springframework.ai:spring-ai-starter-model-openai")\n}\n'
+    files = {"build.gradle.kts": gradle, "src/main/kotlin/demo/WeatherTools.kt": KOTLIN_TOOLS}
+    assert _tools(analyze_files(files)) == {}
+    other = KOTLIN_TOOLS.replace(
+        "import org.springframework.ai.tool.annotation.Tool\n", "import com.acme.Tool\n"
+    )
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": other}
+    assert _tools(analyze_files(files)) == {}  # not Spring AI's @Tool
+
+
+def test_kotlin_mcp_tool_annotation_needs_no_build_evidence(analyze_files) -> None:
+    src = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpTool
+import org.springaicommunity.mcp.annotation.McpToolParam
+
+class Calc {
+    @McpTool(name = "add", description = "Add")
+    fun add(@McpToolParam(description = "First") a: Int, @McpToolParam(required = false) b: Int): Int = a + b
+
+    @McpTool
+    suspend fun reset() {}
+}
+"""
+    tools = _tools(analyze_files({"src/main/kotlin/demo/Calc.kt": src}))
+    assert set(tools) == {"add", "reset"}
+    assert tools["add"].framework == "spring-ai-mcp"
+    assert _params(tools["add"]) == [
+        ("a", "Int", True, None, "First"),
+        ("b", "Int", False, None, None),
+    ]
+    assert tools["reset"].description is None
+
+
+def test_kotlin_aliased_spring_ai_tool(analyze_files) -> None:
+    aliased = (
+        KOTLIN_TOOLS.replace(
+            "import org.springframework.ai.tool.annotation.Tool\n",
+            "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
+        )
+        .replace("@Tool(", "@AiTool(")
+        .replace("@Tool\n", "@AiTool\n")
+    )
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": aliased}
+    tools = _tools(analyze_files(files))
+    assert set(tools) == {"current_weather", "now"}
+    assert tools["current_weather"].framework == "spring-ai-mcp"
+    assert _params(tools["current_weather"])[0] == ("city", "String", True, None, "City name")
+
+
+def test_kotlin_aliased_tool_needs_the_starter_and_the_spring_class(analyze_files) -> None:
+    aliased = (
+        KOTLIN_TOOLS.replace(
+            "import org.springframework.ai.tool.annotation.Tool\n",
+            "import org.springframework.ai.tool.annotation.Tool as AiTool\n",
+        )
+        .replace("@Tool(", "@AiTool(")
+        .replace("@Tool\n", "@AiTool\n")
+    )
+    assert _tools(analyze_files({"src/main/kotlin/demo/WeatherTools.kt": aliased})) == {}
+    unrelated = (
+        KOTLIN_TOOLS.replace(
+            "import org.springframework.ai.tool.annotation.Tool\n",
+            "import com.acme.Tool as AiTool\n",
+        )
+        .replace("@Tool(", "@AiTool(")
+        .replace("@Tool\n", "@AiTool\n")
+    )
+    files = {"build.gradle.kts": GRADLE_KTS_MCP, "src/main/kotlin/demo/WeatherTools.kt": unrelated}
+    assert _tools(analyze_files(files)) == {}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize(
+    "build",
+    [{"pom.xml": POM_MCP}, {"build.gradle.kts": GRADLE_KTS_MCP}],
+    ids=["pom", "gradle-kts"],
+)
+def test_spring_ai_tools_with_a_build_file_starter_for_any_jobs(
+    capture_mcp_tools, build, jobs
+) -> None:
+    files = {
+        **build,
+        "src/main/java/demo/WeatherTools.java": JAVA_TOOLS,
+        "src/main/kotlin/demo/ForecastTools.kt": KOTLIN_TOOLS.replace(
+            "WeatherTools", "ForecastTools"
+        ),
+    }
+    tools = capture_mcp_tools(files, jobs)
+    assert set(tools) == {"current_weather", "now"}
+    assert {t["framework"] for t in tools.values()} == {"spring-ai-mcp"}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_spring_ai_tools_without_the_starter_for_any_jobs(capture_mcp_tools, jobs) -> None:
+    files = {"pom.xml": "<project/>", "src/main/java/demo/WeatherTools.java": JAVA_TOOLS}
+    assert capture_mcp_tools(files, jobs) == {}
+
+
+JAVA_BOTH = """
+package demo;
+
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+import org.springframework.ai.tool.annotation.Tool;
+
+public class Mixed {
+    @Tool(description = "Now")
+    public String now() { return ""; }
+
+    McpServerFeatures.SyncToolSpecification calc() {
+        return new McpServerFeatures.SyncToolSpecification(
+            new McpSchema.Tool("calc", "Calculator", "{}"), (exchange, args) -> null);
+    }
+}
+"""
+
+KOTLIN_BOTH = """
+package demo
+
+import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.spec.McpSchema
+import org.springframework.ai.tool.annotation.Tool
+
+class Mixed {
+    @Tool(description = "Now")
+    fun now(): String = ""
+
+    fun calc() = McpServerFeatures.SyncToolSpecification(
+        McpSchema.Tool("calc", "Calculator", "{}")
+    ) { exchange, args -> null }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [("src/main/java/demo/Mixed.java", JAVA_BOTH), ("src/main/kotlin/demo/Mixed.kt", KOTLIN_BOTH)],
+    ids=["java", "kotlin"],
+)
+def test_annotated_tool_and_tool_specification_in_one_file_are_each_emitted_once(
+    analyze_files, path, source
+) -> None:
+    """The Spring AI package reads only the annotated method, the SDK package only the
+    registration: neither tool is emitted twice."""
+    statements = analyze_files({"pom.xml": POM_MCP, path: source})
+    tools = [s for s in statements if s.semanticType == "mcp_tool"]
+    assert sorted((t.endpoint, t.framework) for t in tools) == [
+        ("calc", "java-mcp"),
+        ("now", "spring-ai-mcp"),
+    ]
+
+
+# ── Resources and prompts (@McpResource / @McpPrompt) ─────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    found = [s for s in statements if s.semanticType == semantic_type]
+    for s in found:
+        # a resource's name is its declared name (checked per test); a prompt's is its endpoint
+        assert semantic_type == "mcp_resource" or s.name == s.endpoint
+        assert s.framework == "spring-ai-mcp"
+    return {s.endpoint: s for s in found}
+
+
+def _p(s: Statement) -> list[tuple]:
+    return [(p.name, p.type, p.required, p.description) for p in s.params or []]
+
+
+JAVA_ENTRIES = """
+package demo;
+
+import org.springaicommunity.mcp.annotation.McpArg;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+import org.springaicommunity.mcp.annotation.McpResource;
+
+public class Entries {
+    @McpResource(uri = "users://{id}/profile", name = "Profile", description = "A user's profile")
+    public String profile(String id) { return id; }
+
+    @McpResource(uri = "config://app")
+    public String config() { return ""; }
+
+    @McpResource(name = "nouri")
+    public String noUri() { return ""; }
+
+    @McpPrompt(name = "review", description = "Review code")
+    public Object review(@McpArg(name = "code", description = "The code", required = true) String code,
+                         String style, GetPromptRequest request) { return null; }
+
+    @McpPrompt
+    public Object greet() { return null; }
+}
+"""
+
+
+def test_spring_ai_java_resources_and_prompts_with_no_tool(analyze_files) -> None:
+    statements = analyze_files({"src/Entries.java": JAVA_ENTRIES})
+    resources = _of(statements, "mcp_resource")
+    assert set(resources) == {"users://{id}/profile", "config://app"}
+    profile = resources["users://{id}/profile"]
+    assert (profile.description, profile.handler, profile.handlerLine) == (
+        "A user's profile",
+        "profile",
+        9,
+    )
+    assert _p(profile) == [("id", "string", True, None)]
+    assert resources["config://app"].params == []
+    # `name =` when a literal, else the URI
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "users://{id}/profile": "Profile",
+        "config://app": "config://app",
+    }
+    prompts = _of(statements, "mcp_prompt")
+    assert set(prompts) == {"review", "greet"}
+    assert prompts["review"].description == "Review code"
+    assert _p(prompts["review"]) == [("code", None, True, "The code"), ("style", None, False, None)]
+    assert prompts["greet"].params == []
+
+
+KOTLIN_ENTRIES = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpArg
+import org.springaicommunity.mcp.annotation.McpPrompt
+import org.springaicommunity.mcp.annotation.McpResource
+
+class Entries {
+    @McpResource(uri = "docs://{name}", description = "A doc")
+    fun doc(name: String): String = name
+
+    @McpPrompt(name = "explain")
+    fun explain(@McpArg(description = "Topic", required = true) topic: String, ctx: McpSyncRequestContext): Any = TODO()
+}
+"""
+
+
+def test_spring_ai_kotlin_resources_and_prompts_with_no_tool(analyze_files) -> None:
+    statements = analyze_files({"src/Entries.kt": KOTLIN_ENTRIES})
+    doc = _of(statements, "mcp_resource")["docs://{name}"]
+    assert (doc.description, doc.handler, doc.handlerLine) == ("A doc", "doc", 9)
+    assert doc.name == "docs://{name}"  # no `name =`: the URI
+    explain = _of(statements, "mcp_prompt")["explain"]
+    assert _p(explain) == [("topic", None, True, "Topic")]
+
+
+def test_spring_ai_resource_declared_name(analyze_files) -> None:
+    """``name =`` of ``@McpResource`` when a literal (Java and Kotlin); a constant → the URI."""
+    java = """
+package demo;
+
+import org.springaicommunity.mcp.annotation.McpResource;
+
+public class Names {
+    static final String NAME = "Named";
+
+    @McpResource(uri = "memo://lit", name = "Lit")
+    public String lit() { return ""; }
+
+    @McpResource(uri = "memo://const", name = NAME)
+    public String constant() { return ""; }
+}
+"""
+    kotlin = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpResource
+
+const val NAME = "Named"
+
+class Names {
+    @McpResource(uri = "kt://lit", name = "KtLit")
+    fun lit(): String = ""
+
+    @McpResource(uri = "kt://const", name = NAME)
+    fun constant(): String = ""
+
+    @McpResource(uri = "kt://template", name = "x$NAME")
+    fun template(): String = ""
+}
+"""
+    statements = analyze_files({"src/Names.java": java, "src/Names.kt": kotlin})
+    assert {uri: r.name for uri, r in _of(statements, "mcp_resource").items()} == {
+        "memo://lit": "Lit",
+        "memo://const": "memo://const",
+        "kt://lit": "KtLit",
+        "kt://const": "kt://const",
+        "kt://template": "kt://template",
+    }
+
+
+def test_spring_ai_prompt_map_parameters_are_not_arguments(analyze_files) -> None:
+    """A map parameter of any ``…Map`` type receives the whole arguments map: not an argument."""
+    java = """
+package demo;
+
+import java.util.*;
+import java.util.concurrent.*;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+
+public class Prompts {
+    @McpPrompt(name = "maps")
+    public Object maps(String topic, Map<String, Object> a, TreeMap<String, Object> b,
+                       SortedMap<String, Object> c, NavigableMap<String, Object> d,
+                       ConcurrentMap<String, Object> e, java.util.concurrent.ConcurrentHashMap<String, Object> f) {
+        return null;
+    }
+}
+"""
+    kotlin = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpPrompt
+
+class Prompts {
+    @McpPrompt(name = "maps")
+    fun maps(topic: String, a: MutableMap<String, Any>, b: java.util.TreeMap<String, Any>, c: SortedMap<String, Any>?): Any = TODO()
+}
+"""
+    for path, src in (("src/Prompts.java", java), ("src/Prompts.kt", kotlin)):
+        prompt = _of(analyze_files({path: src}), "mcp_prompt")["maps"]
+        assert _p(prompt) == [("topic", None, False, None)], path
+
+
+def test_spring_ai_resource_look_alikes(analyze_files) -> None:
+    src = """
+package demo;
+
+public class Other {
+    @Resource(name = "dataSource")
+    private Object ds;
+
+    @Prompt("hello")
+    public String hello() { return ""; }
+}
+"""
+    statements = analyze_files({"src/Other.java": src})
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+def test_spring_ai_java_prompt_arg_constants_leave_params_unknown(analyze_files) -> None:
+    """``@McpArg(name = CONST)`` / ``required = FLAG``: the argument list is unknown (None),
+    never the Java parameter's name or a defaulted ``required``."""
+    src = """
+package demo;
+
+import org.springaicommunity.mcp.annotation.McpArg;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+
+public class P {
+    static final String ARG = "source_code";
+    static final boolean REQ = true;
+
+    @McpPrompt(name = "by_const")
+    public Object byConst(@McpArg(name = ARG, required = true) String code) { return null; }
+
+    @McpPrompt(name = "req_const")
+    public Object reqConst(@McpArg(name = "code", required = REQ) String code) { return null; }
+
+    @McpPrompt(name = "literal")
+    public Object literal(@McpArg(name = "src", required = false) String code,
+                          @McpArg(name = "") String other) { return null; }
+}
+"""
+    prompts = _of(analyze_files({"src/P.java": src}), "mcp_prompt")
+    assert prompts["by_const"].params is None
+    assert prompts["req_const"].params is None
+    assert _p(prompts["literal"]) == [("src", None, False, None), ("other", None, False, None)]
+
+
+def test_spring_ai_kotlin_prompt_arg_constants_leave_params_unknown(analyze_files) -> None:
+    src = """
+package demo
+
+import org.springaicommunity.mcp.annotation.McpArg
+import org.springaicommunity.mcp.annotation.McpPrompt
+
+const val ARG = "source_code"
+
+class P {
+    @McpPrompt(name = "by_const")
+    fun byConst(@McpArg(name = ARG, required = true) code: String): Any = TODO()
+
+    @McpPrompt(name = "req_const")
+    fun reqConst(@McpArg(name = "code", required = REQ) code: String): Any = TODO()
+
+    @McpPrompt(name = "literal")
+    fun literal(@McpArg(name = "src", required = true) code: String): Any = TODO()
+}
+"""
+    prompts = _of(analyze_files({"src/P.kt": src}), "mcp_prompt")
+    assert prompts["by_const"].params is None
+    assert prompts["req_const"].params is None
+    assert _p(prompts["literal"]) == [("src", None, True, None)]
+
+
+def test_spring_ai_java_entries_need_the_annotations_library(analyze_files) -> None:
+    """``@McpResource`` / ``@McpPrompt`` of another library are not read; a star import, Spring
+    AI's own package or a fully qualified annotation are."""
+    files = {
+        "src/Other.java": """
+package demo;
+
+import com.acme.annotations.McpResource;
+import com.acme.annotations.*;
+
+public class Other {
+    @McpResource(uri = "acme://x")
+    public String x() { return ""; }
+
+    @McpPrompt(name = "acme")
+    public Object acme() { return null; }
+}
+""",
+        "src/Star.java": """
+package demo;
+
+import org.springaicommunity.mcp.annotation.*;
+
+public class Star {
+    @McpResource(uri = "star://x")
+    public String x() { return ""; }
+
+    @org.springaicommunity.mcp.annotation.McpPrompt(name = "qualified")
+    public Object q() { return null; }
+}
+""",
+        "src/SpringAi.java": """
+package demo;
+
+import org.springframework.ai.mcp.annotation.McpPrompt;
+
+public class SpringAi {
+    @McpPrompt(name = "spring")
+    public Object s() { return null; }
+}
+""",
+    }
+    statements = analyze_files(files)
+    assert set(_of(statements, "mcp_resource")) == {"star://x"}
+    assert set(_of(statements, "mcp_prompt")) == {"qualified", "spring"}
+
+
+def test_spring_ai_kotlin_entries_need_the_annotations_library(analyze_files) -> None:
+    files = {
+        "src/Other.kt": """
+package demo
+
+import com.acme.annotations.McpResource
+import org.springaicommunity.mcp.annotation.McpPrompt as Prompt
+import com.acme.annotations.McpPrompt
+
+class Other {
+    @McpResource(uri = "acme://x")
+    fun x(): String = ""
+
+    @McpPrompt(name = "acme")
+    fun acme(): Any = TODO()
+
+    @Prompt(name = "aliased")
+    fun aliased(): Any = TODO()
+}
+""",
+        "src/Star.kt": """
+package demo
+
+import org.springaicommunity.mcp.annotation.*
+
+class Star {
+    @McpResource(uri = "star://x")
+    fun x(): String = ""
+
+    @org.springaicommunity.mcp.annotation.McpPrompt(name = "qualified")
+    fun q(): Any = TODO()
+}
+""",
+    }
+    statements = analyze_files(files)
+    assert set(_of(statements, "mcp_resource")) == {"star://x"}
+    assert set(_of(statements, "mcp_prompt")) == {"aliased", "qualified"}

@@ -3,6 +3,8 @@ with shared API/DB call detection (``parsers/detection``)."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
@@ -10,8 +12,9 @@ from ..statements_common import (
     classify_statement,
     render_concat,
     resolve_endpoint,
-    strip_leading_base,
+    url_or_value,
     url_placeholder,
+    url_first,
 )
 from ..treesitter import node_text
 from .decorators import extract_decorators
@@ -214,7 +217,7 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _render_url(node: Node, source: bytes) -> str | None:
+def render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string, template literal, or ``+`` concatenation.
     Interpolations become ``{name}`` placeholders; a leading interpolated base/host
     segment is dropped (``\\`${base}/users/${id}\\``` -> ``/users/{id}``)."""
@@ -229,13 +232,14 @@ def _render_url(node: Node, source: bytes) -> str | None:
             elif c.type == "template_substitution":
                 expr = c.named_children[0] if c.named_children else None
                 parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-        return strip_leading_base("".join(parts))
+        return "".join(parts)
     if node.type == "binary_expression":  # string concatenation: '/a/' + id + '/b'
-        return render_concat(node, source, _render_url)
+        return render_concat(node, source, render_url)
     return None
 
 
-def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
+def _resolve_args(args: Node | None, source: bytes, method: str | None = None
+                  ) -> tuple[str | None, str | None]:
     """(endpoint, override_method) from a call's arguments. Handles the config-object
     form (``axios({ url, method })``) — JS-specific — then falls back to the shared
     positional resolver (first-arg / verb-first)."""
@@ -253,19 +257,20 @@ def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | N
             val = pair.child_by_field_name("value")
             kname = node_text(key, source) if key is not None else ""
             if kname in ("url", "uri", "path") and val is not None:
-                url = _render_url(val, source)
+                url = url_or_value(val, source, render_url)
             elif kname == "method" and val is not None:
-                mv = _render_url(val, source)
+                mv = render_url(val, source)
                 override = mv.lower() if mv else None
         return url, override
-    return resolve_endpoint(named, source, _render_url)
+    return resolve_endpoint(named, source, render_url, method=method)
 
 
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     fn = call.child_by_field_name("function")
     callee = node_text(fn, source) if fn is not None else ""
     method = callee.rsplit(".", 1)[-1]
-    endpoint, override = _resolve_args(call.child_by_field_name("arguments"), source)
+    endpoint, override = _resolve_args(call.child_by_field_name("arguments"), source,
+                                       url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint
@@ -283,16 +288,78 @@ def _wraps_module(node: Node) -> bool:
     )
 
 
-def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tuple[int, int]] = frozenset()):
+#: Values that make a declaration or class field a function binding (``const f = () => …``,
+#: ``handle = function () {…}``) — the binding is then extracted as that ``Function``.
+FUNCTION_VALUES = ("arrow_function", "function_expression")
+_BINDINGS = ("lexical_declaration", "variable_declaration")
+_FIELDS = ("public_field_definition", "field_definition")
+
+
+def _bound_values(node: Node) -> list[Node] | None:
+    """The values a declaration or class field binds, or None when ``node`` is neither or one
+    of its declarators has no value."""
+    if node.type in _FIELDS:
+        value = node.child_by_field_name("value")
+        return [value] if value is not None else None
+    if node.type not in _BINDINGS:
+        return None
+    values = []
+    for child in node.named_children:
+        if child.type == "comment":
+            continue
+        value = child.child_by_field_name("value") if child.type == "variable_declarator" else None
+        if value is None:
+            return None
+        values.append(value)
+    return values or None
+
+
+def binds_only_functions(node: Node) -> bool:
+    """True for a declaration or class field whose every value is a function
+    (``const f = () => …``): its whole content is the ``Function`` it names."""
+    values = _bound_values(node)
+    return values is not None and all(v.type in FUNCTION_VALUES for v in values)
+
+
+def is_bound_function(fn: Node) -> bool:
+    """True when ``fn`` is the value of a declaration or class field that binds only
+    functions — the one place the function is written, so its expression body becomes its
+    statement (see :func:`extract_expression_body`)."""
+    parent = fn.parent
+    if parent is None:
+        return False
+    if parent.type == "variable_declarator":
+        parent = parent.parent
+    return parent is not None and binds_only_functions(parent)
+
+
+def _duplicates_functions(node: Node, built: frozenset[tuple[int, int]]) -> bool:
+    """True when ``node`` only binds functions that were extracted as ``Function`` records —
+    the statement would repeat them, so it is not emitted."""
+    if not built or not binds_only_functions(node):
+        return False
+    values = _bound_values(node) or []
+    return all(_span(v) in built for v in values)
+
+
+def _iter_in_scope(
+    node: Node,
+    descend_all: bool = False,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
+    built: frozenset[tuple[int, int]] = frozenset(),
+) -> Iterator[Node]:
     """Yield EMIT_TYPES statement nodes. When ``descend_all`` is False (file-root /
     class-body scope) nested scopes remain barriers — they are extracted as their own
     Function/Class. When True (a function body) we descend into inline callbacks and
     lambdas, attributing their statements to this function, EXCEPT nested named
     functions (their spans are in ``barriers``): those are extracted as their own
     scope, so descending would double-emit. This closes the "callback black hole"
-    while keeping one-statement-per-nearest-named-function (see build_function)."""
+    while keeping one-statement-per-nearest-named-function (see build_function).
+
+    A declaration that only binds functions extracted as their own ``Function`` (their
+    value spans are in ``built``) is skipped: the Function is the record of that code."""
     for child in node.named_children:
-        if _span(child) in barriers:
+        if _span(child) in barriers or _duplicates_functions(child, built):
             continue
         if not descend_all and child.type in NESTED_SCOPES:
             continue
@@ -304,7 +371,7 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child, descend_all, barriers)
+        yield from _iter_in_scope(child, descend_all, barriers, built)
 
 
 def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
@@ -326,12 +393,13 @@ def extract_statements(
     seen_ids: set[str],
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
+    built: frozenset[tuple[int, int]] = frozenset(),
     typed_db_ids: frozenset[str] | None = None,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all, barriers):
+    for node in _iter_in_scope(body, descend_all, barriers, built):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
@@ -342,3 +410,26 @@ def extract_statements(
             )
         )
     return out
+
+
+def extract_expression_body(
+    body: Node,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    capture: bool,
+    limit: int,
+    seen_ids: set[str],
+    typed_db_ids: frozenset[str] | None = None,
+) -> list[Statement]:
+    """The expression body of an arrow function (``(x) => db.insert(x)``) as that function's
+    one statement, with its own raw ``nodeType`` (``call_expression``)."""
+    if not capture:
+        return []
+    return classify_statement(
+        body, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
+        emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
+        name_of=_name_of, call_details=_call_details, language="typescript",
+        typed_db_ids=typed_db_ids,
+    )

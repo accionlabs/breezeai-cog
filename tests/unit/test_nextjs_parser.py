@@ -12,12 +12,11 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
-from breezeai_cog.parsers.typescript_nextjs.routes import (
-    endpoint_from_path,
+from breezeai_cog.parsers.typescript_nextjs.routes import endpoint_from_path, pages_api_endpoint
+from breezeai_cog.parsers.typescript_nextjs_common import (
     is_app_router_route_file,
     is_pages_api_file,
     is_route_file,
-    pages_api_endpoint,
 )
 from breezeai_cog.schemas import FileRecord
 
@@ -299,12 +298,12 @@ def test_base_path_per_app_in_a_monorepo(analyze_files) -> None:
     assert got == {"apps/web/app/ping/route.ts": "/web/ping", "apps/admin/app/ping/route.ts": "/ping"}
 
 
-def test_unresolvable_base_path_leaves_endpoint_empty(analyze_files) -> None:
-    # Set from the environment / a conditional: the address is unknown (contract §8, decision Q8).
-    for cfg in ("module.exports = { basePath: process.env.BASE_PATH };\n",
-                "module.exports = { basePath: isProd ? '/docs' : '' };\n"):
+def test_unresolvable_base_path_is_a_runtime_part(analyze_files) -> None:
+    # Set from the environment / a conditional: a value read at runtime, marked where it stands.
+    for cfg, want in (("module.exports = { basePath: process.env.BASE_PATH };\n", "${env:BASE_PATH}/users"),
+                      ("module.exports = { basePath: isProd ? '/docs' : '' };\n", "${value}/users")):
         got = _next_endpoints(analyze_files, {"next.config.js": cfg, "app/users/route.ts": _ROUTE})
-        assert got == {"app/users/route.ts": None}, cfg
+        assert got == {"app/users/route.ts": want}, cfg
 
 
 def test_base_path_from_a_constant(analyze_files) -> None:
@@ -462,8 +461,8 @@ def test_records_report_the_node_they_stand_for(analyze_files) -> None:
 
 
 def test_a_handler_declaration_that_is_an_api_call_keeps_it(analyze_files) -> None:
-    # The shared HTTP classifier classified the one-line declaration as the outbound call; the route is a
-    # record beside it, at the same node, not an overwrite of it.
+    # The handler's expression body is its statement and carries the outbound call; the route is
+    # recorded at the declaration, which is otherwise not emitted (it would repeat the Function).
     st = analyze_files({
         "package.json": _NEXT_PKG,
         "pages/api/proxy.ts": (
@@ -475,9 +474,11 @@ def test_a_handler_declaration_that_is_an_api_call_keeps_it(analyze_files) -> No
     got = sorted((s.semanticType, s.nodeType, s.startLine, s.endpoint)
                  for s in st if s.semanticType in ("route", "api_call"))
     assert got == [
-        ("api_call", "lexical_declaration", 1, "https://api.example.com/b"),
+        ("api_call", "call_expression", 2, "https://api.example.com/b"),
         ("route", "lexical_declaration", 1, "/api/proxy"),
     ]
+    call = next(s for s in st if s.semanticType == "api_call")
+    assert call.parentId == "pages/api/proxy.ts#handler@1"
 
 
 _NEXT16_PKG = '{"dependencies": {"next": "^16.0.0", "react": "19"}}'

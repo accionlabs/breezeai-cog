@@ -138,10 +138,10 @@ the route-table entry, or — for a registered container — the member.
 
 | Field | Content | Required |
 |---|---|---|
-| `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) | Yes |
-| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` | When the trigger has one |
+| `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) · `mcp_tool` / `mcp_resource` / `mcp_prompt` (a tool, resource or prompt an MCP server exposes to AI clients) | Yes |
+| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` · `TOOL` (an `mcp_tool`, whose `endpoint` is the tool name) · `RESOURCE` (an `mcp_resource`, whose `endpoint` is the URI or URI template) · `PROMPT` (an `mcp_prompt`, whose `endpoint` is the prompt name) | When the trigger has one |
 | `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
-| `endpoint` | **The address, fully resolved** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)) | If any part can't be determined: **empty**. Never guessed, never a code name |
+| `endpoint` | **The address** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)); a part read at runtime is marked `${name}` where it stands ([§6](#a-part-read-at-runtime-name)) | If a part can't be determined and isn't marked, or no literal path part is known: **empty**. Never guessed |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
 | `handler` | The handler's name: method, function or component | Yes, unless the handler is anonymous ([below](#anonymous-handlers)) |
 | `handlerLine` | Line of the handler's declaration — the start line of its `Function` record, which for C# / Java includes attributes and annotations (for an anonymous handler, the line where the function starts); a line of `handlerPath` when that is set | Yes |
@@ -167,6 +167,12 @@ It is still an entry point. Record it with:
 A function is **named** when the source gives it a name: a declaration (`function getUser`), a
 method, or a function assigned to a variable or property (`const getUser = async () => …`). Only
 a function with none of these is anonymous.
+
+A Java **anonymous class** passed as the handler (`new Handler<Message>() { public void handle(…)
+{ … } }`) is a `Class` of its own, and its method is a named `Function` (`Svc$1#handle`). Where
+the framework's handler type has one method, that method is the handler: Vert.x gives `handler` =
+`handle` and the `handlerLine` of that Function (no `handlerPath`: same file). A body with no such
+method, or two overloads of it, keeps the inline line only.
 
 **Wrappers are not handlers.** When the handler argument is a wrapper call around a function
 (`asyncHandler(async (req, res) => { … })`), the handler is the **innermost function**. When a page
@@ -223,8 +229,9 @@ Records filed under `route` that are not entry points:
 | `mount` | A router mount whose routes aren't in the repo, in the spec's current form (§5); `layout` is no longer written | Names no handler of its own |
 | `navigation` | A link | Outbound |
 
-The entry points are the `route`, `eventbus_consumer` and `timer` records whose `routeKind` is
-not `field_resolver`, `mount`, `layout` or `navigation`.
+The entry points are the `mcp_tool`, `mcp_resource` and `mcp_prompt` records, and the `route`,
+`eventbus_consumer` and `timer` records whose `routeKind` is not `field_resolver`, `mount`,
+`layout` or `navigation`.
 
 > **Decision —** the entry-point record lives at the binding construct, never at the wiring.
 > **Why:** the binding is the one construct that names exactly one handler, so one binding is
@@ -233,11 +240,149 @@ not `field_resolver`, `mount`, `layout` or `navigation`.
 > point. **Cost:** wiring in another file must reach the binding's record through the repository
 > index ([cross-file route composition](cross-file-resolution.md#8-cross-file-route-composition)).
 
+### MCP tools
+
+A tool an MCP server exposes is an entry point an AI client calls by name. Every tool is one
+`mcp_tool` record at the construct that declares it:
+
+| Field | Content |
+|---|---|
+| `method` | `TOOL` |
+| `endpoint` | The name clients call, after any rename. A name that is not a literal → **no record** (the tool exists, but its name is unknown) |
+| `framework` | The SDK the tool is declared with: `fastmcp`, `python-mcp`, `typescript-mcp`, `spring-ai-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp`, `mcp-go`, `go-mcp` |
+| `handler` / `handlerLine` | The function that runs the tool; a lambda gives only its line ([above](#anonymous-handlers)) |
+| `description` | The description the server gives the client, when it is a literal |
+| `params` | The input parameters, in the shape of a function's `params`: `[{name, type, default, decorators, required, description}]` |
+| `nodeType` | The construct's own node: `decorator` (Python), `attribute` (C#), `annotation` / `marker_annotation` (Spring AI), otherwise the call or object that declares it. Never `synthetic`: the construct is a real node. The same holds for `mcp_resource` and `mcp_prompt` |
+
+- **Only on a proven MCP server.** A tool counts only when the code shows that the object it is
+  declared on is an MCP server: a server object of the SDK, the SDK's own annotation or
+  attribute, or a module whose build file declares an MCP server. Agent frameworks and chat
+  clients use the same words (`@agent.tool`, Spring AI `@Tool`, `.tool(…)`); those are not
+  entry points. Each framework's proof is in its role table.
+- **Once.** A file can use two MCP frameworks; each tool is recorded once, by the package of
+  the framework its construct belongs to.
+- **One record per site in the code, not per server.** The record sits where the tool is
+  written, so how many records a tool gets follows the construct each SDK reads:
+  - Go SDK: one per `AddTool` call — a tool variable registered twice gives two records.
+  - TypeScript low-level `Server`: one per tool object. A module-level `const` named in the
+    `tools` arrays of two servers is one record, whose `handler` is the `CallToolRequestSchema`
+    callback of the first server that lists it.
+  - Kotlin SDK `addTools`: one per `RegisteredTool` element of the list, however many
+    `addTools` calls receive it.
+  - Java / Kotlin tool specifications: one per specification built, wherever it is passed
+    (`.tools(spec…)` is not read); a builder shortcut `.tool(…)` is one per call.
+  - Python low-level `Server`: one per `Tool(…)` literal in a `list_tools` function.
+- **`params` is all or nothing.** `[]` means the tool takes no input (no schema, or an empty
+  one). A schema that cannot be read whole (a variable, a spread, an unknown helper) leaves
+  `params` unset, never a partial list. `required` is `true` / `false` when the schema says so
+  and unset when it does not.
+- **`params` stays within 15 KB** as JSON (the backend drops the whole field over 16 KB). Past
+  it, parameter descriptions are kept in parameter order while they fit and the rest go
+  without; names, types and defaults are always kept.
+- **Incremental sync** (`/api/analyze-diff`): unchanged files are materialised empty, like for
+  every cross-file fact. A changed tools file whose proof is in an unchanged file (a server
+  imported from another module, a server starter in a build file) is re-ingested without its
+  tools, and a sync that adds or removes such a proof leaves the unchanged tool files as they
+  were. A full analysis restores them.
+
+### MCP resources and prompts
+
+A resource is data an AI client reads by URI; a prompt is a template it fetches by name. Both are
+entry points held to the tool rules above (a proven server, a literal address, recorded once,
+`params` all or nothing and within 15 KB), at the construct that declares them:
+
+| Field | `mcp_resource` | `mcp_prompt` |
+|---|---|---|
+| `method` | `RESOURCE` | `PROMPT` |
+| `endpoint` | The URI (`config://app`) or URI template (`users://{id}/profile`), as written | The prompt name |
+| `name` | The resource's declared name when the SDK gives one as a literal (`"Profile"` beside its URI); otherwise (no name, or one that is not a literal) the URI | The prompt name (= `endpoint`) |
+| `handler` / `handlerLine` | The function that reads it | The function that renders it |
+| `description` | The description the server gives the client, when it is a literal | Same |
+| `params` | A template's variables: each simple `{name}` → `{name, type: "string", required: true}`; `[]` for a fixed URI; unset when the template uses an RFC 6570 operator (`{?q}`, `{+path}`, `{#f}`, `{/s}`, `{.x}`, `{;x}`, `{&x}`), an explode (`{x*}`), a prefix (`{x:3}`) or several variables in one expression | Its arguments: `{name, required, description}`, never a `type` or `default` (an MCP prompt argument is a string), for every SDK; where the SDK builds them from a function's parameters (FastMCP, C#), those parameters' names, required (no default) and descriptions |
+
+```python
+@mcp.resource("users://{user_id}/profile", description="A user's profile")  # → mcp_resource, params [user_id]
+def profile(user_id: str) -> str: ...
+
+@mcp.prompt(name="review")                                                   # → mcp_prompt, params [code]
+def review_code(code: str) -> str: ...
+```
+
+- A server API that lists them in one function (Python's low-level `@server.list_resources()` /
+  `list_prompts()`, TypeScript's `ListResourcesRequestSchema` / `ListPromptsRequestSchema`
+  handlers) gives one record per literal entry of the returned list; its handler is the server's
+  single `read_resource` / `get_prompt` dispatcher in the same file (none, or several → unset).
+- A fixed resource's URI is literal even with braces in it: `params` is `[]`.
+- A resource's `name` is the name the code gives it — TypeScript `server.resource("Profile", uri,
+  …)` / `registerResource("Profile", …)` and a low-level list entry's `name`, Python
+  `types.Resource(name="Profile", …)` / `ResourceTemplate(name=…)` and FastMCP
+  `@mcp.resource(uri, name="Profile")`, Spring AI `@McpResource(name = "Profile")`, the Java SDK's
+  second `Resource` / `ResourceTemplate` constructor or builder argument (or `.name(…)`), the
+  Kotlin SDK's `addResource(uri, name, …)`, C# `[McpServerResource(Name = "Profile")]`, mcp-go
+  `NewResource(uri, "Profile")` and the Go SDK's `&mcp.Resource{Name: "Profile"}` — only when it
+  is a literal; a name the SDK would derive (a FastMCP or C# method name) is not read, and the
+  record keeps the URI as its `name`. A tool's and a prompt's `name` is their `endpoint`.
+- A URI the SDK derives from a method (C# `[McpServerResource]` without `UriTemplate`) is not read:
+  no record.
+
+### MCP client calls
+
+An `mcp_call` is outbound: a proven MCP **client** calls a tool, reads a resource or gets a
+prompt, by a literal name or URI.
+
+| Field | Content |
+|---|---|
+| `semanticType` | `mcp_call` |
+| `method` | `TOOL` / `RESOURCE` / `PROMPT` |
+| `endpoint` | The tool name, URI or prompt name, written like the server's `mcp_tool` / `mcp_resource` / `mcp_prompt` `endpoint` it reaches; a value that is not a literal → **no record** |
+| `framework` | The client SDK: `python-mcp`, `fastmcp`, `typescript-mcp`, `mcp-go`, `go-mcp`, `java-mcp`, `kotlin-mcp`, `csharp-mcp` |
+| `name` | Not set by the detector: the enriched call statement keeps the name it already has (an assignment target like `result`), an appended one has none — as for an `api_call` |
+| `handler`, `description`, `params` | Never set |
+
+```python
+async with ClientSession(read, write) as session:
+    await session.call_tool("search", {"q": "x"})   # → mcp_call  TOOL  search
+```
+
+- **Only on a proven client.** The receiver must be the SDK's client (constructed, typed, or
+  returned by the SDK's factory). Agent frameworks that wrap MCP servers
+  (`MCPServerStdio.call_tool`, LlamaIndex `BasicMCPClient`, LangChain `MultiServerMCPClient`), the
+  AI SDK's `experimental_createMCPClient`, an `aiohttp` `ClientSession`, a `pg` `Client`, and a
+  client taken from a list (`clients.get(0).callTool(…)`) are not.
+- **The call's own statement.** The record enriches the innermost captured statement that
+  contains the call when it is unclassified and starts on the call's line (keeping its `name`),
+  so that line keeps one statement. It is the statement the call is in, not just any statement
+  on its line: `x = 1; await s.call_tool("t")` enriches the call's statement, `async with
+  ClientSession(r, w) as s: await s.call_tool("x")` and `} catch (e) { await
+  client.callTool(…) }` enrich the body's statement and leave the `with` / `catch` unclassified.
+  A call inside a statement that starts on an earlier line — an argument of a multi-line
+  `gather(…)` / `Promise.all([…])`, the second line of an `if` condition — or in a control-flow
+  header (`if (await s.call_tool("x")).isError:`) gets a record of its own on its line instead.
+- **No file framework.** A file with only client calls keeps `framework` unset: it is not an MCP
+  server.
+- **A spread after the literal** (`client.callTool({ name: "x", ...req })`) may override it at
+  runtime: no record. A spread before it is overridden by it and changes nothing.
+- **Java, Kotlin and C# clients are proven by name within their class.** A name declared in a
+  class as a client (typed, or assigned the SDK's factory), and as nothing else in that class,
+  is a client wherever that name is called in the same class (the innermost `class`, `object`,
+  `struct`, `record` or `interface` around the call; the file's top level outside them). A
+  same-named `client` in another class — inherited from a base class, or declared in an outer
+  class — is not taken for it (no record). Within the class, a Kotlin `with` / scope-function
+  receiver with a member of the same name can still be taken for it. Python and TypeScript
+  resolve the call's nearest binding instead.
+- **Client detectors also run on fixture and test files**, unlike the server detectors (an
+  `mcp_call` is outbound, not an entry point): a test that calls a tool through a real client
+  records that call.
+- The contract checks an `mcp_call` like other outbound records (no empty or placeholder
+  `endpoint`), and also that it has a `method` of `TOOL` / `RESOURCE` / `PROMPT`, a `framework`, an
+  `endpoint` and no handler.
+
 ## 6. Address format (`endpoint`)
 
 The same format is used on both sides: an outbound record's `endpoint` (`api_call`,
-a `route` link, `eventbus_send`) is written exactly like the entry point it reaches, so the two
-match.
+a `route` link, `eventbus_send`, `mcp_call`) is written exactly like the entry point it reaches,
+so the two match.
 
 | Trigger | `endpoint` contains | Example |
 |---|---|---|
@@ -250,6 +395,118 @@ match.
 | Message / event | Queue, topic or address name; an object pattern as canonical JSON with sorted keys (the form the transport matches on) | `billing`, `orders.created`, `{"cmd":"sum"}` |
 | Schedule | Cron or interval expression | `0 2 * * *` |
 | Page | URL path, with parent prefixes applied | `/settings/profile` |
+
+### A part read at runtime (`${name}`)
+
+Many apps build an address from a value cog cannot read — a context root, base path, prefix or
+whole URL from a config file, an env var, a settings object, a variable or a call — plus a literal
+path. cog never guesses the value; it keeps the address with the value **marked where it stands**,
+named after where it comes from:
+
+- **`${…}`** — a value cog cannot read: it may be empty, one path segment, several, a scheme and
+  host, or a whole address. Fixed for a deployment, never filled by a caller.
+- **`{name}`, `:name`, `<name>`** — a path parameter or request value: one segment, filled per
+  request. A framework's own parameter syntax is kept as written.
+
+What is inside a marker names the value's **source**, the same way for both markers, so two values
+never share a name only because their last parts match:
+
+| The value in the code | Its name |
+|---|---|
+| A configuration entry read by literal keys: `config().getJsonObject("api-verticle").getString("address")`, `config.get("base")`, `env.getProperty("app.base")` | `config:` and the key path: `${config:api-verticle.address}`, `${config:base}`, `${config:app.base}` |
+| An environment variable: `process.env.BASE_PATH`, `os.getenv("BASE")`, `System.getenv("BUS")` | `env:` and its name: `${env:BASE_PATH}`, `${env:BASE}`, `${env:BUS}` |
+| A name or member path (a variable, a field, a constant cog cannot resolve) | written whole, less a leading `this.` / `self.`: `config.contextRoot` → `${config.contextRoot}`, `user.id` → `{user.id}`, `this.userId` → `{userId}` |
+| A local variable assigned once from a configuration or environment lookup | named after that lookup (`String address = config().getString("a"); send(address, …)` → `${config:a}`; `const p = process.env.P; app.get(p, h)` → `${env:P}`). Assigned twice, reassigned, or shadowed by a parameter of that name: named as itself (`${address}`) |
+| Another lookup by a literal key | the key: `map.get("pathPrefix")` → `${pathPrefix}` |
+| Another call | `${…}`: the called function (`prefixFromEnv()` → `${prefixFromEnv}`); `{param}` for a request value (`encodeURIComponent(id)`) |
+| A formatted string: `String.format("%s/notice", prefix)` (Java Vert.x) | as the same concatenation: `${prefix}/notice`; only `%s` / `%d` with a format cog can read |
+| Values added with no string between them | one marker each: `prefix + host + ":" + port` → `${prefix}${host}:${port}`; a parenthesised sum `(page + 1)` stays one value |
+| Anything else | `${value}` / `{param}` |
+
+Which marker a part becomes:
+
+- in an **inbound** route path or an **event-bus address**, every part cog cannot read is `${…}`
+  (a request value enters a route only through the framework's own parameter syntax);
+- in an **outbound** URL, a part in the base — before the path's first `/` (or the `?` / `#` of
+  a relative URL with no `/`), the scheme and host included — is `${…}`; a later part is a
+  request value, `{name}` (`"run.php?action=" + a` → `run.php?action={a}`) — except a
+  configuration entry or environment variable, which is `${…}` wherever it stands.
+
+An address made **only of named markers is kept**: it names where the address comes from, not the
+address (`${url}`, `${config:api-verticle.address}`, `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}`).
+An address is empty only when no part has a name (`${value}`, `{param}` only): that says nothing.
+The URL of a call is taken from a variable only when the call takes its URL first — an HTTP verb
+(`get`, `post`, …), `fetch`, a `url(…)` / `uri(…)` builder, a RestTemplate verb — and never from a
+verb on a request builder (`ws.url(u).post(body)`: `post` takes the body); an event-bus address
+only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such as
+`EventBusUtil.send(container, …)`).
+
+| Code | Kind | `endpoint` |
+|---|---|---|
+| `router.get(config().getString("pathPrefix") + "/request")` (Vert.x), ``app.get(`${BASE}/users/:id`)`` (Express) | route | `${config:pathPrefix}/request`, `${BASE}/users/:id` |
+| `router.get("/api/" + version + "/orders")` | route | `/api/${version}/orders` |
+| `register(p, { prefix: config.base })` (Fastify), `setGlobalPrefix(config.x)` (NestJS), `include_router(r, prefix=settings.X)` (FastAPI), `route(prefixFromEnv()) { … }` (Ktor), `basePath: process.env.BASE_PATH` (LoopBack, Next.js), a Vert.x sub-router mounted once at such a prefix | route | `${config.base}/…`, `${config.x}/…`, `${settings.X}/…`, `${prefixFromEnv}/…`, `${env:BASE_PATH}/…` |
+| ``app.get(`${BASE}`, h)`` | route | `${BASE}` |
+| `router.get(path).handler(h)`, `app.get(ordersPath, h)`, `app.get(routes.orders, h)` (a whole path that is one value: [how it is told from another argument](#a-path-that-is-one-value)) | route | `${path}`, `${ordersPath}`, `${routes.orders}`; `${config:orders.path}` / `${env:ORDERS_PATH}` when the variable is read once from there |
+| `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + order.id })` — and the same shapes in every language's HTTP calls | outbound | `${config.contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{order.id}` |
+| `$.get("/api/users/" + user.id + "/roles")`, `` $.getJSON(`/api/users/${id}`) `` — a jQuery URL reads exactly as the same `axios` URL | outbound | `/api/users/{user.id}/roles`, `/api/users/{id}` |
+| `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` |
+| `new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + fileApiPath)` | outbound | `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}` |
+| `send(config().getObject("api-verticle").getString("address"), …)`, `consumer(config().getString("address"), h)`, `send(System.getenv("BUS") + ".orders", …)` | event bus | `${config:api-verticle.address}`, `${config:address}`, `${env:BUS}.orders` |
+| `axios.get(buildUrl(a, b) \|\| fallback)` | outbound | empty: no part has a name |
+
+**Reading it.** An endpoint made only of `${…}` parts names the **source** of the address: two
+records with the same `${…}` read the same variable or key, but each module or deployment may set
+it differently, so records are **never joined on equal `${…}` text**. A reader comparing a call
+with a route drops the leading `${…}`, compares the rest (treating `{id}`, `:id` and `<id>` alike),
+and gets a **candidate**, never a certain match; it never matches through a `${…}` part. In detail:
+
+- **`:` is a source, `.` is code.** `${config:a.b}` is configuration entry `a.b` and `${env:X}`
+  environment variable `X`; `${config.ordersUrl}` is a member of a code object that happens to be
+  named `config` — a variable, not a configuration key.
+- **Same method, or no match.** A call is a candidate only for a route with the same HTTP method
+  (a route with `method` empty or `ANY` takes every verb). A route whose endpoint is only `${…}`
+  is neither matched nor ruled out: "cannot tell".
+- **Mounts are already applied.** A route's endpoint includes the prefix of the router it is
+  mounted on (`adminRouter.get('/audit')` mounted at `process.env.ADMIN_BASE` →
+  `${env:ADMIN_BASE}/audit`); the mount has no record of its own.
+- **A request value keeps its whole name.** `{order.id}` is a request value named by its member
+  path; for matching it is a parameter like `{id}` or `:id`.
+- **The two prefixes differ.** A call's leading `${…}` may hold a scheme and host
+  (`https://billing.example`), a route's only a path prefix: dropping both compares paths, which is
+  why the result is a candidate.
+- **A name says how far cog could follow the value, not where it ends.** A local read once from
+  configuration names the read when it is the whole address (`${config:orders.path}`); inside a
+  built path, or as a field, it is named as written (`${pathPrefix}/x`, `${reportPath}`). A plain
+  `${name}` therefore does not mean the value is not configuration — only that cog did not trace it.
+
+The unknown part is never written `{name}`: that would read as one segment a caller fills in. The
+marker is cog's, never copied source syntax (a JavaScript template literal's `${x}` is read and
+re-marked). Unchanged: a prefix cog resolves (Spring context path, Next.js `basePath`, JAX-RS
+application path, a literal or constant), a real path parameter (`/api/orders/{id}`), and a router
+mounted at two known prefixes (empty). Every outbound URL and every route address goes
+through `parsers/addresses.py` once per file, so the notation is the same in every language.
+
+### A path that is one value
+
+Naming a value says what an address is built from; it does not say whether an argument **is**
+an address. A detector decides that first, from the code around the argument, and the
+evidence it asks for grows as the argument says less:
+
+| The first argument | What makes it a path | Example: recorded | Example: not recorded |
+|---|---|---|---|
+| Has a literal part (a string, a template with text, a sum with a string) | the receiver and verb, as for any literal path | `router.get(prefix + "/x")` → `${prefix}/x` | — |
+| Is one value: a name, a member path, or a configuration / environment read | **all of**: (1) a receiver the file certainly holds as an app or router — bound to `Router.router(vertx)`, `new RouteMatcher()`, `express()`, `Router()` / `express.Router()`, or a field or parameter typed as one, never a receiver known only by its name; (2) a handler — the verb's second argument or a chained `.handler(…)`; (3) the value is no function or router of the file | `router.get(path).handler(this::list)` → `${path}`; `app.get(ordersPath, listOrders)` → `${ordersPath}` | `router.get(path)` (no handler); `cache.get(key, onHit)` (no router); `app.get(listOrders, x)` (a function); `router.get(helper()).handler(h)` (another call) |
+| Is one value, on a mount (`app.use(value, router)`) | (1) and (2) above, the mounted argument a router of this file, **and** the value a configuration or environment read (directly or through a variable read once from it): the first argument of `use` is as often a middleware | `app.use(process.env.API, apiRouter)` → the router's routes under `${env:API}` | `app.use(logger, apiRouter)`; `app.use(authMiddleware)` |
+| Anything else (a call that is no configuration read, an object, a function) | never a path | — | `app.use(helmet(), cors())` |
+
+The record is then named as any other value is (the table above): `${path}`, or
+`${config:orders.path}` / `${env:ORDERS_PATH}` when the variable is assigned once from that read.
+A router mounted at a base read at runtime carries the marked base into its routes, first
+(`${env:API}/orders`, `${BASE}/api/orders`), as a Vert.x sub-router does; mounted at two bases, or
+at a value that is neither, its routes stay empty. Applied to Vert.x (Java) and Express routes; a
+variable read once from configuration names a **whole** path or event-bus address — inside a
+built path (`pathPrefix + "/x"`) each part is still named as written (`${pathPrefix}/x`).
 
 ## 7. Examples
 
@@ -289,9 +546,10 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
 ## 8. Accuracy rules
 
 - **Wrong is worse than missing.** If the address can't be resolved, record the entry point with
-  an empty `endpoint` — never a guess. This includes a prefix that exists but can't be resolved
-  (`include_router(r, prefix=settings.X)`, `setGlobalPrefix(config.x)`): the bindings behind it
-  get an empty `endpoint`, not the part that is known. A message address that can't be resolved
+  an empty `endpoint` — never a guess. A part read at runtime (`include_router(r,
+  prefix=settings.X)`, `setGlobalPrefix(config.x)`) is not guessed either: it is marked
+  `${name}` where it stands ([§6](#a-part-read-at-runtime-name)), never dropped (a partial path
+  would read as the whole address) and never written `{name}` (a path parameter). A message address that can't be resolved
   is empty on both sides — consumer and sender — rather than the symbol it was read from.
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
@@ -343,7 +601,7 @@ there.
 | `AddQueryType<T>()` / `AddMutationType<T>()` / `AddSubscriptionType<T>()` | Wiring | Registers `T` as a root container, usually from another file |
 | Public method or property of a root container | Binding | One operation: `QUERY` / `MUTATION` / `SUBSCRIPTION`, field name as `endpoint` |
 | `descriptor.Field(...)` in `Configure` of a root `ObjectType<T>` / `ObjectTypeExtension` | Binding | One operation, declared fluently |
-| Fields of a data type (`[ExtendObjectType(typeof(Book))]`, `[Parent]` resolvers, `ObjectType<Book>` fields) | None | No address of their own; recorded as `routeKind: field_resolver`, not counted (§5) |
+| Fields of a data type (`[ExtendObjectType(typeof(Book))]`, `[Parent]` resolvers, `ObjectType<Book>` fields whose resolver reads its object: `ctx.Parent<Book>()`, or a `[Parent]` `ResolveWith` method) | None | No address of their own; recorded as `routeKind: field_resolver`, not counted (§5). Other `ObjectType<Book>` fields stay plain statements |
 | `[ReferenceResolver]` on a type (Apollo Federation) | Binding | Called by the gateway through the generated `_entities` field: `method: RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` |
 | `[NodeResolver]` on a type marked `[Node]` (Relay, `AddGlobalObjectIdentification`) | Binding | Called through the generated `node` field: `method: RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` |
 | `[Authorize]` / `.Authorize(...)` | Guard | |

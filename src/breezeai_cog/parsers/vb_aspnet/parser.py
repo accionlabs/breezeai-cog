@@ -13,7 +13,7 @@ from ..aspnet_common import (
     detect_minimal_api_routes,
     detect_route_registrations,
 )
-from ..treesitter import parse_source
+from ..vb.source import parse_vb
 from ..vb.parser import VbParser
 
 _MARKERS = (b"Microsoft.AspNetCore", b"System.Web.Mvc", b"System.Web.Http")
@@ -28,7 +28,7 @@ class VbAspNetParser(VbParser):
         return any(m in source for m in _MARKERS)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("vb", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_vb(ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited VB extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_controller_routes(record, root, ctx.resolution_index)

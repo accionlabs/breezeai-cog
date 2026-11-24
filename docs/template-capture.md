@@ -31,8 +31,8 @@ code half is captured either way.
 |---|---|---|
 | `.phtml` | `php` | `.php` |
 | `.html` `.htm` | `html` | — |
-| `.cshtml` `.razor` | `razor` | — |
-| `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind |
+| `.cshtml` `.razor` `.vbhtml` | `razor` | — |
+| `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind (VB code-behind, `.aspx.vb`, is `vb-webforms`'s) |
 | `.vue` | `typescript-vue` | `.ts` `.tsx` `.js` `.jsx` … |
 | `.jsp` `.jspx` `.jspf` `.tag` `.tagx` | `jsp` | — |
 
@@ -61,10 +61,11 @@ applies to the extensions above.
 | `.tsx` `.jsx` | `typescript` / `javascript` | JSX is code — the markup lives inside a code file |
 | `.svc` | `svc`, `framework=wcf` | A `<%@ ServiceHost %>` directive declares a *service*, not a view |
 | `.asmx` | `asmx`, `framework=asmx` | A `<%@ WebService %>` directive — same reasoning |
+| `.ashx` | `ashx`, `framework=aspnet-webforms` | A `<%@ WebHandler %>` directive — a handler's address, same reasoning |
 | `.xml`, `web.config`, `.csproj`, `.sln` | `config` | XML tags, but configuration rather than a view |
 
-`.svc` and `.asmx` are the surprising pair: they carry ASP.NET `<%@ %>` directives exactly
-like `.aspx` does, but they describe service endpoints, so they stay in the graph.
+`.svc`, `.asmx` and `.ashx` are the surprising ones: they carry ASP.NET `<%@ %>` directives exactly
+like `.aspx` does, but they describe service and handler endpoints, so they stay in the graph.
 
 **Never captured, flag or no flag** — these have no parser at all, so they are reported as
 `unsupported` in either mode:
@@ -290,17 +291,22 @@ discoverable. Skip `.vue` and all of that goes with it.
 | `.html` (plain page) | — | — | a File node only |
 | `.cshtml` | `razor` | `template` | `@page` → a `route`; model and expression statements |
 | `.razor` | `razor` | `component` | same, plus `@code { }` methods as **Functions** |
+| `.vbhtml` | `razor` | `template` | `@ModelType`, `@expr` and control-flow (`@For Each`, `@If`, …) statements, all `nodeType: synthetic` — the Razor grammar is C# only, so a VB view is read by a text scan; no `@page` in VB Razor |
 | `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring |
 | `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
 | `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); directives, EL and JSP comments (`nodeType: synthetic` — there is no JSP grammar; directives keep their keyword in `name`, comments carry `semanticType: comment`), prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
 | `.tag` `.tagx` | `jsp` | `component` | same as a page |
 
-**Inline scripts.** In `.html`, `.cshtml`/`.razor` and `.aspx`/`.ascx`/`.master`, the bodies of
+**Inline scripts.** In `.html`, `.cshtml`/`.razor`/`.vbhtml` and `.aspx`/`.ascx`/`.master`, the bodies of
 inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
 `$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
 counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
 or a Razor layout / `_ViewStart` chain that loads it). `$.ajax({ url: … })` counts without that
-evidence. No other inline-script code is captured yet.
+evidence. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
+URL does (`/api/users/{user.id}`, [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name));
+a Razor or Web Forms expression in or beside the URL (`'@Url.Action("Save")'`,
+`"/a/" + <%= Id %>`) is server code, and the `endpoint` stays empty. No other inline-script code
+is captured yet.
 
 `uiRole` separates a **template** (a view rendered by something else) from a **component** (a
 unit owning both markup and code). `.razor` and `.vue` are components; `.cshtml` and `.aspx`

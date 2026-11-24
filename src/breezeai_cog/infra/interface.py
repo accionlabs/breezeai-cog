@@ -33,3 +33,10 @@ class InfraStream(ABC):
                 or corrupt object.
         """
         raise NotImplementedError
+
+    def abort(self) -> None:
+        """Give up on the upload after the caller failed mid-stream, releasing what it holds.
+
+        Called instead of ``close()``; the object must not become visible. The default does
+        nothing, for implementations with nothing to release.
+        """

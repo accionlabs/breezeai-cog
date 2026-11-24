@@ -46,6 +46,26 @@ def test_page_directive_is_route(tmp_path) -> None:
     assert r.endpoint == "/orders/{id}" and r.framework == "razor"
 
 
+def test_page_template_forms_give_the_served_address(tmp_path) -> None:
+    # "/x" and "~/x" both replace the page's folder address (ASP.NET serves "~/x" at "/x"); a
+    # relative template joins it; a bare "~" or "~x" is no valid route and stays empty.
+    cases = {
+        '"/orders/{id}"': "/orders/{id}",
+        '"~/orders/{id}"': "/orders/{id}",
+        '"~/"': "/",
+        '"~"': None,
+        '"~orders"': None,
+        '"{id:int}"': "/Orders/Edit/{id:int}",
+        "": "/Orders/Edit",
+    }
+    (tmp_path / "Pages" / "Orders").mkdir(parents=True)
+    for template, endpoint in cases.items():
+        source = f"@page {template}\n@model EditModel\n<h1>Edit</h1>\n".encode()
+        rec = _parse(tmp_path, "Pages/Orders/Edit.cshtml", source)
+        routes = [s for s in rec.statements if s.semanticType == "route"]
+        assert [r.endpoint for r in routes] == [endpoint], template
+
+
 def test_event_handler_wiring(tmp_path) -> None:
     rec = _parse(tmp_path, "Orders.razor", _RAZOR)
     events = {s.handler for s in rec.statements if s.nodeType == "razor_html_attribute"}

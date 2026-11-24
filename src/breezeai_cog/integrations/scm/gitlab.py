@@ -171,9 +171,9 @@ class GitLabSCMClient(AbstractSCMClient):
         )
 
     def clone_url(self, ref: RepoRef) -> str:
-        host = ref.host or DEFAULT_HOSTS["gitlab"]
+        origin = ref.origin if ref.host else f'https://{DEFAULT_HOSTS["gitlab"]}'
         auth = f"oauth2:{self._token}@" if self._token else ""
-        return f"https://{auth}{host}/{ref.owner}/{ref.repo}.git"
+        return f"{origin.replace('//', f'//{auth}', 1)}/{ref.owner}/{ref.repo}.git"
 
 
 __all__ = ["GitLabSCMClient"]

@@ -149,7 +149,9 @@ def handler_location(site: _Site | None, own_path: str) -> tuple[int | None, str
 
 
 #: Statements that point at a handler.
-HANDLED = frozenset({"route", "eventbus_consumer", "timer"})
+HANDLED = frozenset(
+    {"route", "eventbus_consumer", "timer", "mcp_tool", "mcp_resource", "mcp_prompt"}
+)
 
 
 def unlocated(s: Statement, located_by_detector: Collection[str] = ()) -> bool:
@@ -203,7 +205,9 @@ def handler_info(
     - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
     - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
     - ``this`` (the class itself implements ``Handler``): ``handle``, its line in this file.
-    - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
+    - Anything else (a factory call ``Handler.create()``): nothing — honest-null. The call
+      alone does not say what it returns; a detector may follow it through a registered fact
+      when the factory's body is only ``return new T(…)`` (Vert.x: ``vertx.handler-factories``)."""
     if arg is None:
         return None, None
     if arg.type in _INLINE or (arg.type == "object_creation_expression"

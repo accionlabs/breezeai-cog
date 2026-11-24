@@ -50,6 +50,7 @@ from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
 from ..schemas import Statement
+from .treesitter import end_line
 
 # (startLine, endLine, id) for a Function/Class scope.
 ScopeSpan = tuple[int, int, str]
@@ -255,7 +256,7 @@ def collect_comment_statements(
     out: list[Statement] = []
     for grp in _merge(comment_nodes, source):  # ascending start line (``_Innermost`` relies on it)
         cs = grp.first.start_point[0] + 1
-        ce = grp.last.end_point[0] + 1
+        ce = end_line(grp.last)
         # Dedup: already inside a captured (non-control-flow) statement's text.
         if absorbed(cs, ce):
             continue

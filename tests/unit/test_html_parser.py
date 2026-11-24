@@ -183,32 +183,56 @@ def test_fallback_angular_without_owner_still_parses(tmp_path) -> None:
     assert any(s.nodeType == "event_binding" and s.handler == "save" for s in rec.statements)
 
 
-def test_behavior_marker_without_framework(tmp_path) -> None:
-    # A plain page enhanced with htmx → behaviors marker, but NOT a rendering framework.
+def _htmx(rec) -> list[tuple[str | None, str | None, str | None]]:
+    return [(s.method, s.endpoint, s.nodeType) for s in rec.statements if s.framework == "htmx"]
+
+
+def test_htmx_requests_are_api_calls_without_framework(tmp_path) -> None:
+    # A plain page enhanced with htmx: not a rendering framework, no file marker; each request
+    # attribute is an api_call. hx-target only shapes the request → nothing.
     rec = _parse(
-        tmp_path, {"page.html": '<button hx-get="/api" hx-target="#o">Go</button>'}, "page.html"
+        tmp_path,
+        {"page.html": '<button hx-get="/api/items" hx-target="#o">Go</button>\n'
+                      "<form data-hx-post='/orders'></form>"},
+        "page.html",
     )
     assert rec.framework is None
     assert rec.uiRole is None
-    assert rec.behaviors == ["htmx"]
+    assert "behaviors" not in rec.model_dump(by_alias=True)
+    assert _htmx(rec) == [("GET", "/api/items", "attribute"), ("POST", "/orders", "attribute")]
+    assert all(s.semanticType == "api_call" and s.parentId == rec.id
+               for s in rec.statements if s.framework == "htmx")
 
 
-def test_rendering_and_behavior_coexist(tmp_path) -> None:
-    # Thymeleaf (rendering) + htmx (behavior) on the same file — framework=thymeleaf, and htmx
-    # rides as a behavior marker (not a competing framework).
+def test_htmx_endpoint_only_when_literal_and_absolute(tmp_path) -> None:
+    # Relative, empty and template-rendered addresses keep the call with endpoint null.
+    rec = _parse(
+        tmp_path,
+        {"p.html": '<a hx-delete="items/1"></a><a hx-put=""></a>'
+                   '<a hx-patch="{{ url }}"></a><a hx-get="https://api.example.com/x"></a>'},
+        "p.html",
+    )
+    assert _htmx(rec) == [("DELETE", None, "attribute"), ("PUT", None, "attribute"),
+                          ("PATCH", None, "attribute"),
+                          ("GET", "https://api.example.com/x", "attribute")]
+
+
+def test_rendering_and_htmx_coexist(tmp_path) -> None:
+    # Thymeleaf (rendering) + htmx on the same file — framework=thymeleaf, and the htmx request
+    # is a statement (not a competing framework).
     rec = _parse(tmp_path, {"t.html": '<div th:text="${n}" hx-post="/save"></div>'}, "t.html")
     assert rec.framework == "thymeleaf"
-    assert rec.behaviors == ["htmx"]
+    assert _htmx(rec) == [("POST", "/save", "attribute")]
 
 
 def test_alpine_not_mislabeled_vue(tmp_path) -> None:
-    # Alpine's @click/:class shorthand once collided with Vue — now Alpine is a behavior and
-    # Vue needs `v-`, so an Alpine page is behaviors=[alpine], framework=None (never vue).
+    # Alpine's @click/:class shorthand once collided with Vue — Vue needs `v-`, so an Alpine page
+    # is framework=None (never vue), and Alpine records nothing.
     rec = _parse(
         tmp_path, {"a.html": '<div x-data="{n:0}" @click="n++" :class="cls"></div>'}, "a.html"
     )
     assert rec.framework is None
-    assert rec.behaviors == ["alpine"]
+    assert rec.statements == []
 
 
 def test_ambiguous_rendering_is_bare(tmp_path) -> None:
@@ -278,22 +302,13 @@ def test_navigation_skipped_in_fixture(tmp_path) -> None:
     assert not any(s.semanticType == "route" for s in rec.statements)
 
 
-def test_bootstrap_data_target_not_stimulus(tmp_path) -> None:
-    # Bootstrap's data-bs-target / a generic data-action must NOT be read as Stimulus — only
-    # data-controller activates Stimulus (a confirmed false positive on real repos).
-    rec = _parse(
-        tmp_path,
-        {"b.html": '<button data-bs-target="#nav" data-action="x">Menu</button>'},
-        "b.html",
-    )
-    assert "stimulus" not in (getattr(rec, "behaviors", None) or [])
-
-
-def test_stimulus_detected_via_controller(tmp_path) -> None:
+def test_stimulus_page_records_nothing(tmp_path) -> None:
+    # Stimulus (data-controller) only acts in the browser: no framework, no statements.
     rec = _parse(
         tmp_path, {"s.html": '<div data-controller="hello"><button>x</button></div>'}, "s.html"
     )
-    assert rec.behaviors == ["stimulus"]
+    assert rec.framework is None
+    assert rec.statements == []
 
 
 def test_framework_code_in_docs_not_claimed(tmp_path) -> None:

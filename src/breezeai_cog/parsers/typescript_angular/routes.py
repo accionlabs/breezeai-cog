@@ -23,6 +23,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
+from ..typescript.scopes import ConstView, file_consts
 from .mount_guards import incoming_guards
 from .mounts import mount_served, route_mounts
 
@@ -90,10 +91,10 @@ def _string_val(node: Node | None, source: bytes) -> str:
     return node_text(node, source)
 
 
-def _resolve_path(node: Node | None, source: bytes, index: object) -> str | None:
-    """The route ``path`` as a literal string, resolving non-literal forms via the repo
-    value index: a string literal verbatim; ``RouteNames.X`` / a bare ``CONST`` resolved to
-    its declared literal (cross-file, globally-unique); a ``+`` concatenation or a template
+def _resolve_path(node: Node | None, source: bytes, consts: ConstView) -> str | None:
+    """The route ``path`` as a literal string, resolving non-literal forms through the constants
+    this file sees (``typescript.scopes``): a string literal verbatim; ``RouteNames.X`` / a bare
+    ``CONST`` resolved to its declared literal (declared here, or imported); a ``+`` concatenation or a template
     literal whose **every** piece resolves, assembled in source order (``RouteNames.X + '/:' +
     RouteParams.Y`` -> ``org/:orgId``). Anything with an unresolved piece — a call, a variable
     not in the index, an ambiguous const — → ``None`` (honest-null, never a guessed segment)."""
@@ -101,21 +102,20 @@ def _resolve_path(node: Node | None, source: bytes, index: object) -> str | None
         return None
     if node.type == "string":
         return _string_val(node, source)  # literal path (may be "")
-    values = getattr(index, "const_values", None) or {}
     if node.type == "member_expression":
         obj, prop = node.child_by_field_name("object"), node.child_by_field_name("property")
         if obj is not None and prop is not None:
-            return values.get(f"{node_text(obj, source)}.{node_text(prop, source)}")
+            return consts.value(f"{node_text(obj, source)}.{node_text(prop, source)}", node)
     elif node.type == "identifier":
-        return values.get(node_text(node, source))
+        return consts.value(node_text(node, source), node)
     elif node.type == "binary_expression":
-        return _resolve_concat(node, source, index)
+        return _resolve_concat(node, source, consts)
     elif node.type == "template_string":
-        return _resolve_template(node, source, index)
+        return _resolve_template(node, source, consts)
     return None
 
 
-def _resolve_concat(node: Node, source: bytes, index: object) -> str | None:
+def _resolve_concat(node: Node, source: bytes, consts: ConstView) -> str | None:
     """A ``+`` string concatenation: resolve the left and right operands and join. Any operator
     other than ``+``, or an unresolved operand, → ``None`` (a single wrong operand must not
     yield a fabricated path). Left-nested ``a + b + c`` recurses down the left operand."""
@@ -123,14 +123,14 @@ def _resolve_concat(node: Node, source: bytes, index: object) -> str | None:
     if op is None or node_text(op, source) != "+":
         return None
     left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
-    lv = _resolve_path(left, source, index)
-    rv = _resolve_path(right, source, index)
+    lv = _resolve_path(left, source, consts)
+    rv = _resolve_path(right, source, consts)
     if lv is None or rv is None:
         return None
     return lv + rv
 
 
-def _resolve_template(node: Node, source: bytes, index: object) -> str | None:
+def _resolve_template(node: Node, source: bytes, consts: ConstView) -> str | None:
     """A template literal: concatenate its ``string_fragment`` parts (verbatim) with each
     ``${…}`` substitution resolved via the index. Any substitution that does not resolve to a
     const literal → ``None`` (never stringify a dynamic expression)."""
@@ -140,7 +140,7 @@ def _resolve_template(node: Node, source: bytes, index: object) -> str | None:
             parts.append(node_text(child, source))
         elif child.type == "template_substitution":
             inner = next((c for c in child.named_children), None)
-            resolved = _resolve_path(inner, source, index)
+            resolved = _resolve_path(inner, source, consts)
             if resolved is None:
                 return None
             parts.append(resolved)
@@ -226,12 +226,12 @@ def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
     return False
 
 
-def _redirect_target(node: Node, prefix: str | None, source: bytes, index: object) -> str | None:
+def _redirect_target(node: Node, prefix: str | None, source: bytes, consts: ConstView) -> str | None:
     """Where a ``redirectTo`` points, as a full route path. A leading ``/`` is absolute (used
     as-is); anything else is relative to the parent route and composes with ``prefix`` like a
     child ``path``. A query string or fragment is page data, not part of the address, so it is
     dropped. A function form or an unresolvable constant → ``None`` (never a guess)."""
-    target = _resolve_path(node, source, index)
+    target = _resolve_path(node, source, consts)
     if target is None:
         return None
     target = re.split(r"[?#]", target, maxsplit=1)[0]
@@ -239,7 +239,8 @@ def _redirect_target(node: Node, prefix: str | None, source: bytes, index: objec
 
 
 def _process(arr: Node, prefix: str | None, source: bytes, path: str,
-             routes: list[Emit], index: object, inherited: tuple[str, ...] = (),
+             routes: list[Emit], index: object, consts: ConstView,
+             inherited: tuple[str, ...] = (),
              mounts: list[tuple[Node, list[str]]] | None = None) -> None:
     """``inherited``: guards of the ancestor routes that run before this route — each ancestor's
     own ``canMatch`` / ``canActivate`` (Angular matches and activates the parent first) and then
@@ -261,12 +262,12 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
         if redirect is not None:  # a redirect is a navigation edge, not an endpoint
             routes.append(Emit(elem, dict(
                 semanticType="route",
-                endpoint=_redirect_target(redirect, prefix, source, index),
+                endpoint=_redirect_target(redirect, prefix, source, consts),
                 framework="angular",
                 routeKind="navigation",
             ), parent=file_id(path), text=entry_text(elem, source)))
             continue
-        full = _compose(prefix, _resolve_path(pairs["path"], source, index))
+        full = _compose(prefix, _resolve_path(pairs["path"], source, consts))
         own = _own_guards(elem, source)
         load = pairs.get("loadChildren")  # lazy route group → wiring
         component = pairs.get("component")
@@ -301,7 +302,7 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
                 guards=[*inherited, *own] or None,
             ), parent=file_id(path), text=entry_text(elem, source)))
         if children is not None and children.type == "array":
-            _process(children, full, source, path, routes, index, child_guards, mounts)
+            _process(children, full, source, path, routes, index, consts, child_guards, mounts)
 
 
 _CLASS_NODE_TYPES = ("class_declaration", "class", "abstract_class_declaration")
@@ -335,9 +336,10 @@ def detect_angular_routes(root: Node, source: bytes, path: str, *,
     prefix = _mount_prefix(path, classes, index)  # parent mount prefix (cross-file), else ""
     # Guards of the lazy mount that loads this file's routes (cross-file), else none.
     incoming = tuple(incoming_guards(index, path, classes))
+    consts = file_consts(index, root, source, path)
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, prefix, source, path, routes, index, incoming)
+            _process(arr, prefix, source, path, routes, index, consts, incoming)
     return routes
 
 
@@ -346,6 +348,10 @@ def declared_classes(root: Node, source: bytes) -> list[str]:
     return [node_text(name, source)
             for cls_type in _CLASS_NODE_TYPES for cls in _all(root, cls_type)
             if (name := cls.child_by_field_name("name")) is not None]
+
+
+#: No constants: a pass that reads guards only, never a path.
+_NO_CONSTS = ConstView("", {}, frozenset(), {})
 
 
 def lazy_mount_guards(root: Node, source: bytes) -> list[tuple[Node, list[str]]]:
@@ -357,5 +363,5 @@ def lazy_mount_guards(root: Node, source: bytes) -> list[tuple[Node, list[str]]]
     found: list[tuple[Node, list[str]]] = []
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, "", [], None, (), found)
+            _process(arr, "", source, "", [], None, _NO_CONSTS, (), found)  # guards only
     return found

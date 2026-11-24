@@ -8,21 +8,26 @@ a tsconfig ``compilerOptions.paths`` alias or a Vite ``resolve.alias`` entry (se
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Sequence, Union
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ...utils.jsonc import load_json_object
+from ..addresses import informative, runtime_part, source_kind, value_path
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
 )
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
+from .scopes import ConstView, const_key
+
+#: What a fold reads: a file's view of the repository's constants, or one file's own (by name).
+Consts = Union[ConstView, dict[str, str | None]]
 
 # `.vue` is appended LAST so an extensionless import next to both `Foo.ts` and `Foo.vue`
 # still resolves to the JS/TS file (matching bundler resolution order). Only `.vue` is added
@@ -36,12 +41,13 @@ _INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
 class TsAliasIndex:
     """Repo-wide TS resolution index (picklable — crosses the process boundary).
 
-    Holds tsconfig path aliases plus a **constant value map**: repo-wide
-    ``symbol → literal`` for top-level ``const``s, ``enum`` members with an initializer, and
-    ``static readonly`` class fields (keyed ``NAME`` or ``Type.MEMBER``) whose value is a string
-    or a number (as JavaScript writes it in a string: ``5_000`` → ``5000``). A symbol
-    declared with differing literals in >1 place maps to ``None`` (ambiguous → do not
-    resolve through it — precision-first, mirroring the C# type index)."""
+    Holds tsconfig path aliases plus a **constant value map**: ``file::symbol → literal`` for
+    each file's top-level ``const``s, ``enum`` members with an initializer, and ``static readonly``
+    class fields (symbol ``NAME`` or ``Type.MEMBER``) whose value is a string or a number (as
+    JavaScript writes it in a string: ``5_000`` → ``5000``). Keyed by file, because a name means
+    a constant only where a file declares or imports it: read it through a file's
+    :class:`~.scopes.ConstView`, never by bare name. A symbol a file declares with differing
+    literals maps to ``None`` (ambiguous → do not resolve through it)."""
 
     base_dir: str  # absolute baseUrl directory (legacy single-config resolution)
     paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]} — relative to base_dir (legacy)
@@ -56,6 +62,11 @@ class TsAliasIndex:
     #: resolves through the nearest folder only when every config there resolves it to the same
     #: file; a config that can't be read counts with no patterns (see :func:`_vite_agreed`).
     vite_scopes: tuple[tuple[str, tuple[dict[str, list[str]], ...]], ...] = ()
+    #: A tsconfig ``baseUrl`` folder (absolute) → the names at its top (``src``, ``config`` for
+    #: ``config.ts``). Its scope holds the pattern ``"*"`` (TypeScript's lookup of a non-relative
+    #: import under ``baseUrl``, tried after ``paths``); an import whose first segment is none of
+    #: these names (a package: ``@nestjs/common``, ``lodash``) is not looked for on disk.
+    base_url_names: dict[str, frozenset[str]] = field(default_factory=dict)
     const_values: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
     #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
@@ -65,20 +76,13 @@ class TsAliasIndex:
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-def _load_jsonc(path: Path) -> dict | None:
-    """Tolerant JSON-with-comments loader for tsconfig files."""
+def _load_jsonc(path: Path) -> dict[str, Any] | None:
+    """A tsconfig-style JSON-with-comments file as an object, else None."""
     try:
         text = path.read_text("utf-8")
     except OSError:
         return None
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)  # block comments
-    text = re.sub(r"(^|\s)//.*$", "", text, flags=re.M)  # line comments (whitespace-prefixed)
-    text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
-    try:
-        result = json.loads(text)
-        return result if isinstance(result, dict) else None
-    except json.JSONDecodeError:
-        return None
+    return load_json_object(text)
 
 
 #: Directories never worth walking for tsconfigs (dependencies + build output).
@@ -143,6 +147,47 @@ def _collect_tsconfig_paths(cfg: Path, seen: set[Path], out: dict[str, list[str]
             _collect_tsconfig_paths(base_cfg, seen, out)
 
 
+def _tsconfig_base_url(cfg: Path, seen: set[Path]) -> Path | None:
+    """The absolute ``compilerOptions.baseUrl`` folder a tsconfig sets, or inherits through a
+    **local** ``extends`` (relative to the config that sets it); None when none does."""
+    if cfg in seen:
+        return None
+    seen.add(cfg)
+    data = _load_jsonc(cfg)
+    if data is None:
+        return None
+    base = (data.get("compilerOptions") or {}).get("baseUrl")
+    if isinstance(base, str):
+        return (cfg.parent / base).resolve()
+    ext = data.get("extends")
+    for e in (ext if isinstance(ext, list) else [ext]):
+        if isinstance(e, str) and (e.startswith(".") or e.startswith("/")):
+            base_cfg = (cfg.parent / e).resolve()
+            if base_cfg.suffix != ".json":
+                base_cfg = base_cfg / "tsconfig.json"
+            found = _tsconfig_base_url(base_cfg, seen)
+            if found is not None:
+                return found
+    return None
+
+
+def _top_names(folder: Path) -> frozenset[str]:
+    """The names an import may start with under ``folder``: each entry, and a file's name up to
+    its first dot (``config`` for ``config.ts``). Dependency and build folders are left out."""
+    try:
+        entries = sorted(os.listdir(folder))
+    except OSError:
+        return frozenset()
+    out: set[str] = set()
+    for name in entries:
+        if name in _PRUNE_DIRS:
+            continue
+        out.add(name)
+        out.add(name.partition(".")[0])
+    out.discard("")
+    return frozenset(out)
+
+
 def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
     """Collect path aliases from **every** tsconfig and Vite config in the tree (not just the
     root), each scope carrying absolute targets so an app's ``@/*`` resolves against its own
@@ -153,6 +198,8 @@ def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
 
     scopes: list[tuple[str, dict[str, list[str]]]] = []
     vite: dict[str, list[dict[str, list[str]]]] = {}
+    base_names: dict[str, frozenset[str]] = {}
+    root = repo_root.resolve()
     for cfg in _iter_alias_configs(repo_root):
         if _is_vite_config(cfg.name):
             vite.setdefault(str(cfg.parent.resolve()), []).append(
@@ -161,6 +208,11 @@ def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
             continue
         paths: dict[str, list[str]] = {}
         _collect_tsconfig_paths(cfg, set(), paths)  # fresh cycle-guard per config
+        base = _tsconfig_base_url(cfg, set())
+        if base is not None and base.is_dir() and base.is_relative_to(root) \
+                and "*" not in paths:  # after `paths`, as TypeScript looks
+            paths["*"] = [str(base) + "/*"]
+            base_names.setdefault(str(base), _top_names(base))
         if paths:
             scopes.append((str(cfg.parent.resolve()), paths))
     vite_scopes = (
@@ -172,7 +224,8 @@ def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
     scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
     vite_scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
     return TsAliasIndex(
-        base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes), vite_scopes=tuple(vite_scopes)
+        base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes), vite_scopes=tuple(vite_scopes),
+        base_url_names=base_names,
     )
 
 
@@ -201,10 +254,13 @@ def number_literal(node: Node | None, source: bytes) -> str | None:
 
 
 def _literal(node: Node | None, source: bytes, *, constant: bool) -> str | None:
-    """A string literal's value, or a number literal's (see :func:`number_literal`) when the
-    declaration is ``constant`` (``const`` / ``readonly``): a ``let`` number is often a counter."""
+    """A string or number literal's value (see :func:`number_literal`), only when the
+    declaration is ``constant`` (``const`` / ``readonly`` / an enum member): a ``let`` or ``var``
+    can be reassigned, so its first value is no constant."""
+    if not constant:
+        return None
     if node is not None and node.type == "number":
-        return number_literal(node, source) if constant else None
+        return number_literal(node, source)
     return _string_literal(node, source)
 
 
@@ -251,21 +307,144 @@ def _pair_key_name(key: Node | None, source: bytes) -> str | None:
     return None  # computed key [x] → skip
 
 
-def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def resolve_const_value(node: Node, source: bytes, consts: Consts) -> str | None:
     """A value node → its literal string via ``consts``: a string literal, a template whose every
     ``${…}`` resolves, or a member/identifier reference. None if not fully resolvable (honest-null).
-    The call site every detector uses to fold a const-built address into its literal."""
+    The call site every detector uses to fold a const-built address into its literal. Detectors
+    pass the file's :class:`~.scopes.ConstView` (the repository's constants are keyed by file);
+    a plain ``dict`` is one file's own constants, keyed by name."""
     if node.type == "string":
         return _string_literal(node, source)
     if node.type == "template_string":
         return _resolve_template(node, source, consts)
     if node.type in ("identifier", "member_expression"):
         key = member_path(node, source)
-        return consts.get(key) if key is not None else None
+        if key is None:
+            return None
+        if isinstance(consts, ConstView):  # a local of that name hides the constant
+            return consts.value(key, node)
+        return consts.get(key)
     return None
 
 
-def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+def _path_parts(
+    node: Node, source: bytes, consts: Consts
+) -> list[tuple[str | None, str]]:
+    """A path expression as parts ``(value, source text)``: the literal text, or None for a
+    runtime value (one that does not fold to a constant). ``a + "/x"`` and ``${a}/x`` both give
+    ``[(None, "a"), ("/x", …)]``."""
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _path_parts(node.named_children[0], source, consts)
+    if node.type == "binary_expression":
+        op = node.child_by_field_name("operator")
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if op is not None and node_text(op, source) == "+" and left is not None \
+                and right is not None:
+            return _path_parts(left, source, consts) + _path_parts(right, source, consts)
+        return [(None, node_text(node, source))]
+    if node.type == "template_string":
+        parts: list[tuple[str | None, str]] = []
+        for c in node.children:
+            if c.type == "string_fragment":
+                parts.append((node_text(c, source), ""))
+            elif c.type == "template_substitution":
+                inner = c.named_children[0] if c.named_children else None
+                parts.append((
+                    None if inner is None else resolve_const_value(inner, source, consts),
+                    node_text(inner, source) if inner is not None else "",
+                ))
+        return parts
+    return [(resolve_const_value(node, source, consts), node_text(node, source))]
+
+
+def folded_path(node: Node, source: bytes, consts: Consts) -> str | None:
+    """A path expression whose every part folds to a constant, as its literal text
+    (``BASE + "/users/" + ID`` with ``BASE``/``ID`` constants → ``/api/users/7``); None when a part
+    is read at runtime (:func:`runtime_path_template` marks it) or there is no part at all."""
+    parts = _path_parts(node, source, consts)
+    if not parts or any(value is None for value, _ in parts):
+        return None
+    return "".join(value for value, _ in parts if value is not None)
+
+
+def runtime_path_template(
+    node: Node, source: bytes, consts: Consts, *, outbound: bool = False
+) -> str | None:
+    """A path expression with a part read at runtime, as an address with that part marked
+    (``addresses.py``): ``BASE + "/users"`` and `` `${BASE}/users` `` give ``${BASE}/users``. In a
+    route path (``outbound`` False) every unresolved part is ``${name}``. In an outbound URL a
+    part before the first literal ``/``, ``?`` or ``#`` is ``${name}`` (a base) and one after it
+    is a request value, ``{name}`` (``ctx + "/orders/" + id`` → ``${ctx}/orders/{id}``,
+    ``"run.php?action=" + a`` → ``run.php?action={a}``). None when every part
+    resolves (no runtime part) or no literal path part is known."""
+    parts = _path_parts(node, source, consts)
+    if all(value is not None for value, _ in parts):
+        return None
+    out: list[str] = []
+    in_base = True
+    for value, text in parts:
+        if value is not None:
+            out.append(value)
+            in_base = in_base and not any(c in value for c in "/?#")
+        elif outbound and not in_base:
+            out.append("{" + (_simple_name(text) or "param") + "}")
+        else:
+            out.append(runtime_part(text))
+    return informative("".join(out))
+
+
+def local_source(node: Node, source: bytes) -> Node:
+    """What names a value (``addresses.py``): a variable bound once in this file, never
+    reassigned, to a configuration or environment read is named after that read
+    (``const p = process.env.ORDERS_PATH; … app.get(p, h)`` → ``env:ORDERS_PATH``); any other
+    node names itself."""
+    if node.type != "identifier":
+        return node
+    name = node_text(node, source)
+    values: list[Node | None] = []
+    root = node
+    while root.parent is not None:
+        root = root.parent
+
+    def walk(n: Node) -> None:
+        if n.type == "variable_declarator":
+            nm = n.child_by_field_name("name")
+            if nm is not None and node_text(nm, source) == name:
+                values.append(n.child_by_field_name("value"))
+        elif n.type in ("assignment_expression", "augmented_assignment_expression"):
+            left = n.child_by_field_name("left")
+            if left is not None and node_text(left, source) == name:
+                values.append(None)
+        elif n.type == "formal_parameters" and any(  # a parameter of that name shadows it
+                node_text(p, source) == name for p in _parameter_names(n)):
+            values.append(None)
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    value = values[0] if len(values) == 1 else None
+    if value is not None and source_kind(node_text(value, source)) is not None:
+        return value
+    return node
+
+
+def _parameter_names(params: Node) -> Iterator[Node]:
+    """The identifiers a parameter list binds (``a``, ``a = 1``, ``a: T``, ``...a``)."""
+    for p in params.named_children:
+        target = p.child_by_field_name("pattern") or p.child_by_field_name("left") or p
+        if target.type == "rest_pattern" and target.named_children:
+            target = target.named_children[0]
+        if target.type == "identifier":
+            yield target
+
+
+def _simple_name(text: str) -> str | None:
+    """``order.id`` → ``order.id`` (``addresses.value_path``); None for anything that is not a
+    name or member path."""
+    return value_path(text)
+
+
+def _resolve_template(node: Node, source: bytes, consts: Consts) -> str | None:
     out: list[str] = []
     for c in node.children:
         if c.type == "string_fragment":
@@ -330,9 +509,9 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
     """Record ``symbol → literal`` from one file's top-level constants: ``const NAME = 'x'``,
     ``enum E { M = 'x' }`` (→ ``E.M``), ``static readonly M = 'x'`` (→ ``C.M``), and the leaves of
     a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Values
-    other than a string or a number are skipped, and a number only counts when declared constant
-    (``const`` / ``readonly`` / an enum member); a symbol seen with >1 distinct literal collapses
-    to ``None`` (honest-null)."""
+    other than a string or a number are skipped, and both only count when declared constant
+    (``const`` / ``readonly`` / an enum member: a ``let`` / ``var`` may be reassigned); a symbol
+    seen with >1 distinct literal collapses to ``None`` (honest-null)."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
             record_distinct(const_values, sym, val)
@@ -354,7 +533,7 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                     if nm is not None and nm.type == "identifier":
                         value = _unwrap_const_expr(d.child_by_field_name("value"))
                         add(node_text(nm, source), _literal(value, source, constant=constant))
-                        if value is not None and value.type == "object":
+                        if constant and value is not None and value.type == "object":
                             obj_consts[node_text(nm, source)] = value
         elif node.type == "enum_declaration":
             ename = next((c for c in node.named_children if c.type in ("identifier", "type_identifier")), None)
@@ -418,23 +597,37 @@ def _collect_heritage(root: Node, source: bytes, rel: str) -> dict[str, ClassHer
     return out
 
 
-def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | None:
-    """A route ``path`` value → ordered resolvable pieces, or None if any piece is dynamic
-    (a call, a template substitution that isn't a plain member/identifier). The pieces resolve
-    later against ``const_values``, once every file's constants are known."""
+#: A ``("ref", …)`` piece: the constants-table key, then the name as written (for a marker).
+_REF_SEP = "\x1f"
+
+
+def _path_pieces(
+    node: Node | None, source: bytes, view: Consts | None = None,
+) -> list[tuple[str, str]] | None:
+    """A route ``path`` value → ordered pieces, or None if any piece is dynamic (a call, a
+    template substitution that isn't a plain member/identifier). The pieces resolve later, once
+    every file's constants are known (:func:`resolve_pieces`):
+
+    * ``("lit", text)`` — literal text;
+    * ``("ref", key + name)`` — a name ``view`` (this file's) binds to a constant: its table key
+      and the name as written (:func:`piece_name`);
+    * ``("sym", name)`` — a name that reads no constant here (a local, an unknown global), or
+      any name when no ``view`` is given: it never resolves, and is marked by its name."""
     if node is None:
         return None
     if node.type == "string":
         frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
         return [("lit", node_text(frag, source) if frag is not None else "")]
     if node.type in ("member_expression", "identifier"):
-        return [("sym", node_text(node, source))]
+        text = node_text(node, source)
+        key = view.key(text, node) if isinstance(view, ConstView) else None
+        return [("ref", key + _REF_SEP + text)] if key is not None else [("sym", text)]
     if node.type == "binary_expression":
         op = node.child_by_field_name("operator")
         if op is None or node_text(op, source) != "+":
             return None
-        left = _path_pieces(node.child_by_field_name("left"), source)
-        right = _path_pieces(node.child_by_field_name("right"), source)
+        left = _path_pieces(node.child_by_field_name("left"), source, view)
+        right = _path_pieces(node.child_by_field_name("right"), source, view)
         return (left + right) if (left is not None and right is not None) else None
     if node.type == "template_string":
         pieces: list[tuple[str, str]] = []
@@ -443,7 +636,7 @@ def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | No
                 pieces.append(("lit", node_text(child, source)))
             elif child.type == "template_substitution":
                 inner = next((c for c in child.named_children), None)
-                sub = _path_pieces(inner, source)
+                sub = _path_pieces(inner, source, view)
                 if sub is None:
                     return None
                 pieces.extend(sub)
@@ -451,6 +644,22 @@ def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | No
                 return None
         return pieces
     return None
+
+
+def piece_value(kind: str, text: str, const_values: Consts) -> str | None:
+    """A piece's text when it is known: a literal, or the constant a ``ref`` piece reads (its
+    key is the table's own, so a view is read through its table)."""
+    if kind == "lit":
+        return text
+    if kind == "ref":
+        table = const_values.table if isinstance(const_values, ConstView) else const_values
+        return table.get(text.split(_REF_SEP, 1)[0])
+    return None
+
+
+def piece_name(kind: str, text: str) -> str:
+    """The name a piece is written with — what a ``${name}`` marker shows."""
+    return text.split(_REF_SEP, 1)[-1] if kind == "ref" else text
 
 
 # Filename infixes / dirs whose mounts are test scaffolding, not the wired app (mirrors
@@ -558,18 +767,16 @@ def _ts_index_one(
         return None
 
 
-def _resolve_pieces(pieces: list[tuple[str, str]], const_values: dict[str, str | None]) -> str | None:
-    """Join a path's resolvable pieces to a literal, or None if any const piece is unresolved
-    (missing from the index, or ambiguous → None there). Honest-null: never a guessed segment."""
+def _resolve_pieces(pieces: list[tuple[str, str]], const_values: Consts) -> str | None:
+    """Join a path's pieces to a literal, or None if any piece is unknown: a name that reads no
+    constant, or a constant missing from the index (or ambiguous → None there). Honest-null:
+    never a guessed segment."""
     out: list[str] = []
     for kind, text in pieces:
-        if kind == "lit":
-            out.append(text)
-        else:  # "sym" — a const/enum/static-field reference resolved cross-file
-            val = const_values.get(text)
-            if val is None:
-                return None
-            out.append(val)
+        val = piece_value(kind, text, const_values)
+        if val is None:
+            return None
+        out.append(val)
     return "".join(out)
 
 
@@ -591,14 +798,14 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("typescript", fact_files, repo_root, jobs)
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
-    for frag in parallel_map(args, _ts_index_one, jobs):
+    for (_, rel, _), frag in zip(args, parallel_map(args, _ts_index_one, jobs)):
         if not frag:
             continue
         (cv, heritage, facts) = frag
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
-        for sym, literal in cv.items():
-            record_distinct(const_values, sym, literal)
+        for sym, literal in cv.items():  # keyed by file: a name means nothing on its own
+            record_distinct(const_values, const_key(rel, sym), literal)
         for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
             record_distinct(class_heritage, cname, ch, same=lambda a, b: False)
 
@@ -607,6 +814,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         paths=alias.paths if alias else {},
         alias_scopes=alias.alias_scopes if alias else (),
         vite_scopes=alias.vite_scopes if alias else (),
+        base_url_names=alias.base_url_names if alias else {},
         const_values=const_values,
         class_heritage=class_heritage,
     )
@@ -654,15 +862,25 @@ def _try_paths(target: Path, repo_root: Path) -> str | None:
 
 
 def _match_alias(
-    module: str, paths: dict[str, list[str]], repo_root: Path, base: Path | None
+    module: str, paths: dict[str, list[str]], repo_root: Path, base: Path | None,
+    base_url_names: dict[str, frozenset[str]] | None = None,
 ) -> str | None:
     """Resolve ``module`` against one alias map. ``base`` joins **relative** targets (legacy
-    single-config); ``None`` means targets are already absolute (per-scope index)."""
+    single-config); ``None`` means targets are already absolute (per-scope index). The pattern
+    ``"*"`` is a ``baseUrl`` folder: tried only when ``module`` starts with a name there."""
     def loc(tgt: str) -> Path:
         return base / tgt if base is not None else Path(tgt)
 
     for pattern, targets in paths.items():
-        if pattern.endswith("/*"):
+        if pattern == "*":  # `baseUrl`: `src/x` → <baseUrl>/src/x, never a package
+            first = module.split("/", 1)[0]
+            for tgt in targets:
+                names = (base_url_names or {}).get(tgt[:-2])
+                if names is not None and first in names:
+                    resolved = _try_paths(loc(tgt[:-1] + module), repo_root)
+                    if resolved:
+                        return resolved
+        elif pattern.endswith("/*"):
             prefix = pattern[:-1]  # "@app/"
             if module.startswith(prefix):
                 rest = module[len(prefix):]
@@ -714,7 +932,7 @@ def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path, file_path:
             if resolved:
                 return resolved
             vite = None
-        resolved = _match_alias(module, paths, repo_root, None)
+        resolved = _match_alias(module, paths, repo_root, None, index.base_url_names)
         if resolved:
             return resolved
     return _vite_agreed(module, vite[1], repo_root) if vite is not None else None

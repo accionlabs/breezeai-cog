@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 
-def parse_gomod(path: str | Path, text: str) -> dict:
+def parse_gomod(path: str | Path, text: str) -> dict[str, Any]:
     lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("//")]
     module = None
     go_version = None

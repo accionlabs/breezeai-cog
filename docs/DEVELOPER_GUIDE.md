@@ -31,7 +31,7 @@ src/breezeai_cog/
   parsers/        # tree-sitter parsers
     base.py       #   BaseParser, ParseContext, the LanguageParser protocol
     treesitter.py #   grammar loading + bounded parse
-    detection/    #   shared, language-agnostic API/DB/route classification
+    detection/    #   shared API/DB/route classification (HTTP client names per language)
     <lang>/       #   base language parser (python, typescript, java, csharp, vb, kotlin, groovy, cpp, …)
     <lang>_<fw>/  #   framework parser (e.g. python_fastapi, typescript_nestjs, java_springboot, csharp_wcf) — run `breezeai-cog capabilities` for the live list
   emit/           # id convention · ndjson · gzip · sinks (file/memory)
@@ -48,6 +48,7 @@ src/breezeai_cog/
       retry.py    #     request_with_retry (429/502/503/504 + transport errors, jittered backoff)
       repository.py #   parse_repo_url → RepoRef (public clouds + configured self-hosted hosts)
       github.py · bitbucket.py · gitlab.py · azure_devops.py   # one class per provider
+      bitbucket_server.py #  Bitbucket Data Center (REST 1.0) — a separate product from Cloud
   analyzers/      # non-AST: sql (DDL via sqlglot), es (Elasticsearch mappings)
   services/       # analysis · inprocess · diff · notify
   server/         # FastAPI app · routes · git_routes (/api/git/* for the backend) · deps · git orchestration (clone / REST diff) · errors

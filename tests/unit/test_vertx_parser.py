@@ -124,12 +124,12 @@ def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
     rec = VertxParser().parse_file(ctx)
     sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
     assert len(sends) == 1
-    assert sends[0].framework == "vertx" and sends[0].endpoint is None  # ADDR unresolved → empty (Q15)
+    assert sends[0].framework == "vertx" and sends[0].endpoint == "${ADDR}"  # ADDR unresolved: named
 
 
 def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
-    # A route that concatenates a runtime variable with a literal is kept with an empty endpoint
-    # (unknown address, never a code name); an outbound send keeps its placeholder form.
+    # A route that concatenates a runtime variable with a literal marks it ${name}; an event-bus
+    # address is a name, not a path: unknown → empty.
     src = (
         b"package x;\nimport io.vertx.ext.web.Router;\n"
         b"public class V {\n"
@@ -142,8 +142,8 @@ def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
                        capture_statements=True)
     rec = VertxParser().parse_file(ctx)
     by = {(s.semanticType, s.method, s.endpoint) for s in rec.statements if s.semanticType}
-    assert ("route", "POST", None) in by
-    assert ("eventbus_send", None, None) in by  # unknown address → empty, never {prefix}/audit
+    assert ("route", "POST", "${cfg.base}/job") in by
+    assert ("eventbus_send", None, "${prefix}/audit") in by  # the unknown part marked where it stands
 
 
 def test_same_file_constant_address_folds(tmp_path) -> None:
@@ -169,7 +169,7 @@ def test_same_file_constant_address_folds(tmp_path) -> None:
     eps = {s.endpoint for s in rec.statements if (s.semanticType or "").startswith("eventbus")}
     assert "svc/lookup" in eps          # ADDR folded
     assert "app/svc/lookup" in eps      # PREF folded (concat + same-file constant ref)
-    assert None in eps and "NF" not in eps  # non-final → not folded → empty, never the symbol
+    assert "${NF}" in eps and "NF" not in eps  # non-final → not folded: marked, never the bare symbol
 
 
 def test_cross_file_constant_address_folds(tmp_path) -> None:
@@ -198,6 +198,40 @@ def test_cross_file_constant_address_folds(tmp_path) -> None:
     assert "APP0957/x" in eps      # cross-file constant chain
 
 
+def test_class_simple_name_address_folds(tmp_path) -> None:
+    # `T.class.getSimpleName()` is the class's simple name as written: it folds in a constant
+    # (same file and across files), nested (`Outer.Inner` -> `Inner`) and inline. A class reached
+    # through a value (`obj.getClass()`), an array class and `getName()` stay empty.
+    (tmp_path / "Filter.java").write_text(
+        "package a;\npublic class Filter {\n"
+        "  public static final String ADDRESS = Filter.class.getSimpleName();\n"
+        "}\n"
+    )
+    v = tmp_path / "V.java"
+    v.write_text(
+        "package a;\nimport io.vertx.core.AbstractVerticle;\n"
+        "public class V extends AbstractVerticle {\n"
+        '  static final String OWN = V.class.getSimpleName() + "/x";\n'
+        "  static final String FQ = V.class.getName();\n"
+        "  void start() {\n"
+        "    vertx.eventBus().consumer(Filter.ADDRESS, h);\n"
+        "    vertx.eventBus().consumer(Filter.Inner.class.getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(OWN, h);\n"
+        "    vertx.eventBus().consumer(Direct.class.getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(FQ, h);\n"
+        "    vertx.eventBus().consumer(this.getClass().getSimpleName(), h);\n"
+        "    vertx.eventBus().consumer(int[].class.getSimpleName(), h);\n"
+        "  }\n}\n"
+    )
+    parser = VertxParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    ctx = ParseContext(path="V.java", abs_path=v, source=v.read_bytes(), repo_root=tmp_path,
+                       resolution_index=idx, capture_statements=True)
+    rec = parser.parse_file(ctx)
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert eps == ["Filter", "Inner", "V/x", "Direct", "${FQ}", "${getSimpleName}", "${getSimpleName}"]
+
+
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"
@@ -211,7 +245,7 @@ def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     assert consumers[0].framework == "vertx"
     # endpoint is the loop variable — address resolution (layers 3/4 + constant folding) is
     # deliberately out of scope for this fix; we only assert the consumer is now detected.
-    assert consumers[0].endpoint is None  # ebName is a runtime variable → empty (Q15)
+    assert consumers[0].endpoint == "${ebName}"  # ebName is a runtime variable: named
 
 
 # Delegation-wrapper idiom: a private helper forwards its address parameter to
@@ -244,41 +278,31 @@ public class AppVerticle extends Verticle {
 '''
 
 
-def test_delegation_wrapper_promotes_call_sites(tmp_path) -> None:
-    # A private wrapper that forwards its first String param to registerHandler makes its
-    # call sites the real consumers; the wrapper's own registerHandler (address = parameter)
-    # is suppressed rather than emitted with endpoint="address" (honest-null).
-    p = tmp_path / "AppVerticle.java"
-    p.write_text(_WRAPPER_SRC.decode())
-    ctx = ParseContext(path="AppVerticle.java", abs_path=p, source=_WRAPPER_SRC,
-                       repo_root=tmp_path, capture_statements=True)
-    rec = VertxParser().parse_file(ctx)
-    consumers = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
-    # three real call-site addresses (`app` is a local var → rendered as placeholder)
-    assert consumers == {None, "view/APP"}  # {app} parts are runtime values → empty
-    # the wrapper's own forwarded call is NOT emitted as a junk consumer
-    assert "address" not in consumers
-    assert rec.framework == "vertx"
+def test_delegation_wrapper_promotes_call_sites(analyze_files) -> None:
+    # A private wrapper that forwards its address parameter to registerHandler is an address
+    # forwarder: each call site is a consumer with its own address folded, and the wrapper's own
+    # registerHandler keeps its record with no address (never the parameter name).
+    st = analyze_files({"src/com/acme/AppVerticle.java": _WRAPPER_SRC.decode()})
+    consumers = sorted((s.startLine, s.endpoint or "") for s in st
+                       if s.semanticType == "eventbus_consumer")
+    # `app` is a local variable: a call site built from it keeps it marked where it stands.
+    assert consumers == [(11, "FULL_${app}/formal"), (12, "${app}/submit"), (13, "view/APP"),
+                         (17, "${address}")]
 
 
-def test_send_wrapper_promotes_call_sites(tmp_path) -> None:
-    # The alias mechanism is not consumer-specific: a wrapper delegating to send() makes its
-    # call sites eventbus_send.
+def test_send_wrapper_promotes_call_sites(analyze_files) -> None:
+    # Not consumer-specific: a wrapper delegating to send() makes its call sites eventbus_send.
     src = (
-        b"package x;\nimport io.vertx.core.AbstractVerticle;\n"
-        b"public class V extends AbstractVerticle {\n"
-        b'  void start() { emit("orders.audit", payload); }\n'
-        b"  private void emit(String address, Object body) {\n"
-        b"    vertx.eventBus().send(address, body);\n"
-        b"  }\n}"
+        "package x;\nimport io.vertx.core.AbstractVerticle;\n"
+        "public class V extends AbstractVerticle {\n"
+        '  void start() { emit("orders.audit", payload); }\n'
+        "  private void emit(String address, Object body) {\n"
+        "    vertx.eventBus().send(address, body);\n"
+        "  }\n}"
     )
-    p = tmp_path / "V.java"
-    p.write_text(src.decode())
-    ctx = ParseContext(path="V.java", abs_path=p, source=src, repo_root=tmp_path,
-                       capture_statements=True)
-    rec = VertxParser().parse_file(ctx)
-    sends = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"}
-    assert sends == {"orders.audit"}  # only the call site; wrapper's own send suppressed
+    st = analyze_files({"src/x/V.java": src})
+    sends = sorted((s.startLine, s.endpoint or "") for s in st if s.semanticType == "eventbus_send")
+    assert sends == [(4, "orders.audit"), (6, "${address}")]  # the call site; the wrapper's own send
 
 
 def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:
@@ -302,7 +326,7 @@ def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:
     # `fire(...)` call site is not classified; the in-wrapper send(addr, ...) is still a send
     # (addr is a local var → symbolic, not suppressed since it is not the parameter).
     sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
-    assert {s.endpoint for s in sends} == {None}  # addr is a parameter → empty
+    assert {s.endpoint for s in sends} == {"${addr}"}  # addr is a parameter: named
     assert not any(s.semanticType and s.text.startswith("fire(") for s in rec.statements)
 
 
@@ -349,7 +373,7 @@ def test_eventbus_request_and_constant_addresses(tmp_path) -> None:
     assert "orders.ask" in sends       # request(...) mapped to eventbus_send
     assert "orders.audit" in sends     # constant TOPIC folded to its value
     assert "orders.audit" in consumers
-    assert None in sends and "runtimeAddr" not in sends  # unresolvable var → empty (Q15)
+    assert "${runtimeAddr}" in sends and "runtimeAddr" not in sends  # unresolvable var: marked
     assert all(s.framework == "vertx" for s in by_sem.get("eventbus_send", []))
 
 
@@ -392,7 +416,7 @@ def test_route_and_consumer_handlers(tmp_path) -> None:
         "/c": ("update", None),        # other::update — another object's method: no line
         "/d": (None, None),            # a factory call names no handler
         "q.one": ("onOne", 21),
-        "q.two": (None, 14),           # anonymous Handler class
+        "q.two": ("handle", 15),       # anonymous Handler class: its own `handle` (`Api$1#handle`)
         "q.out": (None, None),         # a send's reply callback is not an entry point's handler
     }
 
@@ -433,7 +457,7 @@ def test_sub_router_prefix_composes_and_mount_is_not_a_route(tmp_path) -> None:
         "items": "/api/v1/items",    # nested sub-routers compose
         "health": "/api/health",
         "legacy": "/old/legacy",     # 3.x mountSubRouter
-        "x": None,                   # mount path not a literal: address unknown
+        "x": "${prefix}/x",          # mount path read at runtime: marked where it stands
         "root": "/root",
     }
     # the route("/api/*") calls the sub-routers hang off are mounts, not routes

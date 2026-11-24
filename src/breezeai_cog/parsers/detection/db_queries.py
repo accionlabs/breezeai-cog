@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from .api_calls import _ends_with_word, _receiver_text
+
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -129,6 +131,14 @@ def vendor_from_imports(external_imports: "list[str] | None") -> str | None:
     return None
 
 
+# Collection-iteration methods that take a block (Groovy ``list.findAll { it.active }``). When
+# the block is the call's only argument, a call by one of these names iterates a collection in
+# memory, so it is not data access whatever the receiver is called (``collection.find { … }``,
+# ``model.findAll { … }``). A query that takes a closure (GORM ``Book.findAll { author == a }``)
+# is then left unrecorded rather than guessed. Only the iteration methods that share a name with
+# a database verb are listed.
+_CLOSURE_ITERATION_VERBS = frozenset({"find", "findall", "count"})
+
 # Ambiguous ORM verbs -> generic hint, refined by receiver below.
 _GENERIC = {
     "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
@@ -203,11 +213,39 @@ _RECEIVER_HINTS: tuple[tuple[str, str, frozenset[str]], ...] = (
 # method and ``Array.FindAll``. In another language the verb is not evidence of the product,
 # nor of data access, so the receiver has to show it (see ``match_db``). Products absent here
 # are portable: Mongo/Redis/DynamoDB/ES/Neo4j driver verbs appear across languages, and the EF
-# verbs have their own ``_DOTNET`` gate.
+# verbs have their own ``_DOTNET`` gate. The Firebase verbs (``getDocs``, ``onSnapshot``) are the
+# JavaScript SDK's; a Java or Groovy ``getDocs()`` is a getter.
 _PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
-    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS,
+    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS, "firebase": _JSTS,
     "django": _PYTHON, "sqlalchemy": _PYTHON,
 }
+# Needles read like the HTTP client names (:func:`.api_calls._ends_with_word`): a name in the
+# receiver chain must end with one of the needle's words, starting a word there, because the last
+# word of a name says what it is. ``userRepository``, ``this.userRepo``, ``order_repository``,
+# ``getRepository(User)`` and ``repositories.users`` are repositories; ``reportFile`` and
+# ``reportService`` only contain the letters, and ``repoUrl`` / ``repoDir`` are a URL and a folder.
+_WORD_HINTS: dict[str, tuple[str, ...]] = {
+    "repository": ("repository", "repositories"),
+    "repo": ("repo", "repos", "repository", "repositories"),
+}
+
+
+# Everything that cannot be part of a name separates two: a dot, a line break in a chain
+# (``this.getRepository()⏎ .createQueryBuilder()``) and type arguments, whose names count too
+# (``UoW.Repository<Booking>()``, ``Engine.Resolve<IContentItemRepository>()``).
+_NAME_SEPARATORS = re.compile(r"[^A-Za-z0-9_$]+")
+
+
+def _names_word(callee: str, words: tuple[str, ...]) -> bool:
+    """Whether a name in the call's receiver chain ends with one of ``words``, starting a word."""
+    if "." not in callee:
+        return False  # a bare call has no receiver
+    return any(
+        _ends_with_word(name, w)
+        for name in _NAME_SEPARATORS.split(_receiver_text(callee)) for w in words
+    )
+
+
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
 _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
@@ -220,7 +258,7 @@ _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
 # overrides this. (Write verbs like ``save``/``delete``/``create`` are opt-in via
 # ``_HIGH_COLLISION`` and never reach this fallback.)
 _NON_DB_RECEIVERS = (
-    "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
+    "cache", "cachemanager", "cacheservice", "logger", "emitter", "eventbus", "eventemitter", "state",
     "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
     # HTML Canvas / 2D rendering context — ctx.save()/restore() are draw-state calls, not DB.
     "ctx", "canvas", "context2d",
@@ -357,13 +395,12 @@ _ES_VERBS = frozenset({"search", "bulk", "index", "scroll", "reindex", "count"})
 # not merely something ending in "client" — otherwise ``httpClient.count()`` reads as ES.
 _ES_COLLISION_VERBS = frozenset({"count", "index"})
 
-# Cache/Redis service verbs — too generic alone (Map.get, Set.set), so gated on a
-# cache-specific receiver, mirroring the ES verb/receiver pattern.
+# Redis service verbs — too generic alone (Map.get, Set.set), so gated on a receiver named
+# after Redis, mirroring the ES verb/receiver pattern. A cache's name (``cache``,
+# ``cacheManager``, ``HttpRuntime.Cache``) is not one: it says nothing about where the data
+# lives, and is most often in memory (a Map, an LRU, ASP.NET's cache).
 _CACHE_VERBS = frozenset({"get", "set", "del", "reset", "store"})
-_CACHE_RECEIVERS = frozenset({
-    "cache", "cachemanager", "cacheservice",
-    "redisservice", "redis", "redisclient",
-})
+_REDIS_RECEIVERS = frozenset({"redisservice", "redis", "redisclient"})
 # Terminal receiver segment that identifies an ES client (``this.client`` / ``esClient`` /
 # ``osClient``). Anything ending in ``client`` plus the explicit ES names — but NOT the DB
 # receivers above, so ``xxxCustomRepository.search`` / ``xService.search`` are excluded.
@@ -409,10 +446,13 @@ def _is_prisma_chain(low: str) -> bool:
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None,
              vendor: str | None = None,
-             typed_receivers: "Mapping[str, str] | None" = None) -> str | None:
+             typed_receivers: "Mapping[str, str] | None" = None,
+             closure_arg: bool = False) -> str | None:
     """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
     imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``.
-    ``typed_receivers`` maps a name declared as a datastore client type to its product."""
+    ``typed_receivers`` maps a name declared as a datastore client type to its product.
+    ``closure_arg`` says the call's only argument is a closure (see
+    :data:`_CLOSURE_ITERATION_VERBS`)."""
     if language in {"php", "go", "c", "cpp"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php_data_access_common.py), Go from the receiver's declared
@@ -422,6 +462,8 @@ def match_db(callee: str, method: str, language: str | None = None,
         # for them yet, so their data access is left unrecorded.
         return None
     m = method.lower()
+    if closure_arg and m in _CLOSURE_ITERATION_VERBS:
+        return None
     low = callee.lower()
     if typed_receivers and "." in callee:
         product = typed_receivers.get(callee.rsplit(".", 1)[0].rsplit(".", 1)[-1])
@@ -449,6 +491,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
     if m in _EF_INCLUDE_VERBS and language in _DOTNET:
+        if "bundle" in low and not _has_ef_source(low):
+            return None  # ASP.NET bundling: ``new ScriptBundle("~/x").Include("~/Scripts/x.js")``
         ef = vendor == "entity_framework" or _has_ef_source(low)
         return "entity_framework" if ef else None
     if _is_active_record_call(callee, method, language, typed_db_ids):
@@ -471,19 +515,16 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "elasticsearch"
         elif receiver.endswith("client") or receiver in _ES_RECEIVERS:
             return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
-    # Cache/Redis service calls — gated on the TERMINAL receiver only (like ES above), and on an
-    # explicit cache/redis receiver NAME. A bare ``endswith("cache")`` is deliberately NOT used:
-    # in-memory ``Map``/``LRUCache`` fields are routinely named ``…Cache`` (e.g. a DataLoader
-    # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
-    cache_receivers = _CACHE_RECEIVERS
-    if language == "scala":
-        cache_receivers = _CACHE_RECEIVERS - {"cache"}
-    if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
+    # Redis service calls — gated on the TERMINAL receiver only (like ES above), and on a name
+    # that says Redis (:data:`_REDIS_RECEIVERS`, a ``…redis`` suffix); never a cache's name.
+    if receiver and (receiver in _REDIS_RECEIVERS or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC or gated:
         for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
+                continue
+            if needle in _WORD_HINTS and not _names_word(callee, _WORD_HINTS[needle]):
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
@@ -498,6 +539,10 @@ def match_db(callee: str, method: str, language: str | None = None,
                 if m == "remove" or "httpcontext.session" in low:
                     return None
                 return "hibernate" if vendor == "hibernate" else "orm"
+            # ``objects`` is Django's model manager; in another language it is an ordinary
+            # name (``objects.findAll { … }`` filters a list), not evidence of data access.
+            if needle == "objects" and language is not None and language not in _PYTHON:
+                continue
             # The receiver shows data access; the product named must ship for this language.
             if language is not None and language not in langs:
                 return _orm(receiver, vendor)

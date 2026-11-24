@@ -13,11 +13,11 @@ from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.csharp_aspnet.parser import AspNetCoreParser
-from breezeai_cog.parsers.csharp_webforms.page_routes import page_routes
+from breezeai_cog.parsers.webforms_common.page_routes import page_routes
 from breezeai_cog.parsers.emits import apply
 from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
-from breezeai_cog.parsers.csharp_webforms.routes import (
+from breezeai_cog.parsers.webforms_common.pages import (
     detect_webforms_pages,
 )
 from breezeai_cog.schemas import FileRecord
@@ -282,6 +282,20 @@ namespace Acme {
     # Key must include the full subdir prefix so it matches
     # "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"[:-len(".cs")]
     assert pr == {"SplendidCRM-CE/App/CMS/Enrollment.aspx": ["enroll/{id}"]}
+
+
+def test_mappageroute_app_root_does_not_depend_on_path_spelling(tmp_path: Path, windows_spelled) -> None:
+    # A Windows path's string never ends with its "/"-separated repo-relative path; the repo
+    # root must still reach the collector, so the subdir app root is found.
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    app = tmp_path / "Shop"
+    (app / "App_Start").mkdir(parents=True)
+    (app / "web.config").write_bytes(b"<configuration/>")
+    (app / "App_Start" / "RouteConfig.cs").write_bytes(ROUTECFG)
+    cfg = windows_spelled(app / "App_Start" / "RouteConfig.cs")
+    assert page_routes(build_csharp_index(tmp_path, [cfg])) == {
+        "Shop/CMS/Enrollment.aspx": ["enroll/{id}"]}
 
 
 def test_mappageroute_ast_only_ignores_comment_and_string() -> None:

@@ -17,7 +17,14 @@ from typing import Any
 #      iac_data semantic type; module blocks yield Class records.
 # 2.3: additive optional `Statement.handlerPath` (the handler's file, when it is another file).
 # 2.4: additive optional `Class.alias` (a C/C++ typedef'd type's tag).
-SCHEMA_VERSION = "2.4"
+# 2.5: additive optional `Statement.description` / `Statement.params` (mcp_tool, Markdown docs);
+#      semantic types mcp_tool + the Markdown document types (skill, agent, command,
+#      agent_instructions, doc).
+# 2.6: additive optional `Class.isAnonymous` (a Java anonymous class).
+# 2.7: semantic types mcp_resource, mcp_prompt (entry points; methods RESOURCE / PROMPT) and
+#      mcp_call (outbound); `description` / `params` also on mcp_resource / mcp_prompt; an
+#      mcp_resource's `name` is its declared literal name, else its URI.
+SCHEMA_VERSION = "2.7"
 
 
 def export_json_schema() -> dict[str, Any]:
