@@ -1134,3 +1134,12 @@ def test_unbalanced_markup_still_records_every_element(tmp_path, body, expected)
                  for s in rec.statements if s.nodeType == "element" or s.routeKind
                  or s.semanticType == "api_call")
     assert got == expected
+
+
+def test_form_record_keeps_the_server_code_in_its_text(tmp_path) -> None:
+    page = (b'<%@ Page Language="C#" %>\n'
+            b'<form action="<%= ResolveUrl("~/Orders/Save") %>" method="post"></form>\n')
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Orders.aspx", {"Orders.aspx": page})
+    form = next(s for s in rec.statements if s.semanticType == "api_call")
+    assert (form.startLine, form.method, form.endpoint) == (2, "POST", None)
+    assert form.text == '<form action="<%= ResolveUrl("~/Orders/Save") %>" method="post">'

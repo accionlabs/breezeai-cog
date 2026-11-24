@@ -121,7 +121,7 @@ class WebFormsParser(CSharpParser):
             )
             record.statements.extend(collect_data_sources(root, ctx, fid, seen_ids))
             read_page_markup(record, markup, ctx.path, ctx.parse_timeout_micros,
-                             links=not self.is_fixture_file(ctx.path))
+                             links=not self.is_fixture_file(ctx.path), source=ctx.source)
             read_page_scripts(record, ctx, server_code=[(i.start, i.end) for i in islands])
         # methods are structure (always built); their statements only under capture
         read_server_code(record, ctx, islands, seen_ids)
