@@ -66,7 +66,7 @@ def test_inventory_in_run_order() -> None:
         "kotlin": ["kotlin-springai", "kotlin-mcp", "kotlin-mcp-client"],
         "mdx": ["nextjs-mdx-pages"],
         "python": ["celery", "flask", "drf-routers", "django-channels", "python-fastmcp", "python-mcp",
-                   "python-mcp-client"],
+                   "python-mcp-client", "fastapi-imported-routes"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],

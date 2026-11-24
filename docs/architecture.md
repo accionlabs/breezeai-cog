@@ -797,7 +797,8 @@ have a `semanticType` (its meaning, only when detected):
 | `router.post("/orders")…` | `expression_statement` | `route` |
 | `repo.save(order);` | `expression_statement` | `db_method_call` |
 | `// Writes an audit line` | `line_comment` | `comment` |
-| `@GetMapping("/x")` on a method (no statement node exists) | `synthetic` | `route` |
+| `@GetMapping("/x")` on a method (the record sits at the annotation) | `annotation` | `route` |
+| A whole Markdown file (the host grammar has no node for it) | `synthetic` | `doc` |
 
 The `semanticType` values fall into two families:
 
