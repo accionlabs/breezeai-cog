@@ -44,6 +44,23 @@ _FILES = {
         "class GV extends org.vertx.groovy.platform.Verticle {\n"
         "  def start() { }\n"
         "}\n"),
+    # a Java class deployed through the Groovy factory: no Groovy class has the name
+    f"gjava/{RES}/mod.json": '{"main": "groovy:com.acme.JV"}',
+    f"gjava/{JAVA}/JV.java": (
+        "package com.acme;\n"
+        "public class JV extends org.vertx.java.platform.Verticle {\n"
+        "  public void start() {}\n"
+        "}\n"),
+    # a Groovy class that inherits start() is not passed over for a Java class of its name
+    f"gshadow/{RES}/mod.json": '{"main": "groovy:com.acme.Dup"}',
+    "gshadow/src/main/groovy/com/acme/Dup.groovy": (
+        "package com.acme\n"
+        "class Dup extends org.vertx.groovy.platform.Verticle { }\n"),
+    f"gshadow/{JAVA}/Dup.java": (
+        "package com.acme;\n"
+        "public class Dup extends org.vertx.java.platform.Verticle {\n"
+        "  public void start() {}\n"
+        "}\n"),
     # two start() declarations: which one Vert.x calls depends on its version
     f"over/{RES}/mod.json": '{"main": "com.acme.Over"}',
     f"over/{JAVA}/Over.java": (
@@ -89,6 +106,8 @@ def test_mod_json_main_is_a_verticle_deploy(tmp_path: Path, jobs: int) -> None:
         "js": (d + (1, "app.js", None, "js/app.js", None),),
         "rb": (d + (1, "app.rb", None, None, None),),
         "gmod": (d + (1, "com.acme.GV", "start", "gmod/src/main/groovy/com/acme/GV.groovy", 3),),
+        "gjava": (d + (1, "com.acme.JV", "start", f"gjava/{JAVA}/JV.java", 3),),
+        "gshadow": (d + (1, "com.acme.Dup", None, None, None),),
         "over": (d + (1, "com.acme.Over", None, None, None),),
         "lib": (),
         "other": (),
