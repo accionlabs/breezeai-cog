@@ -909,3 +909,19 @@ def test_page_reading_needs_capture_but_script_files_still_link(tmp_path) -> Non
     assert _page_records(rec) == [] and rec.importFiles == ["views/js/app.js"]
     rec = _page(TwigParser(), tmp_path, "templates/orders.html.twig", _TWIG, capture=False)
     assert _page_records(rec) == []
+
+
+def test_a_script_call_never_takes_over_the_server_expression_on_its_line(tmp_path) -> None:
+    rec = _page(TwigParser(), tmp_path, "templates/orders.html.twig", _TWIG)
+    on_12 = {(s.nodeType, s.semanticType) for s in rec.statements if s.startLine == 12}
+    # {{ base }} stays a plain Twig statement; the $.get is its own record.
+    assert on_12 == {("output_directive", None), ("call_expression", "api_call")}
+
+
+def test_form_records_keep_the_page_text(tmp_path) -> None:
+    rec = _page(TwigParser(), tmp_path, "templates/orders.html.twig", _TWIG)
+    form = next(s for s in rec.statements if s.startLine == 5 and s.semanticType == "api_call")
+    assert "{{ path('order_save') }}" in form.text
+    rec = _page(PhpParser(), tmp_path, "views/orders.phtml", _PHTML)
+    form = next(s for s in rec.statements if s.startLine == 4 and s.semanticType == "api_call")
+    assert "<?= $this->url('orders') ?>" in form.text

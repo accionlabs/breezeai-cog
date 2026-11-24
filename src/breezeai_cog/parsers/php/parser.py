@@ -217,5 +217,5 @@ class PhpParser(BaseParser):
         for start, end in server_code:
             blank(markup, start, end)
         read_page_markup(record, bytes(markup), ctx.path, ctx.parse_timeout_micros,
-                         links=not self.is_fixture_file(ctx.path))
+                         links=not self.is_fixture_file(ctx.path), source=ctx.source)
         read_page_scripts(record, ctx, server_code=server_code)

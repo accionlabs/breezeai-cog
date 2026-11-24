@@ -165,14 +165,16 @@ def read_page_markup(
     *,
     links: bool = True,
     tags: TagRule | None = None,
+    source: bytes | None = None,
 ) -> None:
     """Append the page's links (when ``links``; off for fixture files, like every route) and
     form posts to ``record``. ``markup`` is the page, or a copy with its server code blanked
-    at the same offsets. Only called with statement capture."""
+    at the same offsets; ``source`` (the page) then gives the records their text. Only called
+    with statement capture."""
     lowered = markup.lower()
     if b"href" not in lowered and b"<form" not in lowered and b"asp-" not in lowered:
         return
     root = parse_source("html", markup, timeout_micros).root_node
     emits = markup_emits(root, markup, links=links, tags=tags)
     if emits:
-        apply(record, emits, markup, path)
+        apply(record, emits, source if source is not None else markup, path)

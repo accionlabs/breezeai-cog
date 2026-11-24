@@ -99,7 +99,15 @@ def read_page_scripts(
     capture."""
     if not ctx.capture_statements:
         return
+    # A jQuery call is always its own record: the page's statement on its line is markup or
+    # server code (``{{ base }}``, ``@Model.Url``), never the call, so it is not enriched.
+    page = record.statements
+    record.statements = []
     detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros, repo_root=repo_root)
+    seen = {s.id for s in page}
+    for stmt in record.statements:
+        stmt.id = disambiguate(stmt.id, seen)
+    record.statements = page + record.statements
     server_lines = _lines_of(ctx.source, server_code)
     server_expr = _server_expr(ctx.path)
     for stmt in record.statements:
