@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from ..typescript_nextjs_common import is_route_file
 from .components import mark_react_components, mark_react_hooks
+from .jsx import jsx_emits
 from .routes import REACT_GUARDS as _REACT_GUARDS
 
 
@@ -40,4 +42,9 @@ class ReactParser(TypeScriptParser):
         if not (record.framework == "nextjs" and is_route_file(ctx.path, ctx.source)):
             record.framework = "react"
         # Routes: the additive ``react-routes`` detector, already run inside extract().
+        if ctx.capture_statements:
+            # The JSX markup: links, form posts and event props (`onClick={save}`).
+            emits = jsx_emits(root, ctx.source, links=not self.is_fixture_file(ctx.path))
+            if emits:
+                apply(record, emits, ctx.source, ctx.path)
         return record

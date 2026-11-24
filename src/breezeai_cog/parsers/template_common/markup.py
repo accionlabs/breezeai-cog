@@ -138,8 +138,15 @@ def _emit(tag: Node, source: bytes, links: bool, tags: TagRule | None) -> Emit |
     name = next((c for c in tag.named_children if c.type == "tag_name"), None)
     if name is None:
         return None
-    tag_name = node_text(name, source).lower()
-    attrs = _attributes(tag, source)
+    return tag_emit(tag, node_text(name, source).lower(), _attributes(tag, source), links, tags)
+
+
+def tag_emit(
+    tag: Node, tag_name: str, attrs: dict[str, str], links: bool = True, tags: TagRule | None = None
+) -> Emit | None:
+    """The record of one tag, from its lower-case name and its attributes (lower-case name →
+    value as written): a link, a form post, or what the framework's ``tags`` rule says. Shared
+    by every markup reader, whatever grammar found the tag (HTML, JSX)."""
     fields = tags(tag_name, attrs) if tags is not None else None
     if fields is not None:
         return None if fields.get("routeKind") == "navigation" and not links else Emit(tag, fields)
