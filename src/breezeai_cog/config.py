@@ -182,6 +182,9 @@ class Settings(BaseSettings):
     aws_s3_bucket: str | None = Field(
         default=None, validation_alias=AliasChoices("AWS_S3_BUCKET")
     )
+    aws_endpoint_url_s3: str | None = Field(
+        default=None, validation_alias=AliasChoices("AWS_ENDPOINT_URL_S3")
+    )
 
     # ── Validators ────────────────────────────────────────────────────────
     @field_validator("languages", mode="before")
@@ -227,6 +230,11 @@ class Settings(BaseSettings):
                 )
             return level
         return v
+    def storage_url(self, key: str) -> str:
+        """Where the uploaded object ``key`` lives: ``<endpoint>/<bucket>/<key>`` for an emulator, else the AWS URL."""
+        if self.aws_endpoint_url_s3:
+            return f"{self.aws_endpoint_url_s3.rstrip('/')}/{self.aws_s3_bucket}/{key}"
+        return f"https://{self.aws_s3_bucket}.s3.{self.aws_region}.amazonaws.com/{key}"
 
     @property
     def aws_credentials_kwargs(self) -> dict[str, str]:
