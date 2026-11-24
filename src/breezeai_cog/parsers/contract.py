@@ -93,8 +93,9 @@ ROUTE_KINDS: dict[str, frozenset[str | None]] = {
 }
 
 _PLACEHOLDERS = ("${", "#{", "`")
-#: A part read at runtime, as the contract writes it (``${contextRoot}``; addresses.py).
-_RUNTIME_PART = re.compile(r"\$\{[\w.-]*\}")
+#: A part read at runtime, as the contract writes it (``${contextRoot}``,
+#: ``${config:api-verticle.address}``, ``${env:BASE_PATH}``; addresses.py).
+_RUNTIME_PART = re.compile(r"\$\{(?:(?:config|env):)?[\w.$-]*\}")
 
 #: An RFC 6570 expression of a URI template (``{id}``, ``{+path}``, ``{#anchor}``, ``{ids*}``),
 #: not one written as ``${…}``: a resource URI template's ``page://doc#{anchor}`` is a literal

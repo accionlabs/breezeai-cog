@@ -625,7 +625,7 @@ def test_unresolvable_global_prefix_is_a_runtime_part(analyze_files) -> None:
         "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
     })
     [r] = [s for s in st if s.semanticType == "route"]
-    assert (r.method, r.endpoint, r.handler) == ("GET", "${globalPrefix}/users", "list")
+    assert (r.method, r.endpoint, r.handler) == ("GET", "${config.values.globalPrefix}/users", "list")
 
 
 def test_global_prefix_per_app_in_a_monorepo(analyze_files) -> None:

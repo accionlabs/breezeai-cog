@@ -23,7 +23,7 @@ def loopback_base_paths(index: Any | None) -> dict[str, str | None]:
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> BasePathRaw | None:
     if b"@loopback" not in source or rel.rsplit("/", 1)[-1].startswith("next.config."):
         return None
-    return collect_base_path(root, source, rel, "loopback")
+    return collect_base_path(root, source, rel, "loopback", repo_root)
 
 
 register_fact(FactSpec(

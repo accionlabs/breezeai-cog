@@ -18,6 +18,7 @@ from ..statements_common import (
     set_datastore_receivers,
     set_http_client_ids,
     url_placeholder,
+    url_first,
 )
 from ..treesitter import node_text
 from .attributes import extract_attributes
@@ -102,7 +103,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         verb, url_node = request
         endpoint = _render_url(url_node, source) if url_node is not None else None
         return callee, verb or method, endpoint
-    endpoint, override = resolve_endpoint(named, source, _render_url)
+    endpoint, override = resolve_endpoint(named, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

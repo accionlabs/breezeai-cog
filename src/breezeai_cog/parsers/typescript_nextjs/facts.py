@@ -180,7 +180,7 @@ def _collect_base_path(
 ) -> BasePathRaw | None:
     if not rel.rsplit("/", 1)[-1].startswith("next.config."):
         return None
-    return collect_base_path(root, source, rel, "nextjs")
+    return collect_base_path(root, source, rel, "nextjs", repo_root)
 
 
 def _is_next_app(repo_root: str, root: str) -> bool:

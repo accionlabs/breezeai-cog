@@ -302,7 +302,11 @@ inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.p
 `$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
 counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
 or a Razor layout / `_ViewStart` chain that loads it). `$.ajax({ url: … })` counts without that
-evidence. No other inline-script code is captured yet.
+evidence. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
+URL does (`/api/users/{user.id}`, [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name));
+a Razor or Web Forms expression in or beside the URL (`'@Url.Action("Save")'`,
+`"/a/" + <%= Id %>`) is server code, and the `endpoint` stays empty. No other inline-script code
+is captured yet.
 
 `uiRole` separates a **template** (a view rendered by something else) from a **component** (a
 unit owning both markup and code). `.razor` and `.vue` are components; `.cshtml` and `.aspx`

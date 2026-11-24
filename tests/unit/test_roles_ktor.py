@@ -265,7 +265,7 @@ def test_constant_with_two_values_across_files_leaves_the_endpoint_empty(analyze
         ROUTES: _kt("com.acme", ROUTING + "import com.acme.API\n",
                     'fun Route.r() {\n    get(API) { }\n}'),
     }
-    assert _routes(files, analyze_files) == [("GET", None)]
+    assert _routes(files, analyze_files) == [("GET", "${API}")]  # the constant named, never one value
 
 
 def test_constant_not_visible_from_the_file_is_not_used(analyze_files) -> None:
@@ -280,7 +280,7 @@ def test_constant_not_visible_from_the_file_is_not_used(analyze_files) -> None:
 }"""),
     }
     # Not imported, not in this package; a star import is not followed: unknown, never guessed.
-    assert _routes(files, analyze_files) == [("GET", None), ("GET", None), ("GET", None)]
+    assert _routes(files, analyze_files) == [("GET", "${API}"), ("GET", "${Paths.USERS}"), ("GET", "${STAR}")]
 
 
 def test_only_a_resolvable_val_of_an_object_or_top_level_is_shared(analyze_files) -> None:
@@ -301,7 +301,7 @@ fun f() { val local = "/l" }"""),
     }
     # A var can change; a constant built from another file's constant, an instance property
     # and a local are not shared: all unknown.
-    assert _routes(files, analyze_files) == [("GET", None)] * 4
+    assert _routes(files, analyze_files) == [("GET", "${MUTABLE}"), ("GET", "${BUILT}"), ("GET", "${Instance.inst}"), ("GET", "${local}")]
 
 
 def test_a_constant_of_this_file_shadows_an_import(analyze_files) -> None:

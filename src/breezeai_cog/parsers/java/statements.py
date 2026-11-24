@@ -9,7 +9,7 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
 from ..detection import text_has_query
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -40,6 +40,41 @@ def render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
+#: Client methods whose HTTP verb is an ``HttpMethod.X`` argument: Vert.x ``HttpClient`` /
+#: ``WebClient`` ``request`` / ``requestAbs``, Spring ``RestTemplate`` ``exchange`` /
+#: ``execute``, ``WebClient`` ``method``.
+_VERB_ARG_METHODS = frozenset({"request", "requestAbs", "exchange", "execute", "method"})
+_HTTP_METHOD_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
+
+
+def _http_method_arg(args: list[Node], source: bytes) -> tuple[int, str] | None:
+    """``(index, verb)`` of the first ``HttpMethod.PUT`` argument (any qualifier ending in
+    ``HttpMethod``), else None."""
+    for i, arg in enumerate(args):
+        if arg.type != "field_access":
+            continue
+        obj, field = arg.child_by_field_name("object"), arg.child_by_field_name("field")
+        if obj is None or field is None:
+            continue
+        verb = node_text(field, source)
+        if node_text(obj, source).rsplit(".", 1)[-1] == "HttpMethod" and verb in _HTTP_METHOD_VERBS:
+            return i, verb.lower()
+    return None
+
+
+def _verb_arg_url(args: list[Node], at: int, source: bytes) -> str | None:
+    """The URL of a call whose verb is argument ``at``: the first argument when the verb is not
+    first (``exchange(url, HttpMethod.GET, …)``); else the last later argument that reads as
+    a path or URL (Vert.x ``request(method, [port,] [host,] uri)``: the host is no path)."""
+    if at > 0:
+        return render_url(args[0], source)
+    for arg in reversed(args[at + 1:]):
+        url = render_url(arg, source)
+        if url and (url.startswith(("/", "{")) or "://" in url):
+            return url
+    return None
+
+
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     obj = call.child_by_field_name("object")
     name_node = call.child_by_field_name("name")
@@ -47,7 +82,11 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     callee = f"{node_text(obj, source)}.{method}" if obj is not None else method
     args = call.child_by_field_name("arguments")
     named = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(named, source, render_url)
+    verb_arg = _http_method_arg(named, source) if method in _VERB_ARG_METHODS else None
+    if verb_arg is not None:
+        at, verb = verb_arg
+        return callee, verb, _verb_arg_url(named, at, source)
+    endpoint, override = resolve_endpoint(named, source, render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint
@@ -69,9 +108,11 @@ ELIDED_BODY = "{ … }"
 
 
 def is_anonymous_body(node: Node) -> bool:
-    """``node`` is the body of an anonymous class (``new T(…) { … }``)."""
+    """``node`` is the body of an anonymous class: ``new T(…) { … }``, or an enum constant's
+    (``RED { … }``: Java makes it an anonymous subclass of the enum)."""
     parent = node.parent
-    return node.type == "class_body" and parent is not None and parent.type == "object_creation_expression"
+    return node.type == "class_body" and parent is not None \
+        and parent.type in ("object_creation_expression", "enum_constant")
 
 
 def stored_field(body: Node) -> Node | None:

@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..detection import text_has_query
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES
@@ -59,7 +59,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     callee = f"{node_text(receiver, source)}.{method}" if receiver is not None else method
     arguments = call.child_by_field_name("arguments")
     args = list(arguments.named_children) if arguments is not None else []
-    endpoint, override = resolve_endpoint(args, source, _render_url)
+    endpoint, override = resolve_endpoint(args, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

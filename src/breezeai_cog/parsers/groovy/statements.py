@@ -6,7 +6,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -109,7 +109,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         endpoint, override = _render_url(url_arg, source), None
     else:
         positional = [a for a in arg_nodes if a.type != "named_argument"]
-        endpoint, override = resolve_endpoint(positional, source, _render_url)
+        endpoint, override = resolve_endpoint(positional, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
     return callee, method, endpoint

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from breezeai_cog.parsers import additive
+from breezeai_cog.parsers.addresses import normalize_addresses
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.java.parser import JavaParser
 
@@ -17,6 +18,7 @@ def _calls(tmp_path: Path, src: str, rel: str = "src/main/java/com/acme/Client.j
     ctx = ParseContext(path=rel, abs_path=path, source=src.encode(), repo_root=tmp_path,
                        capture_statements=True)
     record = JavaParser().parse_file(ctx)
+    normalize_addresses(record)  # as the executor does once per file
     return [(s.method, s.endpoint, s.startLine) for s in record.statements
             if s.semanticType == "api_call"]
 
@@ -43,7 +45,7 @@ class Client {
 
 def test_request_class_gives_the_verb(tmp_path: Path) -> None:
     assert _calls(tmp_path, _CLIENT) == [
-        ("GET", None, 10), ("POST", "/api/v1/orders", 12), ("GET", "/api/v1/orders/{uri}", 15)]
+        ("GET", "${uri}", 10), ("POST", "/api/v1/orders", 12), ("GET", "/api/v1/orders/{uri}", 15)]
 
 
 def test_httpclient5_and_wildcard_and_qualified(tmp_path: Path) -> None:
@@ -56,7 +58,7 @@ class Client {
     }
 }
 """
-    assert _calls(tmp_path, src) == [("PUT", None, 5), ("DELETE", None, 6)]
+    assert _calls(tmp_path, src) == [("PUT", "${u}", 5), ("DELETE", "${u}", 6)]
 
 
 def test_own_class_named_like_a_request_is_not_one(tmp_path: Path) -> None:

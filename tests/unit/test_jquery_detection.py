@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from breezeai_cog import iter_file_records
 from breezeai_cog.cli import app
+from breezeai_cog.parsers.addresses import normalize_addresses
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
 from breezeai_cog.parsers.html.parser import HtmlParser
@@ -35,6 +36,7 @@ def _parse(parser, name: str, *, capture: bool = True) -> FileRecord:
 def _jquery(rec: FileRecord) -> list[tuple[str | None, str | None]]:
     """(method, endpoint) of every jquery api_call — assertions target the framework, not
     'no api_call at all', so unrelated calls in a fixture cannot mask a result."""
+    normalize_addresses(rec)  # as the executor does once per file
     return [
         (s.method, s.endpoint)
         for s in rec.statements
@@ -98,15 +100,16 @@ def test_non_selection_load_is_not_jquery() -> None:
 
 
 def test_generic_detection_is_unchanged_for_http_clients(tmp_path) -> None:
-    # axios keeps its generic classification (no framework from this detector); a bare `$.get`
-    # with no jQuery evidence is not promoted to an api_call by the generic classifier either.
+    # axios keeps its generic classification (its framework comes from the axios detector, not
+    # this one); a bare `$.get` with no jQuery evidence is not promoted to an api_call by the
+    # generic classifier either.
     src = b"import axios from 'axios';\naxios.get('/api/a');\n$.get('/api/b');\n"
     p = tmp_path / "a.ts"
     p.write_bytes(src)
     ctx = ParseContext(path="a.ts", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
     api = [s for s in rec.statements if s.semanticType == "api_call"]
-    assert [(s.startLine, s.method, s.framework) for s in api] == [(2, "GET", None)]
+    assert [(s.startLine, s.method, s.framework) for s in api] == [(2, "GET", "axios")]
     assert _jquery(rec) == []
 
 
@@ -144,7 +147,7 @@ def test_dynamic_url_and_verb_are_honest_null(tmp_path) -> None:
     ctx = ParseContext(path="d.js", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
     # nothing is invented: a base read at runtime is marked `${base}`; a URL or verb that
     # cannot be read at all stays null
-    assert _jquery(TypeScriptParser().parse_file(ctx)) == [("GET", "${base}/x"), (None, None)]
+    assert _jquery(TypeScriptParser().parse_file(ctx)) == [("GET", "${base}/x"), (None, "${u}")]
 
 
 def test_non_javascript_script_block_is_ignored(tmp_path) -> None:
@@ -195,7 +198,7 @@ def _src(tmp_path, src: str, name: str = "a.js", parser=None) -> list[tuple[str 
         ('$.ajax({ url: "/api/d", type: "POST", method: "PUT" });', [("POST", "/api/d")]),
         ('$.ajax({ url: "/api/d", method: "PUT", type: "POST" });', [("POST", "/api/d")]),
         # a dynamic endpoint is null, never the expression text
-        ('import $ from "jquery";\n$.get(`/api/${id}`);', [("GET", None)]),
+        ('import $ from "jquery";\n$.get(`/api/${id}`);', [("GET", "/api/{id}")]),
     ],
 )
 def test_recognition_edges(tmp_path, src: str, expected) -> None:
@@ -247,16 +250,16 @@ _JQ = 'import $ from "jquery";\n'
     [
         # literal / variable / member-expression URLs; unresolved ones are null, never the text
         (_JQ + '$.ajax({ url: "/api/a", type: "GET" });', [("GET", "/api/a")]),
-        (_JQ + '$.ajax({ url: target, type: "POST" });', [("POST", None)]),
-        (_JQ + '$.ajax({ url: form.action, type: "POST" });', [("POST", None)]),
-        (_JQ + '$.ajax({ url: "/api/" + id, method: "GET" });', [("GET", None)]),
+        (_JQ + '$.ajax({ url: target, type: "POST" });', [("POST", "${target}")]),
+        (_JQ + '$.ajax({ url: form.action, type: "POST" });', [("POST", "${form.action}")]),
+        (_JQ + '$.ajax({ url: "/api/" + id, method: "GET" });', [("GET", "/api/{id}")]),
         # every verb, from `type` and from `method`, any case
         (_JQ + '$.ajax({ url: "/v", type: "put" });', [("PUT", "/v")]),
         (_JQ + '$.ajax({ url: "/v", method: "PATCH" });', [("PATCH", "/v")]),
         (_JQ + '$.ajax({ url: "/v", method: "DELETE" });', [("DELETE", "/v")]),
         (_JQ + '$.ajax({ url: "/v", type: "POST" });', [("POST", "/v")]),
         # omitted verb on a literal options object = jQuery's default GET
-        (_JQ + '$.ajax({ url: target });', [("GET", None)]),
+        (_JQ + '$.ajax({ url: target });', [("GET", "${target}")]),
         # an unreadable verb is null: a dynamic value, or a spread that may carry it
         (_JQ + '$.ajax({ url: "/v", type: verb });', [(None, "/v")]),
         (_JQ + '$.ajax({ ...defaults, url: "/v" });', [(None, "/v")]),
@@ -264,13 +267,13 @@ _JQ = 'import $ from "jquery";\n'
         (_JQ + '$.ajax(settings);', []),
         (_JQ + '$.ajax($.extend({}, base, { url: "/v" }));', []),
         # shorthand helpers keep their fixed verbs
-        (_JQ + '$.get(target);', [("GET", None)]),
-        (_JQ + '$.post(target, data);', [("POST", None)]),
-        (_JQ + '$.getJSON(`/api/${id}`);', [("GET", None)]),
+        (_JQ + '$.get(target);', [("GET", "${target}")]),
+        (_JQ + '$.post(target, data);', [("POST", "${target}")]),
+        (_JQ + '$.getJSON(`/api/${id}`);', [("GET", "/api/{id}")]),
         # .load: GET, literal or built URL; the legacy load EVENT and non-selections are not requests
         (_JQ + '$("#c").load("/Products/Details");', [("GET", "/Products/Details")]),
-        (_JQ + '$("#c").load("/p/" + id);', [("GET", None)]),
-        (_JQ + '$("#c").load(`/p/${id}`, cb);', [("GET", None)]),
+        (_JQ + '$("#c").load("/p/" + id);', [("GET", "/p/{id}")]),
+        (_JQ + '$("#c").load(`/p/${id}`, cb);', [("GET", "/p/{id}")]),
         (_JQ + '$("#c").load("?handler=Partial");', [("GET", "?handler=Partial")]),
         (_JQ + '$(window).load(function () {});', []),
         (_JQ + '$(window).load(init);', []),
@@ -326,7 +329,7 @@ def test_layout_evidence_reaches_page_inline_script_and_external_script(tmp_path
     })
     assert _scan(root, templates=True) == {
         "App/Pages/Index.cshtml": [(5, "GET", "?handler=Rows")],  # line inside the original file
-        "App/wwwroot/js/site.js": [(2, "POST", None)],  # form.action → unresolved, not invented
+        "App/wwwroot/js/site.js": [(2, "POST", "${form.action}")],  # form.action: named, never its value
     }
 
 
@@ -341,12 +344,12 @@ def test_template_capture_off_skips_markup_and_its_evidence(tmp_path) -> None:
     # default: markup is not read. Razor's `.load` is absent and the layout's evidence is
     # unavailable, so an evidence-dependent `$.post` stays unclassified; the `$.ajax({ url: … })`
     # options object is recognised from its own shape (dynamic url → null endpoint).
-    assert _scan(root, templates=False) == {"wwwroot/js/site.js": [(2, "POST", None)]}
+    assert _scan(root, templates=False) == {"wwwroot/js/site.js": [(2, "POST", "${form.action}")]}
     # with template capture the layout vouches for helper.js too, and the page's `.load` appears
     assert _scan(root, templates=True) == {
         "Pages/Index.cshtml": [(5, "GET", "?handler=Rows")],
-        "wwwroot/js/helper.js": [(1, "POST", None)],
-        "wwwroot/js/site.js": [(2, "POST", None)],
+        "wwwroot/js/helper.js": [(1, "POST", "${form.action}")],
+        "wwwroot/js/site.js": [(2, "POST", "${form.action}")],
     }
 
 
@@ -393,7 +396,7 @@ def test_external_script_needs_to_be_loaded_after_jquery(tmp_path) -> None:
         "wwwroot/js/late.js": '$.get(a);\n',
         "wwwroot/js/unlisted.js": '$.get(a);\n',
     })
-    assert _scan(root, templates=True) == {"wwwroot/js/late.js": [(1, "GET", None)]}
+    assert _scan(root, templates=True) == {"wwwroot/js/late.js": [(1, "GET", "${a}")]}
 
 
 def test_external_script_with_its_own_dollar_is_not_promoted(tmp_path) -> None:
@@ -476,8 +479,8 @@ def test_ndjson_gz_output_has_each_call_once_with_and_without_templates(tmp_path
         "wwwroot/lib/vendor/plugin.js": '(function ($) {\n  $.ajax($.extend(true, { mode: "abort" }, param));\n})(jQuery);\n',
     })
     site = [
-        ("wwwroot/js/site.js", 2, "GET", None),  # dynamic url → null, verb and line kept
-        ("wwwroot/js/site.js", 3, "POST", None),  # form.action → null
+        ("wwwroot/js/site.js", 2, "GET", "${url}"),  # dynamic url: named, verb and line kept
+        ("wwwroot/js/site.js", 3, "POST", "${form.action}"),  # form.action: named
         ("wwwroot/js/site.js", 4, "PUT", "/api/lit"),  # literal URL retained, jQuery alias
     ]
     # default run: Razor is skipped by design, so only the self-evident `$.ajax({url})` forms appear
@@ -594,6 +597,10 @@ def test_layout_bundle_is_evidence_for_the_view(tmp_path) -> None:
         ("cshtml", 'jQuery.get("https://user@host.example/x");', [(1, "GET", "https://user@host.example/x")]),
         ("cshtml", 'jQuery.ajax({ url: "/api/s", type: "POST" });', [(1, "POST", "/api/s")]),
         ("html", 'jQuery.get("/api/@Model.Id");', [(1, "GET", None)]),  # plain markup: same honest-null
+        # a URL built from strings and JavaScript values reads as axios reads it, in every markup
+        ("cshtml", 'jQuery.get("/api/users/" + user.id + "/roles");', [(1, "GET", "/api/users/{user.id}/roles")]),
+        ("aspx", 'jQuery.post("/api/users/" + id, data);', [(1, "POST", "/api/users/{id}")]),
+        ("html", 'jQuery.ajax({ url: `/api/items/${item.id}`, type: "PUT" });', [(1, "PUT", "/api/items/{item.id}")]),
         # a Razor/WebForms expression elsewhere (a callback) does not null a literal URL
         ("cshtml", 'jQuery.get("/api/ok", function () { var x = @Model.Id; });', [(1, "GET", "/api/ok")]),
         ("aspx", 'jQuery.get("/api/ok", function () { var x = <%= Id %>; });', [(1, "GET", "/api/ok")]),

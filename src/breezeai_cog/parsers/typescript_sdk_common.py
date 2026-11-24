@@ -30,10 +30,14 @@ https://accionlabs.atlassian.net/wiki/x/BIAGl
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from tree_sitter import Node
 
+from ..emit import statement_id
+from ..schemas import FileRecord
+from .detection import match_api
 from .emits import Emit, Enrich
 from .treesitter import node_text
 
@@ -234,3 +238,100 @@ def detect_client_chain(root: Node, source: bytes, sdk: Sdk, out: list[Emit]) ->
         emit_outbound(call, callee, sdk.framework, out)
         emitted = True
     return emitted
+
+
+# ── The HTTP client of a generic outbound call ──────────────────────────────────────────────
+def label_http_client(
+    root: Node, source: bytes, path: str, record: FileRecord, framework: str,
+    evidenced: Callable[[Node], bool],
+) -> list[Emit]:
+    """``framework`` on the ``api_call`` statements this file already holds, when the client of
+    their HTTP call is certain (``evidenced``: an ``axios`` imported here, the global ``fetch``,
+    an injected Angular ``HttpClient``). Never a new statement and never a guess: a statement is
+    labelled only when it has no ``framework`` yet and **every** HTTP call in it is ``evidenced``
+    (``Promise.all([axios.get(a), fetch(b)])`` gets none)."""
+    unlabelled = {s.id: s for s in record.statements
+                  if s.semanticType == "api_call" and not s.framework}
+    if not unlabelled:
+        return []
+    from .typescript.statements import collect_http_client_ids
+    client_ids = collect_http_client_ids(root, source)
+    out: list[Emit] = []
+    done: set[str] = set()
+    for call in walk_calls(root):
+        if not evidenced(call):
+            continue
+        node: Node | None = call
+        while node is not None:
+            sid = statement_id(path, node.start_point[0] + 1, node.start_point[1])
+            stmt = unlabelled.get(sid)
+            if stmt is not None and stmt.nodeType == node.type:
+                break
+            node = node.parent
+        if node is None or sid in done:
+            continue
+        done.add(sid)
+        if all(evidenced(c) for c in walk_calls(node) if _is_http_call(c, source, client_ids)):
+            out.append(Emit(node, {"framework": framework}, enrich="same"))
+    return out
+
+
+def _is_http_call(call: Node, source: bytes, client_ids: frozenset[str]) -> bool:
+    """Whether the shared outbound classifier reads ``call`` as an HTTP call."""
+    fn = call.child_by_field_name("function")
+    callee = node_text(fn, source) if fn is not None else ""
+    method = callee.rsplit(".", 1)[-1]
+    return match_api(callee, method, client_ids, "typescript") is not None
+
+
+def callee_root(call: Node, source: bytes) -> str | None:
+    """The name a call is made through: ``axios`` in ``axios(cfg)`` / ``axios.get(u)``, ``api`` in
+    ``api.post(u)``. None for a longer chain or any other callee (``this.api.get``,
+    ``axios.defaults.get``)."""
+    fn = call.child_by_field_name("function")
+    if fn is not None and fn.type == "identifier":
+        return node_text(fn, source)
+    obj = fn.child_by_field_name("object") \
+        if fn is not None and fn.type == "member_expression" else None
+    return node_text(obj, source) if obj is not None and obj.type == "identifier" else None
+
+
+def shadowed_names(root: Node, source: bytes) -> frozenset[str]:
+    """Names this file binds more than once (an import and a local, two locals, a function and a
+    variable) or as a parameter: a call through one of them may not reach what one binding says."""
+    counts: dict[str, int] = {}
+    params: set[str] = set()
+
+    def bind(node: Node | None) -> None:
+        if node is not None and node.type == "identifier":
+            name = node_text(node, source)
+            counts[name] = counts.get(name, 0) + 1
+
+    def walk(n: Node) -> None:
+        if n.type in ("variable_declarator", "function_declaration", "class_declaration",
+                      "generator_function_declaration"):
+            bind(n.child_by_field_name("name"))
+        elif n.type == "import_clause":
+            for c in n.named_children:
+                if c.type == "identifier":
+                    bind(c)
+                elif c.type == "namespace_import":
+                    for i in c.named_children:
+                        bind(i)
+                elif c.type == "named_imports":
+                    for spec in c.named_children:
+                        bind(spec.child_by_field_name("alias") or spec.child_by_field_name("name"))
+        elif n.type == "formal_parameters":
+            for p in n.named_children:
+                target = p.child_by_field_name("pattern") or p.child_by_field_name("left") or p
+                if target.type == "identifier":
+                    params.add(node_text(target, source))
+        elif n.type == "arrow_function":
+            single = n.child_by_field_name("parameter")
+            if single is not None and single.type == "identifier":
+                params.add(node_text(single, source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return frozenset(params | {n for n, k in counts.items() if k > 1})

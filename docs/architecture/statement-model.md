@@ -140,6 +140,9 @@ their methods as `Function`s; the enclosing method keeps only its own statements
 - The type after `new` is `extends` when it is certainly a class (constructor arguments, or a
   class of this file, the repository or a known JDK type) and `implements` when it is certainly
   an interface; a library type gives neither.
+- **An enum constant's body** (`RED("r") { String tag() { … } }`) is an anonymous subclass of
+  the enum, as Java compiles it: named after the constant (`Color.RED`), `extends` the enum, its
+  methods under it. The constant stays an `enum_member` statement of the enum.
 
 | Code | `Function` | Statements |
 |---|---|---|
@@ -191,7 +194,29 @@ flowchart TD
 `method` on an `api_call` is an HTTP verb or empty. A generic `client.request(…)` whose verb
 the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`) is an
 `api_call` with an empty `method`; where the language parser reads the verb from the arguments
-(`requests.request("GET", url)`, `axios({ method: "post" })`) it is that verb.
+(`requests.request("GET", url)`, `axios({ method: "post" })`) it is that verb. In Java a client
+method whose verb is an argument — Vert.x `request` / `requestAbs`, Spring `exchange` /
+`execute`, `WebClient.method` — takes a written `HttpMethod.PUT` as its verb; its URL is the
+first argument when the verb is not first (`exchange(url, HttpMethod.GET, …)`), else the last
+later argument that reads as a path or URL (`request(HttpMethod.PUT, 8080, "host", "/orders")`
+→ `/orders`).
+
+`framework` on an `api_call` names the HTTP client, and only from evidence; the shared
+classifier matches clients by name, so on its own it leaves `framework` empty. An additive
+detector labels the statement afterwards — never adding one — when the file binds the client
+and **every** HTTP call in the statement goes through it:
+
+| Client | Evidence in the file | `framework` |
+|---|---|---|
+| jQuery | jQuery imported or loaded by the page | `jquery` |
+| axios | `axios` imported or required, or an instance from its `create(…)`; called as `axios(…)` / `axios.get(…)` / `api.post(…)` | `axios` |
+| Fetch API | `fetch(…)` / `window.fetch(…)` / `globalThis.fetch(…)`, with `fetch` bound by nothing in the file or only by an import from a Fetch implementation (`node-fetch`, `cross-fetch`, `undici`, …) | `fetch` |
+| Angular `HttpClient` | `this.<field>.get(…)` etc., the field a constructor parameter property, typed field or `inject(…)` of `HttpClient` imported from `@angular/common/http`; or `http.get(…)` on a local bound once to `inject(HttpClient)` or typed `HttpClient` | `angular` |
+| Vert.x `HttpClient`, vendor SDKs | the client type | `vertx`, `hubspot`, … |
+
+No evidence — `this.http.get(…)` with no visible type, a wrapper of unknown origin, a name
+bound twice or shadowed by a parameter, `Promise.all([axios.get(a), fetch(b)])` — leaves
+`framework` empty.
 
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
@@ -414,8 +439,16 @@ Two further rules apply to detectors:
   are throwaway test set-ups: additive detectors with `Gate(skip_fixtures=True)`, parser-owned
   route code with `is_fixture_file`.
 - **Constants are folded** into `endpoint` when they are true compile-time constants (`ORDERS` →
-  `orders.created`). Otherwise the endpoint is left empty. See
-  [Cross-file resolution](cross-file-resolution.md).
+  `orders.created`; a route path `app.get(API + "/orders")` → `/api/orders`) and the file shows
+  which constant a name is: it declares it or imports it. A name it does neither for — or reads
+  at runtime under the same name — is marked, never filled from another file's constant. See
+  [Cross-file resolution §7](cross-file-resolution.md#7-constant-folding).
+- **A part read at runtime is marked `${…}`** where it stands, named after its source, never
+  guessed, and never written `{name}` (a path parameter): inbound
+  `router.get(pathPrefix + "/request")` → `endpoint: ${pathPrefix}/request`; outbound
+  `axios.post(config.contextRoot + "/orders/" + id)` → `endpoint: ${config.contextRoot}/orders/{id}`.
+  An address left with no named part (`${value}`, `{param}` only) is empty. The full rule is in the
+  [entry-point contract §6](entry-points.md#a-part-read-at-runtime-name).
 
 ---
 

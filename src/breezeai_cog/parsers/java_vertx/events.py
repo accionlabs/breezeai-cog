@@ -32,7 +32,7 @@ from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
-                          invocations, java_string, local_value)
+                          invocations, java_string, local_value, value_source)
 from .forwarders import forwarder_sites
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
@@ -43,9 +43,11 @@ from .route_guards import (chained_handlers, failure_args, library_handlers, pat
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
-from ..addresses import join_runtime
+from ..addresses import informative, join_runtime, mark_runtime, runtime_name, source_kind
 from ..vertx_common import (
     vertx_emit,
+    EVENTBUS,
+    HTTP_VERBS,
     MOUNTED_FACTORIES,
     FactoryMount,
     factory_mount,
@@ -105,7 +107,9 @@ def _parts(
     first_str = first_arg = None
     if args is not None and args.named_children:
         first_node = args.named_children[0]
-        first_arg = node_text(first_node, source)
+        # an event-bus address held in a local read from config / env is named after the read
+        first_arg = node_text(value_source(first_node, source) if method in EVENTBUS
+                              else first_node, source)
         first_str = render_address(first_node, source, consts, java_string)
     return method, first_str, first_arg, obj
 
@@ -122,6 +126,40 @@ def _classify(
     method, first_str, first_arg, obj = _parts(call, source, consts)
     return classify_call(method, first_str, first_arg, obj, service_vars=service_vars,
                          routers=routers, non_routers=non_routers)
+
+
+def _value_route(
+    call: Node, source: bytes, consts: dict[str, str], routers: frozenset[str],
+) -> tuple[SemanticType, str | None, str | None, str | None] | None:
+    """A route whose whole path is one value cog cannot read, on a router this file declares
+    (``Router r = Router.router(vertx)``, a ``Router`` / ``RouteMatcher`` field or parameter),
+    with a handler: ``router.get(path).handler(h)`` → ``${path}``, named after its source
+    (``addresses.py``; a local assigned once from ``config().getString("a")`` → ``${config:a}``).
+    The path is a name, a field or a configuration / environment read; any other call is not
+    read as one. None for anything else."""
+    name = call.child_by_field_name("name")
+    verb = node_text(name, source) if name is not None else ""
+    receiver = call.child_by_field_name("object")
+    args = call.child_by_field_name("arguments")
+    named = list(args.named_children) if args is not None else []
+    if verb not in HTTP_VERBS and verb != "route" or receiver is None or not named \
+            or router_name(node_text(receiver, source)) not in routers:
+        return None
+    first = named[0]
+    if verb == "route" and len(named) > 1:  # `route(HttpMethod.GET, path)`: not a path first
+        return None
+    if first.type not in ("identifier", "field_access", "method_invocation") \
+            or render_address(first, source, consts, java_string) is not None:
+        return None
+    text = node_text(value_source(first, source), source)
+    if first.type == "method_invocation" and source_kind(text) is None:
+        return None
+    if _handler_arg(call, source) is None:
+        return None
+    endpoint = informative(mark_runtime("{" + runtime_name(text) + "}"))
+    if endpoint is None:
+        return None
+    return "route", verb.upper() if verb != "route" else None, endpoint, "route"
 
 
 def _handler_arg(call: Node, source: bytes) -> Node | None:
@@ -446,7 +484,8 @@ def detect_vertx(
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        info = _classify(call, source, consts, service_vars, routers, non_routers)
+        info = _classify(call, source, consts, service_vars, routers, non_routers) \
+            or _value_route(call, source, consts, routers)
         if info is None:
             pathless_call = pathless_at.get((call.start_byte, call.end_byte))
             if pathless_call is not None:  # `router.post().handler(BodyHandler.create())`
