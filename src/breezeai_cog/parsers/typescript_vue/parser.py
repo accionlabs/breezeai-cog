@@ -19,13 +19,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from tree_sitter import Node
+
 from ...emit import file_id
 from ...schemas import FileRecord, Statement
 from ..base import HandlerLocator, ParseContext
+from ..template_common.markup import read_page_markup
+from ..template_common.scripts import link_page_scripts
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_composables, mark_factory_ui_roles
-from .sfc import script_grammar, script_language, script_ranges, shadow_source
+from .sfc import script_blocks, script_grammar, script_language, shadow_source, template_markup
 from .template import collect_vue_template_statements
 
 # Byte guards for a Vue-ecosystem import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the
@@ -60,12 +64,11 @@ class VueParser(TypeScriptParser):
         return super().handler_locator(ctx)
 
     def _template_statements(
-        self, ctx: ParseContext, fid: str, seen_ids: set[str]
+        self, ctx: ParseContext, vroot: Node, fid: str, seen_ids: set[str]
     ) -> list[Statement]:
-        """Parse the SFC with the ``vue`` grammar and capture ``<template>`` bindings — the
-        script capture uses the shadow source (which blanks the template), so this is the only
-        pass that sees the markup. Closes the documented ``sfc.py`` gap."""
-        vroot = parse_source("vue", ctx.source, ctx.parse_timeout_micros).root_node
+        """Capture ``<template>`` bindings from the SFC's ``vue`` tree — the script capture uses
+        the shadow source (which blanks the template), so this is the only pass that sees the
+        markup."""
         return collect_vue_template_statements(
             vroot,
             ctx.source,
@@ -78,8 +81,9 @@ class VueParser(TypeScriptParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         if ctx.path.lower().endswith(".vue"):
-            ranges = script_ranges(ctx.source)
-            if not ranges:  # a template/style-only SFC has no code — still capture the template
+            vroot = parse_source("vue", ctx.source, ctx.parse_timeout_micros).root_node
+            blocks = script_blocks(vroot)
+            if not blocks:  # a template/style-only SFC has no code — still capture the template
                 fid = file_id(ctx.path)
                 rec = FileRecord(
                     id=fid,
@@ -87,19 +91,18 @@ class VueParser(TypeScriptParser):
                     type="code",
                     # language = the JS/TS axis (from <script lang>); a template-only SFC has
                     # no script → javascript. framework = the framework axis; uiRole = the role.
-                    language=script_language(ctx.source),
+                    language=script_language(blocks),
                     framework="vue",
                     loc=0,
                     uiRole="component",  # a .vue SFC is a component even with no <script>
                 )
-                if ctx.capture_statements:
-                    rec.statements.extend(self._template_statements(ctx, fid, set()))
+                self._read_page(rec, ctx, vroot)
                 return rec
-            grammar = script_grammar(ctx.source)
+            grammar = script_grammar(blocks)
             # Parse the shadow (script bytes at their real offsets, everything else blanked);
             # feed the SAME shadow to extract()/route detection, since node byte offsets index
             # into it — and the script bytes are identical to the original there.
-            parsed_source = shadow_source(ctx.source, ranges)
+            parsed_source = shadow_source(ctx.source, blocks)
             parse_ctx = replace(ctx, source=parsed_source)
         else:
             parsed_source = ctx.source
@@ -116,7 +119,7 @@ class VueParser(TypeScriptParser):
         if ctx.path.lower().endswith(".vue"):
             # language axis: the SFC's script lang (ts/js), NOT "vue" — "vue" is the framework,
             # which the extension can't carry, so JS/TS would otherwise be lost on .vue files.
-            record.language = script_language(ctx.source)
+            record.language = script_language(blocks)
             record.uiRole = "component"  # a .vue SFC is, by definition, a component
         # Factory-defined UI entities in any file this parser handles — Vue `defineComponent`
         # (component) / Pinia `defineStore` (store) — mark the File (default export) or the
@@ -124,10 +127,31 @@ class VueParser(TypeScriptParser):
         mark_factory_ui_roles(root, parsed_source, record)
         # Composables — a `useX` function that calls a Vue reactivity primitive.
         mark_composables(root, parsed_source, record)
-        # <template> bindings — parsed from the ORIGINAL source with the vue grammar (the
-        # shadow blanked the template). Closes the sfc.py gap; script statements keep their ids.
-        if ctx.path.lower().endswith(".vue") and ctx.capture_statements:
-            record.statements.extend(
-                self._template_statements(ctx, file_id(ctx.path), {s.id for s in record.statements})
-            )
+        if ctx.path.lower().endswith(".vue"):
+            self._read_page(record, ctx, vroot)
         return record
+
+    def _read_page(self, record: FileRecord, ctx: ParseContext, vroot: Node) -> None:
+        """The SFC's page parts, after its script: ``<script src>`` file links, then (with
+        statement capture) the ``<template>`` bindings and the template's links and form posts
+        through the shared markup reader. The script blocks already ran every script detector,
+        so the shared script reader is not used here (it would count each call twice)."""
+        link_page_scripts(record, ctx)
+        if not ctx.capture_statements:
+            return
+        # Script statements keep their ids: template ids are disambiguated against them.
+        record.statements.extend(
+            self._template_statements(
+                ctx, vroot, file_id(ctx.path), {s.id for s in record.statements}
+            )
+        )
+        markup = template_markup(vroot, ctx.source)
+        if markup is not None:
+            read_page_markup(
+                record,
+                markup,
+                ctx.path,
+                ctx.parse_timeout_micros,
+                links=not self.is_fixture_file(ctx.path),
+                source=ctx.source,
+            )
