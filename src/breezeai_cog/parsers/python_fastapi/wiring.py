@@ -13,6 +13,8 @@ wiring facts (:mod:`.file_facts`) are collected once per repository and composed
 * a router included at more than one place is served at each of them: its address is unknown
   (``None``), never its own prefix alone — an address it is not served at;
 * a router in an include cycle keeps its own prefix;
+* a router re-exported by the module it is included from (``from .items import router`` in a
+  package ``__init__.py``, included as ``routers.router``) is followed one step;
 * an include this analysis cannot read (the router comes from a function call, a configuration
   value or a list built at run time) may mount any router: while one exists, a router with no
   readable include has an unknown address — never its own prefix alone;
@@ -32,7 +34,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import parse_source
-from ..python_common import module_constants
+from ..python_common import ImportRefs, module_constants
 from ..addresses import runtime_part
 from .file_facts import FileFacts, PrefixSpec, file_facts
 
@@ -77,6 +79,18 @@ def _constants(repo_root: Path, rel: str) -> tuple[str, dict[str, str]]:
     return rel, module_constants(root, source)
 
 
+def _reexport(repo_root: Path, rel: str, name: str) -> Node_ | None:
+    """(file, variable) that the module-level import of ``name`` in ``rel`` brings in
+    (``from .items import router``); None when ``name`` is not such an import."""
+    try:
+        source = (repo_root / rel).read_bytes()
+        root = parse_source("python", source).root_node
+    except (OSError, ValueError):
+        return None
+    ref = ImportRefs(root, source, repo_root, rel).get(name)
+    return (ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
+
+
 def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWiring | None:
     if not values:
         return None
@@ -105,6 +119,7 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
             own[(rel, var)] = (value(spec), deps)
     sites: dict[Node_, set[tuple[Node_, str | None, tuple[str, ...]]]] = {}
     unreadable = any(f.unreadable_includes for f in facts.values())
+    reexports: dict[Node_, Node_ | None] = {}
     for rel, f in facts.items():
         for receiver, child, spec, deps in f.includes:
             if child[0] == "factory":  # the router the factory function creates and returns
@@ -115,6 +130,10 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
                 target: Node_ = (child[1], made)
             else:
                 target = (rel, child[1]) if child[0] == "local" else (child[1], child[2])
+                if target not in own and child[0] == "ext":  # a re-export: one step
+                    if target not in reexports:
+                        reexports[target] = _reexport(root, *target)
+                    target = reexports[target] or target
             if target in own:
                 sites.setdefault(target, set()).add(((rel, receiver), value(spec), deps))
             else:  # a name of the repo that is not a router: a value, an alias — not readable

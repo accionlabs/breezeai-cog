@@ -5,6 +5,7 @@ file) and the ``fastapi.wiring`` fact (:mod:`.wiring`, across files), so both re
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,7 +13,8 @@ from tree_sitter import Node
 
 from ..addresses import runtime_part
 from ..python_common import (
-    ImportRefs, Origins, calls, keyword, literal, module_constants, module_file,
+    ImportRefs, Origins, attribute_owner, calls, keyword, literal, module_constants, module_file,
+    submodule,
 )
 from ..treesitter import node_text
 
@@ -199,9 +201,10 @@ def _returned_names(fdef: Node, source: bytes) -> list[str]:
 def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFacts:
     """The FastAPI wiring facts of one file (see :class:`FileFacts`)."""
     facts = FileFacts(constants=module_constants(root, source))
-    imports = ImportRefs(root, source, repo_root, rel, anywhere=True)  # also inside functions
+    # Also inside functions; `plain`: `import app.routers.items` binds `app`, so the dotted chain
+    # `app.routers.items.router` is followed one submodule at a time.
+    imports = ImportRefs(root, source, repo_root, rel, anywhere=True, plain=True)
     origins = Origins(root, source)
-    plain = _plain_imports(root, source)
 
     def spec(call: Node) -> PrefixSpec:
         value = keyword(call, source, "prefix")
@@ -217,11 +220,10 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             ref = imports.get(name)
             if ref is not None and ref[0] == "symbol":
                 return ("const", ref[1], ref[2])
-        if value.type == "attribute":
-            obj, attr = value.child_by_field_name("object"), value.child_by_field_name("attribute")
-            ref = imports.get(node_text(obj, source)) if obj is not None and obj.type == "identifier" else None
-            if ref is not None and ref[0] == "module" and attr is not None:
-                return ("const", ref[1], node_text(attr, source))
+        if value.type == "attribute":  # config.API_PREFIX, app.config.API_PREFIX
+            owner = attribute_owner(value, source, imports, repo_root)
+            if owner is not None:
+                return ("const", *owner)
         return ("unknown", node_text(value, source))
 
     for node in calls(root):
@@ -248,17 +250,24 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             facts.factories[node_text(fname, source)] = routers[0]
 
     def module_of(node: Node | None) -> str | None:
-        """The repo file a module expression names: an imported name (``orders``) or a dotted
-        path imported as such (``import app.routers.items`` → ``app.routers.items``)."""
+        """The repo file a module expression names: an imported module (``orders``), or a
+        submodule reached through imported packages (``import app`` → ``app.routers.items``)."""
         if node is None:
             return None
         if node.type == "identifier":
             ref = imports.get(node_text(node, source))
-            if ref is not None:
-                return ref[1] if ref[0] == "module" else None
-        dotted = node_text(node, source)
-        if node.type in ("identifier", "attribute") and dotted in plain:
-            return module_file(repo_root, rel, dotted, 0)
+            return ref[1] if ref is not None and ref[0] == "module" else None
+        owner = attribute_owner(node, source, imports, repo_root)
+        if owner is not None:
+            return submodule(repo_root, owner[0], owner[1])
+        # A namespace package (no `__init__.py` on the way): `import app.routers.items` names
+        # the file by its whole dotted path.
+        head: Node | None = node
+        while head is not None and head.type == "attribute":
+            head = head.child_by_field_name("object")
+        name = node_text(head, source) if head is not None and head.type == "identifier" else ""
+        if name and origins.names.get(name) == name:
+            return module_file(repo_root, rel, node_text(node, source), 0)
         return None
 
     def mounted_router(expr: Node) -> RouterRef | None:
@@ -304,7 +313,10 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             return False
         name = node_text(head, source)
         origin = origins.names.get(name)
-        return origin is not None and not origin.startswith(".") and imports.get(name) is None
+        if origin is None or origin.startswith(".") or imports.get(name) is not None:
+            return False
+        # `import app` of a folder without `__init__.py` resolves to no file, but is the repo's.
+        return not (origin == name and _repo_package(repo_root, rel, name))
 
     for node in calls(root):
         fn = node.child_by_field_name("function")
@@ -330,17 +342,16 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
     return facts
 
 
-def _plain_imports(root: Node, source: bytes) -> set[str]:
-    """The dotted names of ``import a.b.c`` statements (not aliased), anywhere in the file."""
-    out: set[str] = set()
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        if node.type == "import_statement":
-            out.update(node_text(c, source) for c in node.named_children if c.type == "dotted_name")
-        else:
-            stack.extend(node.named_children)
-    return out
+def _repo_package(repo_root: Path, importer: str, name: str) -> bool:
+    """Whether an absolute import of ``name`` may be a module or folder of the repository, from
+    the importer's directory up to the repo root (as :func:`module_file` looks)."""
+    here = importer.split("/")[:-1]
+    root = os.fspath(repo_root)
+    for n in range(len(here), -1, -1):
+        base = "/".join([*here[:n], name])
+        if os.path.isdir(f"{root}/{base}") or os.path.isfile(f"{root}/{base}.py"):
+            return True
+    return False
 
 
 def _loop_elements(arg: Node, source: bytes) -> list[Node]:

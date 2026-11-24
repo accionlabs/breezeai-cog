@@ -303,3 +303,47 @@ def test_imported_non_router_is_none(analyze_files) -> None:
         "app/other.py": (
             "from app.cache import cache\n\n@cache.get('k')\ndef c():\n    pass\n")})
     assert _eps(st) == []
+
+
+_ITEMS = ("from fastapi import APIRouter\nrouter = APIRouter(prefix='/items')\n\n"
+          "@router.get('/{item_id}')\ndef get_item(item_id: int):\n    pass\n")
+
+
+def test_router_reached_through_an_imported_package_gets_the_include_prefix(analyze_files) -> None:
+    # `import app` + `app.routers.items.router`: followed one submodule at a time.
+    for head in ("import app", "import app.routers.items"):
+        st = analyze_files({
+            "app/__init__.py": "", "app/routers/__init__.py": "", "app/routers/items.py": _ITEMS,
+            "app/main.py": (f"{head}\nfrom fastapi import FastAPI\napi = FastAPI()\n"
+                            "api.include_router(app.routers.items.router, prefix='/v1')\n")})
+        assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "/v1/items/{item_id}")], head
+
+
+def test_router_of_a_namespace_package_gets_the_include_prefix(analyze_files) -> None:
+    # No `__init__.py`: the dotted import names the file as a whole.
+    st = analyze_files({
+        "app/routers/items.py": _ITEMS,
+        "app/main.py": ("import app.routers.items\nfrom fastapi import FastAPI\napi = FastAPI()\n"
+                        "api.include_router(app.routers.items.router, prefix='/v1')\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "/v1/items/{item_id}")]
+
+
+def test_router_of_a_library_package_leaves_repo_routers_their_address(analyze_files) -> None:
+    st = analyze_files({
+        "app/__init__.py": "", "app/items.py": _ITEMS,
+        "app/main.py": ("import lib_pkg\nfrom fastapi import FastAPI\napi = FastAPI()\n"
+                        "api.include_router(lib_pkg.router)\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "/items/{item_id}")]
+
+
+def test_router_re_exported_by_its_package_gets_the_include_prefix(analyze_files) -> None:
+    # `from .items import router` in the package: followed one step, not an unreadable include.
+    st = analyze_files({
+        "app/__init__.py": "", "app/routers/__init__.py": "from .items import router\n",
+        "app/routers/items.py": _ITEMS,
+        "app/main.py": ("from fastapi import FastAPI\nfrom app import routers\napi = FastAPI()\n"
+                        "api.include_router(routers.router, prefix='/v1')\n"),
+        "app/health.py": ("from fastapi import APIRouter\nhealth = APIRouter(prefix='/health')\n\n"
+                          "@health.get('/ping')\ndef ping():\n    pass\n")})
+    assert sorted((s.method, s.endpoint) for s in _eps(st)) == [
+        ("GET", "/health/ping"), ("GET", "/v1/items/{item_id}")]
