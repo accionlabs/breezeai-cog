@@ -4,9 +4,14 @@ Coexists with NestJS because selection is per-file by ``claims``."""
 
 from __future__ import annotations
 
+from tree_sitter import Node
+
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..emits import apply
+from ..html.statements import collect_template_statements
+from ..template_common.inline_templates import inline_template_markup
+from ..template_common.markup import read_page_markup
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_angular_ui_roles
@@ -35,4 +40,30 @@ class AngularParser(TypeScriptParser):
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by statement capture; skip fixtures (R4)
             routes = detect_angular_routes(root, ctx.source, ctx.path, index=ctx.resolution_index)
             apply(record, routes, ctx.source, ctx.path)  # framework already stamped above
+        if ctx.capture_statements:
+            self._inline_template(record, root, ctx)
         return record
+
+    def _inline_template(self, record: FileRecord, root: Node, ctx: ParseContext) -> None:
+        """A ``template: `…``` written in the component: read as its ``.html`` template would be
+        (bindings, links and form posts), at its true lines in this file."""
+        markup = inline_template_markup(root, ctx.source)
+        if markup is None:
+            return
+        troot = parse_source("angular", markup, ctx.parse_timeout_micros).root_node
+        record.statements.extend(
+            collect_template_statements(
+                troot,
+                markup,
+                ctx.path,
+                parent_id=record.id,
+                seen_ids={s.id for s in record.statements},
+                limit=ctx.statement_text_limit,
+                framework="angular",
+                emit_routes=not self.is_fixture_file(ctx.path),
+            )
+        )
+        read_page_markup(
+            record, markup, ctx.path, ctx.parse_timeout_micros,
+            links=not self.is_fixture_file(ctx.path), source=ctx.source,
+        )

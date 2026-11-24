@@ -25,6 +25,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import FileRecord, Statement
 from ..base import HandlerLocator, ParseContext
+from ..template_common.inline_templates import inline_template_markup
 from ..template_common.markup import read_page_markup
 from ..template_common.scripts import link_page_scripts, page_file
 from ..treesitter import parse_source
@@ -137,7 +138,33 @@ class VueParser(TypeScriptParser):
         mark_composables(root, parsed_source, record)
         if ctx.path.lower().endswith(".vue"):
             self._read_page(record, ctx, vroot)
+        elif ctx.capture_statements:
+            self._inline_template(record, root, ctx)
         return record
+
+    def _inline_template(self, record: FileRecord, root: Node, ctx: ParseContext) -> None:
+        """A ``template: `…``` option in a ``.js`` / ``.ts`` component: read as an SFC's
+        ``<template>`` (bindings, links and form posts), at its true lines in this file."""
+        markup = inline_template_markup(root, ctx.source)
+        if markup is None:
+            return
+        vroot = parse_source("vue", markup, ctx.parse_timeout_micros).root_node
+        record.statements.extend(
+            collect_vue_template_statements(
+                vroot,
+                markup,
+                ctx.path,
+                parent_id=record.id,
+                seen_ids={s.id for s in record.statements},
+                limit=ctx.statement_text_limit,
+                emit_routes=not self.is_fixture_file(ctx.path),
+                whole_file=True,
+            )
+        )
+        read_page_markup(
+            record, markup, ctx.path, ctx.parse_timeout_micros,
+            links=not self.is_fixture_file(ctx.path), source=ctx.source,
+        )
 
     def _read_page(self, record: FileRecord, ctx: ParseContext, vroot: Node) -> None:
         """The SFC's page parts, after its script: ``<script src>`` file links, then (with
