@@ -86,9 +86,12 @@ flowchart LR
 > **Cost:** to see "the statements of a function", filter by `parentId`.
 
 > **Decision —** `nodeType` is always a real grammar node type, or the single value `synthetic`.
-> **Why:** it stays truthful and checkable against the source. A statement with no node of its
-> own (a route derived from an annotation such as `@GetMapping`) uses `synthetic` rather than an
-> invented name like `route_annotation`. The meaning goes in `semanticType`.
+> **Why:** it stays truthful and checkable against the source. A statement takes the type
+> tree-sitter gives the node it sits at — a route read from `@GetMapping` is an `annotation`, one
+> read from a Python `@app.get` is a `decorator`, a config entry in a dict is a `pair` — never an
+> invented name like `route_annotation`. `synthetic` is only for a statement the host grammar has
+> no node for (a whole file, a route given by a file name, a directive the grammar does not
+> parse). The meaning goes in `semanticType`.
 
 ---
 
@@ -404,8 +407,8 @@ initialiser (outside any function body), or a route that comes from an annotatio
 @GetMapping("/orders/{id}")
 public Order get(@PathVariable String id) { … }
 ```
-→ a new record with `nodeType: synthetic`, `semanticType: route`, `method: GET`,
-`endpoint: /orders/{id}`, `handler: get`, parented to the method.
+→ a new record at the annotation with `nodeType: annotation`, `semanticType: route`,
+`method: GET`, `endpoint: /orders/{id}`, `handler: get`, parented to the method.
 
 Which statement an emit may enrich is its `enrich` mode:
 
@@ -560,7 +563,8 @@ routes, calls, events, comments or enum members. Files, classes, functions, impo
   `enrich` mode deliberately ([§4](#4-framework-detectors-enrich-or-append)).
 - Check `ctx.capture_statements` before emitting anything (an additive detector's `Gate` does
   it); route emitters skip fixture files (`Gate(skip_fixtures=True)` or `is_fixture_file`).
-- Use a real grammar `nodeType`, or `synthetic`. Never invent a node type.
+- Use the real grammar `nodeType` of the node the statement sits at (an annotation or decorator
+  has one); `synthetic` only when the host grammar has no node for it. Never invent a node type.
 - Never put a `semanticType` on a control-flow statement.
 - Reuse an existing `semanticType` where it fits. A new value needs a decision first
   ([Extending Capture §5](../../skills/extend-capture/SKILL.md#5-choosing-how-to-store-what-you-capture)).
