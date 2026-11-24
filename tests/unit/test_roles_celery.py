@@ -308,3 +308,60 @@ def go():
 """
     st = analyze_files(_repo(**{"proj/views.py": views}))
     assert _celery(st, "proj/views.py") == []
+
+
+# ── an app reached through a re-export or a factory ───────────────────────────────────────────
+_REEXPORT = {
+    "proj/__init__.py": "from .celery import app as celery_app\n",
+    "proj/celery.py": "from celery import Celery\napp = Celery('proj')\n",
+    "proj/tasks.py": ("from proj import celery_app\n\n@celery_app.task(name='proj.add')\n"
+                      "def add(x, y):\n    pass\n\ndef go():\n    celery_app.send_task('proj.add')\n"),
+}
+
+
+def test_app_re_exported_by_its_package_is_a_celery_app(analyze_files) -> None:
+    st = analyze_files(_REEXPORT)
+    assert _consumers(st) == {"add": "proj.add"}
+    assert [s.endpoint for s in _celery(st) if s.semanticType == "eventbus_send"] == ["proj.add"]
+
+
+def test_re_exported_name_that_is_not_an_app_is_none(analyze_files) -> None:
+    st = analyze_files({
+        "proj/__init__.py": "from .utils import scheduler\n",
+        "proj/utils.py": "from apscheduler import APScheduler\nscheduler = APScheduler()\n",
+        "proj/jobs.py": ("import celery\nfrom proj import scheduler\n\n"
+                         "@scheduler.task(name='x')\ndef tick():\n    pass\n")})
+    assert _celery(st) == []
+
+
+def test_re_exported_name_also_assigned_is_none(analyze_files) -> None:
+    st = analyze_files({**_REEXPORT, "proj/__init__.py": (
+        "from .celery import app as celery_app\ncelery_app = object()\n")})
+    assert _consumers(st) == {}
+
+
+def test_app_made_by_a_factory_is_a_celery_app(analyze_files) -> None:
+    # The factory returns `Celery(…)` directly, or a variable only ever assigned it (Flask docs).
+    st = analyze_files({
+        "flaskapp/__init__.py": "",
+        "flaskapp/ext.py": ("from celery import Celery\ndef make_celery(app):\n"
+                            "    return Celery(app.import_name)\n\ncelery = make_celery(None)\n\n"
+                            "@celery.task(name='flask.job')\ndef job():\n    pass\n"),
+        "flaskapp/factory.py": ("from celery import Celery\ndef make_celery(app):\n"
+                                "    celery = Celery(app.import_name)\n"
+                                "    celery.conf.update(app.config)\n    return celery\n"),
+        "flaskapp/worker.py": ("import celery\nfrom flaskapp.factory import make_celery\n"
+                               "worker = make_celery(None)\n\n"
+                               "@worker.task(name='flask.other')\ndef other():\n    pass\n")})
+    assert _consumers(st) == {"job": "flask.job", "other": "flask.other"}
+
+
+def test_function_that_may_return_something_else_is_no_factory(analyze_files) -> None:
+    st = analyze_files({
+        "jobs.py": ("from celery import Celery\ndef make(flag):\n    if flag:\n"
+                    "        return Celery('x')\n    return None\n\n"
+                    "def maybe(flag):\n    if flag:\n        return Celery('x')\n\n"
+                    "a = make(True)\nb = maybe(True)\n\n"
+                    "@a.task(name='a')\ndef ta():\n    pass\n\n"
+                    "@b.task(name='b')\ndef tb():\n    pass\n")})
+    assert _consumers(st) == {}
