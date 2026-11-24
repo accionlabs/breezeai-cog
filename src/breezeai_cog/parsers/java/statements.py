@@ -3,11 +3,11 @@ call detection."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...schemas import Call, Decorator, Statement
+from ...schemas import Decorator, Statement
 from ..detection import text_has_query
 from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..treesitter import node_text
@@ -207,17 +207,14 @@ def extract_statements(
     seen_ids: set[str],
     descend_all: bool = False,
     skip_anonymous: bool = False,
-    calls_for: Callable[[Node], list[Call]] | None = None,
 ) -> list[Statement]:
     """``skip_anonymous``: anonymous class bodies are captured as their own Class, so their
-    statements are not walked here and their text is left out of the statement creating them.
-    ``calls_for``: the calls of a statement no Function holds (written in a class body, outside
-    any method), set on its first record when it makes any."""
+    statements are not walked here and their text is left out of the statement creating them."""
     if not capture or body is None:
         return []
     out: list[Statement] = []
     for node in _iter_in_scope(body, descend_all, skip_anonymous):
-        records = list(
+        records = (
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
@@ -225,9 +222,5 @@ def extract_statements(
                 decorators=_field_decorators(node, source),
             )
         )
-        if calls_for is not None and records:
-            calls = calls_for(node)
-            if calls:
-                records[0] = records[0].model_copy(update={"calls": calls})
         out.extend(_elide_anonymous(node, source, records) if skip_anonymous else records)
     return out

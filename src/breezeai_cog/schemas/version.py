@@ -24,7 +24,8 @@ from typing import Any
 # 2.7: semantic types mcp_resource, mcp_prompt (entry points; methods RESOURCE / PROMPT) and
 #      mcp_call (outbound); `description` / `params` also on mcp_resource / mcp_prompt; an
 #      mcp_resource's `name` is its declared literal name, else its URI.
-SCHEMA_VERSION = "2.7"
+# 2.8: additive optional `Class.calls` (the calls of a class's code outside any method).
+SCHEMA_VERSION = "2.8"
 
 
 def export_json_schema() -> dict[str, Any]:

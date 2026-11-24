@@ -33,17 +33,17 @@ from collections.abc import Callable, Mapping
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Call, Class, Function, Statement
+from ...schemas import Class, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
 from .functions import (
     build_method,
+    class_calls,
     class_fields,
     class_members,
     extract_annotations,
     modifiers_node,
-    statement_calls,
 )
 from .heritage import file_imports
 from .statements import anonymous_bodies, extract_statements, stored_field
@@ -309,10 +309,6 @@ def build_anonymous(
     classes: list[Class] = []
     methods: list[Function] = []
 
-    def calls_for(stmt: Node) -> list[Call]:  # `new HashMap<>() {{ put(…); }}`, a field of it
-        return statement_calls(stmt, source, resolve, owner_class, own_fields, own_path=path,
-                               kind_of=kind_of, through=_through(stmt, stop, source))
-
     statements = extract_statements(
         body,
         source,
@@ -322,7 +318,6 @@ def build_anonymous(
         limit=limit,
         seen_ids=seen_ids,
         skip_anonymous=True,
-        calls_for=calls_for,
     )
     n = 0
     for member in class_members(body):
@@ -389,6 +384,12 @@ def build_anonymous(
             methods.extend(sub_methods)
             statements.extend(sub_statements)
 
+    # Its own field initializers and initializer blocks (`new HashMap<>() {{ put(…); }}`), resolved
+    # as code written in it (every member shares the chain of enclosing anonymous classes).
+    first = body.named_children[0] if body.named_children else None
+    calls = class_calls(body, source, resolve, owner_class, own_fields, own_path=path,
+                        kind_of=kind_of, through=_through(first, stop, source)) if first else []
+
     cls = Class(
         id=cid,
         parentId=parent_id,
@@ -399,6 +400,7 @@ def build_anonymous(
         extends=extends,
         implements=implements,
         decorators=decorators,
+        calls=calls or None,
         startLine=start,
         endLine=end,
     )

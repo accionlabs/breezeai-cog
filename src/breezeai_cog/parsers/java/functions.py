@@ -12,7 +12,6 @@ from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, method_types, noop_resolver
 from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
-from .mappings import EMIT_TYPES
 from .statements import extract_statements, is_anonymous_body
 
 #: ``anonymous.KindOf`` (that module imports this one): a type as written, and the simple name
@@ -116,37 +115,28 @@ def _created_class(
     return name
 
 
-def _in_lambda(node: Node, root: Node) -> bool:
-    """``node`` sits in a lambda below ``root``."""
-    n = node.parent
-    while n is not None and n != root:
-        if n.type == "lambda_expression":
-            return True
-        n = n.parent
-    return False
+#: Members of a class body whose code is not the class's own initialization: methods and
+#: constructors are Functions, nested types are Classes.
+_NOT_INITIALIZATION = frozenset({
+    "method_declaration", "constructor_declaration", "compact_constructor_declaration",
+    "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
+    "annotation_type_declaration",
+})
 
 
-def statement_calls(
-    node: Node, source: bytes, resolve: CallResolver, owner: str | None,
+def class_calls(
+    body: Node | None, source: bytes, resolve: CallResolver, owner: str | None,
     fields: Mapping[str, str | None], *, own_path: str, kind_of: _KindOf | None = None,
     through: tuple[str | None, ...] | None = None,
 ) -> list[Call]:
-    """The calls of one statement written outside any method: a field declaration, a statement
-    of a ``static { … }`` or ``{ … }`` block, an enum constant. A statement nested in it that is
-    captured on its own (``if`` → its body's statements) keeps its own calls; a lambda's
-    statements are not captured, so its calls are this statement's. Variables resolve with the
-    class's ``fields`` and the locals of the initializer block the statement is in."""
-    # The initializer block it is in: `static { … }`, or a `{ … }` directly in a class body.
-    block = node.parent
-    while block is not None and not (
-        block.type == "static_initializer"
-        or (block.type == "block" and block.parent is not None
-            and block.parent.type in ("class_body", "enum_body_declarations"))
-    ):
-        if block.type in ("class_body", "enum_body"):
-            block = None
-            break
-        block = block.parent
+    """The calls of a class's code outside any method — its field initializers, its
+    ``static { … }`` and ``{ … }`` initializer blocks and its enum constants' arguments, the code
+    that runs when the class loads or an object is built — in the shape of ``Function.calls``:
+    one per name, in order of first appearance. Methods, constructors, nested types and
+    anonymous class bodies have their own calls. Variables resolve with the class's ``fields``
+    and the locals of its initializer blocks."""
+    if body is None:
+        return []
     locals_: list[tuple[str, str | None]] = []
 
     def walk(n: Node) -> None:
@@ -154,14 +144,15 @@ def statement_calls(
             locals_.extend(declarations(c, source))
             walk(c)
 
-    if block is not None:
-        walk(block)
+    for member in class_members(body):
+        if member.type in ("static_initializer", "block"):
+            walk(member)
     scope = method_types(fields, [], locals_)
 
     def stop(child: Node) -> bool:
-        return child.type in EMIT_TYPES and not _in_lambda(child, node)
+        return child.type in _NOT_INITIALIZATION
 
-    return _calls(node, source, resolve, owner, scope, through=through, own_anonymous=True,
+    return _calls(body, source, resolve, owner, scope, through=through, own_anonymous=True,
                   own_path=own_path, kind_of=kind_of, stop=stop)
 
 
@@ -186,7 +177,7 @@ def _calls(
     ``own_path``: this file; given, ``new X(…)`` of a class of another repository file is a
     call named ``X`` (its constructor's Function name) with that file's path — an anonymous
     subclass's too (``_created_class``, with ``kind_of``). ``stop``: a node it is true for is
-    not walked (a statement captured on its own)."""
+    not walked (a method or nested type of a class body, :func:`class_calls`)."""
     if body is None:
         return []
     calls: list[Call] = []
