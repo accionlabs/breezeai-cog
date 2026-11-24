@@ -5,8 +5,8 @@
 * A member type a class inherits (``Handler`` declared in a base class) is found by its simple
   name: it gives the anonymous class its ``extends`` and the creation its file.
 * ``import a.Outer.Inner;`` resolves to ``Outer``'s file.
-* A statement outside any method — a field initializer, a ``static { … }`` or ``{ … }`` block
-  statement, an enum constant — carries its calls (``Statement.calls``).
+* The code outside any method — field initializers, ``static { … }`` and ``{ … }`` blocks, enum
+  constants' arguments — has its calls on its class (``Class.calls``), statement capture or not.
 """
 
 from __future__ import annotations
@@ -85,6 +85,16 @@ public class ServiceServer {
   public void start() {}
 }
 """,
+    "h/Defaults.java": """package h;
+import java.util.HashMap;
+public class Defaults {
+  void make() {
+    Object m = new HashMap<String, Object>() {{
+      put("w", new WriteHandler());
+    }};
+  }
+}
+""",
     "h/Client.java": """package h;
 public interface Client {
   enum KIND {
@@ -97,7 +107,7 @@ public interface Client {
 }
 
 
-def _parse(tmp_path: Path, target: str) -> FileRecord:
+def _parse(tmp_path: Path, target: str, *, capture: bool = True) -> FileRecord:
     for rel, src in FILES.items():
         p = tmp_path / _ROOT / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +117,7 @@ def _parse(tmp_path: Path, target: str) -> FileRecord:
     rel = f"{_ROOT}/{target}"
     path = tmp_path / rel
     ctx = ParseContext(path=rel, abs_path=path, source=path.read_bytes(), repo_root=tmp_path,
-                       resolution_index=index, capture_statements=True)
+                       resolution_index=index, capture_statements=capture)
     return parser.parse_file(ctx)
 
 
@@ -115,8 +125,8 @@ def _fn_calls(rec: FileRecord) -> dict[str, dict[str, str | None]]:
     return {f.name: {c.name: c.path for c in f.calls} for f in rec.functions}
 
 
-def _stmt_calls(rec: FileRecord) -> dict[int, dict[str, str | None]]:
-    return {s.startLine: {c.name: c.path for c in s.calls} for s in rec.statements if s.calls}
+def _class_calls(rec: FileRecord) -> dict[str, dict[str, str | None]]:
+    return {c.name: {k.name: k.path for k in c.calls} for c in rec.classes if c.calls}
 
 
 def test_an_anonymous_subclass_calls_its_class_constructor(tmp_path: Path) -> None:
@@ -146,31 +156,55 @@ def test_a_nested_class_import_resolves_to_its_outer_file(tmp_path: Path) -> Non
     assert "h.ApiHandler.ApiConfig" not in rec.externalImports
 
 
-def test_a_field_initializer_carries_its_calls(tmp_path: Path) -> None:
+def test_field_initializer_calls_are_the_class_calls(tmp_path: Path) -> None:
     rec = _parse(tmp_path, "h/ApiHandlerBuilder.java")
-    stmts = _stmt_calls(rec)
-    assert stmts[4] == {"ApiConfig": f"{_H}/ApiHandler.java"}
-    assert stmts[5] == {"norm": f"{_H}/Util.java"}
+    assert _class_calls(rec) == {
+        "ApiHandlerBuilder": {"ApiConfig": f"{_H}/ApiHandler.java", "norm": f"{_H}/Util.java"},
+    }
     assert _fn_calls(rec)["ApiHandlerBuilder"] == {}  # the constructor's own body: unchanged
 
 
-def test_a_static_block_statement_carries_its_own_calls(tmp_path: Path) -> None:
-    stmts = _stmt_calls(_parse(tmp_path, "h/ServiceServer.java"))
-    assert stmts[7] == {"put": None, "WriteHandler": f"{_H}/WriteHandler.java"}
-    # the `if` keeps its condition's call; the statement in its body keeps its own
-    assert stmts[8] == {"isEmpty": None}
-    assert stmts[9] == {"add": f"{_H}/Registry.java", "WriteHandler": f"{_H}/WriteHandler.java"}
-    assert 6 not in stmts  # `new HashMap<>()`: a library class, no call
-
-
-def test_an_enum_constant_carries_its_argument_calls(tmp_path: Path) -> None:
-    rec = _parse(tmp_path, "h/Client.java")
-    stmts = _stmt_calls(rec)
-    assert stmts[4] == {"WriteHandler": f"{_H}/WriteHandler.java"}
-    assert 5 not in stmts  # no call: no `calls`
-
-
-def test_a_statement_inside_a_method_carries_no_calls(tmp_path: Path) -> None:
+def test_a_field_stored_anonymous_subclass_calls_from_its_class(tmp_path: Path) -> None:
     rec = _parse(tmp_path, "h/DataWriteApiHandler.java")
-    method_ids = {f.id for f in rec.functions}
-    assert all(s.calls is None for s in rec.statements if s.parentId in method_ids)
+    # `errorAlert = new ResponseHandler() { … }`: the enclosing class runs its constructor
+    assert _class_calls(rec)["DataWriteApiHandler"] == {"ResponseHandler": f"{_H}/ApiHandler.java"}
+
+
+def test_static_block_calls_are_the_class_calls(tmp_path: Path) -> None:
+    rec = _parse(tmp_path, "h/ServiceServer.java")
+    server = next(c for c in rec.classes if c.name == "ServiceServer")
+    # every call of the block, nested statements included, once per name in order of appearance;
+    # `new HashMap<>()`: a library class, no call
+    assert [(c.name, c.path) for c in server.calls or []] == [
+        ("put", None),
+        ("WriteHandler", f"{_H}/WriteHandler.java"),
+        ("isEmpty", None),
+        ("add", f"{_H}/Registry.java"),
+    ]
+    assert _fn_calls(rec)["start"] == {}
+
+
+def test_enum_constant_argument_calls_are_the_enum_calls(tmp_path: Path) -> None:
+    assert _class_calls(_parse(tmp_path, "h/Client.java")) == {
+        "KIND": {"WriteHandler": f"{_H}/WriteHandler.java"},  # `Client` itself: none, no `calls`
+    }
+
+
+def test_an_anonymous_class_initializer_calls_are_its_own(tmp_path: Path) -> None:
+    rec = _parse(tmp_path, "h/Defaults.java")
+    anon = next(c for c in rec.classes if c.isAnonymous)
+    assert {c.name: c.path for c in anon.calls or []} == {
+        "put": None, "WriteHandler": f"{_H}/WriteHandler.java",
+    }
+    assert _fn_calls(rec)["make"] == {}  # a JDK class built: the method calls nothing of its own
+
+
+def test_class_calls_do_not_depend_on_statement_capture(tmp_path: Path) -> None:
+    on = _class_calls(_parse(tmp_path, "h/ServiceServer.java"))
+    off = _parse(tmp_path, "h/ServiceServer.java", capture=False)
+    assert off.statements == [] and _class_calls(off) == on
+
+
+def test_statements_carry_no_calls(tmp_path: Path) -> None:
+    rec = _parse(tmp_path, "h/ServiceServer.java")
+    assert all("calls" not in s.model_dump(exclude_none=True) for s in rec.statements)

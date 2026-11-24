@@ -129,12 +129,6 @@ class Statement(BaseModel):
     # MCP server statements only: an ``mcp_tool``'s input parameters, an ``mcp_resource``
     # template's variables, an ``mcp_prompt``'s arguments.
     params: list[Parameter] | None = None
-    #: The calls a statement written outside any method makes (Java: a field initializer, a
-    #: ``static { … }`` or ``{ … }`` initializer block, an enum constant's arguments), in the
-    #: shape of ``Function.calls``: that code runs when the class loads or an object is built,
-    #: yet no Function holds it. Absent on a statement inside a method (its Function has the
-    #: calls) and on one that makes none.
-    calls: list[Call] | None = None
 
 
 class Function(BaseModel):
@@ -198,6 +192,11 @@ class Class(BaseModel):
     implements: list[str] = Field(default_factory=list)
     constructorParams: list[ConstructorParam] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
+    #: The calls of the class's code that no method holds — what runs when the class loads or an
+    #: object is built (Java: field initializers, ``static { … }`` and ``{ … }`` initializer
+    #: blocks, enum constants' arguments) — in the shape of ``Function.calls``. Absent when that
+    #: code makes no call; its methods' calls are on their Functions.
+    calls: list[Call] | None = None
     metadata: dict[str, Any] | None = None
     # Statements are NOT nested here — see FileRecord.statements (flat, linked via parentId).
 

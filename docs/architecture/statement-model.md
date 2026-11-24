@@ -144,15 +144,19 @@ their methods as `Function`s; the enclosing method keeps only its own statements
   class of this file, the repository — a member type the enclosing class inherits from an
   in-repo ancestor included — or a known JDK type) and `implements` when it is certainly an
   interface; a library type gives neither. When it is a class of another repository file, the
-  creating method (or statement) also calls its constructor (`calls` entry named after it).
+  creating method (or, outside any method, the class) also calls its constructor (`calls`
+  entry named after it).
 
-**Java code outside any method** — a field initializer, a statement of a `static { … }` or
-`{ … }` initializer block, an enum constant's arguments — runs when the class loads or an object
-is built, yet no `Function` holds it. Its statement carries `calls` (the shape of
-`Function.calls`, present only when it makes a call): `static { bus.put(A, new WriteHandler()); }`
-→ `calls: [{name: "put"}, {name: "WriteHandler", path: "…/WriteHandler.java"}]`. A statement
-nested in it that is emitted on its own (an `if` body's) keeps its own calls; a statement
-inside a method never has `calls`.
+**Java code outside any method** — field initializers, `static { … }` and `{ … }` initializer
+blocks, enum constants' arguments — runs when the class loads or an object is built, yet no
+`Function` holds it. Its calls are the **class's** (`Class.calls`, the shape of
+`Function.calls`: one per name in order of first appearance, present only when there is one), so
+they do not depend on statement capture, and statements never carry calls:
+`static { bus.put(A, new WriteHandler()); }` in `ServiceServer` → the `ServiceServer` Class has
+`calls: [{name: "put"}, {name: "WriteHandler", path: "…/WriteHandler.java"}]`. An anonymous
+class's own initializers (`new HashMap<>() {{ put(…); }}`) are that anonymous Class's calls; a
+field-stored anonymous subclass's constructor call (`ResponseHandler onError = new
+ResponseHandler() { … }`) is the enclosing class's.
 - **An enum constant's body** (`RED("r") { String tag() { … } }`) is an anonymous subclass of
   the enum, as Java compiles it: named after the constant (`Color.RED`), `extends` the enum, its
   methods under it. The constant stays an `enum_member` statement of the enum.
