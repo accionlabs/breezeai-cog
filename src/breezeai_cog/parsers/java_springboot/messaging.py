@@ -182,9 +182,8 @@ def detect_spring_listeners(
                 handler=fn.name,
                 handlerLine=fn.startLine,
                 routeKind="message",
-            ), parent=fn.id, node_type="synthetic",
-                text=first_line(node_text(ann, source))[:200],
-                line=fn.startLine, col=0, end_line=fn.endLine))
+            ), parent=fn.id,
+                text=first_line(node_text(ann, source))[:200]))
 
     for cls in _classes(root):
         body = cls.child_by_field_name("body")

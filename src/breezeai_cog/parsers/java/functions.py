@@ -50,6 +50,15 @@ def extract_annotations(modifiers: Node | None, source: bytes) -> list[Decorator
             if c.type in ("marker_annotation", "annotation")]
 
 
+def annotation_nodes(declaration: Node | None) -> list[Node]:
+    """The annotation nodes of a declaration, in the order of its ``decorators`` (the
+    :func:`extract_annotations` of its modifiers): ``decorators[i]`` was read from item ``i``."""
+    modifiers = modifiers_node(declaration) if declaration is not None else None
+    if modifiers is None:
+        return []
+    return [c for c in modifiers.named_children if c.type in ("marker_annotation", "annotation")]
+
+
 def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     out: list[Parameter] = []
     if params_node is None:
