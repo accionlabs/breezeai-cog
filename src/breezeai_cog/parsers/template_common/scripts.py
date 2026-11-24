@@ -355,6 +355,13 @@ def link_page_scripts(record: FileRecord, ctx: ParseContext) -> None:
             record.importFiles.append(target)
 
 
+def page_file(src: str, page_path: str, root: Path) -> str | None:
+    """A ``src`` written on a page (``<script src>``, Vue ``<template src>``) as a file of the
+    repository, resolved from the page's folder; None when it is not one, or is the page."""
+    target = _script_file(src, PurePosixPath(page_path).parent, root.resolve())
+    return target if target != page_path else None
+
+
 def _script_file(src: str, page_dir: PurePosixPath, root: Path) -> str | None:
     src = src.split("?", 1)[0].split("#", 1)[0].strip()
     if not src or _NOT_A_PATH.search(src):

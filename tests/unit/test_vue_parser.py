@@ -1018,3 +1018,30 @@ def test_template_markup_keeps_lines_and_blanks_script(tmp_path) -> None:
     assert markup is not None and len(markup) == len(src)
     assert markup.count(b"\n") == src.count(b"\n")
     assert b'<a href="/x">' in markup and b"/z" not in markup and b"<template>" not in markup
+
+
+def test_template_src_is_a_file_link(tmp_path) -> None:
+    (tmp_path / "src/components").mkdir(parents=True)
+    (tmp_path / "src/components/Panel.html").write_text("<div></div>\n")
+    src = b'<template src="./Panel.html"></template>\n<script>\nexport default {}\n</script>\n'
+    p = tmp_path / "src/components/Panel.vue"
+    p.write_bytes(src)
+    ctx = ParseContext(path="src/components/Panel.vue", abs_path=p, source=src, repo_root=tmp_path)
+    rec = VueParser().parse_file(ctx)
+    assert "src/components/Panel.html" in rec.importFiles
+
+
+def test_template_src_missing_file_is_not_linked(tmp_path) -> None:
+    src = b'<template src="./Missing.html"></template>\n<script>\nexport default {}\n</script>\n'
+    rec = _parse("Panel.vue", src, tmp_path)
+    assert rec.importFiles == []
+
+
+def test_pug_template_is_skipped_without_records(tmp_path) -> None:
+    src = (
+        b'<template lang="pug">\ndiv\n  button(@click="go") Go\n</template>\n'
+        b"<script>\nexport default { methods: { go() {} } }\n</script>\n"
+    )
+    rec = _parse("Pug.vue", src, tmp_path)
+    assert not [s for s in rec.statements if s.nodeType == "directive_attribute"]
+    assert [f.name for f in rec.functions] == ["go"]

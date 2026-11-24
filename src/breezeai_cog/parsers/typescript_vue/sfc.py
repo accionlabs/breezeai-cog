@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 from tree_sitter import Node
 
-from ..template_common.script_blocks import blank
+from ..template_common.script_blocks import SRC_VALUE, blank
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,3 +116,16 @@ def template_markup(root: Node, source: bytes) -> bytes | None:
     for start, end in kept:
         markup[start:end] = source[start:end]
     return bytes(markup)
+
+
+def template_src(root: Node) -> str | None:
+    """The ``src`` of the SFC's top-level ``<template src="…">`` (markup kept in another file),
+    as written; None when the template is inline."""
+    for node in root.named_children:
+        if node.type != "template_element":
+            continue
+        open_tag = _child(node, "start_tag")
+        m = SRC_VALUE.search(open_tag.text) if open_tag is not None and open_tag.text else None
+        if m is not None:
+            return next(g for g in m.groups() if g is not None).decode("utf-8", "replace")
+    return None

@@ -119,12 +119,16 @@ def collect_vue_template_statements(
     *,
     framework: str = "vue",
     emit_routes: bool = True,
+    whole_file: bool = False,
 ) -> list[Statement]:
     """Walk each ``<template>`` block and emit one flat Statement per binding / interpolation.
     ``<router-link>`` ``to`` becomes a ``route`` statement (``routeKind="navigation"``), gated by
-    ``emit_routes`` (off for fixture files)."""
+    ``emit_routes`` (off for fixture files). ``whole_file``: the file is all template markup (an
+    ``.html`` loaded by ``<template src>``), so every top-level node is walked."""
     out: list[Statement] = []
-    stack: list[Node] = [c for c in root.named_children if c.type == "template_element"]
+    stack: list[Node] = [
+        c for c in root.named_children if whole_file or c.type == "template_element"
+    ]
     while stack:
         node = stack.pop()
         start, col = node.start_point[0] + 1, node.start_point[1]

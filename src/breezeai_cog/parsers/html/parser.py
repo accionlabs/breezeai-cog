@@ -48,6 +48,7 @@ from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
 from .statements import collect_template_statements
 from ..template_common.markup import read_page_markup
 from ..template_common.scripts import link_page_scripts, read_page_scripts
+from ..typescript_vue.template import collect_vue_template_statements
 
 #: framework → the tree-sitter grammar that models its template dialect. A framework absent
 #: here is still tagged (role + framework) but its markup is not parsed into statements
@@ -101,7 +102,22 @@ class HtmlParser(BaseParser):
             import_files=import_files,
         )
         grammar = _GRAMMAR_BY_FRAMEWORK.get(framework)
-        if ctx.capture_statements and grammar is not None:
+        if ctx.capture_statements and component is not None and framework == "vue":
+            # Markup of a Vue SFC's `<template src>`: read as that component's template.
+            vroot = parse_source("vue", ctx.source, ctx.parse_timeout_micros).root_node
+            record.statements.extend(
+                collect_vue_template_statements(
+                    vroot,
+                    ctx.source,
+                    ctx.path,
+                    parent_id=fid,
+                    seen_ids=set(),
+                    limit=ctx.statement_text_limit,
+                    emit_routes=not self.is_fixture_file(ctx.path),
+                    whole_file=True,
+                )
+            )
+        elif ctx.capture_statements and grammar is not None:
             root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
             seen_ids: set[str] = set()
             record.statements.extend(

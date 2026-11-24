@@ -501,3 +501,49 @@ def test_markup_records_need_statement_capture(tmp_path) -> None:
     page = '<a href="/about.html">About</a>\n<form action="/x"></form>'
     rec = _parse(tmp_path, {"page.html": page}, "page.html", capture=False)
     assert rec.statements == []
+
+
+# ── Vue <template src>: the .html is that SFC's template ──────────────────────────────────
+
+_SRC_SFC = '<template src="./Panel.html"></template>\n<script>\nexport default {}\n</script>\n'
+_SRC_HTML = (
+    '<div>\n  <button @click="save">Save</button>\n'
+    '  <router-link to="/help">Help</router-link>\n</div>\n'
+)
+
+
+def test_vue_template_src_html_is_read_as_the_sfc_template(tmp_path) -> None:
+    rec = _parse(tmp_path, {"Panel.vue": _SRC_SFC, "Panel.html": _SRC_HTML}, "Panel.html")
+    assert (rec.framework, rec.uiRole, rec.importFiles) == ("vue", "template", ["Panel.vue"])
+    click = next(s for s in rec.statements if s.name == "click")
+    assert (click.nodeType, click.handler, click.startLine) == ("directive_attribute", "save", 2)
+    nav = next(s for s in rec.statements if s.semanticType == "route")
+    assert (nav.routeKind, nav.endpoint) == ("navigation", "/help")
+
+
+def test_vue_template_src_without_the_file_is_not_linked(tmp_path) -> None:
+    rec = _parse(tmp_path, {"Panel.vue": _SRC_SFC, "Other.html": _SRC_HTML}, "Other.html")
+    assert rec.framework is None and rec.importFiles == []
+
+
+def test_vue_template_src_claimed_by_two_sfcs_is_not_linked(tmp_path) -> None:
+    files = {"Panel.vue": _SRC_SFC, "Copy.vue": _SRC_SFC, "Panel.html": _SRC_HTML}
+    rec = _parse(tmp_path, files, "Panel.html")
+    assert rec.importFiles == []
+
+
+def test_vue_template_src_beyond_the_head_is_not_read(tmp_path) -> None:
+    # Only the head of each .vue is scanned (keeps the pass cheap): a <template src> after a
+    # long script block is not linked — the html stays a plain file, as before.
+    late = "<script>\n" + "// x\n" * 1200 + "export default {}\n</script>\n" + _SRC_SFC.split("\n")[0]
+    rec = _parse(tmp_path, {"Panel.vue": late, "Panel.html": _SRC_HTML}, "Panel.html")
+    assert rec.importFiles == []
+
+
+def test_vue_template_src_in_another_folder_is_not_read(tmp_path) -> None:
+    # Only SFCs beside an .html are scanned (keeps the pass cheap): a template one folder up
+    # is not read as Vue — the html stays a plain file, as before.
+    (tmp_path / "views").mkdir()
+    (tmp_path / "views/Panel.vue").write_text(_SRC_SFC.replace("./Panel.html", "../Panel.html"))
+    rec = _parse(tmp_path, {"Panel.html": _SRC_HTML}, "Panel.html")
+    assert rec.importFiles == []

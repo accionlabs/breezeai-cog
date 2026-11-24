@@ -18,6 +18,7 @@ is the only way to catch those; ``.vue`` and vue-router files get it for free vi
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from tree_sitter import Node
 
@@ -25,11 +26,18 @@ from ...emit import file_id
 from ...schemas import FileRecord, Statement
 from ..base import HandlerLocator, ParseContext
 from ..template_common.markup import read_page_markup
-from ..template_common.scripts import link_page_scripts
+from ..template_common.scripts import link_page_scripts, page_file
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_composables, mark_factory_ui_roles
-from .sfc import script_blocks, script_grammar, script_language, shadow_source, template_markup
+from .sfc import (
+    script_blocks,
+    script_grammar,
+    script_language,
+    shadow_source,
+    template_markup,
+    template_src,
+)
 from .template import collect_vue_template_statements
 
 # Byte guards for a Vue-ecosystem import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the
@@ -137,6 +145,12 @@ class VueParser(TypeScriptParser):
         through the shared markup reader. The script blocks already ran every script detector,
         so the shared script reader is not used here (it would count each call twice)."""
         link_page_scripts(record, ctx)
+        # `<template src="./x.html">`: the markup lives in that file, which the html parser
+        # reads as this component's Vue template (see html/index.py).
+        src = template_src(vroot)
+        target = page_file(src, ctx.path, Path(ctx.repo_root)) if src else None
+        if target is not None and target not in record.importFiles:
+            record.importFiles.append(target)
         if not ctx.capture_statements:
             return
         # Script statements keep their ids: template ids are disambiguated against them.
