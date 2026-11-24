@@ -141,8 +141,18 @@ their methods as `Function`s; the enclosing method keeps only its own statements
   numbered in source order within the named class, `Svc$1`, `Svc$2` (`Svc$1$1` nested). The
   statement that creates it keeps its head, the body shown as `{ … }`.
 - The type after `new` is `extends` when it is certainly a class (constructor arguments, or a
-  class of this file, the repository or a known JDK type) and `implements` when it is certainly
-  an interface; a library type gives neither.
+  class of this file, the repository — a member type the enclosing class inherits from an
+  in-repo ancestor included — or a known JDK type) and `implements` when it is certainly an
+  interface; a library type gives neither. When it is a class of another repository file, the
+  creating method (or statement) also calls its constructor (`calls` entry named after it).
+
+**Java code outside any method** — a field initializer, a statement of a `static { … }` or
+`{ … }` initializer block, an enum constant's arguments — runs when the class loads or an object
+is built, yet no `Function` holds it. Its statement carries `calls` (the shape of
+`Function.calls`, present only when it makes a call): `static { bus.put(A, new WriteHandler()); }`
+→ `calls: [{name: "put"}, {name: "WriteHandler", path: "…/WriteHandler.java"}]`. A statement
+nested in it that is emitted on its own (an `if` body's) keeps its own calls; a statement
+inside a method never has `calls`.
 - **An enum constant's body** (`RED("r") { String tag() { … } }`) is an anonymous subclass of
   the enum, as Java compiles it: named after the constant (`Color.RED`), `extends` the enum, its
   methods under it. The constant stays an `enum_member` statement of the enum.

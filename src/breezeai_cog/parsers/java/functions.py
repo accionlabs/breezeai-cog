@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from tree_sitter import Node
 
@@ -12,7 +12,13 @@ from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, method_types, noop_resolver
 from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
+from .mappings import EMIT_TYPES
 from .statements import extract_statements, is_anonymous_body
+
+#: ``anonymous.KindOf`` (that module imports this one): a type as written, and the simple name
+#: of the named class it is written in → its declaration's tree-sitter type, or None.
+_KindOf = Callable[..., "str | None"]
+_COMMENTS = ("line_comment", "block_comment")
 
 
 def modifiers_node(node: Node) -> Node | None:
@@ -85,22 +91,86 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _created_class(creation: Node, source: bytes) -> str | None:
-    """The class ``new X(…)`` / ``new X<T>(…)`` builds, as written without type arguments;
-    None for an anonymous class (``new X() { … }``) or a qualified name (``new a.b.X()``)."""
-    if any(c.type == "class_body" for c in creation.named_children):
-        return None
+def _created_class(
+    creation: Node, source: bytes, owner: str | None = None, kind_of: _KindOf | None = None,
+) -> str | None:
+    """The class ``new X(…)`` / ``new X<T>(…)`` builds, as written without type arguments; None
+    for a qualified name (``new a.b.X()``).
+
+    An anonymous class (``new X(…) { … }``) builds X too — its constructor runs first — when X
+    is certainly a class: it takes constructor arguments (an interface takes none), or
+    ``kind_of`` (written in ``owner``) finds it declared as a class. An interface, or a type
+    whose kind is not known (a library's), gives None: it has no constructor to call."""
     typ = creation.child_by_field_name("type")
     if typ is not None and typ.type == "generic_type":
         typ = typ.named_children[0] if typ.named_children else None
-    return node_text(typ, source) if typ is not None and typ.type == "type_identifier" else None
+    if typ is None or typ.type != "type_identifier":
+        return None
+    name = node_text(typ, source)
+    if any(c.type == "class_body" for c in creation.named_children):
+        args = creation.child_by_field_name("arguments")
+        if args is not None and any(c.type not in _COMMENTS for c in args.named_children):
+            return name
+        kind = kind_of(name, owner) if kind_of is not None else None
+        return name if kind == "class_declaration" else None
+    return name
+
+
+def _in_lambda(node: Node, root: Node) -> bool:
+    """``node`` sits in a lambda below ``root``."""
+    n = node.parent
+    while n is not None and n != root:
+        if n.type == "lambda_expression":
+            return True
+        n = n.parent
+    return False
+
+
+def statement_calls(
+    node: Node, source: bytes, resolve: CallResolver, owner: str | None,
+    fields: Mapping[str, str | None], *, own_path: str, kind_of: _KindOf | None = None,
+    through: tuple[str | None, ...] | None = None,
+) -> list[Call]:
+    """The calls of one statement written outside any method: a field declaration, a statement
+    of a ``static { … }`` or ``{ … }`` block, an enum constant. A statement nested in it that is
+    captured on its own (``if`` → its body's statements) keeps its own calls; a lambda's
+    statements are not captured, so its calls are this statement's. Variables resolve with the
+    class's ``fields`` and the locals of the initializer block the statement is in."""
+    # The initializer block it is in: `static { … }`, or a `{ … }` directly in a class body.
+    block = node.parent
+    while block is not None and not (
+        block.type == "static_initializer"
+        or (block.type == "block" and block.parent is not None
+            and block.parent.type in ("class_body", "enum_body_declarations"))
+    ):
+        if block.type in ("class_body", "enum_body"):
+            block = None
+            break
+        block = block.parent
+    locals_: list[tuple[str, str | None]] = []
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            locals_.extend(declarations(c, source))
+            walk(c)
+
+    if block is not None:
+        walk(block)
+    scope = method_types(fields, [], locals_)
+
+    def stop(child: Node) -> bool:
+        return child.type in EMIT_TYPES and not _in_lambda(child, node)
+
+    return _calls(node, source, resolve, owner, scope, through=through, own_anonymous=True,
+                  own_path=own_path, kind_of=kind_of, stop=stop)
 
 
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, scope: Mapping[str, str | None] | None = None,
     *, through: tuple[str | None, ...] | None = None, own_anonymous: bool = False,
-    own_path: str | None = None,
+    own_path: str | None = None, kind_of: _KindOf | None = None,
+    stop: Callable[[Node], bool] | None = None,
 ) -> list[Call]:
     """The calls in a method body, one per name in order of first appearance. ``owner`` is the
     simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
@@ -114,7 +184,9 @@ def _calls(
     class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
     calls in an anonymous class body are that class's methods' own, so they are left out.
     ``own_path``: this file; given, ``new X(…)`` of a class of another repository file is a
-    call named ``X`` (its constructor's Function name) with that file's path."""
+    call named ``X`` (its constructor's Function name) with that file's path — an anonymous
+    subclass's too (``_created_class``, with ``kind_of``). ``stop``: a node it is true for is
+    not walked (a statement captured on its own)."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -146,14 +218,18 @@ def _calls(
         for child in node.named_children:
             if own_anonymous and is_anonymous_body(child):
                 continue
+            if stop is not None and stop(child):
+                continue
             if child.type == "object_creation_expression" and own_path is not None:
-                built = _created_class(child, source)
+                built = _created_class(child, source, owner, kind_of)
                 # `new X(…)` calls X's constructor (a Function named X) when X resolves as Java
-                # resolves a type name (an import, this package) to another file of the
-                # repository. A library class or one of this file adds nothing; an anonymous
-                # class links through its `extends` instead.
+                # resolves a type name (an import, this package, a member type the class
+                # inherits) to another file of the repository. A library class or one of this
+                # file adds nothing.
                 if built is not None and (built not in at or calls[at[built]].path is None):
                     path = resolve(built, None)
+                    if path is None and owner is not None:
+                        path = resolve(built, None, owner, as_type=True)
                     if path is not None and path != own_path:
                         if built not in at:
                             at[built] = len(calls)
@@ -361,9 +437,11 @@ def build_method(
     through: tuple[str | None, ...] | None = None,
     scope_node: Node | None = None,
     own_anonymous: bool = False,
+    kind_of: _KindOf | None = None,
 ) -> tuple[Function, list[Statement]]:
     """``fields``: the enclosing class's fields (outer classes' included), for the method's
-    variable types; omitted, its calls use the resolver's file-wide types.
+    variable types; omitted, its calls use the resolver's file-wide types. ``kind_of``: whether
+    the type of an anonymous class created in the body is a class (``_created_class``).
 
     ``own_anonymous``: anonymous classes in the body are captured as their own Class, so their
     calls and statements are not this method's. ``through`` and ``scope_node`` are for a method
@@ -396,7 +474,7 @@ def build_method(
         endLine=end,
         calls=_calls(body, source, resolve, class_name,
                      None if fields is None else method_scope(scope_node or node, source, fields),
-                     through=through, own_anonymous=own_anonymous, own_path=path),
+                     through=through, own_anonymous=own_anonymous, own_path=path, kind_of=kind_of),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
