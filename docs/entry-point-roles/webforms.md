@@ -10,7 +10,7 @@ language). `.ashx` handlers and `web.config` handler mappings are C# only.
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | `.aspx` page (its code-behind `Page` class) | Binding | `route`, `GET`, `routeKind: page`, `/<path>.aspx` (or its `MapPageRoute` URL), `handler` = the page class, `handlerLine` = the class declaration | One page reached by URL; GET and every postback share it (the event handler is chosen by form data) |
-| `[WebMethod] public static T M(…)` in a page's code-behind (ASP.NET AJAX page method) | Binding | `route`, `POST`, `routeKind: route`, `endpoint` = the page's endpoint + `/M`, `handler` = `M`, `handlerLine` | Its own URL, one handler |
+| `[WebMethod] public static T M(…)` in a page's code-behind (ASP.NET AJAX page method) | Binding | `route`, `POST`, `routeKind: route`, `endpoint` = the page's endpoint + `/M`, `handler` = `M`, `handlerLine`; at the `[WebMethod]` attribute (`nodeType: attribute`) | Its own URL, one handler |
 | `RouteTable.Routes.MapPageRoute(name, url, "~/X.aspx")` | Wiring | statement stays plain; `url` becomes the page's `endpoint` | Gives a page its friendly address |
 | `.ascx` user control | None | — | Folded into the pages that host it; no URL of its own |
 | `<%@ Register Src="~/X.ascx" %>` / `LoadControl("~/X.ascx")` | Wiring | plain statement, `nodeType: synthetic` (the directive has no tree node), `name: Register`; host → control stays in `importFiles` | Structural link, no handler |
@@ -19,7 +19,7 @@ language). `.ashx` handlers and `web.config` handler mappings are C# only.
 | `.master` page | None | — | A layout, never reached by URL |
 | Server-control event (`OnClick="Save_Click"`) | None | plain statement with `handler` = the code-behind method | Runs inside the page's postback |
 | `Response.Redirect` / `Server.Transfer` / `NavigateUrl` / `PostBackUrl` to a page | Outbound | `route`, `routeKind: navigation`, `endpoint` = the target page | Our code moving the user to a page |
-| `.ashx` generic handler (`IHttpHandler.ProcessRequest`) | Binding | `route`, `/<path>.ashx`, `handler: ProcessRequest` | One handler reached by URL |
+| `.ashx` generic handler (`IHttpHandler.ProcessRequest`) | Binding | `route`, `/<path>.ashx`, `handler: ProcessRequest`, at that method (`nodeType: method_declaration`: no attribute declares it) | One handler reached by URL |
 | `.ashx` `<%@ WebHandler Class=… %>` | Wiring | its own file record (`ashx`, `framework: aspnet-webforms`), statement stays plain; host → code-behind stays in `importFiles` | Gives the `.ashx` address to its handler class |
 | `web.config` `<add verb path type>` under `httpHandlers` / `handlers`, `type` a repo class | Binding | `route` on the class's `ProcessRequest` (`ProcessRequestAsync`, `BeginProcessRequest`, `GetHandler`), `endpoint` = the config's folder under the app root + `<location path>` + `path`, kept as written (`/Admin/Api/*.ashx`); `method` per verb, `*` = `ANY` | The handler answers every request the mapping matches |
 | `Global.asax` `Application_Start` | None | — | Start-up |

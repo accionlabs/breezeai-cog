@@ -180,6 +180,7 @@ def test_generic_handler_is_binding(analyze_files) -> None:
     )
     [r] = _eps(stmts)
     assert (r.semanticType, r.endpoint, r.handler) == ("route", "/Export.ashx", "ProcessRequest")
+    assert r.nodeType == "method_declaration"  # no attribute declares it: the method itself
 
 
 def test_generic_handler_host_is_a_file_with_a_plain_directive(analyze_files, tmp_path) -> None:
@@ -259,9 +260,9 @@ def test_web_config_handler_is_binding(analyze_files) -> None:
     # Folder under the application root + <location path> + path; a verb list is one record
     # per verb; the same mapping under httpHandlers and handlers is one record.
     assert _registered(analyze_files) == [
-        ("Shop/Dispatcher.cs", "ANY", "/Admin/Api/*.ashx", "ProcessRequest", 8, "synthetic"),
-        ("Shop/Export.cs", "GET", "/Admin/Export.axd", "ProcessRequest", 5, "synthetic"),
-        ("Shop/Export.cs", "POST", "/Admin/Export.axd", "ProcessRequest", 5, "synthetic"),
+        ("Shop/Dispatcher.cs", "ANY", "/Admin/Api/*.ashx", "ProcessRequest", 8, "method_declaration"),
+        ("Shop/Export.cs", "GET", "/Admin/Export.axd", "ProcessRequest", 5, "method_declaration"),
+        ("Shop/Export.cs", "POST", "/Admin/Export.axd", "ProcessRequest", 5, "method_declaration"),
     ]
 
 
