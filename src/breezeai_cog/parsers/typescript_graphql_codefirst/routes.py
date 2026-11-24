@@ -239,7 +239,7 @@ def detect_codefirst_graphql_routes(
                         guards=guards or None,
                         requestDTO=req_dto,
                         responseDTO=res_dto,
-                    ), parent=parent, node_type="synthetic",  # decorator-derived, no AST node
+                    ), parent=parent,  # at the decorator: nodeType: decorator
                         text=node_text(dec, source).split("\n", 1)[0][:200]))
             pending = []
     return routes

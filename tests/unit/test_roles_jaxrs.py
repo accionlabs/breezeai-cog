@@ -181,3 +181,31 @@ def test_application_without_path_is_none(analyze_files) -> None:
         )
     )
     assert _eps(st) == []
+
+
+def test_route_sits_at_its_verb_annotation(analyze_files) -> None:
+    # The record is the verb annotation it was read from, not the whole method.
+    st = analyze_files(
+        _java(
+            "Res",
+            RS,
+            """@Path("/orders")
+public class Res {
+  @Deprecated
+  @GET
+  @Path("/{id}")
+  public String get(String id) {
+    return id;
+  }
+}""",
+        )
+    )
+    [r] = _eps(st)
+    assert (r.nodeType, r.startLine, r.endLine, r.text, r.handlerLine, r.endpoint) == (
+        "marker_annotation",
+        6,
+        6,
+        "@GET",
+        5,
+        "/orders/{id}",
+    )

@@ -603,3 +603,40 @@ public class OrdersController : ControllerBase {
 '''})
     assert sorted((r.method, r.endpoint) for r in _eps(stmts)) == [
         ("GET", "/api/orders"), ("GET", "/api/orders/page/{page=1}")]
+
+
+def test_route_sits_at_its_verb_attribute(analyze_files) -> None:
+    # An attribute route is the verb attribute it was read from (nodeType attribute, its own
+    # line), not the whole action; a convention route is the action's method_declaration.
+    stmts = analyze_files({"OrdersController.cs": CONTROLLER, "HomeController.cs": MVC})
+    got = {(r.handler, r.nodeType, r.startLine, r.endLine, r.text) for r in _eps(stmts)}
+    assert got == {
+        ("Get", "attribute", 11, 11, 'HttpGet("{id}")'),
+        ("About", "method_declaration", 7, 7, "(convention) About"),
+    }
+
+
+VB_CONTROLLER = b"""Imports System.Web.Mvc
+
+Public Class OrdersController
+    Inherits Controller
+
+    <Authorize>
+    <HttpGet>
+    Public Function Index() As ActionResult
+        Return View()
+    End Function
+End Class
+"""
+
+
+def test_vb_route_sits_at_its_verb_attribute(analyze_files) -> None:
+    stmts = analyze_files({"OrdersController.vb": VB_CONTROLLER.decode()})
+    [r] = _eps(stmts)
+    assert (r.method, r.nodeType, r.startLine, r.endLine, r.text) == (
+        "GET",
+        "attribute",
+        7,
+        7,
+        "HttpGet",
+    )

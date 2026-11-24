@@ -13,7 +13,7 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, FileRecord, Function
 from ..emits import Emit
-from ..java.functions import method_nodes, payload_type
+from ..java.functions import annotation_nodes, method_nodes, payload_type
 from ..java_security_guards import security_guards
 from .security import Rule, route_rule
 from ..java_web_guards import ModuleGuards, spring_global_guards
@@ -137,7 +137,7 @@ def _request_dto(fn: Function) -> str | None:
 
 def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[Emit]:
     """One route per mapping annotation (and per path of an array mapping) of a controller
-    method, for :func:`~..emits.apply`: read off the record, placed on the method."""
+    method, for :func:`~..emits.apply`: read off the record, placed on the annotation."""
     controllers: dict[str, str] = {}  # class id -> base path
     class_decorators: dict[str, list[Decorator]] = {}
     for cls in record.classes:
@@ -156,12 +156,17 @@ def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[
         scoped = security_guards(class_decorators[fn.parentId], fn.decorators)
         guards = [g.text for g in scoped] or None
         auth_required = True if any(g.requires_auth for g in scoped) else None
-        for dec in fn.decorators:
+        method = nodes.get((fn.name, fn.startLine))
+        if method is None:
+            continue
+        anns = annotation_nodes(method)
+        aligned = len(anns) == len(fn.decorators)
+        for i, dec in enumerate(fn.decorators):
             verb, subs = _routes_of(dec)
             if verb is None:
                 continue
             for sub in subs:  # the array form @GetMapping({"/a","/b"}) yields one route each
-                routes.append(Emit(nodes.get((fn.name, fn.startLine), root), dict(
+                routes.append(Emit(anns[i] if aligned else method, dict(
                     semanticType="route",
                     method=verb,
                     endpoint=_join(base, sub),
@@ -174,6 +179,5 @@ def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[
                     authRequired=auth_required,
                     requestDTO=_request_dto(fn),
                     responseDTO=payload_type(fn.returnType),
-                ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
-                    line=fn.startLine, col=0, end_line=fn.endLine))
+                ), parent=fn.id))
     return routes

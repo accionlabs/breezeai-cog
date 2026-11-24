@@ -216,7 +216,6 @@ def detect_loopback_routes(
                         authRequired=auth_required,
                         requestDTO=_request_dto(member, source),
                         responseDTO=return_dto(member, source),
-                    ), parent=function_id(path, mname, mline, class_name=class_name),
-                        node_type="synthetic"))
+                    ), parent=function_id(path, mname, mline, class_name=class_name)))
             pending = []
     return routes

@@ -36,6 +36,7 @@ def test_case_in_http_routes_is_binding(analyze_files) -> None:
         ("GET", "/orders/{id}", "route", "http4s"),
         ("POST", "/orders", "route", "http4s"),
     }
+    assert {r.nodeType for r in _eps(st)} == {"case_clause"}  # the case clause tree-sitter returns
 
 
 def test_case_records_anonymous_handler(analyze_files) -> None:

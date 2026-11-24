@@ -104,7 +104,8 @@ def test_query_operations_detected() -> None:
     for s in _routes(rec):
         assert s.parentId in fn_ids  # parented to the resolver method
         assert s.routeKind == "query" and s.method == "QUERY"
-        assert s.framework == "graphql" and s.nodeType == "synthetic"
+        # the field is the method: the record sits at its method_declaration
+        assert s.framework == "graphql" and s.nodeType == "method_declaration"
 
 
 def test_field_name_is_the_wire_name_not_the_method_name() -> None:
@@ -407,6 +408,7 @@ def test_consumer_anchors_at_the_topic_attribute() -> None:
     topic_line = next(i for i, line in enumerate(SUBSCRIPTIONS.decode().splitlines(), 1)
                       if '[Topic("bookAdded")]' in line)
     assert consumer.startLine == consumer.endLine == topic_line
+    assert (consumer.nodeType, consumer.text) == ("attribute", 'Topic("bookAdded")')
     assert route.startLine < consumer.startLine <= route.endLine  # inside the member's span
 
 

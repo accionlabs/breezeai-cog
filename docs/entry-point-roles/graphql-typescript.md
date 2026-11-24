@@ -13,7 +13,7 @@ follows [graphql-sdl.md](graphql-sdl.md); the Apollo transport mount is in [expr
 | Resolver-map object and `new ApolloServer({ typeDefs, resolvers })` | Wiring | — | Registers many operations |
 | Field of a data-type object in a resolver map (`Book: { author: … }`) | None | — | No address of its own |
 | `__resolveReference` of a type in a resolver map (federation) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the gateway's `_entities` field |
-| `@Query(sdl)` / `@Mutation` / `@Subscription` on a method (code-first, decorators from a local `decorators` module) | Binding | `route`, `framework: graphql`, operation kind, operation name (leading identifier of the SDL fragment, else the method name) as `endpoint`, `handler` = method | One operation |
+| `@Query(sdl)` / `@Mutation` / `@Subscription` on a method (code-first, decorators from a local `decorators` module) | Binding | `route`, `framework: graphql`, operation kind, operation name (leading identifier of the SDL fragment, else the method name) as `endpoint`, `handler` = method, at the decorator (`nodeType: decorator`) | One operation |
 | `@FieldResolver` on a method (code-first) | None | — | Data-type field |
 | `@RequireScopes` / `@RequireAPIScope` / `@Authorized` on a class or method (code-first) | Guard | names in `guards` | Run before the operations |
 | `@Resolver()` class with `@Query` / `@Mutation` / `@Subscription` methods from `type-graphql` | Binding per method | as for code-first | One operation each |

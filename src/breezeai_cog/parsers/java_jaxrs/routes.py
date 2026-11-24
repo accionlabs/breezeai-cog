@@ -15,7 +15,7 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, FileRecord
 from ..emits import Emit
-from ..java.functions import method_nodes, payload_type
+from ..java.functions import annotation_nodes, method_nodes, payload_type
 from ..java_security_guards import security_guards
 
 # Standard @HttpMethod-meta-annotated markers (javax/jakarta.ws.rs).
@@ -95,10 +95,15 @@ def detect_jaxrs_routes(
         scoped = [g for g in security_guards(class_decorators[fn.parentId], fn.decorators)
                   if g.text.split("(", 1)[0] not in bound]
         guards = (outer + [g.text for g in scoped]) or None
-        for dec in fn.decorators:
+        method = nodes.get((fn.name, fn.startLine))
+        if method is None:
+            continue
+        anns = annotation_nodes(method)
+        aligned = len(anns) == len(fn.decorators)
+        for i, dec in enumerate(fn.decorators):
             if dec.name not in _HTTP_METHODS:
                 continue
-            routes.append(Emit(nodes.get((fn.name, fn.startLine), root), dict(
+            routes.append(Emit(anns[i] if aligned else method, dict(
                 semanticType="route",
                 method=dec.name,
                 endpoint=(_join(app_path, _join(base, sub))
@@ -112,6 +117,5 @@ def detect_jaxrs_routes(
                 guards=guards,
                 authRequired=True if any(g.requires_auth for g in scoped) else None,
                 responseDTO=payload_type(fn.returnType),  # JAX-RS has no @RequestBody → requestDTO stays null
-            ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
-                line=fn.startLine, col=0, end_line=fn.endLine))
+            ), parent=fn.id))
     return routes

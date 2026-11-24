@@ -104,6 +104,7 @@ class SimpleRouterImpl extends SimpleRouter {
     }
     assert {s.handler for s in routes} == {"index", "show", "item"}
     assert sum(s.isRegex is True for s in routes) == 1
+    assert {s.nodeType for s in routes} == {"case_clause"}  # the case clause tree-sitter returns
 
 
 def test_fixture_controller_emits_no_routes(tmp_path: Path) -> None:

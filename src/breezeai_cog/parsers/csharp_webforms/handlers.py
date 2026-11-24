@@ -10,18 +10,22 @@ convention as a Web Forms page — and ``handler`` / ``handlerLine`` = the metho
 claims it; this runs for every C# file, like the Lambda detector. The class is linked to its
 ``.ashx`` by the code-behind convention (``X.ashx.cs`` beside ``X.ashx`` whose ``Class=`` names
 it). A class ``web.config`` maps a path to (:mod:`.config_handlers`) gets one record per
-``(endpoint, method)`` it is registered with, on the same method. A handler class with neither is
+``(endpoint, method)`` it is registered with, on the same method. A record sits at that method
+(``nodeType: method_declaration`` — nothing declares it but the method itself), or at the class
+when it has no entry method. A handler class with neither is
 not reachable by a known URL, so it gets no record.
 """
 
 from __future__ import annotations
 
+from typing import Any
 
 from tree_sitter import Node
 
-from ...schemas import FileRecord
+from ...schemas import Class, FileRecord, Function
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..dotnet_hosts import host_files
+from ..dotnet_nodes import method_nodes, type_nodes
 from ..emits import Emit
 from .config_handlers import config_handlers
 
@@ -39,10 +43,11 @@ _ENTRY_METHODS = ("ProcessRequestAsync", "ProcessRequest", "BeginProcessRequest"
 def detect_generic_handlers(
     anchor: Node, path: str, record: FileRecord, index: object
 ) -> list[Emit]:
-    """One ``route`` per generic-handler class whose ``.ashx`` is found. The record is built from
-    the class and method records, so ``anchor`` (the file's root) only carries the emit; every
-    span field is given explicitly."""
+    """One ``route`` per generic-handler class whose ``.ashx`` is found, at its entry method. The
+    record is built from the class and method records, so ``anchor`` (the file's root) only
+    carries the emit when the declaration is not in the tree."""
     hosts = host_files(index)
+    place = _Placer(anchor)
     found: list[Emit] = []
     for cls in record.classes:
         bases = [b.split("<", 1)[0].rsplit(".", 1)[-1] for b in [cls.extends or "", *cls.implements]]
@@ -53,9 +58,8 @@ def detect_generic_handlers(
             continue
         method = next((f for f in record.functions
                        if f.parentId == cls.id and f.name == entry), None)
-        line = method.startLine if method is not None else cls.startLine
-        found.append(Emit(
-            anchor,
+        found.append(place(
+            method, cls,
             {
                 "semanticType": "route",
                 "method": "ANY",
@@ -65,11 +69,29 @@ def detect_generic_handlers(
                 "handler": entry if method is not None else None,
                 "handlerLine": method.startLine if method is not None else None,
             },
-            parent=method.id if method is not None else cls.id, node_type="synthetic",
-            text=host.rsplit("/", 1)[-1], line=line, col=0,
-            end_line=method.endLine if method is not None else cls.endLine,
+            host.rsplit("/", 1)[-1],
         ))
     return found
+
+
+class _Placer:
+    """Builds a handler's record at its entry method's declaration, or at the class's when it
+    has none. Only when that declaration is not in the tree does the file's root stand in, as
+    ``synthetic`` with the declaration's span."""
+
+    def __init__(self, root: Node) -> None:
+        self.root = root
+        self.methods = method_nodes(root)
+        self.types = type_nodes(root)
+
+    def __call__(self, method: Function | None, cls: Class, fields: dict[str, Any],
+                 text: str) -> Emit:
+        owner: Function | Class = method if method is not None else cls
+        node = (self.methods if method is not None else self.types).get(owner.startLine)
+        if node is None:
+            return Emit(self.root, fields, parent=owner.id, node_type="synthetic", text=text,
+                        line=owner.startLine, col=0, end_line=owner.endLine)
+        return Emit(node, fields, parent=owner.id, text=text)
 
 
 def _class_fqn(cls_name: str, path: str, index: object) -> str | None:
@@ -93,6 +115,7 @@ def detect_registered_handlers(
         return []
     types = getattr(index, "types", None)
     names = {fqn.rsplit(".", 1)[-1] for fqn in registered}
+    place = _Placer(anchor)
     found: list[Emit] = []
     for cls in record.classes:
         fqn = _class_fqn(cls.name, path, index) if cls.name in names else None
@@ -104,8 +127,8 @@ def detect_registered_handlers(
         if method is None and len(types.get(fqn, ())) > 1:  # type: ignore[union-attr]
             continue
         for endpoint, verb in pairs:
-            found.append(Emit(
-                anchor,
+            found.append(place(
+                method, cls,
                 {
                     "semanticType": "route",
                     "method": verb,
@@ -115,9 +138,7 @@ def detect_registered_handlers(
                     "handler": method.name if method is not None else None,
                     "handlerLine": method.startLine if method is not None else None,
                 },
-                parent=method.id if method is not None else cls.id, node_type="synthetic",
-                text=endpoint, line=method.startLine if method is not None else cls.startLine,
-                col=0, end_line=method.endLine if method is not None else cls.endLine,
+                endpoint,
             ))
     return found
 

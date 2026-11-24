@@ -286,6 +286,7 @@ def test_reference_resolver_is_binding(analyze_files) -> None:
         "Book",
         "ResolveBook",
     )
+    assert (r.nodeType, r.text) == ("attribute", "ReferenceResolver")  # at its attribute
 
 
 def test_node_resolver_is_binding(analyze_files) -> None:
