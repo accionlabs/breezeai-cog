@@ -61,7 +61,7 @@ class AspNetCoreParser(CSharpParser):
     priority = 10
     frameworks = ["aspnet", "aspnetcore"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return owned_by_aspnet(source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

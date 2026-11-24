@@ -39,7 +39,7 @@ class VbWebFormsParser(VbParser):
     priority = 10  # framework parser > base vb (0); disjoint claims from vb-aspnet
     frameworks = ["aspnet-webforms"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return path.lower().endswith(_CODE_BEHIND)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

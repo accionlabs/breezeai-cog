@@ -61,7 +61,7 @@ class WebFormsParser(CSharpParser):
     # ``synthetic``: a ``<%@ Register %>`` directive, which the html grammar never sees.
     statement_types = [*CSharpParser.statement_types, "element", "attribute", "synthetic"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return (
             path.lower().endswith(_MARKUP_EXT)  # markup files (Step 1)
             or path.lower().endswith((".aspx.cs", ".ascx.cs", ".master.cs"))

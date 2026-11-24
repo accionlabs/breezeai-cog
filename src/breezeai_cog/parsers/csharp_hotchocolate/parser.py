@@ -49,7 +49,7 @@ class CSharpHotChocolateParser(CSharpParser):
     priority = 25  # above csharp-aspnet (10); distinct from csharp-graphql (20) — no tie
     frameworks = ["graphql"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return owned_by_hotchocolate(source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

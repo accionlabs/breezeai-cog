@@ -344,7 +344,7 @@ class CodeIgniterParser(PhpParser):
     priority = 20
     frameworks = ["codeigniter"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         if _CODEIGNITER_DECLARATION.search(source):
             return True
         # A filename is not framework evidence.  Route configuration without an

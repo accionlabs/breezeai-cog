@@ -191,7 +191,7 @@ class SlimParser(PhpParser):
     priority = 30
     frameworks = ["slim"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         lower = source.lower()
         return any(marker in lower for marker in (
             b"slim\\", b"namespace slim;", b"routecollectorproxy",

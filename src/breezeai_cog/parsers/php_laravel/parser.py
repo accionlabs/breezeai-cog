@@ -472,7 +472,7 @@ class LaravelParser(PhpParser):
     priority = 10
     frameworks = ["laravel"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         lower = source.lower()
         return (
             b"Illuminate\\Support\\Facades\\Route" in source

@@ -19,7 +19,7 @@ class SymfonyParser(PhpParser):
     priority = 40
     frameworks = ["symfony"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         lower = source.lower()
         # Symfony components (HttpFoundation, EventDispatcher, Messenger) are used by many
         # non-Symfony applications — Laravel, Drupal, Slim — so they are not ownership

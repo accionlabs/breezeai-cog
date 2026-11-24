@@ -65,7 +65,7 @@ class VbWcfParser(VbParser):
     priority = 10  # framework parser > base vb (0)
     frameworks = ["wcf", "asmx"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         if path.lower().endswith(_WEBFORMS_SUFFIXES):
             return False
         return any(m in source for m in _MARKERS) or _ATTRIBUTES.search(source) is not None

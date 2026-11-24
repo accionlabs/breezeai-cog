@@ -72,7 +72,7 @@ class Struts2ConfigParser(BaseParser):
     def matches(self, path: str | Path) -> bool:
         return Path(path).suffix.lower() == ".xml"
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return STRUTS_ROOT.search(source) is not None and any(m in source for m in _CONTENT)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

@@ -36,7 +36,7 @@ class ApexParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         """``.cls`` is also the extension of VB6 class modules and LaTeX document classes;
         those are not Apex. Apex never starts with ``\\`` or ``%`` (LaTeX's comment)."""
         head = source.lstrip()

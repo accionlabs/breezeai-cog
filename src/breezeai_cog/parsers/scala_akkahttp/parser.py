@@ -15,7 +15,7 @@ class ScalaAkkaHttpParser(ScalaParser):
     priority = 10
     frameworks = ["akka-http"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"akka.http.scaladsl" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

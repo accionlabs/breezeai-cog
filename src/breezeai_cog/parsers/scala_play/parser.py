@@ -37,7 +37,7 @@ class ScalaPlayParser(ScalaParser):
     priority = 10
     frameworks = ["play"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"play.api" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

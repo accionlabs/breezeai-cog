@@ -26,5 +26,5 @@ class VertxParser(JavaParser):
     priority = 5
     frameworks = ["vertx"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"io.vertx" in source or b"org.vertx" in source

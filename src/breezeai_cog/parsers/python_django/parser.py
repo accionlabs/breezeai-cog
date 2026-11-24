@@ -20,7 +20,7 @@ class DjangoParser(PythonParser):
     priority = 8
     frameworks = [FRAMEWORK]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"django" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
@@ -50,5 +50,5 @@ class DRFParser(DjangoParser):
     priority = 9  # built on Django: wins a file both claim
     frameworks = [drf.FRAMEWORK]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"rest_framework" in source

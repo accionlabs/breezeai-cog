@@ -15,7 +15,7 @@ class ScalaHttp4sParser(ScalaParser):
     priority = 10
     frameworks = ["http4s"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"org.http4s" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

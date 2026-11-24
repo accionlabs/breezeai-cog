@@ -25,7 +25,7 @@ class NestJSParser(TypeScriptParser):
     priority = 20
     frameworks = ["nestjs", "routing-controllers", "nestjs-like"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return claims_nest(source)
 
     @staticmethod

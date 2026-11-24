@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import breezeai_cog.parsers.ruby_grape.parser as grape_parser_module
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.ruby_grape.parser import GrapeParser
 
@@ -75,6 +76,21 @@ def test_grape_routes_are_gated_and_claims_are_specific(tmp_path: Path) -> None:
     assert not parser.claims("plain.rb", b'DOC = "Grape::API is documented here"')
     assert not parser.claims("plain.rb", b"# Grape::Endpoint is mentioned here\nclass PlainRuby; end")
     assert parser.frameworks == ["grape"]
+
+
+def test_grape_claim_propagates_parse_timeout(monkeypatch) -> None:
+    original_parse_source = grape_parser_module.parse_source
+    seen: list[int] = []
+
+    def timed_parse_source(grammar: str, source: bytes, timeout_micros: int = 0):
+        seen.append(timeout_micros)
+        return original_parse_source(grammar, source, timeout_micros)
+
+    monkeypatch.setattr(grape_parser_module, "parse_source", timed_parse_source)
+    source = b'require "grape"\nclass API < Grape::API\nend\n'
+
+    assert GrapeParser().claims("api.rb", source, parse_timeout_micros=987654)
+    assert seen == [987654]
 
 
 def test_grape_block_handler_has_line_only(tmp_path: Path) -> None:

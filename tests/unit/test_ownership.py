@@ -54,7 +54,7 @@ class UpperFramework(Upper):
     name = "upper-fw"
     priority = 10
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"FRAMEWORK" in source
 
 
