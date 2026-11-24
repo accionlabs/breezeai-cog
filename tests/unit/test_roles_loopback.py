@@ -34,6 +34,7 @@ def test_verb_decorator_is_a_binding(analyze_files) -> None:
         "findById",
         5,
     )
+    assert r.nodeType == "decorator"  # the decorator tree-sitter returns, not synthetic
 
 
 def test_operation_decorator_is_a_binding(analyze_files) -> None:
