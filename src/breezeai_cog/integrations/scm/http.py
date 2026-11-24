@@ -69,7 +69,9 @@ class SCMHttpClient:
         self.provider = provider
         self.base_url = base_url.rstrip("/")
         self._headers = dict(headers)
-        self._timeout = settings.scm_api_timeout
+        self._timeout = httpx.Timeout(
+            settings.scm_api_timeout, connect=settings.scm_api_connect_timeout
+        )
         self._max_retries = settings.scm_api_retry_max
         self._backoff = settings.scm_api_retry_backoff_seconds
         self._max_pages = settings.scm_max_pages

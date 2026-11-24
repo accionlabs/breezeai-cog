@@ -85,7 +85,7 @@ def test_route_block_is_wiring(analyze_files) -> None:
     assert (r.method, r.endpoint) == ("POST", "/api/orders")
 
 
-def test_route_block_with_a_non_path_argument_makes_the_address_unknown(analyze_files) -> None:
+def test_route_block_with_a_non_path_argument_is_a_runtime_part(analyze_files) -> None:
     st = analyze_files(
         _app("""    routing {
         route("/api") {
@@ -93,8 +93,8 @@ def test_route_block_with_a_non_path_argument_makes_the_address_unknown(analyze_
         }
     }""")
     )
-    [r] = _eps(st)  # never the partial /api/x
-    assert (r.method, r.endpoint) == ("GET", None)
+    [r] = _eps(st)  # never the partial /api/x: the runtime part is marked where it stands
+    assert (r.method, r.endpoint) == ("GET", "/api/${prefixFromEnv}/x")
 
 
 def test_websocket_is_binding(analyze_files) -> None:
@@ -265,7 +265,7 @@ def test_constant_with_two_values_across_files_leaves_the_endpoint_empty(analyze
         ROUTES: _kt("com.acme", ROUTING + "import com.acme.API\n",
                     'fun Route.r() {\n    get(API) { }\n}'),
     }
-    assert _routes(files, analyze_files) == [("GET", None)]
+    assert _routes(files, analyze_files) == [("GET", "${API}")]  # the constant named, never one value
 
 
 def test_constant_not_visible_from_the_file_is_not_used(analyze_files) -> None:
@@ -280,7 +280,7 @@ def test_constant_not_visible_from_the_file_is_not_used(analyze_files) -> None:
 }"""),
     }
     # Not imported, not in this package; a star import is not followed: unknown, never guessed.
-    assert _routes(files, analyze_files) == [("GET", None), ("GET", None), ("GET", None)]
+    assert _routes(files, analyze_files) == [("GET", "${API}"), ("GET", "${Paths.USERS}"), ("GET", "${STAR}")]
 
 
 def test_only_a_resolvable_val_of_an_object_or_top_level_is_shared(analyze_files) -> None:
@@ -301,7 +301,7 @@ fun f() { val local = "/l" }"""),
     }
     # A var can change; a constant built from another file's constant, an instance property
     # and a local are not shared: all unknown.
-    assert _routes(files, analyze_files) == [("GET", None)] * 4
+    assert _routes(files, analyze_files) == [("GET", "${MUTABLE}"), ("GET", "${BUILT}"), ("GET", "${Instance.inst}"), ("GET", "${local}")]
 
 
 def test_a_constant_of_this_file_shadows_an_import(analyze_files) -> None:

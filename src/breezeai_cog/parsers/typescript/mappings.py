@@ -38,6 +38,10 @@ EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
 #: low-collision names are listed: domain-ambiguous verbs (`get`/`set`/`has`/`delete`/`add`/
 #: `find`/`create`/`update`/`count`/`index`/`search`) are deliberately excluded — a repo may
 #: genuinely declare a method of that name, and dropping those edges would cost real recall.
+#: The generic names of a JS/TS array type (``Array<T>``; ``T[]`` is read by its brackets): a
+#: call on a receiver of such a type is the array's method, never one of ``T``'s file.
+JS_ARRAY_TYPES = frozenset({"Array", "ReadonlyArray"})
+
 JS_BUILTIN_METHODS = frozenset({
     # Array.prototype (iteration / query / mutation / transform)
     "map", "filter", "forEach", "reduce", "reduceRight", "some", "every",

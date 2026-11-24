@@ -40,7 +40,7 @@ The other fields depend on the meaning:
 | Fields | Used by |
 |---|---|
 | `id`, `parentId`, `nodeType`, `text`, `startLine`, `endLine`, `path` | Every statement |
-| `name` | Declarations (`int retries = 3` → `retries`), enum members |
+| `name` | Declarations (`int retries = 3` → `retries`), enum members; an MCP tool's or prompt's name (= `endpoint`), an MCP resource's declared literal name, else its URI |
 | `method`, `endpoint`, `framework` | Routes, API calls, events |
 | `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
 | `dataAccessHint` | `db_method_call` (which ORM / database) |
@@ -110,6 +110,46 @@ scopes depends on where it is:
 | The file root or a class body | **Stops** at them | They are extracted as their own `Class` / `Function`, with their own statements. |
 | A function body | **Walks into inline lambdas** and gives their statements to the function | A lambda is not a `Function` record, so its statements belong to the enclosing function. |
 
+**Functions without a name of their own.** Each piece of code is recorded once:
+
+- An **inline** function (a callback argument, a `go`/`defer` literal, an array value) is never
+  a `Function`. Its statements belong to the enclosing function. In Go and PHP, an inline
+  function at the file root gives its statements to the file
+  (Laravel `Route::get('/health', function () { return …; })`).
+- A function **stored in a variable or class field** (`const save = (x) => …`,
+  `var notify = func(msg string) {…}`, `$notify = function ($msg) {…};`,
+  `handle = () => {…}`) is one `Function`, named after the variable (`type`
+  `arrow_function` or `function_expression`). The declaration that stores it is not emitted
+  as a statement, because its text is that Function's code. A declaration that also stores
+  something else (`const a = 1, f = () => go();`) is still emitted.
+- An arrow function with an **expression body** (`const save = (x) => db.insert(x)`) gets
+  that expression as its one statement, with the expression's own `nodeType`
+  (`call_expression`), so the call is recorded under the Function.
+
+**Java anonymous classes** (`new T(…) { … }`) are a `Class` each (`isAnonymous: true`), with
+their methods as `Function`s; the enclosing method keeps only its own statements and calls.
+
+- **Stored in a field** as its whole initializer (`ResponseHandler onError = new ResponseHandler()
+  { … };`): named after the field (`Svc.onError`). The `Class` spans the declaration and carries
+  its annotations, so the declaration is not also a statement. A declaration that also stores
+  something else (`Runnable c = new Runnable() { … }, d = null;`) is still emitted, with the body
+  shown as `{ … }`.
+- **Anywhere else** (an argument, a `return`, a local variable, part of a larger expression):
+  numbered in source order within the named class, `Svc$1`, `Svc$2` (`Svc$1$1` nested). The
+  statement that creates it keeps its head, the body shown as `{ … }`.
+- The type after `new` is `extends` when it is certainly a class (constructor arguments, or a
+  class of this file, the repository or a known JDK type) and `implements` when it is certainly
+  an interface; a library type gives neither.
+- **An enum constant's body** (`RED("r") { String tag() { … } }`) is an anonymous subclass of
+  the enum, as Java compiles it: named after the constant (`Color.RED`), `extends` the enum, its
+  methods under it. The constant stays an `enum_member` statement of the enum.
+
+| Code | `Function` | Statements |
+|---|---|---|
+| `func Run() { r.GET("/x", func(c *gin.Context) { c.JSON(200, list()) }) }` | `Run` | `r.GET(…)` and `c.JSON(200, list())`, both under `Run` |
+| `var notify = func(msg string) { send(msg) }` | `notify` (`function_expression`) | `send(msg)` under `notify`; no `var_declaration` statement |
+| `const save = (x: string) => db.insert(x);` | `save` (`arrow_function`) | `db.insert(x)` (`call_expression`) under `save`; no `lexical_declaration` statement |
+
 **Example** (Java)
 
 ```java
@@ -151,26 +191,75 @@ flowchart TD
   D -- no --> N[no meaning]
 ```
 
+`method` on an `api_call` is an HTTP verb or empty. A generic `client.request(…)` whose verb
+the call does not name (`request(config)`, `request(HttpMethod.valueOf(m), url)`) is an
+`api_call` with an empty `method`; where the language parser reads the verb from the arguments
+(`requests.request("GET", url)`, `axios({ method: "post" })`) it is that verb. In Java a client
+method whose verb is an argument — Vert.x `request` / `requestAbs`, Spring `exchange` /
+`execute`, `WebClient.method` — takes a written `HttpMethod.PUT` as its verb; its URL is the
+first argument when the verb is not first (`exchange(url, HttpMethod.GET, …)`), else the last
+later argument that reads as a path or URL (`request(HttpMethod.PUT, 8080, "host", "/orders")`
+→ `/orders`).
+
+`framework` on an `api_call` names the HTTP client, and only from evidence; the shared
+classifier matches clients by name, so on its own it leaves `framework` empty. An additive
+detector labels the statement afterwards — never adding one — when the file binds the client
+and **every** HTTP call in the statement goes through it:
+
+| Client | Evidence in the file | `framework` |
+|---|---|---|
+| jQuery | jQuery imported or loaded by the page | `jquery` |
+| axios | `axios` imported or required, or an instance from its `create(…)`; called as `axios(…)` / `axios.get(…)` / `api.post(…)` | `axios` |
+| Fetch API | `fetch(…)` / `window.fetch(…)` / `globalThis.fetch(…)`, with `fetch` bound by nothing in the file or only by an import from a Fetch implementation (`node-fetch`, `cross-fetch`, `undici`, …) | `fetch` |
+| Angular `HttpClient` | `this.<field>.get(…)` etc., the field a constructor parameter property, typed field or `inject(…)` of `HttpClient` imported from `@angular/common/http`; or `http.get(…)` on a local bound once to `inject(HttpClient)` or typed `HttpClient` | `angular` |
+| Vert.x `HttpClient`, vendor SDKs | the client type | `vertx`, `hubspot`, … |
+
+No evidence — `this.http.get(…)` with no visible type, a wrapper of unknown origin, a name
+bound twice or shadowed by a parameter, `Promise.all([axios.get(a), fetch(b)])` — leaves
+`framework` empty.
+
 `dataAccessHint` names the product, in order of evidence:
 1. **A distinctive method:** `insertOne` → `mongodb`.
-2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
+2. **The receiver:** `orderRepository.findOne` → `typeorm`. A repository name counts only where it
+   ends a name in the receiver chain, as the HTTP client names below do: `this.userRepo`,
+   `getRepository(User)` and `repositories.users` are repositories; `reportFile`, `reportService`
+   and `repoUrl` are not. A product is named only in a language
    it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
-   verb in another language (`stream().findFirst()`) needs a data-access receiver too. A
+   verb, or a Firebase JavaScript SDK verb (`getDocs`, `onSnapshot`), in another language
+   (`stream().findFirst()`, a Groovy `paperKit.getDocs()`) needs a data-access receiver too. A
    receiver whose declared type is the product's client counts for that product's generic verbs:
    in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
-   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call.
+   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call. The name is bound where
+   the call is: a class that declares its own `_ctx` as something else is not DynamoDB.
+   A cache's name is not evidence of a product: `cache.get(key)`, `cacheManager.Set(…)` or
+   `HttpRuntime.Cache.Get(…)` is most often in memory, so only a name that says Redis
+   (`redisClient.get`) or a Redis verb (`hset`, `lpush`) gives `redis`.
+   Django's `objects` manager counts only in Python; elsewhere `objects` is an ordinary name.
+   A collection-iteration method whose only argument is a closure (Groovy
+   `collection.find { it.id == id }`, `model.findAll { it.enabled }`) filters a list in memory,
+   so it is no data access whatever the receiver is called. The parser says when a call's only
+   argument is a closure (`classify_statement(closure_only=…)`, Groovy so far), and names inside
+   a closure along the call chain are not part of the receiver. A GORM query written with a
+   closure (`Book.findAll { author == a }`) is therefore left unrecorded, not guessed.
 3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
    entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
    `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the
    `NHibernate` namespace → `hibernate`, `Microsoft.EntityFrameworkCore` → `entity_framework`
-   (Java, Kotlin, Groovy, Scala, C#, VB). A `jakarta.persistence` annotation or exception is not
-   enough: other ORMs (Ebean) use them too.
+   (Java, Kotlin, Groovy, Scala, C#, VB). In C# an import made once for the whole project counts
+   as the file's own — a `global using` in any `.cs` file of the same project, or
+   `<Using Include>` in its `.csproj` / `Directory.Build.props` — as the compiler sees it; another
+   project's imports do not. A `jakarta.persistence` annotation or exception is not
+   enough: other ORMs (Ebean) use them too. EF's `Include` / `ThenInclude` on a chain naming a
+   bundle (`new ScriptBundle("~/x").Include("~/Scripts/x.js")`) is ASP.NET bundling, not a query.
 4. **Otherwise `orm`:** data access whose product the file doesn't show. A service that
    receives its repository by injection usually imports only that interface, so it stays `orm`.
 
 The order matters: API is checked first (so Django's `objects.get` is not mistaken for an HTTP
 GET only because of its name), and raw queries before ORM calls (so `createNativeQuery("SELECT …")`
-is a `query_statement`). If no call matches but the statement contains a string with real SQL
+is a `query_statement`). `createQuery` is a raw query only with a query string as its argument
+(`em.createQuery("select p from Person p")`) or in a file importing JPA or Hibernate (step 3
+above): elsewhere the name builds something else, such as a model's `Query.createQuery(key, value)`
+or LINQ's `Provider.CreateQuery(expression)`. If no call matches but the statement contains a string with real SQL
 structure, it becomes a `query_statement`:
 
 ```java
@@ -178,11 +267,55 @@ String q = "SELECT id, total FROM orders WHERE id = ?";
 ```
 → `nodeType: local_variable_declaration`, `semanticType: query_statement`, `name: q`.
 
+### HTTP client names, per language
+
+The HTTP step decides by the receiver's name: a call with an HTTP verb (`get`, `post`, …) whose
+receiver names a client. A part of the receiver chain names one when its name **ends with** a
+client name that starts a word there, because the last word of a name says what it is:
+
+| Receiver | Client? |
+|---|---|
+| `dataApiClient`, `new P3APIClient(uri)`, `DefaultHttpClient`, `this._http`, `$http`, `axios.create()` | yes |
+| `apiClientPool` (a pool), `HttpRuntime.Cache` (a cache), `httpContextProvider`, `fetched` | no |
+| `sky`, `forgot` (`ky` and `got` do not start a word) | no |
+
+Each language reads only its own libraries' names, because the same word is an ordinary name
+elsewhere: `session` is Python's `requests.Session`, but in Java it is often a JSON object, so
+`session.getString("platformId")` reads a field, and in Groovy a Map.
+
+```mermaid
+flowchart LR
+  F["call in a file of language L"] --> H{"a receiver name ends with<br/>one of L's client names?"}
+  H -- yes --> API[api_call]
+  H -- "no, or L has none" --> N[no HTTP meaning]
+```
+
+| Languages | Client names |
+|---|---|
+| all below | `http`, `httpClient`, `restClient`, `apiClient` |
+| JavaScript / TypeScript | `httpService`, `axios`, `fetch`, `superagent`, `got`, `ky`, `ofetch`, `webClient`, and a bare `fetch(…)` |
+| Python | `requests`, `session`, `httpx`, `aiohttp`, `urllib`, `urllib3` |
+| Java, Kotlin, Groovy, Scala | `restTemplate`, `webClient` |
+| C#, VB | `restTemplate` (Spring.NET), `webClient`, and the `HttpClient` verbs `GetAsync`, `GetStringAsync`, `PostAsJsonAsync` … |
+| Go | only the shared names |
+| Ruby | `HTTParty` |
+
+Some clients are recognised by their imported classes instead of a name. Apache HttpClient
+(Java) puts the verb in the request class and sends with a generic `execute`, so the record sits
+where the request is built: `new HttpGet(url)`, with `HttpGet` imported from
+`org.apache.http.client.methods` (or HttpClient 5's `org.apache.hc.client5.http.classic.methods`),
+→ `api_call`, `method: GET`, `endpoint` from `url` when it holds a string. A class of the
+repository's own with the same name is not one.
+
+In C# and VB, a receiver ending in `Session` (ASP.NET session state, NHibernate `ISession`) is
+never a client, not even `HttpContext.Session`.
+
 ### Languages that skip the name match
 
 The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `session`, `repo`).
 Some languages have no naming convention to rely on, so they skip those steps and record such
-calls only through evidence-based detectors (an import, a declared type):
+calls only through evidence-based detectors (an import, a declared type). A language with no
+client names above skips the HTTP step:
 
 | Language | Skips | Recorded instead by |
 |---|---|---|
@@ -285,6 +418,12 @@ Which statement an emit may enrich is its `enrich` mode:
 | `same` | the statement captured on this very node, whatever its type |
 | `any` | whatever statement is there |
 
+An emit that sets `skip` (node types never enriched; the MCP client's `mcp_call` sets the
+control-flow statements) finds its statement through the tree instead of by line: the innermost
+captured statement that contains the node. When that one is of a `skip` type (the call is in a
+control-flow header) or not eligible under its `enrich` mode, the emit is appended. So on a line
+with two statements (`x = 1; call()`, `with c as s: call()`) the one the call is in is enriched.
+
 `apply` also gives each appended statement its id (`path:line:col`, disambiguated in emit
 order) and its parent, and enriches a statement at most once per run, so a second route in one
 statement (`route(p).get(a).post(b)`) gets its own record.
@@ -300,8 +439,16 @@ Two further rules apply to detectors:
   are throwaway test set-ups: additive detectors with `Gate(skip_fixtures=True)`, parser-owned
   route code with `is_fixture_file`.
 - **Constants are folded** into `endpoint` when they are true compile-time constants (`ORDERS` →
-  `orders.created`). Otherwise the endpoint is left empty. See
-  [Cross-file resolution](cross-file-resolution.md).
+  `orders.created`; a route path `app.get(API + "/orders")` → `/api/orders`) and the file shows
+  which constant a name is: it declares it or imports it. A name it does neither for — or reads
+  at runtime under the same name — is marked, never filled from another file's constant. See
+  [Cross-file resolution §7](cross-file-resolution.md#7-constant-folding).
+- **A part read at runtime is marked `${…}`** where it stands, named after its source, never
+  guessed, and never written `{name}` (a path parameter): inbound
+  `router.get(pathPrefix + "/request")` → `endpoint: ${pathPrefix}/request`; outbound
+  `axios.post(config.contextRoot + "/orders/" + id)` → `endpoint: ${config.contextRoot}/orders/{id}`.
+  An address left with no named part (`${value}`, `{param}` only) is empty. The full rule is in the
+  [entry-point contract §6](entry-points.md#a-part-read-at-runtime-name).
 
 ---
 
@@ -420,5 +567,3 @@ routes, calls, events, comments or enum members. Files, classes, functions, impo
 - Don't truncate text in the parser; splitting happens at output.
 
 The step-by-step is in the [Parser Reference](../parser-reference.md).
-</content>
-</invoke>

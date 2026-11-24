@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from breezeai_cog.integrations.scm import RepoRef, parse_repo_url
+from breezeai_cog.integrations.scm import RepoRef, parse_bitbucket_server_url, parse_repo_url
 from breezeai_cog.server import git as git_mod
 
 
@@ -93,8 +93,10 @@ _INSTANCES = {
             RepoRef("github", "acme", "widgets", host="ghe.acme.com"),
         ),
         (
+            # Userinfo is dropped; the explicit port is kept, or every call would go
+            # to 443 and a self-hosted instance on another port could never connect.
             "https://user@bb.acme.com:8443/acme/widgets",
-            RepoRef("bitbucket", "acme", "widgets", host="bb.acme.com"),
+            RepoRef("bitbucket", "acme", "widgets", host="bb.acme.com", port=8443),
         ),
         (
             "https://ado.acme.com/DefaultCollection/my-project/_git/my-repo",
@@ -132,3 +134,126 @@ def test_legacy_shim_ignores_self_hosted_until_wired() -> None:
     """Until the clone/REST helpers read RepoRef.host, a self-hosted URL must 400 rather
     than silently target the public cloud."""
     assert git_mod.parse_repo_url("https://git.acme.internal/grp/proj") is None
+
+
+# ── Bitbucket Data Center ──────────────────────────────────────────────────
+
+_STASH = {"stash.payroll.co.jp": "bitbucket_server"}
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # The clone URL, under a /stash context path.
+        (
+            "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git",
+            RepoRef("bitbucket_server", "p3", "zaike-non-unity-kit-create",
+                    host="stash.payroll.co.jp", context_path="/stash"),
+        ),
+        # Browse URL, same instance.
+        (
+            "https://stash.payroll.co.jp/stash/projects/P3/repos/cog/browse",
+            RepoRef("bitbucket_server", "P3", "cog",
+                    host="stash.payroll.co.jp", context_path="/stash"),
+        ),
+        # Pull-request URL keeps the slug, not the trailing segments.
+        (
+            "https://stash.payroll.co.jp/stash/projects/P3/repos/cog/pull-requests/42/overview",
+            RepoRef("bitbucket_server", "P3", "cog",
+                    host="stash.payroll.co.jp", context_path="/stash"),
+        ),
+        # Served at the root: no context path.
+        (
+            "https://stash.payroll.co.jp/scm/P3/cog.git",
+            RepoRef("bitbucket_server", "P3", "cog", host="stash.payroll.co.jp"),
+        ),
+        # A personal repository: /users/{name} normalises to the API's ~{name}.
+        (
+            "https://stash.payroll.co.jp/users/jdoe/repos/cog/browse",
+            RepoRef("bitbucket_server", "~jdoe", "cog", host="stash.payroll.co.jp"),
+        ),
+        (
+            "https://stash.payroll.co.jp/projects/~jdoe/repos/cog/browse",
+            RepoRef("bitbucket_server", "~jdoe", "cog", host="stash.payroll.co.jp"),
+        ),
+        # A context path literally named "scm" still resolves: only one index leaves
+        # exactly two trailing segments.
+        (
+            "https://stash.payroll.co.jp/scm/scm/P3/cog.git",
+            RepoRef("bitbucket_server", "P3", "cog",
+                    host="stash.payroll.co.jp", context_path="/scm"),
+        ),
+    ],
+)
+def test_bitbucket_server_urls(url, expected) -> None:
+    assert parse_repo_url(url, _STASH) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://stash.payroll.co.jp/stash/projects/P3/browse",   # no /repos segment
+        "https://stash.payroll.co.jp/stash/scm/P3",               # slug missing
+        "https://stash.payroll.co.jp/stash/dashboard",            # not a repository URL
+    ],
+)
+def test_bitbucket_server_rejects_urls_it_cannot_address(url) -> None:
+    assert parse_repo_url(url, _STASH) is None
+
+
+def test_bitbucket_server_is_unreachable_without_an_instance_entry() -> None:
+    """Data Center has no public-cloud pattern, so an unregistered host is a 400."""
+    assert parse_repo_url(
+        "https://stash.payroll.co.jp/stash/scm/p3/cog.git", {}
+    ) is None
+
+
+def test_parse_bitbucket_server_url_needs_no_instances_entry() -> None:
+    """What `gitProvider: "bitbucket_server"` on a request buys: an unregistered host."""
+    assert parse_bitbucket_server_url(
+        "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+    ) == RepoRef(
+        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
+        host="stash.payroll.co.jp", context_path="/stash",
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://stash.payroll.co.jp/stash/dashboard",  # no repository anchor
+        "/stash/scm/p3/kit.git",                        # no host
+    ],
+)
+def test_parse_bitbucket_server_url_rejects_what_it_cannot_address(url) -> None:
+    assert parse_bitbucket_server_url(url) is None
+
+
+# ── scheme and port survive parsing (self-hosted instances) ────────────────
+
+@pytest.mark.parametrize(
+    ("url", "origin", "context"),
+    [
+        # Data Center's stock HTTP port, served at the root.
+        ("http://bb.corp:7990/scm/P3/kit.git", "http://bb.corp:7990", ""),
+        # Behind a TLS proxy on 8443, under a /stash context path.
+        ("https://bb.corp:8443/stash/scm/P3/kit.git", "https://bb.corp:8443", "/stash"),
+        # A port equal to the scheme default normalises away.
+        ("https://bb.corp:443/stash/scm/P3/kit.git", "https://bb.corp", "/stash"),
+        ("http://bb.corp:80/scm/P3/kit.git", "http://bb.corp", ""),
+    ],
+)
+def test_bitbucket_server_keeps_scheme_and_port(url, origin, context) -> None:
+    ref = parse_bitbucket_server_url(url)
+    assert ref is not None
+    assert (ref.origin, ref.context_path) == (origin, context)
+
+
+def test_a_browsed_file_path_containing_scm_is_not_read_as_the_project() -> None:
+    """`projects`/`repos` is matched before `scm`, so a directory called `scm` inside a
+    browsed path cannot be mistaken for the project key."""
+    ref = parse_bitbucket_server_url(
+        "https://bb.corp/stash/projects/P3/repos/app/browse/scm/dir/f.py"
+    )
+    assert ref is not None
+    assert (ref.owner, ref.repo, ref.context_path) == ("P3", "app", "/stash")

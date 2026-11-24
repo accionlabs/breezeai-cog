@@ -38,20 +38,24 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
+from ..addresses import runtime_part
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import (
+    Consts,
     TsAliasIndex,
+    _collect_const_values,
     _is_fixture_path,
     _module_of,
     _string_literal,
+    folded_path,
     relative_requires,
     require_specifier,
-    resolve_const_value,
+    runtime_path_template,
 )
 from ..typescript.imports import _resolve as _resolve_module
-from ..typescript_express.mounts import mw_name
-from ..typescript_express.routes import package_locals
+from ..typescript.scopes import collect_consts, const_key
+from ..typescript_http_common import mw_name, package_locals
 
 FACT = "fastify.plugin-prefixes"
 
@@ -230,7 +234,7 @@ def guard_names(value: Node | None, source: bytes) -> list[str]:
 
 
 class _Analyzer:
-    def __init__(self, root: Node, source: bytes, consts: dict[str, str | None] | None) -> None:
+    def __init__(self, root: Node, source: bytes, consts: Consts | None) -> None:
         self.root = root
         self.source = source
         self.consts = consts or {}
@@ -466,8 +470,12 @@ class _Analyzer:
     # Registrations -------------------------------------------------------------------------
 
     def prefix_token(self, opts: Node | None, scope: Scope) -> str | None:
-        """The ``prefix`` a registration's options give: ``""`` none, a literal, ``None`` when
-        it can't be read, :data:`FROM_OPTS` for the enclosing plugin's own options."""
+        """The ``prefix`` a registration's options give: ``""`` none, a literal,
+        one folded from constants (``PREFIX``, ``API + "/v1"``), a ``${name}`` part for a value
+        read at runtime (``config.base`` → ``${base}``, ``config.base + "/v1"`` → ``${base}/v1``,
+        see ``addresses``),
+        ``None`` when the options can't be read, :data:`FROM_OPTS` for the enclosing plugin's own
+        options."""
         opts = _unwrap(opts)
         if opts is None:
             return ""
@@ -489,9 +497,13 @@ class _Analyzer:
             value = _unwrap(value)
             if value is None:
                 return None
-            if value.type in ("string", "template_string"):
-                return resolve_const_value(value, src, self.consts)
-            return None
+            resolved = folded_path(value, src, self.consts)
+            if resolved is not None:
+                return resolved
+            # A prefix read at runtime (`prefix: config.base`): a `${base}` part of the routes'
+            # addresses, with the literal parts around it kept.
+            return runtime_path_template(value, src, self.consts) \
+                or runtime_part(node_text(value, src))
         spreads = _has_spread(opts)
         if not spreads:
             return ""
@@ -748,12 +760,12 @@ def _filter_value(node: Node, source: bytes) -> tuple[str, str] | str:
     return ("str", text) if text is not None else "unknown"
 
 
-def analyze(root: Node, source: bytes, consts: dict[str, str | None] | None = None) -> FileFastify:
+def analyze(root: Node, source: bytes, consts: Consts | None = None) -> FileFastify:
     """The Fastify instances, registrations and plugin exports of one file."""
     return _Analyzer(root, source, consts).run()
 
 
-def analyzer(root: Node, source: bytes, consts: dict[str, str | None] | None = None) -> _Analyzer:
+def analyzer(root: Node, source: bytes, consts: Consts | None = None) -> _Analyzer:
     """:func:`analyze`, keeping the analyzer for :meth:`_Analyzer.lookup` (which scope a call's
     receiver is bound in)."""
     a = _Analyzer(root, source, consts)
@@ -801,7 +813,11 @@ class _FileValue:
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileValue | None:
     if root is None or _is_fixture_path(rel):
         return None
-    info = analyze(root, source)
+    own: dict[str, str | None] = {}
+    _collect_const_values(root, source, own)  # this file's own: the repo's are not known yet
+    consts = collect_consts(root, source, rel, repo_root,
+                            {const_key(rel, k): v for k, v in own.items()})
+    info = analyze(root, source, consts)
     if not (info.edges or info.autoloads or info.exports or info.config):
         return None
     repo = repo_root or Path(".")

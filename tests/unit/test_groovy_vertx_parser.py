@@ -102,12 +102,15 @@ def test_receiver_qualified_routematcher(tmp_path) -> None:
 
 def test_bare_calls_inside_routematcher_scope(tmp_path) -> None:
     """Bare ``get("...")`` / ``delete("...")`` inside ``rm.with {}`` → route (route_scope). The
-    paths start with ``${config.path}`` (runtime config): the address is unknown → empty."""
+    paths start with ``${config.path}`` (runtime config): marked as written; a path with
+    no literal part besides its runtime parts (``${config.path}/${ECHO}``) says nothing → empty."""
     rec = _parse(tmp_path, FILTER_SRC, "URIMapperVerticle.groovy")
     assert rec.framework == "vertx"
     routes = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"]
     assert sorted(m for m, _ in routes) == ["DELETE", "DELETE", "GET", "GET"]
-    assert all(ep is None for _, ep in routes)
+    assert sorted(ep or "" for _, ep in routes) == [
+        "${config.path}/${ECHO}", "${config.path}/${cache}", "${config.path}/${cache}/schema",
+        "${config.path}/:platformId/:filterId"]
 
 
 def test_bare_verb_calls_need_routematcher_in_file(tmp_path) -> None:
@@ -146,7 +149,25 @@ def test_constant_addresses_fold(tmp_path) -> None:
     eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
     assert "svc/local" in eps    # same-file constant
     assert "svc/web" in eps      # cross-file constant (Addr.WEB)
-    assert None in eps and "runtimeVar" not in eps  # unresolvable var → empty (Q15)
+    assert "${runtimeVar}" in eps and "runtimeVar" not in eps  # unresolvable var: marked
+
+
+def test_class_dot_class_simple_name_stays_empty(tmp_path) -> None:
+    # In Groovy `x.class` on a variable is `x.getClass()`, so `T.class.getSimpleName()` cannot be
+    # told from a variable's runtime class by syntax: it is never folded (unlike Java).
+    src = (
+        b"package a\n"
+        b"import org.vertx.groovy.platform.Verticle\n"
+        b"class N extends Verticle {\n"
+        b"  static final String ADDR = N.class.getSimpleName()\n"
+        b"  def start() {\n"
+        b"    eb.registerHandler(ADDR, h)\n"
+        b"    eb.registerHandler(handler.class.getSimpleName(), h)\n"
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "N.groovy")
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert eps == ["${ADDR}", "${getSimpleName}"]  # unresolved: named, never guessed
 
 
 def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
@@ -164,8 +185,8 @@ def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "M.groovy")
     routes = _routes(rec)
-    assert ("POST", None) in routes
-    assert ("DELETE", None) in routes
+    assert ("POST", "${cfg.path}/job") in routes
+    assert ("DELETE", "${cfg.path}/job/:jobId") in routes
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
@@ -256,7 +277,8 @@ def test_gstring_constants_resolve_reassigned_variables_do_not(tmp_path) -> None
         b"  }\n}\n"
     )
     rec = _parse(tmp_path, src, "R.groovy")
-    assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", None)}
+    # a reassigned local is read at runtime: marked, never folded to either value
+    assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", "${moving}/z")}
 
 
 def test_local_literal_folds_only_where_it_is_visible(tmp_path) -> None:
@@ -281,9 +303,8 @@ def test_local_literal_folds_only_where_it_is_visible(tmp_path) -> None:
         b"  }\n}\n"
     )
     rec = _parse(tmp_path, src, "Api.groovy")
-    assert _routes(rec) == {("GET", "/a/x"), ("GET", "/f/w"), ("GET", None)}
     assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
-        "", "", "", "/a/x", "/f/w"]
+        "${BASE}/v", "${prefix}/q", "${prefix}/y", "/a/x", "/f/w"]
 
 
 def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
@@ -298,7 +319,7 @@ def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "script.groovy")
     assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
-        "", "/s/closure", "/s/top"]
+        "${prefix}/method", "/s/closure", "/s/top"]
 
 
 _GROOVY_USER_API = """import io.vertx.ext.web.Router

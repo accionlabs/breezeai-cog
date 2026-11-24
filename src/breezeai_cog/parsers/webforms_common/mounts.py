@@ -6,8 +6,8 @@ A page/control declares the user controls it composes in two places:
   ``.ascx``/``.master``, which is not itself scanned/parsed);
 * **code-behind** — ``LoadControl("~/Controls/Cart.ascx")`` (a literal-arg call).
 
-Each is resolved to the control's **code-behind** path (``…/Nav.ascx.cs`` — the file that
-actually has a ``FileRecord``; markup files get none) and added to the host's
+Each is resolved to the control's **code-behind** path (``…/Nav.ascx.cs`` or ``…/Nav.ascx.vb`` — the
+file that has the control's class) and added to the host's
 ``importFiles``, building the ``IMPORTS`` edge host→control. This reuses the existing
 load-bearing field — no new schema field or type.
 
@@ -22,6 +22,21 @@ import re
 from pathlib import Path
 
 from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
+
+#: Code-behind languages: a code-behind is its markup's path plus one of these.
+CODE_BEHIND_EXTS = (".cs", ".vb")
+
+
+def code_behind_ext(path: str) -> str | None:
+    """``.cs`` / ``.vb`` when ``path`` ends with one (``Page.aspx.vb`` → ``.vb``), else None."""
+    return next((e for e in CODE_BEHIND_EXTS if path.lower().endswith(e)), None)
+
+
+def _code_behind_of(markup_rel: str, repo_root: Path, prefer: str | None) -> str | None:
+    """The code-behind beside ``markup_rel`` that exists, in its real casing — the host's own
+    language first (``prefer``), then the other (a Web Site project may mix languages)."""
+    order = sorted(CODE_BEHIND_EXTS, key=lambda e: e != prefer)
+    return next((hit for e in order if (hit := ci_resolve(repo_root, markup_rel + e))), None)
 
 # ``<%@ Register … Src="~/Controls/Nav.ascx" … %>``. TagPrefix/Namespace/Assembly Register
 # variants carry no ``Src`` and are skipped (they register assembly controls, not a file).
@@ -39,13 +54,13 @@ _MASTER_FILE = re.compile(
 )
 
 def read_sibling_markup(abs_path: Path | None) -> bytes:
-    """The page/control/master markup bytes beside a code-behind (``Page.aspx.cs`` →
-    ``Page.aspx``); ``b""`` when there is no on-disk path or no sibling. Read once and shared
+    """The page/control/master markup bytes beside a code-behind (``Page.aspx.cs`` or
+    ``Page.aspx.vb`` → ``Page.aspx``); ``b""`` when there is no on-disk path or no sibling. Read once and shared
     by the mount + master passes."""
     if abs_path is None:
         return b""
     text = str(abs_path)
-    if not text.endswith(".cs"):
+    if code_behind_ext(text) is None:
         return b""
     markup = Path(text[:-3])
     if not markup.is_file():
@@ -56,13 +71,15 @@ def read_sibling_markup(abs_path: Path | None) -> bytes:
         return b""
 
 
-def _resolve_mount(src: str, cur_dir: str, app_root: str, repo_root: Path) -> str | None:
-    """A ``Src`` / ``LoadControl`` path → the control's repo-relative ``.ascx.cs`` path in its
+def _resolve_mount(
+    src: str, cur_dir: str, app_root: str, repo_root: Path, prefer: str | None,
+) -> str | None:
+    """A ``Src`` / ``LoadControl`` path → the control's repo-relative code-behind path in its
     real on-disk casing, only when it exists (else the ``IMPORTS`` edge would dangle)."""
     rel = to_repo_path(src, cur_dir, app_root)
     if rel is None or not rel.lower().endswith(".ascx"):  # only user controls are mounts
         return None
-    return ci_resolve(repo_root, rel + ".cs")
+    return _code_behind_of(rel, repo_root, prefer)
 
 
 def resolve_mounts(
@@ -77,9 +94,11 @@ def resolve_mounts(
     raw = _REGISTER_SRC.findall(markup) + _LOADCONTROL.findall(source)
     app_root = web_app_root(rel_path, repo_root)
     cur_dir = posixpath.dirname(rel_path)
+    prefer = code_behind_ext(rel_path)
     out: set[str] = set()
     for b in raw:
-        resolved = _resolve_mount(b.decode("utf-8", "replace"), cur_dir, app_root, repo_root)
+        resolved = _resolve_mount(
+            b.decode("utf-8", "replace"), cur_dir, app_root, repo_root, prefer)
         if resolved is not None:
             out.add(resolved)
     return sorted(out)
@@ -106,11 +125,14 @@ def resolve_master(markup: bytes, rel_path: str, repo_root: Path | None) -> str 
     return "/" + actual if actual is not None else None
 
 
-def master_codebehind(master_endpoint: str | None, repo_root: Path | None) -> str | None:
+def master_codebehind(
+    master_endpoint: str | None, repo_root: Path | None, prefer: str | None = ".cs",
+) -> str | None:
     """The master's **code-behind** repo path (for the page→master ``IMPORTS`` edge), in real
     on-disk casing, or ``None`` when there's no master or it has no code-behind (an inline-code
     master → honest-null, no dangling edge). ``master_endpoint`` is the already-resolved
-    ``/…​.master`` from :func:`resolve_master`; its ``.cs`` sibling is the master's FileRecord."""
+    ``/…​.master`` from :func:`resolve_master`; its ``.cs`` / ``.vb`` sibling (``prefer`` first)
+    is the master's FileRecord."""
     if master_endpoint is None or repo_root is None:
         return None
-    return ci_resolve(repo_root, master_endpoint.lstrip("/") + ".cs")
+    return _code_behind_of(master_endpoint.lstrip("/"), repo_root, prefer)

@@ -17,26 +17,10 @@ base parser already captured the enclosing statement (top level of a method body
 it in place; for calls inside lambda handlers — which the base skips as a nested scope — we
 add a statement parented to the enclosing function. Mutates ``record``.
 
-**Delegation wrappers.** A common idiom hides the EventBus registration behind a thin
-private helper, so the real addresses live at the call sites, not at the framework call::
-
-    void start() {
-        register("svc/formal",  new FormalHandler(this));   // ← the real consumers
-        register("svc/submit",  new SubmitHandler(this));
-    }
-    private void register(String address, Handler<Message> h) {
-        vertx.eventBus().registerHandler(address, h, ...);   // ← address is a parameter
-    }
-
-A single-pass detector sees only ``registerHandler(address, ...)`` — one consumer whose
-endpoint is the unresolved variable ``"address"`` — and misses every real one. So before
-classifying call sites we scan for such wrappers (``_wrapper_aliases``): a *private* method
-whose first ``String`` parameter is forwarded *directly* (no transform) as the address of an
-EventBus call. Its callers are then classified as that EventBus kind, and the wrapper's own
-delegated call is suppressed (its address is a parameter — honest-null, not ``"address"``).
-The direct-passthrough requirement keeps this tight: a method that rewrites the address is
-not treated as a transparent alias. Detection is structural — the wrapper's *name* is
-irrelevant (it need not be ``register``); only the shape is matched."""
+**Addresses through helpers.** A helper method or constructor that passes its parameter on
+as the EventBus address (``register(address, h)`` → ``registerHandler(address, h)``) is an
+address forwarder (:mod:`.forwarders`, repo-wide, Vert.x 2 and 3+): each call to it is a record
+with its own argument folded, and the helper's own call keeps its record with no address."""
 
 from __future__ import annotations
 
@@ -47,15 +31,20 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
-from .java_syntax import (calls_and_creations, handler_class, imports_and_package,
-                          invocations, java_string, local_value)
-from .legacy import forwarder_sites, http_client_calls, registration_tables
+from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
+                          invocations, java_string, local_value, value_source)
+from .forwarders import forwarder_sites
+from .handler_factories import FactoryCalls
+from .legacy import http_client_calls, registration_tables
+from .route_guards import library_handlers, pathless_middleware, route_guards
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
+from ..addresses import informative, join_runtime, mark_runtime, runtime_name, source_kind
 from ..vertx_common import (
     vertx_emit,
     EVENTBUS,
+    HTTP_VERBS,
     MOUNTED_FACTORIES,
     FactoryMount,
     factory_mount,
@@ -67,12 +56,14 @@ from ..vertx_common import (
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
-    is_bus_receiver,
+    failure_handler_only,
     join_path,
     render_address,
+    route_template,
     router_vars,
     service_builder_vars,
     sub_router_bases,
+    runtime_mount_prefixes,
 )
 
 
@@ -86,89 +77,6 @@ def _root_receiver(receiver: Node, source: bytes) -> str:
     while node.type == "method_invocation" and (obj := node.child_by_field_name("object")):
         node = obj
     return node_text(node, source)
-
-
-def _method_declarations(root: Node) -> list[Node]:
-    out: list[Node] = []
-
-    def walk(n: Node) -> None:
-        if n.type == "method_declaration":
-            out.append(n)
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return out
-
-
-def _first_string_param(decl: Node, source: bytes) -> str | None:
-    """Name of a method's first formal parameter when its type is ``String`` — the shape a
-    Vert.x address must have; ``None`` otherwise. (A Vert.x address is always the *first*
-    argument, so an alias wrapper forwards its own first parameter.)"""
-    params = decl.child_by_field_name("parameters")
-    if params is None:
-        return None
-    fp = next((c for c in params.named_children if c.type == "formal_parameter"), None)
-    if fp is None:
-        return None
-    type_node = fp.child_by_field_name("type")
-    name_node = fp.child_by_field_name("name")
-    if type_node is None or name_node is None or node_text(type_node, source) != "String":
-        return None
-    return node_text(name_node, source)
-
-
-#: Byte substrings that must both be present for a file to possibly contain an alias wrapper:
-#: the ``private`` helper and some EventBus method name it forwards to. A cheap guard so the
-#: extra declaration scan runs only on the rare file that could match (mirrors the Groovy
-#: parser's ``b"RouteMatcher" in source`` gate).
-_EVENTBUS_BYTES = tuple(m.encode() for m in EVENTBUS)
-
-
-def _may_have_wrapper(source: bytes) -> bool:
-    return b"private" in source and any(n in source for n in _EVENTBUS_BYTES)
-
-
-def _wrapper_aliases(
-    root: Node, source: bytes
-) -> tuple[dict[str, SemanticType], set[tuple[int, int]]]:
-    """Find EventBus **delegation wrappers** (see module docstring).
-
-    Returns ``(aliases, suppress)``: ``aliases`` maps a wrapper method name to the EventBus
-    ``SemanticType`` it delegates to (so its call sites classify as that kind); ``suppress``
-    is the byte span of each wrapper's own delegated call — its address is the wrapper's
-    parameter, so emitting it would fabricate an ``endpoint="address"`` edge (honest-null).
-
-    Detection is purely structural (raw first-argument text vs the parameter name) — no
-    address folding — so it stays cheap even when the byte guard admits many files."""
-    aliases: dict[str, SemanticType] = {}
-    suppress: set[tuple[int, int]] = set()
-    for decl in _method_declarations(root):
-        mods = next((c for c in decl.children if c.type == "modifiers"), None)
-        if mods is None or "private" not in node_text(mods, source):
-            continue
-        param = _first_string_param(decl, source)
-        name_node = decl.child_by_field_name("name")
-        body = decl.child_by_field_name("body")
-        if param is None or name_node is None or body is None:
-            continue
-        for call in invocations(body):
-            name_n = call.child_by_field_name("name")
-            method = node_text(name_n, source) if name_n is not None else ""
-            if method not in EVENTBUS:
-                continue
-            obj_n = call.child_by_field_name("object")
-            if obj_n is None or not is_bus_receiver(node_text(obj_n, source)):
-                continue
-            args = call.child_by_field_name("arguments")
-            first = args.named_children[0] if args is not None and args.named_children else None
-            # A transparent alias forwards its parameter *unchanged* as the address: the raw
-            # first argument must be exactly the parameter identifier (not `prefix + address`).
-            if first is not None and node_text(first, source) == param:
-                aliases[node_text(name_node, source)] = EVENTBUS[method]
-                suppress.add((call.start_byte, call.end_byte))
-                break
-    return aliases, suppress
 
 
 def _parts(
@@ -186,7 +94,9 @@ def _parts(
     first_str = first_arg = None
     if args is not None and args.named_children:
         first_node = args.named_children[0]
-        first_arg = node_text(first_node, source)
+        # an event-bus address held in a local read from config / env is named after the read
+        first_arg = node_text(value_source(first_node, source) if method in EVENTBUS
+                              else first_node, source)
         first_str = render_address(first_node, source, consts, java_string)
     return method, first_str, first_arg, obj
 
@@ -195,22 +105,47 @@ def _classify(
     call: Node,
     source: bytes,
     consts: dict[str, str],
-    aliases: dict[str, SemanticType],
     service_vars: dict[str, str] | None = None,
     routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
-    """→ (semanticType, method, endpoint, routeKind) or None. Falls back to an alias-wrapper
-    match (``aliases``) when the direct decision table does not classify the call — the
-    address is the wrapper call's own first argument, folded like any other."""
+    """→ (semanticType, method, endpoint, routeKind) or None."""
     method, first_str, first_arg, obj = _parts(call, source, consts)
-    info = classify_call(method, first_str, first_arg, obj, service_vars=service_vars,
+    return classify_call(method, first_str, first_arg, obj, service_vars=service_vars,
                          routers=routers)
-    if info is not None:
-        return info
-    semantic = aliases.get(method)
-    if semantic is not None:  # an event-bus wrapper: resolved address or empty (Q15)
-        return semantic, None, first_str if first_str and "{" not in first_str else None, None
-    return None
+
+
+def _value_route(
+    call: Node, source: bytes, consts: dict[str, str], routers: frozenset[str],
+) -> tuple[SemanticType, str | None, str | None, str | None] | None:
+    """A route whose whole path is one value cog cannot read, on a router this file declares
+    (``Router r = Router.router(vertx)``, a ``Router`` / ``RouteMatcher`` field or parameter),
+    with a handler: ``router.get(path).handler(h)`` → ``${path}``, named after its source
+    (``addresses.py``; a local assigned once from ``config().getString("a")`` → ``${config:a}``).
+    The path is a name, a field or a configuration / environment read; any other call is not
+    read as one. None for anything else."""
+    name = call.child_by_field_name("name")
+    verb = node_text(name, source) if name is not None else ""
+    receiver = call.child_by_field_name("object")
+    args = call.child_by_field_name("arguments")
+    named = list(args.named_children) if args is not None else []
+    if verb not in HTTP_VERBS and verb != "route" or receiver is None or not named \
+            or router_name(node_text(receiver, source)) not in routers:
+        return None
+    first = named[0]
+    if verb == "route" and len(named) > 1:  # `route(HttpMethod.GET, path)`: not a path first
+        return None
+    if first.type not in ("identifier", "field_access", "method_invocation") \
+            or render_address(first, source, consts, java_string) is not None:
+        return None
+    text = node_text(value_source(first, source), source)
+    if first.type == "method_invocation" and source_kind(text) is None:
+        return None
+    if _handler_arg(call, source) is None:
+        return None
+    endpoint = informative(mark_runtime("{" + runtime_name(text) + "}"))
+    if endpoint is None:
+        return None
+    return "route", verb.upper() if verb != "route" else None, endpoint, "route"
 
 
 def _handler_arg(call: Node, source: bytes) -> Node | None:
@@ -230,6 +165,19 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
             found = pargs.named_children[0] if pargs is not None and pargs.named_children else None
         node = parent
     return found
+
+
+def _chained(call: Node, source: bytes) -> list[str]:
+    """The names of the calls chained on ``call``: ``router.get("/x").handler(h)`` → ``[handler]``."""
+    names: list[str] = []
+    node = call
+    while (parent := node.parent) is not None and parent.type == "method_invocation" \
+            and parent.child_by_field_name("object") == node:
+        name = parent.child_by_field_name("name")
+        if name is not None:
+            names.append(node_text(name, source))
+        node = parent
+    return names
 
 
 def _mount_arg(node: Node, source: bytes) -> str | None:
@@ -479,42 +427,53 @@ def detect_vertx(
     found: list[Emit] = []
     consts = consts or {}
 
-    aliases: dict[str, SemanticType] = {}
     suppress: set[tuple[int, int]] = set()
-    if _may_have_wrapper(source):
-        aliases, suppress = _wrapper_aliases(root, source)
     methods = method_lines(record.functions)
     calls, creations = calls_and_creations(root)
+    built_by = FactoryCalls(root, source, index)  # handlers built by `X.create(…)`
     mounts, mount_routes = (
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
     bases = sub_router_bases(mounts)
+    runtime_mounts = runtime_mount_prefixes(mounts)
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
-    # Vert.x 2 idioms (legacy.py): registration tables, address forwarders, HttpClient calls.
-    handled: set[tuple[int, int]] = set()
+    # Vert.x 2 idioms (legacy.py): registration tables, HttpClient calls.
     if b"org.vertx" in source:
-        tables, replaced = registration_tables(calls, source, consts, index, path)
+        tables, replaced = registration_tables(calls, source, consts, index, path, built_by)
         suppress |= replaced
-        sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
-                                         index, suppress)
         found.extend(tables)
-        found.extend(sites)
         found.extend(http_client_calls(root, calls, source, record, consts))
+    # Calls to an address forwarder (forwarders.py), any Vert.x version.
+    sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
+                                     index, suppress, built_by)
+    found.extend(sites)
+    # Middleware for the routes' `guards` (route_guards.py): path-less registrations, and the
+    # Vert.x library handlers chained ahead of a route's own handler.
+    middleware = pathless_middleware(calls, source, routers) if b"handler(" in source else []
+    singles, wildcards, package = imports_and_package(root, source)
+    is_library = library_handlers(singles, wildcards, package,
+                                  {c.name for c in record.classes}, index)
 
     for call in calls:
-        if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
+        if (call.start_byte, call.end_byte) in suppress:  # a table loop's own registration
             continue
         if (call.start_byte, call.end_byte) in handled:  # a call to a forwarder: recorded above
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        info = _classify(call, source, consts, aliases, service_vars, routers)
+        info = _classify(call, source, consts, service_vars, routers) \
+            or _value_route(call, source, consts, routers)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
+        if semantic == "route" and failure_handler_only(_chained(call, source)):
+            continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
+        if semantic == "route" and endpoint is None:
+            # A path with a part read at runtime (`pathPrefix + "/x"`): `${pathPrefix}/x`.
+            endpoint = route_template(_parts(call, source, consts)[1])
         unknown_base = False
         receiver = call.child_by_field_name("object")
         recv = router_name(_root_receiver(receiver, source)) if receiver is not None else ""
@@ -527,7 +486,10 @@ def detect_vertx(
                 mounted, prefix = factory_mount(index, cls, method_name)
                 if mounted:
                     base = prefix
-        if base is not _NOT_MOUNTED:
+        if semantic == "route" and recv in runtime_mounts and endpoint is not None:
+            # Mounted once, at a prefix read at runtime: `${prefix}/x` (addresses.py).
+            endpoint = join_runtime(runtime_mounts[recv], endpoint)
+        elif base is not _NOT_MOUNTED:
             if base is None or endpoint is None:
                 unknown_base, endpoint = True, None
             else:
@@ -536,6 +498,12 @@ def detect_vertx(
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
         )
+        if handler is None and semantic in HANDLER_SEMANTICS:
+            # `registerHandler(addr, new Handler<Message>() { void handle(…) })`: the anonymous
+            # class's `handle` is a Function of its own (`Outer$1#handle`) — the code that runs.
+            anon_line = anonymous_handle(_handler_arg(call, source), source)
+            if anon_line is not None:
+                handler, handler_line = "handle", anon_line
         # A service registration: every method of the interface is a binding on the address
         # (the message's `action` header picks it) — one consumer per method, handler = method.
         handlers: list[str | None] = [handler]
@@ -552,7 +520,8 @@ def detect_vertx(
         elif handler is None and semantic in HANDLER_SEMANTICS:
             # `registerHandler(addr, new LoadHandler(eb))`: a Vert.x `Handler` has one method,
             # so the code that runs is that class's `handle` (usually another file).
-            impl = handler_class(_handler_arg(call, source), source)
+            arg = _handler_arg(call, source)
+            impl = handler_class(arg, source) or built_by.built(arg)
             if impl:
                 handlers = ["handle"]
 
@@ -565,9 +534,11 @@ def detect_vertx(
             handler_line, first_path = site(handler)
         else:
             first_path = None
+        guards = route_guards(call, recv, method, middleware, is_library, source) \
+            if semantic == "route" else None
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
                                 handler_line, unknown_base=unknown_base,
-                                handler_path=first_path))
+                                handler_path=first_path, guards=guards))
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {

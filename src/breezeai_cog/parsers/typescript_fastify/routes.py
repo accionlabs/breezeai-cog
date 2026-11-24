@@ -21,7 +21,8 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..contract import HTTP_METHODS
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.imports import resolve_const_value
+from ..typescript.imports import Consts, resolve_const_value
+from ..typescript.scopes import file_consts
 from ..wiring import compose_guards
 from .plugins import (
     GUARD_HOOKS, LOOSE, ROOT, UNKNOWN, Scope, _args, _member_call, _unwrap, analyzer,
@@ -41,7 +42,7 @@ def _join_path(prefix: str | None, path: str | None) -> str | None:
     return join_prefix(prefix, path) or "/"
 
 
-def _path(node: Node | None, source: bytes, consts: dict[str, str | None]) -> str | None:
+def _path(node: Node | None, source: bytes, consts: Consts) -> str | None:
     node = _unwrap(node)
     if node is None:
         return None
@@ -98,7 +99,7 @@ def _methods(node: Node | None, source: bytes) -> list[str] | None:
     return out
 
 
-def _routes(call: Node, method: str, source: bytes, consts: dict[str, str | None],
+def _routes(call: Node, method: str, source: bytes, consts: Consts,
             lines: dict[str, int | None]
             ) -> list[tuple[str, str | None, str | None, int | None, list[str], str]]:
     """One route call → [(method, path, handler, handlerLine, route-level guards, routeKind)]."""
@@ -136,8 +137,7 @@ def detect_fastify(root: Node, source: bytes, path: str, record: FileRecord,
     facts = plugin_prefixes(index)
     if b"astify" not in source and path not in facts.files:
         return []
-    index_consts = getattr(index, "const_values", None)
-    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    consts: Consts = file_consts(index, root, source, path)
     an = analyzer(root, source, consts)
     loose = None if facts.loose_unknown else ""
 
@@ -187,10 +187,12 @@ def detect_fastify(root: Node, source: bytes, path: str, record: FileRecord,
         before = [name for off, name in scope.hooks if off < call.start_byte]
         for method, route_path, handler, line, hooks, kind in _routes(
                 call, mc[1], source, consts, lines):
+            # A prefix read at runtime is a ``${name}`` part of it (addresses.py).
+            endpoint = _join_path(prefix, route_path)
             found.append(Emit(
                 call,
                 {"semanticType": "route", "framework": "fastify", "routeKind": kind,
-                 "method": method, "endpoint": _join_path(prefix, route_path)},
+                 "method": method, "endpoint": endpoint},
                 fill={"handler": handler, "handlerLine": line,
                       "guards": compose_guards(list(outer), list(scope.guards), before, hooks),
                       # A hook — the route's own too — may validate, log or parse as well as

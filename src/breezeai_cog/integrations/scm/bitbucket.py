@@ -182,9 +182,9 @@ class BitbucketSCMClient(AbstractSCMClient):
         )
 
     def clone_url(self, ref: RepoRef) -> str:
-        host = ref.host or DEFAULT_HOSTS["bitbucket"]
+        origin = ref.origin if ref.host else f'https://{DEFAULT_HOSTS["bitbucket"]}'
         auth = f"x-bitbucket-api-token-auth:{self._api_key}@" if self._api_key else ""
-        return f"https://{auth}{host}/{ref.owner}/{ref.repo}.git"
+        return f"{origin.replace('//', f'//{auth}', 1)}/{ref.owner}/{ref.repo}.git"
 
 
 __all__ = ["BitbucketSCMClient"]

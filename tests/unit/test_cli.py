@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -29,7 +30,7 @@ def test_capabilities() -> None:
     result = runner.invoke(app, ["capabilities"])
     assert result.exit_code == 0
     caps = json.loads(result.stdout)
-    assert "python" in caps["languages"] and caps["schemaVersion"] == "2.4"
+    assert "python" in caps["languages"] and caps["schemaVersion"] == "2.7"
 
 
 def test_repo_to_json_tree(tmp_path) -> None:
@@ -128,10 +129,30 @@ def test_cog_pre_exists_as_file_gives_clean_error(tmp_path, monkeypatch) -> None
     assert "NotADirectoryError" not in result.output
 
 
+def test_a_file_in_the_log_path_is_reported_as_not_a_directory_on_any_os(tmp_path, monkeypatch) -> None:
+    """Windows raises FileExistsError, not NotADirectoryError, when .cog is a file: the message
+    is the same."""
+    monkeypatch.setenv("BREEZEAI_COG_LOG_TO_FILE", "true")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / ".cog").write_text("not a dir\n")
+
+    def windows_mkdir(*_args, **_kwargs):
+        raise FileExistsError(183, "Cannot create a file when that file already exists")
+
+    monkeypatch.setattr("breezeai_cog.cli.setup_logging", windows_mkdir)
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+    assert result.exit_code == 1
+    assert "not a directory" in result.output
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.skipif(
     hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
     reason="root bypasses filesystem permission checks",
 )
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows ignores read-only mode on folders")
 def test_cog_read_only_gives_clean_error(tmp_path, monkeypatch) -> None:
     """Bug 2: a read-only .cog directory must yield a clean permission error, not a raw
     PermissionError traceback."""
@@ -561,6 +582,21 @@ def test_batch_upload_force_reuploads_everything(tmp_path, monkeypatch) -> None:
     # both re-uploaded despite the pre-seeded state
     assert sorted(uploaded) == ["proj-a", "proj-b"]
     assert not state_file.exists()  # cleared after a fully-successful run
+
+
+def test_upload_timeout_flag_help_shows_minimum() -> None:
+    result = runner.invoke(app, ["repo-to-json-tree", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "[x>=1.0]" in result.stdout
+
+
+def test_upload_timeout_flag_rejects_values_below_one_second(tmp_path) -> None:
+    ws = _workspace_with(tmp_path, ["proj-a"])
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--upload-timeout", "0.5"],
+    )
+    assert result.exit_code == 2
 
 
 def test_upload_tuning_flags_plumb_into_settings(tmp_path, monkeypatch) -> None:

@@ -7,10 +7,14 @@ markup-level, not handler methods). A user control and a master page are parts o
 entry points: their links stay structural (``importFiles``).
 
 Endpoints are derived from the code-behind path. **Host→control mount edges** are resolved
-by the markup pass (:mod:`.mounts`): ``<%@ Register Src %>`` from the sibling markup and
+by the markup pass (:mod:`..webforms_common.mounts`): ``<%@ Register Src %>`` from the sibling markup and
 literal ``LoadControl("…")`` from the code-behind are resolved to each control's code-behind
 path and added to ``importFiles`` (the ``IMPORTS`` edge). ``MapPageRoute`` friendly URLs,
-master-page composition, and ``NavigateUrl`` navigation are later items of the same pass."""
+master-page composition, and ``NavigateUrl`` navigation are later items of the same pass.
+
+The page records, links and navigation targets are shared with VB (``vb_webforms``) through
+``webforms_common``; this package reads the C# tree. Markup files (``.aspx``/``.ascx``/
+``.master``) are owned here whatever the code-behind's language: the markup is the same."""
 
 from __future__ import annotations
 
@@ -30,10 +34,13 @@ from .markup import (
     resolve_control_mounts,
     shadow_markup,
 )
-from .mounts import master_codebehind, read_sibling_markup, resolve_master, resolve_mounts
-from .navigation import detect_navigation
-from .page_routes import page_routes
-from .routes import detect_webforms_pages
+from ..webforms_common.mounts import (
+    master_codebehind, read_sibling_markup, resolve_master, resolve_mounts,
+)
+from ..webforms_common.navigation import detect_navigation
+from ..webforms_common.page_routes import page_routes
+from ..webforms_common.pages import detect_webforms_pages
+from .navigation import codebehind_redirects
 
 #: Web Forms code-behind imports System.Web.UI (Page/UserControl) — NOT the MVC/Core
 #: markers that select the sibling AspNetCoreParser, so the two claim disjoint files.
@@ -121,14 +128,15 @@ class WebFormsParser(CSharpParser):
             if routes or master_ep is not None or ctx.path.lower().endswith(".ascx.cs"):
                 record.framework = "aspnet-webforms"
             # Page→page navigation → routeKind=navigation statements (item 4).
-            nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
+            nav = detect_navigation(record, ctx.path, root,
+                                    codebehind_redirects(root, ctx.source), markup, ctx.repo_root)
             if nav:
                 apply(record, nav, ctx.source, ctx.path)
                 record.framework = "aspnet-webforms"
         # Cross-file IMPORTS edges (core field, NOT statement-gated): host→control mounts +
         # page→master composition. Deduped against existing imports, sorted for determinism.
         imports = resolve_mounts(markup, ctx.path, ctx.source, ctx.repo_root)
-        master_cb = master_codebehind(master_ep, ctx.repo_root)
+        master_cb = master_codebehind(master_ep, ctx.repo_root, ".cs")
         if master_cb is not None:
             imports.append(master_cb)
         if imports:

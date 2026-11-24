@@ -53,6 +53,7 @@ _CONTINUATION_CLEARED: tuple[str, ...] = (
     "semanticType", "name", "uiRole", "framework", "method", "endpoint",
     "handler", "handlerLine", "routeKind", "isRegex", "version", "authRequired",
     "guards", "requestDTO", "responseDTO", "dataLoaders", "dataAccessHint", "keyFields",
+    "description", "params",
 )
 
 

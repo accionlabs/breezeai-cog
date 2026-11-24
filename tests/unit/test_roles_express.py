@@ -168,12 +168,12 @@ def test_apollo_transport_mount_is_a_post_route(analyze_files) -> None:
     assert [(s.method, s.endpoint, s.framework) for s in _eps(st)] == [("POST", "/graphql", "graphql")]
 
 
-def test_unresolved_path_part_leaves_endpoint_empty(analyze_files) -> None:
+def test_unresolved_path_part_is_marked(analyze_files) -> None:
     st = _app(
         analyze_files, "import { BASE } from './config.js';\napp.get(`${BASE}/users`, listUsers);\n"
     )
     [r] = _eps(st)
-    assert r.endpoint in (None, "")
+    assert r.endpoint == "${BASE}/users"
 
 
 def test_settings_getter_is_none(analyze_files) -> None:

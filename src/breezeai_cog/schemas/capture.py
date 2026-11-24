@@ -40,10 +40,19 @@ class Decorator(BaseModel):
 
 
 class Parameter(BaseModel):
+    """One parameter of a function (``Function.params``) or one input of an MCP statement
+    (``Statement.params``): an ``mcp_tool``'s input parameter, an ``mcp_resource`` template's
+    variable or an ``mcp_prompt``'s argument."""
+
     name: str
-    type: str
+    type: str | None = None  # as written in the signature / schema; None when not declared
     decorators: list[Decorator] = Field(default_factory=list)
     default: str | None = None  # default-value expr, e.g. FastAPI `Depends(get_db)`
+    #: Whether a caller must pass it. None = not known (never read as optional).
+    required: bool | None = None
+    #: What the parameter is for, from the schema or annotation; for a Python tool it falls
+    #: back to the param's entry in the docstring's ``Args:`` / ``Parameters`` / ``:param``.
+    description: str | None = None
 
 
 class ConstructorParam(BaseModel):
@@ -88,7 +97,11 @@ class Statement(BaseModel):
     # route-only
     framework: str | None = None
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)
-    endpoint: str | None = None  # route path (route) or outbound URL (api_call)
+    #: Route path (route) or outbound URL (api_call). A part cog cannot read (a prefix or base
+    #: from config, env or a variable) is written ``${name}`` and may stand for any text, a host
+    #: included: ``${contextRoot}/orders/{id}``. ``{name}`` / ``:id`` / ``<id>`` stay path
+    #: parameters (one segment). Empty when no literal path part is known.
+    endpoint: str | None = None
     handler: str | None = None
     #: Line of the handler's declaration — in ``handlerPath`` when that is set, else in this file.
     handlerLine: int | None = None
@@ -109,6 +122,13 @@ class Statement(BaseModel):
     keyFields: list[str] | None = None
     # iac-only: cloud provider inferred from resource type prefix or provider name
     platform: str | None = None
+    # Human description: the front-matter ``description`` of a skill / agent /
+    # command document, or the description / docstring of an ``mcp_tool`` / ``mcp_resource`` /
+    # ``mcp_prompt``.
+    description: str | None = None
+    # MCP server statements only: an ``mcp_tool``'s input parameters, an ``mcp_resource``
+    # template's variables, an ``mcp_prompt``'s arguments.
+    params: list[Parameter] | None = None
 
 
 class Function(BaseModel):
@@ -158,6 +178,9 @@ class Class(BaseModel):
     # closed hierarchy — Kotlin `sealed` (C#/Java `sealed` are the analogue).
     # Sibling of isAbstract; present (True) only when sealed.
     isSealed: bool | None = None
+    # A class with no name in the source: a Java anonymous class (`new T(…) { … }`). Its `name`
+    # is cog's (`Outer$1`, or the field it is stored in). Present (True) only when anonymous.
+    isAnonymous: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
     # The type's other name, given in the same declaration: the tag of a C/C++
@@ -248,6 +271,11 @@ class ProjectMetaData(BaseModel):
         # file types — an empty ``{}`` is a JSON file but captures nothing, so it does not
         # count. Format-neutral: covers every full-capture parser, not just JSON.
         if (cfg.get("capturedDataDocuments") or 0) > 0:
+            return True
+        # A typed AI document (skill, agent, command, agent instructions — parsers/markdown)
+        # is content an agent uses, even in a repo with no code. Plain docs (a README, a
+        # changelog, a decision record, prose) alone are not.
+        if (cfg.get("capturedAgentDocuments") or 0) > 0:
             return True
         # IaC repos (Terraform, etc.) have no code language or functions but are real
         # content — detected via the "iac" category set in FileRecord.metadata.

@@ -16,7 +16,7 @@ Hint                  Proof (detector)
                       ``ObjectManager`` / ``ManagerRegistry``; an inherited repository method on
                       ``$this`` in a ``ServiceEntityRepository`` / ``EntityRepository`` subclass,
                       or on a variable typed as one (``php_doctrine/data_access.py``)
-``codeigniter-builder``  ``$this->db`` in a CodeIgniter file, ``db_connect()``,
+``codeigniter``         ``$this->db`` in a CodeIgniter file, ``db_connect()``,
                       ``\\Config\\Database::connect()``, a variable assigned from one, or a variable
                       typed / constructed as a ``CodeIgniter\\Model`` subclass
                       (``php_codeigniter/data_access.py``)

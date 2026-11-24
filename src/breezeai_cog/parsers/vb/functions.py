@@ -2,9 +2,15 @@
 
 VB nests modifiers under a ``modifiers`` wrapper, types under an ``as_clause``, and
 attributes under ``attribute_block`` nodes; calls use ``invocation`` / ``member_access``.
+
+The grammar's type argument list is ``Of T`` without its parentheses, so in ``List(Of Customer)``
+the ``(`` is an ``ERROR`` inside the type and the ``)`` an ``ERROR`` right after it: a type's text
+is read by :func:`type_text`, which takes those closing parentheses back from the source.
 """
 
 from __future__ import annotations
+
+import re
 
 from tree_sitter import Node
 
@@ -12,7 +18,12 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
+from .source import generic_group_end, shadow
 from .statements import extract_statements
+
+#: A type argument list right after a type node (``(Of …)``, or a further ``.Inner(Of …)``
+#: segment of a qualified type); the ``(`` is group 1.
+_BLANKED_GROUP = re.compile(rb"[ \t]*(?:\.[\w\[\]]+[ \t]*)?(\()(?=[ \t]*Of\b)", re.IGNORECASE)
 
 _VISIBILITY = {"Public": "public", "Private": "private", "Protected": "protected", "Friend": "internal"}
 
@@ -40,21 +51,25 @@ def _attribute(node: Node, source: bytes) -> Decorator:
     arglist = next((c for c in node.named_children if c.type == "argument_list"), None)
     if arglist is not None:
         for arg in arglist.named_children:
-            if arg.type != "argument":
-                continue
-            lit = _find_string(arg)
-            args.append(node_text(lit, source).strip('"') if lit is not None else node_text(arg, source))
+            if arg.type == "argument":
+                args.append(_attribute_arg(arg, source))
     return Decorator(name=name, args=args)
 
 
-def _find_string(node: Node) -> Node | None:
-    if node.type == "string_literal":
-        return node
-    for c in node.named_children:
-        found = _find_string(c)
-        if found is not None:
-            return found
-    return None
+#: A whole VB string literal (``""`` is an escaped quote).
+_VB_STRING = re.compile(r'^"((?:[^"]|"")*)"$', re.DOTALL)
+
+
+def _attribute_arg(arg: Node, source: bytes) -> str:
+    """One attribute argument as the C# reader keeps it: a named argument as written
+    (``Name:="GetOrder"``), a positional string literal unquoted (``{id}``), anything else
+    (``"a" & "b"``, ``Order.Last``) as written."""
+    text = node_text(arg, source).strip()
+    first = arg.named_children[0] if arg.named_children else None
+    if first is not None and first.type == "identifier":  # ``Key:=value``
+        return text
+    m = _VB_STRING.match(text)
+    return m.group(1).replace('""', '"') if m else text
 
 
 def attributes_from_blocks(blocks: list[Node], source: bytes) -> list[Decorator]:
@@ -70,6 +85,40 @@ def extract_attributes(node: Node, source: bytes) -> list[Decorator]:
     return attributes_from_blocks(blocks, source)
 
 
+def _is_sub(node: Node, source: bytes) -> bool:
+    """Whether a method is a ``Sub``, which returns nothing — whatever the grammar put in its
+    ``return_type`` when a parameter list misparses (a type after a generic parameter)."""
+    name = node.child_by_field_name("name")
+    head = source[node.start_byte:name.start_byte] if name is not None else b""
+    return re.search(rb"(?i)\bSub[ \t]+$", head) is not None
+
+
+def type_text(node: Node, source: bytes) -> str | None:
+    """A type node's text with the closing parentheses its generic arguments lost to the grammar
+    (``Task(Of List(Of Customer``, then ``))`` in the source → ``Task(Of List(Of Customer))``);
+    only ``)`` directly after the node (spaces between) are taken, as many as are missing. A type
+    argument list the shadow blanked (``Dictionary``, then ``(Of String, Integer)`` in the source;
+    see :func:`~.source.blank_generic_arguments`) is taken back whole. None when they are not
+    there: a partial type is not a type."""
+    end = node.end_byte
+    missing = node_text(node, source).count("(") - node_text(node, source).count(")")
+    while missing > 0:
+        j = end
+        while j < len(source) and source[j] in b" \t":
+            j += 1
+        if source[j:j + 1] != b")":
+            return None
+        end, missing = j + 1, missing - 1
+    if missing != 0:
+        return None
+    while (m := _BLANKED_GROUP.match(source, end)) is not None:
+        group_end = generic_group_end(source, m.start(1))
+        if group_end is None:
+            return None
+        end = group_end
+    return source[node.start_byte:end].decode("utf-8", "replace")
+
+
 def as_clause_type(container: Node, source: bytes) -> str | None:
     """The declared type of a node's ``As <type>`` clause (param/field), else None."""
     as_clause = next((c for c in container.named_children if c.type == "as_clause"), None)
@@ -77,13 +126,59 @@ def as_clause_type(container: Node, source: bytes) -> str | None:
         tnode = as_clause.child_by_field_name("type") or next(
             (c for c in as_clause.named_children if c.type in ("type", "primitive_type")), None)
         if tnode is not None:
-            return node_text(tnode, source)
+            return type_text(tnode, source)
     return None
 
 
-def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
-    out: list[Parameter] = []
+#: The text between two parameters (one ``,``) or around them (none): whitespace, `` _``
+#: continuations, comments, and an attribute block the grammar did not attach to its parameter
+#: (``<[In], Out> ByVal a() As T`` on the line after ``(``: the parameter is read, only its
+#: attributes are not).
+_PARAM_GAP = re.compile(rb"""(?:[ \t\r\n_]|'[^\n]*|<(?:[^<>"\n]|"(?:[^"]|"")*")*>)*""")
+
+
+#: What separates a parameter list's ``)`` from its return type: `` As `` (continued lines too).
+_RETURN_AS = re.compile(rb"(?:[ \t\r\n]|_[ \t]*\r?\n)*As(?:[ \t\r\n]|_[ \t]*\r?\n)+", re.IGNORECASE)
+
+
+def _directly_after(ret: Node, params_node: Node, source: bytes, parsed: bytes | None = None) -> bool:
+    """Whether the return type ``ret`` follows the parameter list's ``)`` with only `` As ``
+    between, as the grammar saw it (``parsed``: the text a separate parse read, default the
+    shadow)."""
+    text = parsed if parsed is not None else shadow(source)
+    return _RETURN_AS.fullmatch(text[params_node.end_byte:ret.start_byte]) is not None
+
+
+def params_broken(params_node: Node | None, source: bytes, parsed: bytes | None = None) -> bool:
+    """Whether the grammar lost text between a parameter list's parameters — anything but the
+    separators (``<FromQuery> toY As String`` reads as the keyword ``To`` and falls into an
+    ``ERROR`` between them). Its parameters are then not read: none rather than some. An error
+    inside one parameter (``<[In], Out> ByVal a() As T``) loses no parameter and is not counted."""
     if params_node is None:
+        return False
+    # the gaps as the grammar saw them (a blanked ``(Of …)`` is not lost)
+    source = parsed if parsed is not None else shadow(source)
+    params = [c for c in params_node.named_children if c.type == "parameter"]
+    kids = params_node.children
+    pos = kids[0].end_byte if kids and kids[0].type == "(" else params_node.start_byte
+    end = kids[-1].start_byte if kids and kids[-1].type == ")" else params_node.end_byte
+    gaps = [source[pos:params[0].start_byte]] if params else [source[pos:end]]
+    gaps += [source[a.end_byte:b.start_byte] for a, b in zip(params, params[1:])]
+    if params:
+        gaps.append(source[params[-1].end_byte:end])
+    for i, gap in enumerate(gaps):
+        inner = 0 < i < len(gaps) - 1
+        rest = gap.replace(b",", b"", 1) if inner else gap
+        if (inner and b"," not in gap) or _PARAM_GAP.fullmatch(rest) is None:
+            return True
+    return False
+
+
+def extract_params(
+    params_node: Node | None, source: bytes, parsed: bytes | None = None,
+) -> list[Parameter]:
+    out: list[Parameter] = []
+    if params_node is None or params_broken(params_node, source, parsed):
         return out
     for p in params_node.named_children:
         if p.type != "parameter":
@@ -124,6 +219,42 @@ def _calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> 
     return calls
 
 
+#: ``Function Name`` / ``Sub Name`` in a declaration header.
+_HEADER_NAME = re.compile(rb"\b(?:Function|Sub)[ \t]+(?:\[([^\]\n]+)\]|([A-Za-z_]\w*))", re.IGNORECASE)
+
+
+#: ``Operator`` right before a method's name: an operator declaration the shadow reads as a
+#: function (:func:`~.source.blank_operators`), named ``Operator +``, ``Operator CType``.
+_OPERATOR_BEFORE = re.compile(rb"\bOperator[ \t]+\Z", re.IGNORECASE)
+
+
+#: ``Declare`` before a method's name: a ``Declare`` statement its own parse reads as a bodiless
+#: method (:func:`~.source.parse_declares`).
+_DECLARE_BEFORE = re.compile(
+    rb"\bDeclare(?:[ \t]+(?:Ansi|Unicode|Auto))?[ \t]+(?:Function|Sub)\b", re.IGNORECASE)
+
+
+def method_name(node: Node, source: bytes) -> tuple[str | None, bool]:
+    """``(name, header_broken)`` of a method or constructor. When the grammar fails inside the
+    header (an ``ERROR`` before the ``name`` field), that field points into the body — e.g. at
+    ``IsNullOrWhiteSpace`` from the first ``If`` — so the name is read from the header text
+    instead, and ``header_broken`` tells the caller not to trust the parsed parameters."""
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        return None, False
+    if not any(c.type == "ERROR" and c.start_byte < name_node.start_byte for c in node.named_children):
+        name = node_text(name_node, source)
+        if _OPERATOR_BEFORE.search(source, node.start_byte, name_node.start_byte):
+            name = f"Operator {name}"  # read as a function from the shadow, named as C# names it
+        return name, False
+    # matched on the shadow (a non-ASCII name is ASCII there), read from the original
+    m = _HEADER_NAME.search(shadow(source), node.start_byte, name_node.start_byte)
+    if m is None:
+        return None, True
+    group = 1 if m.group(1) is not None else 2
+    return source[m.start(group):m.end(group)].decode("utf-8", "replace"), True
+
+
 def defined_names(root: Node, source: bytes) -> set[str]:
     names: set[str] = set()
     types = {
@@ -133,7 +264,11 @@ def defined_names(root: Node, source: bytes) -> set[str]:
 
     def walk(n: Node) -> None:
         for c in n.named_children:
-            if c.type in types:
+            if c.type in ("method_declaration", "constructor_declaration"):
+                name, _ = method_name(c, source)
+                if name is not None:
+                    names.add(name)
+            elif c.type in types:
                 nm = c.child_by_field_name("name")
                 if nm is not None:
                     names.add(node_text(nm, source))
@@ -176,18 +311,34 @@ def build_method(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    parsed: bytes | None = None,
 ) -> tuple[Function, list[Statement]]:
+    """A method or constructor. ``parsed`` is the text a separate parse read (a ``Declare``,
+    :func:`~.source.parse_declares`); by default the file's shadow."""
     is_ctor = node.type == "constructor_declaration"
-    name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source) if name_node is not None else ("New" if is_ctor else "<anonymous>")
+    declared, header_broken = method_name(node, source)
+    name = declared or ("New" if is_ctor else "<anonymous>")
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # A nested type's methods carry its dotted owner (``Outer.Inner``) in their id.
+    fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
-    ret = node.child_by_field_name("return_type")
+    name_node = node.child_by_field_name("name")
+    line_start = source.rfind(b"\n", 0, node.start_byte) + 1  # a bare `Declare` is before the node
+    if (parsed is not None and name_node is not None
+            and _DECLARE_BEFORE.search(source, line_start, name_node.start_byte)):
+        is_static = True  # a `Declare` is Shared by definition, as C#'s `static extern`
+    # A broken header's parameter list and return type are read from the wrong text: empty.
+    params_node = None if header_broken else node.child_by_field_name("parameters")
+    ret = None if header_broken or _is_sub(node, source) else node.child_by_field_name("return_type")
+    if params_node is not None and params_broken(params_node, source, parsed):
+        if ret is not None and not _directly_after(ret, params_node, source, parsed):
+            ret = None  # the list closed early: the "return type" may be one of its parameters
+        params_node = None
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -196,9 +347,9 @@ def build_method(
         type="constructor" if is_ctor else "method",
         visibility=visibility,
         isStatic=is_static,
-        params=extract_params(node.child_by_field_name("parameters"), source),
+        params=extract_params(params_node, source, parsed),
         decorators=extract_attributes(node, source),
-        returnType=node_text(ret, source) if ret is not None else None,
+        returnType=type_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
         calls=_calls(node, source, resolve),

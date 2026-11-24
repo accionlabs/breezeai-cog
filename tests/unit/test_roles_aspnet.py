@@ -256,7 +256,9 @@ def test_razor_page_model_not_in_the_code_behind_stays_unlocated(analyze_files) 
     # Outside Pages/ the address is unknown: empty, never the bare template.
     ("Views/Orders/Edit.cshtml", '@page "{id}"', "razor_page_directive", None),
     ("Views/Orders/Edit.cshtml", "@page", "synthetic", None),
-    ("Pages/Orders/Edit.cshtml", '@page "~/x"', "razor_page_directive", None),
+    # "~/x" replaces the address like "/x" (ASP.NET serves it at "/x"); a bare "~" has no route.
+    ("Pages/Orders/Edit.cshtml", '@page "~/x"', "razor_page_directive", "/x"),
+    ("Pages/Orders/Edit.cshtml", '@page "~"', "razor_page_directive", None),
 ])
 def test_razor_page_address(analyze_files, path, directive, node_type, endpoint) -> None:
     cls = path.rsplit("/", 1)[-1].split(".")[0].lstrip("_") + "Model"

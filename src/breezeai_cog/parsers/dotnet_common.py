@@ -8,9 +8,10 @@ nodes) so C# and VB parsers share them verbatim:
   ``HttpGet``) and :func:`response_dto` (``Task<ActionResult<List<Foo>>>`` → ``List<Foo>``);
 * **IIS virtual paths** — :func:`web_app_root` (the ``web.config`` application root),
   :func:`to_repo_path` (``~/Controls/Nav.ascx`` → repo-relative) and :func:`ci_resolve`
-  (case-insensitive lookup returning the real on-disk casing);
-* **code-behind hosts** — :func:`code_behind_host` (the ``.asmx`` / ``.svc`` / ``.ashx`` file
-  that serves a code-behind class).
+  (case-insensitive lookup returning the real on-disk casing).
+
+The host file serving a code-behind class (``.svc`` / ``.asmx`` / ``.ashx``) is read from the
+repo index: :mod:`.dotnet_hosts`.
 """
 
 from __future__ import annotations
@@ -28,13 +29,14 @@ def simple_attr_name(name: str) -> str:
     return name[: -len("Attribute")] if name.endswith("Attribute") and name != "Attribute" else name
 
 
-#: ``Name = value`` — a named attribute argument as the C# attribute reader keeps it.
-_NAMED_ARG = re.compile(r"^\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.*?)\s*$", re.DOTALL)
+#: ``Name = value`` (C#) / ``Name:=value`` (VB) — a named attribute argument as the attribute
+#: readers keep it.
+_NAMED_ARG = re.compile(r"^\s*([A-Za-z_]\w*)\s*:?=(?!=)\s*(.*?)\s*$", re.DOTALL)
 
 
 def named_arg(arg: str) -> tuple[str | None, str]:
-    """``(key, value)`` of a C# attribute argument: ``("Name", '"X"')`` for ``Name = "X"``,
-    ``(None, arg)`` for a positional one."""
+    """``(key, value)`` of a C# or VB attribute argument: ``("Name", '"X"')`` for ``Name = "X"``
+    or ``Name:="X"``, ``(None, arg)`` for a positional one."""
     m = _NAMED_ARG.match(arg)
     return (m.group(1), m.group(2)) if m else (None, arg.strip())
 
@@ -184,22 +186,3 @@ def to_repo_path(src: str, cur_dir: str, app_root: str) -> str | None:
     else:
         rel = posixpath.normpath(posixpath.join(cur_dir, s))
     return None if rel.startswith("..") else rel
-
-
-def code_behind_host(
-    path: str, repo_root: Path | None, cls_name: str, ext: str, directive: re.Pattern[bytes]
-) -> str | None:
-    """The host file (``X.asmx`` / ``X.svc`` / ``X.ashx``) that serves class ``cls_name``
-    declared in ``path`` — the code-behind convention ``X<ext>.cs`` beside ``X<ext>`` — when that
-    file exists and its directive's class attribute names the class. Anything else → None (host
-    unknown)."""
-    if repo_root is None or not path.lower().endswith(ext + ".cs"):
-        return None
-    host = path[: -len(".cs")]
-    try:
-        body = (repo_root / host).read_bytes()
-    except OSError:
-        return None
-    m = directive.search(body)
-    simple = m.group(1).decode("utf-8", "replace").rsplit(".", 1)[-1] if m else None
-    return host if simple == cls_name else None

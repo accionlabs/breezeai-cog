@@ -24,7 +24,6 @@ from ..statements_common import (
     reset_http_client_ids,
     resolve_endpoint,
     set_http_client_ids,
-    strip_leading_base,
     url_placeholder,
 )
 from ..treesitter import node_text
@@ -122,7 +121,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
                 lambda match: url_placeholder(match.group(1) or match.group(2)),
                 body,
             )
-            return strip_leading_base(body)
+            return body
     if node.type == "infix_expression":
         op = node.child_by_field_name("operator")
         if op is not None and node_text(op, source) == "+":
@@ -186,7 +185,7 @@ def _scalaj_request(chain: Node, source: bytes) -> tuple[str, str | None]:
             continue
         name = _function_name(function, source)
         if name == "Http" and function.type == "identifier":
-            endpoint, _ = resolve_endpoint(_call_args(chained), source, _render_url)
+            endpoint, _ = resolve_endpoint(_call_args(chained), source, _render_url, method=name)
         elif verb is None and name.lower() in _SCALAJ_VERB_METHODS:
             verb = _SCALAJ_VERB_METHODS[name.lower()]
         elif verb is None and name == "method":
@@ -220,7 +219,12 @@ def _is_uri_or_string_arg(args: list[Node]) -> bool:
 
 def _chain_endpoint(call: Node, source: bytes) -> str | None:
     for chained in _chain_calls(call, source):
-        endpoint, _ = resolve_endpoint(_call_args(chained), source, _render_url)
+        function = chained.child_by_field_name("function")
+        name = _function_name(function, source) if function is not None else None
+        # in a builder chain only the URL setter takes the URL as a value (`ws.url(u).post(body)`:
+        # the verb takes the body)
+        link = name if name is not None and name.lower() in ("url", "uri") else None
+        endpoint, _ = resolve_endpoint(_call_args(chained), source, _render_url, method=link)
         if endpoint is not None:
             return endpoint
     return None
@@ -299,7 +303,12 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     method = _function_name(fn, source)
 
     named_args = _call_args(call)
-    endpoint, override = resolve_endpoint(named_args, source, _render_url)
+    # a verb on a request builder (`ws.url(u).post(body)`) takes the body: its URL is an earlier
+    # link's, read by `_chain_endpoint`
+    on_builder = fn.type == "field_expression" and (
+        (recv := fn.child_by_field_name("value")) is not None and recv.type == _CALL_TYPE)
+    endpoint, override = resolve_endpoint(named_args, source, _render_url,
+                                          method=None if on_builder else method)
     if override is not None:
         method = override
 
@@ -344,7 +353,8 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
 
     # http4s terminal operations represent a GET only when the sole argument is a bare
     # Uri/String; when it's a Request value the verb lives inside that value (could be
-    # anything), so fall back to the generic "request" sentinel rather than guessing GET.
+    # anything), so fall back to the generic "request" (an api_call with an empty method)
+    # rather than guessing GET.
     # Only typed HTTP receivers get this fallback; Quill/Neo4j/ordinary ``run`` calls
     # remain available to the existing DB detectors.
     if lower_method in {"expect", "fetchas", "run"} and root_receiver in current_http_client_ids():

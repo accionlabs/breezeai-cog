@@ -9,7 +9,7 @@ from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..php_route_common import string_value, walk
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import CLOSURES, extract_expression_body, extract_statements
 
 _CALL_TYPES = {
     "function_call_expression",
@@ -17,7 +17,8 @@ _CALL_TYPES = {
     "nullsafe_member_call_expression",
     "scoped_call_expression",
 }
-_NESTED_FUNCTIONS = {"function_definition", "method_declaration", "anonymous_function", "arrow_function"}
+_DECLARED_FUNCTIONS = {"function_definition", "method_declaration"}
+_NESTED_FUNCTIONS = _DECLARED_FUNCTIONS | CLOSURES
 _CLASS_TYPES = {"class_declaration", "interface_declaration", "trait_declaration", "enum_declaration"}
 
 
@@ -95,32 +96,43 @@ def _call_parts(node: Node, source: bytes) -> tuple[str, str | None, str] | None
 
 
 def _calls(
-    body: Node | None, source: bytes, resolve: CallResolver
+    body: Node | None, source: bytes, resolve: CallResolver,
+    bound: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Call]:
+    """Calls in ``body``, inline closures included; declared functions, classes and closures
+    stored in a variable (``bound``) keep their own calls."""
     if body is None:
         return []
     found: list[Call] = []
     seen: set[tuple[str, str | None]] = set()
 
+    def record(call: Node) -> None:
+        parts = _call_parts(call, source)
+        if parts is not None:
+            _, receiver, method = parts
+            key = (method, receiver)
+            if key not in seen:
+                seen.add(key)
+                found.append(Call(name=method, path=resolve(method, receiver)))
+
     def visit(node: Node) -> None:
         for child in node.named_children:
-            if child.type in _NESTED_FUNCTIONS | _CLASS_TYPES:
+            if (child.type in _DECLARED_FUNCTIONS | _CLASS_TYPES
+                    or (child.start_byte, child.end_byte) in bound):
                 continue
             if child.type in _CALL_TYPES:
-                parts = _call_parts(child, source)
-                if parts is not None:
-                    _, receiver, method = parts
-                    key = (method, receiver)
-                    if key not in seen:
-                        seen.add(key)
-                        found.append(Call(name=method, path=resolve(method, receiver)))
+                record(child)
             visit(child)
 
+    if body.type in _CALL_TYPES:  # an arrow function's expression body: `fn ($x) => save($x)`
+        record(body)
     visit(body)
     return found
 
 
 def function_node_type(node: Node) -> bool:
+    """A node that may be a Function: a declared function or method, or a closure (a Function
+    only when stored in a variable — see :func:`bound_closure_name`)."""
     return node.type in _NESTED_FUNCTIONS
 
 
@@ -152,9 +164,15 @@ def build_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    name: str | None = None,
+    bound: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[Function, list[Statement]]:
-    name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source) if name_node is not None else "<anonymous>"
+    """A declared function or method, or a closure stored in a variable (``name``, from the
+    variable). Closures stored in variables inside it (``bound``) are Functions of their own."""
+    if name is None:
+        name_node = node.child_by_field_name("name")
+        name = node_text(name_node, source) if name_node is not None else "<anonymous>"
+    bound = bound - {(node.start_byte, node.end_byte)}
     start, end = line_span(node)
     fid = disambiguate(
         function_id(path, name, start, class_name=class_name),
@@ -190,10 +208,17 @@ def build_function(
         returnType=_type_text(return_type, source) or None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, bound),
     )
-    statements = extract_statements(
+    statements: list[Statement] = []
+    if node.type == "arrow_function" and body is not None:
+        # `$f = fn ($x) => save($x);`: the assignment is not emitted (it would repeat this
+        # Function), so the expression body is this function's statement.
+        statements = extract_expression_body(
+            body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
+        )
+    statements += extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit,
-        seen_ids=seen_ids,
+        seen_ids=seen_ids, bound=bound,
     )
     return fn, statements

@@ -144,3 +144,53 @@ def test_same_enriches_the_statement_captured_on_the_node_itself() -> None:
     apply(record, [Emit(post, {"semanticType": "route"}, enrich="same")], SOURCE, "a.ts")
     assert [(s.id, s.semanticType) for s in record.statements] == [
         ("a.ts:2:2", None), ("a.ts:2:2#2", "route")]
+
+
+def test_skip_enriches_the_statement_that_contains_the_node() -> None:
+    post, get = _calls()
+    # An earlier one-line statement on the same line (``x = 1; app.get(…)``) is the smallest
+    # span on it and comes first, but does not contain the call; nor does one whose id holds
+    # no position.
+    record = _record()
+    record.statements.insert(0, Statement(
+        id="a.ts:2:0", parentId="a.ts#main", nodeType="lexical_declaration", text="x = 1",
+        startLine=2, endLine=2,
+    ))
+    record.statements.insert(0, Statement(
+        id="a.ts#odd", parentId="a.ts#main", nodeType="expression_statement", text="odd",
+        startLine=2, endLine=2,
+    ))
+    skip = frozenset({"if_statement"})
+    apply(record, [
+        Emit(post, {"semanticType": "mcp_call", "endpoint": "b"}, enrich="starts", skip=skip),
+        Emit(get, {"semanticType": "mcp_call", "endpoint": "a"}, enrich="starts", skip=skip),
+        Emit(get, {"semanticType": "mcp_call", "endpoint": "c"}, enrich="starts", skip=skip),
+    ], SOURCE, "a.ts")
+    assert [(s.id, s.semanticType, s.endpoint) for s in record.statements] == [
+        ("a.ts#odd", None, None),
+        ("a.ts:2:0", None, None),
+        ("a.ts:2:2", "mcp_call", "b"),
+        # the inner call: its statement is written already, so it is appended…
+        ("a.ts:2:2#2", "mcp_call", "a"),
+        # …and that appended record is the one a later emit on the same node finds: written
+        # already this run, so that emit is appended as well
+        ("a.ts:2:2#3", "mcp_call", "c"),
+    ]
+
+
+def test_skip_appends_when_the_containing_statement_is_skipped() -> None:
+    post, _ = _calls()
+    # the statement containing the call is of a skipped type (as a control-flow statement
+    # whose header holds the call): the call is appended on its own
+    record = _record()
+    apply(record, [Emit(post, {"semanticType": "mcp_call"}, enrich="starts",
+                        skip=frozenset({"expression_statement"}))], SOURCE, "a.ts")
+    assert [(s.nodeType, s.semanticType) for s in record.statements] == [
+        ("expression_statement", None), ("call_expression", "mcp_call")]
+    # no captured statement contains the node at all: appended too
+    record = _record()
+    record.statements.clear()
+    apply(record, [Emit(post, {"semanticType": "mcp_call"}, enrich="starts",
+                        skip=frozenset({"if_statement"}))], SOURCE, "a.ts")
+    assert [(s.nodeType, s.semanticType) for s in record.statements] == [
+        ("call_expression", "mcp_call")]

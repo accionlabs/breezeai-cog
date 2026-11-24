@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.config.index import build_config_index
 from breezeai_cog.parsers.java_struts2.common import (
     action_endpoint, convention_name, convention_namespace, extension, xml_constants,
 )
@@ -39,8 +40,10 @@ def _parse(tmp_path: Path, rel: str, source: bytes, *, capture: bool = True) -> 
     p = tmp_path / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(source)
+    # as a run does: the config index first (without one the action extension is unknown)
+    index = build_config_index(tmp_path, sorted(tmp_path.rglob("*.xml")))
     ctx = ParseContext(path=rel, abs_path=p, source=source, repo_root=tmp_path,
-                       capture_statements=capture)
+                       capture_statements=capture, resolution_index=index)
     return Struts2ConfigParser().parse_file(ctx)
 
 

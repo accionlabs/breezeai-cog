@@ -110,7 +110,7 @@ causes the failures in §1.
 | You are adding… | Category | Mechanism | Owns the file? |
 |---|---|---|---|
 | A new programming language (its own grammar and extensions) | **Language parser** | The full `LanguageParser` for the language | Yes — the fallback owner for its extensions |
-| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers — **and** has a file-level signature no other framework shares (NestJS, Spring, Vert.x) | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
+| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers — **and** has a file-level signature no other framework shares (NestJS, Spring) | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
 | A library used *across* files that already belong to other frameworks — ORM, validation, serialization, messaging SDK, HTTP client — **or** a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Internal-framework detector** | An *additive* detector — **not** a registered parser | **No** — it composes on top of whatever parser owns the file |
 
 The distinction that trips people up: a **server framework owns the file** (a file "is a
@@ -120,6 +120,10 @@ one-per-file parser would displace the server framework and lose its routes.
 The test: **can this framework's entry points appear in a file another framework owns?** If
 so, it is additive even though it defines routes — an Express `app.get(...)` inside a NestJS
 `main.ts` is captured by the `express` detector while NestJS keeps the file.
+A framework that is *also* a library other frameworks' files call (Vert.x: a Spring
+`@Component` calls `vertx.setPeriodic`) takes both: a low-priority parser that only claims
+the files no other framework owns, and an additive detector that does all its detection
+(`parsers/java_vertx/parser.py` and `detector.py`).
 
 ### 3A. Language parser
 Implement the full language parser. The step-by-step (package layout, the parse/extract
@@ -257,8 +261,8 @@ A value counts only if it survives ingest and agents can reach it. Three rules (
 
 | You are adding… | What happens |
 |---|---|
-| A new field on `File` or `Class` | Kept — these nodes are **open**. Prefer `metadata` for anything nested. |
-| A new field on `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. Once approved, it needs a backend allow-list change in the same release; unit tests and schema validation pass either way, so they won't tell you. |
+| A new field on `File` | Kept — this node is **open**. Prefer `metadata` for anything nested. |
+| A new field on `Class`, `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. Once approved, it needs a backend allow-list change in the same release; unit tests and schema validation pass either way, so they won't tell you. |
 | A new `semanticType` value | Stored and filterable at once, with no backend change. Once approved, add it to the [Target Spec](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model). |
 | A new node type or relationship type | A schema-wide change for every query and agent — propose it only when no field, value or statement kind can carry the meaning. |
 

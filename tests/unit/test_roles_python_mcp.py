@@ -1,0 +1,1090 @@
+"""MCP server tools of the official Python SDK (``mcp.server.fastmcp``):
+one ``mcp_tool`` statement per tool.
+
+Every case runs the whole pipeline (``analyze_files``), which also fails on any entry-point
+contract error (``parsers/contract.py``).
+
+The ``@<server>.tool`` reader is shared with FastMCP and covered in ``test_roles_fastmcp.py``;
+these cases cover which package emits a tool.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from breezeai_cog.schemas import Statement
+
+
+def _tools(statements: list[Statement]) -> dict[str | None, Statement]:
+    tools = [s for s in statements if s.semanticType == "mcp_tool"]
+    for t in tools:
+        assert t.method == "TOOL" and t.nodeType
+    return {t.endpoint: t for t in tools}
+
+
+def _params(tool: Statement) -> list[tuple]:
+    return [(p.name, p.type, p.required, p.default, p.description) for p in tool.params or []]
+
+
+def test_official_sdk_fastmcp_is_python_mcp(analyze_files) -> None:
+    src = "from mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP('demo')\n\n\n@mcp.tool()\ndef echo(text: str) -> str:\n    return text\n"
+    assert _tools(analyze_files({"srv.py": src}))["echo"].framework == "python-mcp"
+
+
+def test_official_sdk_server_imported_from_another_module(analyze_files) -> None:
+    files = {
+        "app/server.py": "from mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP('x')\n",
+        "app/tools.py": "from app.server import mcp\n\n\n@mcp.tool()\ndef hello(name: str) -> str:\n    return name\n",
+    }
+    tools = _tools(analyze_files(files))
+    assert set(tools) == {"hello"}
+    # The server's file decides the SDK: the tools file imports neither package.
+    assert tools["hello"].framework == "python-mcp"
+    assert _params(tools["hello"]) == [("name", "str", True, None, None)]
+
+
+def test_each_tool_is_emitted_once_by_the_package_of_its_server(analyze_files) -> None:
+    """A tools file using a FastMCP server and an official-SDK server: each tool is one
+    statement, with its own server's framework."""
+    files = {
+        "app/fast.py": "from fastmcp import FastMCP\n\nfast = FastMCP('a')\n",
+        "app/official.py": "from mcp.server.fastmcp import FastMCP\n\nofficial = FastMCP('b')\n",
+        "app/tools.py": (
+            "from app.fast import fast\nfrom app.official import official\n\n\n"
+            "@fast.tool()\ndef one() -> str:\n    return ''\n\n\n"
+            "@official.tool()\ndef two() -> str:\n    return ''\n"
+        ),
+    }
+    tools = [s for s in analyze_files(files) if s.semanticType == "mcp_tool"]
+    assert sorted((t.endpoint, t.framework) for t in tools) == [
+        ("one", "fastmcp"),
+        ("two", "python-mcp"),
+    ]
+
+
+# ── Low-level server (`mcp.server.lowlevel.Server`) ─────────────────────────
+
+LOWLEVEL = """
+from mcp.server.lowlevel import Server
+import mcp.types as types
+
+server = Server("demo")
+
+
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="add",
+            description="Add two numbers",
+            inputSchema={
+                "type": "object",
+                "properties": {"a": {"type": "number", "description": "First"}, "b": {"type": "number"}},
+                "required": ["a"],
+            },
+        ),
+        types.Tool(name="ping", inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name=COMPUTED, description="x", inputSchema={}),
+        types.Tool(name="schema", description=DESC, inputSchema=Model.model_json_schema()),
+        types.Tool(name="fstring", inputSchema={"type": "object", "properties": {"q": {"description": f"{x}"}}}),
+    ]
+
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    return []
+"""
+
+
+def test_lowlevel_server_tools(analyze_files) -> None:
+    tools = _tools(analyze_files({"srv.py": LOWLEVEL}))
+    assert set(tools) == {"add", "ping", "schema", "fstring"}  # a computed name is not guessed
+    add = tools["add"]
+    assert (add.framework, add.description, add.handler, add.handlerLine) == (
+        "python-mcp",
+        "Add two numbers",
+        "call_tool",
+        28,  # the `@server.call_tool()` function dispatches every tool
+    )
+    assert add.startLine == 11 and add.nodeType == "call"
+    assert _params(add) == [
+        ("a", "number", True, None, "First"),
+        ("b", "number", False, None, None),
+    ]
+    assert tools["ping"].params == [] and tools["ping"].description is None
+    # A schema that is not a literal dict (a call, an f-string inside) is unknown, never partial.
+    assert tools["schema"].params is None and tools["schema"].description is None
+    assert tools["fstring"].params is None
+
+
+def test_lowlevel_tool_imports_and_list_tools_result(analyze_files) -> None:
+    src = """
+from mcp.server import Server as McpLowLevel
+from mcp.types import Tool as T, ListToolsResult
+from mcp import types as mt
+
+
+def build(app: McpLowLevel) -> None:
+    @app.list_tools()
+    async def tools():
+        if ready:
+            return ListToolsResult(tools=[T(name="one", inputSchema={})])
+        return [mt.Tool(name="two", inputSchema={})]
+"""
+    tools = _tools(analyze_files({"srv.py": src}))
+    assert set(tools) == {"one", "two"}
+    assert tools["one"].handler is None and tools["one"].handlerLine is None  # no call_tool
+
+
+def test_lowlevel_list_not_written_as_literal_elements_is_not_read(analyze_files) -> None:
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("demo")
+TOOLS = [Tool(name="hidden", inputSchema={})]
+
+
+@server.list_tools()
+async def list_tools():
+    def helper():
+        return [Tool(name="nested", inputSchema={})]
+    if flag:
+        return [t for t in TOOLS if t.name != "x"]
+    if other:
+        return TOOLS
+    return [Tool(name="a", inputSchema={})] if flag else []
+"""
+    assert _tools(analyze_files({"srv.py": src})) == {}
+
+
+def test_lowlevel_dispatcher_must_be_on_the_same_server(analyze_files) -> None:
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+a = Server("a")
+b = Server("b")
+
+
+@a.list_tools()
+async def list_a():
+    return [Tool(name="from_a", inputSchema={})]
+
+
+@b.call_tool()
+async def call_b(name, arguments):
+    return []
+
+
+@b.list_tools()
+async def list_b():
+    return [Tool(name="from_b", inputSchema={})]
+
+
+@b.call_tool()
+async def call_b_again(name, arguments):
+    return []
+"""
+    tools = _tools(analyze_files({"srv.py": src}))
+    assert tools["from_a"].handler is None  # `a` has no dispatcher; `b`'s is not `a`'s
+    assert tools["from_b"].handler is None  # two dispatchers on `b`: which one is unknown
+
+
+def test_lowlevel_look_alikes_are_not_tools(analyze_files) -> None:
+    """A local class named ``Server``, the standard library's ``types``, a name rebound in a
+    nearer scope, and agent frameworks that say ``tool``: no record."""
+    files = {
+        "local_server.py": """
+from mcp.types import Tool
+
+
+class Server:
+    def list_tools(self):
+        return lambda f: f
+
+
+server = Server()
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="fake", inputSchema={})]
+""",
+        "stdlib_types.py": """
+import types
+from mcp.server.lowlevel import Server
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [types.Tool(name="not_mcp_types", inputSchema={})]
+""",
+        "shadowed.py": """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+
+
+def register(server):
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="untyped_param", inputSchema={})]
+
+
+def other():
+    server = make_agent()
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="rebound", inputSchema={})]
+""",
+        "agents.py": """
+from langchain_core.tools import tool, StructuredTool
+from pydantic_ai import Agent
+from agents import function_tool
+
+agent = Agent("openai:gpt-4o")
+
+
+@tool
+def search(q: str) -> str:
+    return q
+
+
+@agent.tool
+def lookup(ctx, q: str) -> str:
+    return q
+
+
+@function_tool
+def weather(city: str) -> str:
+    return city
+
+
+calc = StructuredTool.from_function(func=search, name="calc")
+""",
+    }
+    assert _tools(analyze_files(files)) == {}
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "class Server:\n    def list_tools(self):\n        return lambda f: f\n",
+        "from socketio import Server\n",
+        "Server = make_server_class()\n",
+        "try:\n    pass\nexcept ImportError:\n    from fake import Server\n",
+        "import socketio as Server\n",
+        "with make() as Server:\n    pass\n",
+    ],
+)
+def test_lowlevel_server_class_rebound_in_the_module_is_not_proven(
+    analyze_files, rebinding
+) -> None:
+    """``Server`` imported from the SDK and bound again at module level (a local class, another
+    package's ``Server``, an assignment): which one ``Server()`` means is not read — no record.
+    The same file without the rebinding has its tool (the detector reads it)."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+{rebinding}
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src.format(rebinding="")}))) == {"maybe"}
+    assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "def reset():\n    global server\n    server = other()\n",
+        "def reset():\n    global server\n    for server in others():\n        pass\n",
+    ],
+)
+def test_lowlevel_server_rebound_through_global_is_not_proven(analyze_files, rebinding) -> None:
+    """A function that declares the module's server ``global`` and binds it again rebinds the
+    module's name: which object the decorator runs on is not read — no record. ``global``
+    without a binding, or a same-named local of another function, changes nothing."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+
+{rebinding}
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+    assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
+    for harmless in (
+        "def read():\n    global server\n    return server\n",
+        "def other():\n    server = other()\n",
+    ):
+        assert set(_tools(analyze_files({"srv.py": src.format(rebinding=harmless)}))) == {"maybe"}
+
+
+def test_lowlevel_server_rebound_through_nonlocal_is_not_proven(analyze_files) -> None:
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def build():
+    server = Server("x")
+
+    def reset():
+        nonlocal server
+        server = other()
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="maybe", inputSchema={})]
+"""
+    assert _tools(analyze_files({"srv.py": src})) == {}
+
+
+def test_lowlevel_server_class_rebound_only_inside_a_function_is_still_proven(
+    analyze_files,
+) -> None:
+    """Only module-level bindings hide the imported class: a function's own ``Server`` is local
+    to it."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def helper():
+    Server = object
+    return Server
+
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="kept", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"kept"}
+
+
+def test_lowlevel_server_class_rebound_in_the_function_of_the_call_is_not_proven(
+    analyze_files,
+) -> None:
+    """A function that binds ``Server`` itself means its own class there: a server built from
+    it (or a parameter annotated with it) inside that function, or a function nested in it, is
+    not the SDK's; a sibling function still uses the SDK's ``Server``."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def build():
+    from socketio import Server
+    server = Server("x")
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="socket", inputSchema={})]
+
+    def nested(other: Server):
+        @other.list_tools()
+        async def list_nested():
+            return [Tool(name="nested", inputSchema={})]
+
+
+def real():
+    server = Server("y")
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="real", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"real"}
+
+
+def test_lowlevel_server_class_imported_from_the_sdk_inside_the_function_is_proven(
+    analyze_files,
+) -> None:
+    """Importing the SDK's ``Server`` inside the function is not a binding of another class: the
+    server built from it there is the SDK's. A local ``class Server`` beside such an import
+    still hides it."""
+    src = """
+import mcp.types as types
+
+
+def main():
+    from mcp.server.lowlevel import Server
+    app = Server("x")
+    @app.list_tools()
+    async def lt() -> list[types.Tool]:
+        return [types.Tool(name="t", inputSchema={"type":"object","properties":{}})]
+
+
+def aliased():
+    import mcp.server.lowlevel as ll
+    app = ll.Server("y")
+    @app.list_tools()
+    async def lt() -> list[types.Tool]:
+        return [types.Tool(name="aliased", inputSchema={"type":"object","properties":{}})]
+
+
+def own():
+    from mcp.server.lowlevel import Server
+    class Server: ...
+    app = Server("z")
+    @app.list_tools()
+    async def lt() -> list[types.Tool]:
+        return [types.Tool(name="own", inputSchema={"type":"object","properties":{}})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"t", "aliased"}
+
+
+def test_lowlevel_server_with_two_list_tools_functions_gives_no_tools(analyze_files) -> None:
+    """Only the last ``@server.list_tools()`` function registered answers at runtime: with two on
+    one server which list is served is not read; another server's list is kept."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+other = Server("y")
+
+
+@server.list_tools()
+async def first():
+    return [Tool(name="first", inputSchema={})]
+
+
+@server.list_tools()
+async def second():
+    return [Tool(name="second", inputSchema={})]
+
+
+@other.list_tools()
+async def only():
+    return [Tool(name="only", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"only"}
+
+
+def test_lowlevel_tools_are_python_mcp_only(analyze_files) -> None:
+    """A file that also uses FastMCP: each low-level tool is one record, ``python-mcp``."""
+    src = (
+        "from fastmcp import FastMCP\n"
+        + LOWLEVEL
+        + "\nfast = FastMCP('f')\n\n\n@fast.tool()\ndef fast_one() -> str:\n    return ''\n"
+    )
+    tools = [s for s in analyze_files({"srv.py": src}) if s.semanticType == "mcp_tool"]
+    assert sorted((t.endpoint, t.framework) for t in tools) == [
+        ("add", "python-mcp"),
+        ("fast_one", "fastmcp"),
+        ("fstring", "python-mcp"),
+        ("ping", "python-mcp"),
+        ("schema", "python-mcp"),
+    ]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_lowlevel_server_in_another_module_for_any_jobs(capture_mcp_tools, jobs) -> None:
+    files = {
+        "app/server.py": "from mcp.server.lowlevel import Server\n\nserver = Server('x')\n",
+        "app/tools.py": (
+            "from mcp import types\n"
+            "from app.server import server as srv\n\n\n"
+            "@srv.list_tools()\nasync def list_tools():\n"
+            "    return [types.Tool(name='hello', inputSchema={'type': 'object', 'properties': {}})]\n\n\n"
+            "@srv.call_tool()\nasync def dispatch(name, arguments):\n    return []\n"
+        ),
+        "app/other.py": (
+            "from mcp import types\nfrom app.server import helper\n\n\n"
+            "@helper.list_tools()\nasync def list_tools():\n"
+            "    return [types.Tool(name='not_a_server', inputSchema={})]\n"
+        ),
+    }
+    tools = capture_mcp_tools(files, jobs)
+    assert set(tools) == {"hello"}
+    assert (tools["hello"]["framework"], tools["hello"]["handler"]) == ("python-mcp", "dispatch")
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_lowlevel_imported_server_rebound_through_global_is_not_proven(
+    capture_mcp_tools, jobs
+) -> None:
+    files = {
+        "app/server.py": "from mcp.server.lowlevel import Server\n\nserver = Server('x')\n",
+        "app/tools.py": (
+            "from mcp import types\n"
+            "from app.server import server\n\n\n"
+            "def reset():\n    global server\n    server = other()\n\n\n"
+            "@server.list_tools()\nasync def list_tools():\n"
+            "    return [types.Tool(name='rebound', inputSchema={})]\n"
+        ),
+    }
+    assert capture_mcp_tools(files, jobs) == {}
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_lowlevel_imported_server_rebound_in_the_module_is_not_proven(
+    capture_mcp_tools, jobs
+) -> None:
+    """``from app.server import server`` proves the server only while nothing else in the
+    module binds the name: ``server = wrap(server)`` may be anything."""
+    files = {
+        "app/server.py": "from mcp.server.lowlevel import Server\n\nserver = Server('x')\n",
+        "app/tools.py": (
+            "from mcp import types\n"
+            "from app.server import server\n\n"
+            "server = wrap(server)\n\n\n"
+            "@server.list_tools()\nasync def list_tools():\n"
+            "    return [types.Tool(name='wrapped', inputSchema={})]\n"
+        ),
+    }
+    assert capture_mcp_tools(files, jobs) == {}
+
+
+# ── Low-level resources and prompts ───────────────────────────────────────────
+
+
+def _of(statements: list[Statement], semantic_type: str) -> dict[str | None, Statement]:
+    return {s.endpoint: s for s in statements if s.semanticType == semantic_type}
+
+
+LOWLEVEL_RESOURCES = """
+from mcp.server.lowlevel import Server
+import mcp.types as types
+from pydantic import AnyUrl
+
+server = Server("res")
+
+
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    return [
+        types.Resource(uri=AnyUrl("memo://insights"), name="Insights", description="Memo"),
+        types.Resource(uri="file:///logs/app.log", name="Log"),
+        types.Resource(uri=AnyUrl(f"file:///{name}.txt"), name="computed"),
+    ]
+
+
+@server.list_resource_templates()
+async def list_templates():
+    return types.ListResourceTemplatesResult(resourceTemplates=[
+        types.ResourceTemplate(uriTemplate="users://{id}", name="User"),
+    ])
+
+
+@server.read_resource()
+async def read_resource(uri: AnyUrl) -> str:
+    return ""
+"""
+
+
+def test_lowlevel_resources_with_no_tool(analyze_files) -> None:
+    resources = _of(analyze_files({"srv.py": LOWLEVEL_RESOURCES}), "mcp_resource")
+    assert set(resources) == {"memo://insights", "file:///logs/app.log", "users://{id}"}
+    memo = resources["memo://insights"]
+    assert (memo.framework, memo.method, memo.description, memo.handler, memo.handlerLine) == (
+        "python-mcp",
+        "RESOURCE",
+        "Memo",
+        "read_resource",
+        26,
+    )
+    assert memo.params == [] and memo.nodeType == "call" and memo.startLine == 12
+    template = resources["users://{id}"]
+    assert template.handler == "read_resource"  # templates are read by the same dispatcher
+    assert _params(template) == [("id", "string", True, None, None)]
+    # the declared `name=`
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://insights": "Insights",
+        "file:///logs/app.log": "Log",
+        "users://{id}": "User",
+    }
+
+
+def test_lowlevel_resource_name_is_the_uri_when_not_a_literal(analyze_files) -> None:
+    src = """
+from mcp.server.lowlevel import Server
+import mcp.types as types
+
+server = Server("res")
+NAME = "Named"
+
+
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    return [
+        types.Resource(uri="memo://const", name=NAME),
+        types.Resource(uri="memo://fstring", name=f"x{NAME}"),
+        types.Resource(uri="memo://none"),
+    ]
+"""
+    resources = _of(analyze_files({"srv.py": src}), "mcp_resource")
+    assert {uri: r.name for uri, r in resources.items()} == {
+        "memo://const": "memo://const",
+        "memo://fstring": "memo://fstring",
+        "memo://none": "memo://none",
+    }
+
+
+LOWLEVEL_PROMPTS = """
+from mcp.server.lowlevel import Server
+from mcp.types import Prompt, PromptArgument, ListPromptsResult
+
+app = Server("prompts")
+
+
+@app.list_prompts()
+async def list_prompts():
+    if paged:
+        return ListPromptsResult(prompts=[Prompt(name="paged")])
+    return [
+        Prompt(
+            name="review",
+            description="Review code",
+            arguments=[
+                PromptArgument(name="code", description="The code", required=True),
+                PromptArgument(name="style"),
+            ],
+        ),
+        Prompt(name="dynamic", arguments=ARGS),
+        Prompt(name=NAME),
+    ]
+
+
+@app.get_prompt()
+async def get_prompt(name: str, arguments: dict | None):
+    return None
+"""
+
+
+def test_lowlevel_prompts_with_no_tool(analyze_files) -> None:
+    prompts = _of(analyze_files({"srv.py": LOWLEVEL_PROMPTS}), "mcp_prompt")
+    assert set(prompts) == {"paged", "review", "dynamic"}
+    review = prompts["review"]
+    assert (review.method, review.description, review.handler, review.handlerLine) == (
+        "PROMPT",
+        "Review code",
+        "get_prompt",
+        27,
+    )
+    assert _params(review) == [
+        ("code", None, True, None, "The code"),
+        ("style", None, False, None, None),  # the SDK's default: not required
+    ]
+    assert prompts["paged"].params == []
+    assert prompts["dynamic"].params is None  # not a literal list: unknown
+
+
+def test_lowlevel_resource_and_prompt_look_alikes(analyze_files) -> None:
+    """A local ``Server`` class, stdlib ``types``, and entries not imported from ``mcp.types``."""
+    files = {
+        "local.py": """
+from mcp.types import Resource, Prompt
+
+
+class Server:
+    pass
+
+
+server = Server()
+
+
+@server.list_resources()
+async def r():
+    return [Resource(uri="x://local", name="x")]
+
+
+@server.list_prompts()
+async def p():
+    return [Prompt(name="local")]
+""",
+        "stdlib.py": """
+import types
+from mcp.server.lowlevel import Server
+
+server = Server("x")
+
+
+@server.list_resources()
+async def r():
+    return [types.Resource(uri="x://stdlib", name="x")]
+""",
+        "other.py": """
+from mcp.server.lowlevel import Server
+from myapp.models import Prompt
+
+server = Server("x")
+
+
+@server.list_prompts()
+async def p():
+    return [Prompt(name="other")]
+""",
+    }
+    statements = analyze_files(files)
+    assert not [s for s in statements if s.semanticType in ("mcp_resource", "mcp_prompt")]
+
+
+_REBOUND_SRC = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+server = Server("x")
+
+{rebinding}
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "if (server := other()):\n    pass\n",
+        "match msg:\n    case server:\n        pass\n",
+        'match msg:\n    case {"s": server}:\n        pass\n',
+        "match msg:\n    case [server, *rest]:\n        pass\n",
+        "match msg:\n    case Foo(a=server):\n        pass\n",
+        "match msg:\n    case [first, *server]:\n        pass\n",
+        "match msg:\n    case Foo() as server:\n        pass\n",
+        "del server\n",
+        "server, other = 1, 2\n",
+        "[first, *server] = items\n",
+        "(server, other) = pair\n",
+        "server += 1\n",
+        "for server, other in pairs:\n    pass\n",
+        "with open('f') as server:\n    pass\n",
+    ],
+)
+def test_lowlevel_server_rebound_by_any_binding_is_not_proven(analyze_files, rebinding) -> None:
+    """A walrus, a ``case`` capture (a bare name, a mapping or sequence value, a keyword
+    pattern, a ``*rest``, an ``as`` alias), a ``del``, an unpacking target, an augmented
+    assignment, a ``for`` target or a ``with … as`` all rebind the server name: no record."""
+    assert _tools(analyze_files({"srv.py": _REBOUND_SRC.format(rebinding=rebinding)})) == {}
+
+
+@pytest.mark.parametrize(
+    "harmless",
+    [
+        "match msg:\n    case Color.RED:\n        pass\n",
+        "match msg:\n    case Foo():\n        pass\n",
+        'match msg:\n    case {"s": other}:\n        pass\n',
+        "if (other := make()):\n    pass\n",
+        "del other\n",
+        "first, *rest = items\n",
+    ],
+)
+def test_lowlevel_server_kept_when_other_names_are_bound(analyze_files, harmless) -> None:
+    """A dotted value or a class pattern captures nothing, and binding other names leaves the
+    proven server as it is."""
+    assert set(_tools(analyze_files({"srv.py": _REBOUND_SRC.format(rebinding=harmless)}))) == {
+        "maybe"
+    }
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "(Server := make_server)\n",
+        "match kind:\n    case Server:\n        pass\n",
+        "del Server\n",
+        "Server, other = make_server, 1\n",
+        "for Server in classes:\n    pass\n",
+        "with ctx() as Server:\n    pass\n",
+        "from other.servers import Server\n",
+        "from other.servers import Base as Server\n",
+        "import Server\n",
+        "class Server:\n    pass\n",
+    ],
+)
+def test_lowlevel_server_class_rebound_by_any_binding_is_not_proven(
+    analyze_files, rebinding
+) -> None:
+    """The ``Server`` class name bound again in the module (walrus, ``case``, ``del``,
+    unpacking, ``for``, ``with``, another import, a class) is no longer the SDK's: no record."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+{rebinding}
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [Tool(name="maybe", inputSchema={{}})]
+"""
+    assert _tools(analyze_files({"srv.py": src.format(rebinding=rebinding)})) == {}
+
+
+_TOOL_SRC = """
+from mcp.server.lowlevel import Server
+{imports}
+
+{rebinding}
+
+server = Server("x")
+
+
+@server.list_tools()
+async def list_tools():
+    return [{call}(name="maybe", inputSchema={{}})]
+"""
+
+
+@pytest.mark.parametrize(
+    ("imports", "call", "rebinding"),
+    [
+        ("from mcp.types import Tool", "Tool", "Tool = make_tool_class()"),
+        ("from mcp.types import Tool", "Tool", "from langchain_core.tools import Tool"),
+        ("from mcp.types import Tool", "Tool", "from other import Base as Tool"),
+        ("from mcp.types import Tool", "Tool", "import Tool"),
+        ("from mcp.types import Tool", "Tool", "(Tool := make_tool_class())"),
+        ("from mcp.types import Tool", "Tool", "for Tool in classes:\n    pass"),
+        ("from mcp.types import Tool", "Tool", "with ctx() as Tool:\n    pass"),
+        ("from mcp.types import Tool", "Tool", "del Tool"),
+        ("from mcp.types import Tool", "Tool", "class Tool:\n    pass"),
+        ("from mcp.types import Tool", "Tool", "def Tool(**kw):\n    return kw"),
+        ("from mcp.types import Tool", "Tool", "from langchain.tools import *"),
+        ("from mcp.types import Tool", "Tool", "from .local import *"),
+        ("from mcp import types", "types.Tool", "import types"),
+        ("from mcp import types", "types.Tool", "types = load_types()"),
+        ("from mcp import types", "types.Tool", "from other import types"),
+        ("import mcp.types as types", "types.Tool", "import other.types as types"),
+        ("import mcp", "mcp.types.Tool", "mcp = fake_mcp()"),
+    ],
+)
+def test_lowlevel_tool_class_rebound_in_the_module_is_not_proven(
+    analyze_files, imports, call, rebinding
+) -> None:
+    """``Tool`` (or the ``types`` module) imported from the SDK and bound again in the module —
+    an assignment, another package's import, a walrus, a ``for`` / ``with`` target, ``del``, a
+    ``class`` / ``def``, a ``from other import *`` — is no longer the SDK's: no record. The
+    same file without the rebinding has its tool."""
+    plain = _TOOL_SRC.format(imports=imports, call=call, rebinding="")
+    assert set(_tools(analyze_files({"srv.py": plain}))) == {"maybe"}
+    src = _TOOL_SRC.format(imports=imports, call=call, rebinding=rebinding)
+    assert _tools(analyze_files({"srv.py": src})) == {}
+
+
+@pytest.mark.parametrize(
+    ("imports", "call"),
+    [
+        ("from mcp.types import Tool\nfrom mcp import Tool", "Tool"),
+        ("from mcp import types\nimport mcp.types as types", "types.Tool"),
+        ("from mcp.types import Tool\nfrom mcp.types import *", "Tool"),
+        ("from mcp.types import Tool\nfrom mcp.server.lowlevel import *", "Tool"),
+        ("from mcp.types import Tool\nimport mcp", "Tool"),
+    ],
+)
+def test_lowlevel_tool_class_imported_again_from_the_sdk_is_proven(
+    analyze_files, imports, call
+) -> None:
+    """Importing ``Tool`` (``types``) again from the SDK, or a wildcard import of an SDK module,
+    keeps it the SDK's."""
+    src = _TOOL_SRC.format(imports=imports, call=call, rebinding="")
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"maybe"}
+
+
+def test_lowlevel_server_class_rebound_by_a_wildcard_import_is_not_proven(analyze_files) -> None:
+    """``from socketio import *`` may bind ``Server`` too: which class ``Server()`` is is not
+    read — no record."""
+    src = _TOOL_SRC.format(
+        imports="from mcp.types import Tool", call="Tool", rebinding="from socketio import *"
+    )
+    assert _tools(analyze_files({"srv.py": src})) == {}
+
+
+@pytest.mark.parametrize(
+    "comprehension",
+    [
+        "names = [server for server in servers]",
+        "names = {server for server in servers}",
+        "names = {server: 1 for server in servers}",
+        "names = list(server for server in servers)",
+        "names = [s for server in servers for s in server]",
+    ],
+)
+def test_lowlevel_comprehension_variable_does_not_rebind_the_server(
+    analyze_files, comprehension
+) -> None:
+    """A comprehension's variable is its own scope's (Python 3), so a same-named one leaves
+    the module's server as it is — at module level and in a function around the server. A
+    ``for`` statement of the same name does rebind it: no record."""
+    assert set(_tools(analyze_files({"srv.py": _REBOUND_SRC.format(rebinding=comprehension)}))) == {
+        "maybe"
+    }
+    in_function = f"""
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def build():
+    server = Server("x")
+    {comprehension}
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="local", inputSchema={{}})]
+"""
+    assert set(_tools(analyze_files({"srv.py": in_function}))) == {"local"}
+    statement = "for server in servers:\n    pass\n"
+    assert _tools(analyze_files({"srv.py": _REBOUND_SRC.format(rebinding=statement)})) == {}
+
+
+def test_lowlevel_server_class_name_in_a_comprehension_keeps_the_class(analyze_files) -> None:
+    """``[Server for Server in classes]`` binds ``Server`` only in the comprehension: the SDK's
+    class around it is unchanged."""
+    src = """
+from mcp.server.lowlevel import Server
+from mcp.types import Tool
+
+
+def build():
+    kinds = [Server for Server in classes]
+    server = Server("x")
+
+    @server.list_tools()
+    async def list_tools():
+        return [Tool(name="kept", inputSchema={})]
+"""
+    assert set(_tools(analyze_files({"srv.py": src}))) == {"kept"}
+
+
+def test_lowlevel_agent_framework_objects_with_list_tools_are_not_servers(analyze_files) -> None:
+    """Files that import ``mcp`` and use ``@x.list_tools()`` (so they pass the byte gate and the
+    receiver proof decides): a pydantic-ai ``Agent``, an OpenAI Agents ``Agent``, a LangChain
+    ``Tool(name=…)``, an MCP client session, and a FastMCP server all have a ``list_tools``, and
+    none is a low-level ``Server`` — no record. The same files with the receiver built by
+    ``Server(…)`` have their tool, so it is the receiver proof that rejects them."""
+    receivers = {
+        "pydantic_agent.py": 'Agent("openai:gpt-4o")',
+        "openai_agent.py": 'Agent(name="assistant")',
+        "langchain_tool.py": 'Tool(name="helper", func=print, description="d")',
+        "client_session.py": "ClientSession(read, write)",
+        "fastmcp_server.py": 'FastMCP("x")',
+    }
+    files = {
+        "pydantic_agent.py": """
+from mcp.types import Tool
+from pydantic_ai import Agent
+
+agent = Agent("openai:gpt-4o")
+
+
+@agent.list_tools()
+async def list_tools():
+    return [Tool(name="pydantic", inputSchema={})]
+""",
+        "openai_agent.py": """
+import mcp
+from agents import Agent
+
+agent = Agent(name="assistant")
+
+
+@agent.list_tools()
+async def list_tools():
+    return [mcp.types.Tool(name="openai", inputSchema={})]
+""",
+        "langchain_tool.py": """
+from mcp import types
+from mcp.server.lowlevel import Server
+from langchain_core.tools import Tool
+
+server = Server("x")
+helper = Tool(name="helper", func=print, description="d")
+
+
+@helper.list_tools()
+async def list_tools():
+    return [types.Tool(name="langchain", inputSchema={})]
+""",
+        "client_session.py": """
+from mcp import ClientSession
+from mcp.types import Tool
+
+session = ClientSession(read, write)
+
+
+@session.list_tools()
+async def list_tools():
+    return [Tool(name="client", inputSchema={})]
+""",
+        "fastmcp_server.py": """
+from mcp.server.fastmcp import FastMCP
+from mcp.types import Tool
+
+mcp_app = FastMCP("x")
+
+
+@mcp_app.list_tools()
+async def list_tools():
+    return [Tool(name="fastmcp", inputSchema={})]
+""",
+    }
+    assert _tools(analyze_files(files)) == {}
+    controls = {
+        path: "from mcp.server.lowlevel import Server\n"
+        + src.replace(receivers[path], 'Server("x")')
+        for path, src in files.items()
+    }
+    assert set(_tools(analyze_files(controls))) == {
+        "pydantic",
+        "openai",
+        "langchain",
+        "client",
+        "fastmcp",
+    }
+
+
+def test_decorated_records_keep_the_decorator_node_type(analyze_files) -> None:
+    """A tool, resource or prompt is read from its decorator, a real node: never ``synthetic``."""
+    src = """
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("demo")
+
+
+@mcp.tool()
+def echo(text: str) -> str:
+    return text
+
+
+@mcp.resource("greeting://{name}")
+def get_greeting(name: str) -> str:
+    return name
+
+
+@mcp.prompt()
+def review(code: str) -> str:
+    return code
+"""
+    records = {
+        s.semanticType: s.nodeType
+        for s in analyze_files({"srv.py": src})
+        if s.semanticType in ("mcp_tool", "mcp_resource", "mcp_prompt")
+    }
+    assert records == {
+        "mcp_tool": "decorator",
+        "mcp_resource": "decorator",
+        "mcp_prompt": "decorator",
+    }

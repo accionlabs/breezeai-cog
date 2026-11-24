@@ -105,6 +105,49 @@ def test_router_route_without_path_has_no_record(analyze_files) -> None:
     assert _eps(st) == []
 
 
+def test_route_with_only_a_failure_handler_has_no_record(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.get("/orders").handler(this::handle);
+    router.get("/orders").failureHandler(ctx -> ctx.response().end());""")
+    )
+    [r] = _eps(st)
+    assert (r.startLine, r.method, r.endpoint, r.handler) == (9, "GET", "/orders", "handle")
+    assert not any(s.semanticType == "route" for s in _at(st, 10))
+
+
+def test_route_with_a_handler_and_a_failure_handler_keeps_its_handler(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.post("/orders").handler(this::handle).failureHandler(ctx -> ctx.fail(500));""")
+    )
+    [r] = _eps(st)
+    assert (r.method, r.endpoint, r.handler) == ("POST", "/orders", "handle")
+
+
+def test_groovy_route_with_only_a_failure_handler_has_no_record(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "src/main/groovy/a/Api.groovy": """package a
+import io.vertx.ext.web.Router
+class Api extends io.vertx.core.AbstractVerticle {
+  void start() {
+    def router = Router.router(vertx)
+    router.get("/a").handler(this::list)
+    router.get("/a").failureHandler { ctx -> ctx.response().end() }
+    router.post("/b").blockingHandler(this::save).failureHandler(this::fail)
+  }
+  void list(ctx) {}
+  void save(ctx) {}
+  void fail(ctx) {}
+}
+"""
+        }
+    )
+    got = sorted((r.startLine, r.method, r.endpoint, r.handler) for r in _eps(st))
+    assert got == [(6, "GET", "/a", "list"), (8, "POST", "/b", "save")]
+
+
 def test_sub_router_mount_is_wiring(analyze_files) -> None:
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);
@@ -137,7 +180,7 @@ def test_event_bus_consumer_records_handler(analyze_files) -> None:
     assert (r.handler, r.handlerLine) == ("handle", 10)
 
 
-def test_address_forwarding_helper_is_wiring(analyze_files) -> None:
+def test_address_forwarding_helper_binds_at_each_call_site(analyze_files) -> None:
     st = analyze_files(
         {
             SRC: IMPORTS
@@ -154,8 +197,11 @@ def test_address_forwarding_helper_is_wiring(analyze_files) -> None:
 """
         }
     )
-    got = sorted((r.semanticType, r.endpoint) for r in _eps(st))
-    assert got == [("eventbus_consumer", "svc.a"), ("eventbus_consumer", "svc.b")]
+    # Each call site binds its own address; the helper's own call keeps its record, its address
+    # unknown (a parameter).
+    got = sorted((r.semanticType, r.endpoint or "") for r in _eps(st))
+    assert got == [("eventbus_consumer", "${address}"), ("eventbus_consumer", "svc.a"),
+                   ("eventbus_consumer", "svc.b")]
 
 
 def test_timer_is_binding(analyze_files) -> None:
@@ -210,7 +256,7 @@ def test_service_builder_in_a_variable_and_unknown_receivers(analyze_files) -> N
     # The side comes from the variable's declared type; an unresolved address is empty (Q15); a
     # setAddress on an unknown receiver is not known to be a service proxy: no record.
     assert [(s.semanticType, s.endpoint) for s in st if s.semanticType] == [
-        ("eventbus_consumer", None),
+        ("eventbus_consumer", "${env:ADDR}"),
     ]
 
 def test_proxygen_interface_is_none(analyze_files) -> None:
@@ -572,3 +618,27 @@ def test_vertx_records_in_a_fixture_file_are_skipped(analyze_files) -> None:
     st = analyze_files({"src/test/java/fixtures/a/Api.java": body})
     # A fixture is parsed for structure, never as a source of entry points.
     assert _eps(st) == []
+
+
+def test_pathless_registration_is_a_guard_of_later_routes(analyze_files) -> None:
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.post().handler(BodyHandler.create());
+    router.post("/orders").handler(this::handle);""")
+    )
+    [r] = _eps(st)
+    assert (r.startLine, r.method, r.guards) == (10, "POST", ["BodyHandler"])
+
+
+def test_registrations_of_one_path_keep_their_own_records(analyze_files) -> None:
+    # the app's own handlers on one path are steps of the endpoint, not guards: each
+    # registration stays a binding with its own handler
+    st = analyze_files(
+        _verticle("""    Router router = Router.router(vertx);
+    router.post("/orders").handler(this::check);
+    router.post("/orders").handler(this::handle);""")
+    )
+    assert [(r.startLine, r.handler, r.guards) for r in _eps(st)] == [
+        (9, "check", None),
+        (10, "handle", None),
+    ]

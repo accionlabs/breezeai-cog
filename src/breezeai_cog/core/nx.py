@@ -17,13 +17,13 @@ executor stamps ``project`` / ``projectRoot`` on each record after it is parsed.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 from ..parsers.config.nx import in_nx_workspace
+from ..utils.jsonc import load_json_object
 from .scanner import ScanEntry
 
 
@@ -89,10 +89,9 @@ def discover_nx_projects(repo_root: Path, entries: Sequence[ScanEntry]) -> NxPro
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
-        value = json.loads(_strip_json_comments(text))
-    except (OSError, ValueError, TypeError, RecursionError):
+    except OSError:
         return {}
-    return value if isinstance(value, dict) else {}
+    return load_json_object(text) or {}
 
 
 def _project_map(data: dict[str, Any]) -> dict[str, Any]:
@@ -128,37 +127,3 @@ def _normalise_rel(path: str) -> str:
     while value.startswith("./"):
         value = value[2:]
     return value
-
-
-def _strip_json_comments(text: str) -> str:
-    """Accept Nx's common JSONC form without treating URLs or strings as comments."""
-    out: list[str] = []
-    i, n = 0, len(text)
-    in_string = escaped = False
-    while i < n:
-        ch = text[i]
-        if in_string:
-            out.append(ch)
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            i += 1
-        elif ch == '"':
-            in_string = True
-            out.append(ch)
-            i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and text[i:i + 2] != "*/":
-                i += 1
-            i += 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)

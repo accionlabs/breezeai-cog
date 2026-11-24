@@ -130,10 +130,10 @@ def test_plugin_registered_at_two_prefixes_has_no_endpoint(analyze_files) -> Non
     assert _routes(st) == {("GET", None, "h")}
 
 
-def test_unresolved_prefix_leaves_endpoint_empty(analyze_files) -> None:
+def test_unresolved_prefix_is_a_runtime_part(analyze_files) -> None:
     st = _app(analyze_files,
               "app.register(async (r) => {\n  r.get('/x', h);\n}, { prefix: config.base });\n")
-    assert _routes(st) == {("GET", None, "h")}
+    assert _routes(st) == {("GET", "${config.base}/x", "h")}
 
 
 def test_unresolved_path_leaves_endpoint_empty(analyze_files) -> None:

@@ -42,6 +42,8 @@ from ..additive import (
 )
 from ..emits import Emit, apply
 from ..treesitter import node_text, parse_source
+from ..statements_common import url_or_value
+from ..typescript.statements import render_url
 from ..typescript_sdk_common import emit_outbound, walk_calls
 
 _NAMES = frozenset({"$", "jQuery"})
@@ -240,6 +242,30 @@ def _verb(node: Node | None, source: bytes) -> str | None:
     return upper if upper in _VERBS else None
 
 
+def _built_url(node: Node | None, source: bytes) -> str | None:
+    """A URL built from strings and values (``"/api/users/" + user.id``, `` `${base}/items` ``),
+    rendered exactly as an ``axios`` / ``fetch`` URL is (``typescript.statements.render_url``;
+    the executor then marks a base read at runtime, ``addresses.py``). Never across server-side
+    code: a Razor / Web Forms expression in or beside the URL leaves it unread."""
+    node = _unwrap(node)
+    if node is None or not _delimited(node) or _SERVER_EXPR.search(node_text(node, source)):
+        return None
+    return render_url(node, source) or None
+
+
+def _request_url(node: Node | None, source: bytes) -> str | None:
+    """The URL of a request call (``$.ajax``, ``$.get`` …): a literal, a built URL, else one
+    ``{name}`` part for a whole value (``$.get(url)`` → ``{url}``, as ``axios.get(url)``).
+    Never across server-side code."""
+    built = _literal_url(node, source) or _built_url(node, source)
+    if built is not None:
+        return built
+    node = _unwrap(node)
+    if node is None or not _delimited(node) or _SERVER_EXPR.search(node_text(node, source)):
+        return None
+    return url_or_value(node, source, render_url)
+
+
 def _ajax(call_args: list[Node], source: bytes) -> tuple[str | None, str | None, bool] | None:
     """``(endpoint, method, options_have_url)`` for ``$.ajax(options)`` /
     ``$.ajax(url, options)`` / ``$.ajax(url)``, or ``None`` when the request is not statically
@@ -273,8 +299,7 @@ def _ajax(call_args: list[Node], source: bytes) -> tuple[str | None, str | None,
         method = None
     else:
         method = "GET"
-    url = _literal_url(url_node, source)
-    return url, method, has_url_option
+    return _request_url(url_node, source), method, has_url_option
 
 
 def _url_like(node: Node | None, source: bytes) -> bool:
@@ -319,7 +344,7 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
             if sel in ("window", "document"):  # $(window).load(fn) is the legacy load event
                 continue
             first = args[0] if args else None
-            url = _literal_url(first, source)
+            url = _literal_url(first, source) or _built_url(first, source)
             if url is None and not _url_like(first, source):
                 continue  # a function / handler / no argument is the event form, not a request
             emit_outbound(call, url or "", "jquery", out, method="GET", enrich="own", reclassify_db=True)
@@ -340,9 +365,9 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
             emit_outbound(call, endpoint or "", "jquery", out, method=method, enrich="own", reclassify_db=True)
         elif method_name in _STATIC_VERB and scope.is_jquery(recv):
             first = args[0] if args else None
-            endpoint = _literal_url(first, source)
-            if endpoint is None and first is not None and first.type == "object":
-                endpoint = _literal_url(_pairs(first, source).get("url"), source)
+            url_node = _pairs(first, source).get("url") \
+                if first is not None and first.type == "object" else first
+            endpoint = _request_url(url_node, source)
             emit_outbound(call, endpoint or "", "jquery", out,
                            method=_STATIC_VERB[method_name], enrich="own", reclassify_db=True)
     return out
@@ -374,7 +399,7 @@ def _server_comments(path: str) -> tuple[bytes, bytes] | None:
     owns it (``@*`` in a plain ``.html`` JavaScript string is just text). ``<!-- -->`` is different:
     an HTML comment, markup only, never inside a script body."""
     low = path.lower()
-    if low.endswith((".cshtml", ".razor")):
+    if low.endswith((".cshtml", ".razor", ".vbhtml")):
         return _RAZOR_COMMENT
     if low.endswith((".aspx", ".ascx", ".master")):
         return _WEBFORMS_COMMENT
@@ -444,7 +469,7 @@ def _shadow_scripts(markup: bytes, path: str = "") -> tuple[bytes, bool]:
 #     with it loaded — recorded as a fact so the script's own parse can read it (``_collect``);
 #   * a Razor view's layout chain (``Layout = "…"`` in the view, else the nearest ``_ViewStart``),
 #     resolved with ASP.NET's own view-location rule (``_find_layout``).
-_MARKUP_EXTS = (".cshtml", ".razor", ".html", ".htm", ".aspx", ".ascx", ".master")
+_MARKUP_EXTS = (".cshtml", ".razor", ".vbhtml", ".html", ".htm", ".aspx", ".ascx", ".master")
 _SCRIPT_TAG = _SCRIPT_OPEN
 #: ``<asp:ScriptReference Path="~/Scripts/jquery.js" />`` — a ScriptManager's script list
 _SCRIPT_REFERENCE = re.compile(rb"<asp:ScriptReference\b" + _OPEN_ATTRS, re.IGNORECASE | re.DOTALL)
@@ -455,7 +480,8 @@ _JQUERY_BUNDLE = re.compile(
 #: the first ``*.js`` path in an attribute value — also inside ``@Url.Content("~/js/x.js")``
 _JS_PATH = re.compile(rb"(?:https?:)?[\w.~/\-]*[\w\-]\.js(?![\w])", re.IGNORECASE)
 _LAYOUT_ASSIGN = re.compile(rb'\bLayout\s*=\s*"([^"]+)"')
-_LAYOUT_NULL = re.compile(rb"\bLayout\s*=\s*null\b")
+#: ``Layout = null`` (C#) / ``Layout = Nothing`` (VB): the view has no layout.
+_LAYOUT_NULL = re.compile(rb"\bLayout\s*=\s*null\b|(?i:\bLayout\s*=\s*Nothing\b)")
 _LAYOUT_DEPTH = 3  # a layout may itself have a parent layout
 
 
@@ -508,15 +534,15 @@ def _within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _find_layout(name: str, base: Path, repo_root: Path) -> Path | None:
+def _find_layout(name: str, base: Path, repo_root: Path, ext: str = ".cshtml") -> Path | None:
     """The layout file ``name`` refers to, searched like ASP.NET does: the view's directory and each
     ancestor up to the repo root, directly and under a ``Shared`` folder (``Pages/Shared``,
-    ``Views/Shared``)."""
+    ``Views/Shared``). A bare name takes the view's own extension (``ext``)."""
     rel = Path(name.strip().lstrip("~").lstrip("/"))
     if not rel.name or ".." in rel.parts:
         return None
-    if rel.suffix.lower() != ".cshtml":
-        rel = rel.with_name(rel.name + ".cshtml")
+    if rel.suffix.lower() not in (".cshtml", ".vbhtml"):
+        rel = rel.with_name(rel.name + ext)
     anc = base
     while _within(anc, repo_root):
         for sub in ("", "Shared"):
@@ -529,13 +555,13 @@ def _find_layout(name: str, base: Path, repo_root: Path) -> Path | None:
     return None
 
 
-def _view_start_layouts(base: Path, repo_root: Path) -> list[str]:
+def _view_start_layouts(base: Path, repo_root: Path, ext: str = ".cshtml") -> list[str]:
     """``Layout`` names from the nearest ``_ViewStart`` that assigns one (it applies to every view
     beneath it)."""
     anc = base
     while _within(anc, repo_root):
         try:
-            names = _layout_names((anc / "_ViewStart.cshtml").read_bytes())
+            names = _layout_names((anc / f"_ViewStart{ext}").read_bytes())
         except OSError:
             names = []
         if names:
@@ -546,9 +572,11 @@ def _view_start_layouts(base: Path, repo_root: Path) -> list[str]:
     return []
 
 
-def _chain_loads_jquery(names: list[str], base: Path, repo_root: Path, depth: int = 0) -> bool:
+def _chain_loads_jquery(
+    names: list[str], base: Path, repo_root: Path, depth: int = 0, ext: str = ".cshtml",
+) -> bool:
     for name in names:
-        layout = _find_layout(name, base, repo_root)
+        layout = _find_layout(name, base, repo_root, ext)
         if layout is None:
             continue
         try:
@@ -558,7 +586,7 @@ def _chain_loads_jquery(names: list[str], base: Path, repo_root: Path, depth: in
         if _page_loads_jquery(bytes(_sweep(data, layout.name)[0])):
             return True
         if depth < _LAYOUT_DEPTH and _chain_loads_jquery(
-            _layout_names(data), layout.parent, repo_root, depth + 1
+            _layout_names(data), layout.parent, repo_root, depth + 1, ext
         ):
             return True
     return False
@@ -567,12 +595,13 @@ def _chain_loads_jquery(names: list[str], base: Path, repo_root: Path, depth: in
 def layout_loads_jquery(markup: bytes, rel: str, repo_root: Path) -> bool:
     """Does the Razor view at ``rel`` render inside a layout that loads jQuery? Partials count too:
     they are rendered into pages, and ``_ViewStart`` applies to the views under it. ``Layout = null``
-    opts out."""
+    (VB: ``Nothing``) opts out. A VB view (``.vbhtml``) looks for ``.vbhtml`` layouts."""
     if _LAYOUT_NULL.search(markup):
         return False
     base = (repo_root / rel).parent
-    names = _layout_names(markup) or _view_start_layouts(base, repo_root)
-    return _chain_loads_jquery(names, base, repo_root)
+    ext = ".vbhtml" if rel.lower().endswith(".vbhtml") else ".cshtml"
+    names = _layout_names(markup) or _view_start_layouts(base, repo_root, ext)
+    return _chain_loads_jquery(names, base, repo_root, ext=ext)
 
 
 def _collect(root: Any, source: bytes, rel: str, repo_root: Path | None) -> frozenset[str] | None:
