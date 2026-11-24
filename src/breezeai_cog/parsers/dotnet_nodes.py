@@ -20,12 +20,16 @@ _ATTRIBUTE_GROUPS = ("attribute_list", "attribute_block")
 def method_nodes(root: Node) -> dict[int, Node]:
     """Method and constructor declarations by start line — the line their ``Function`` record
     starts at (C# and VB). A line with two declarations maps to none: which one is unknown."""
+    return _by_line(root, ("method_declaration", "constructor_declaration"))
+
+
+def _by_line(root: Node, types: tuple[str, ...]) -> dict[int, Node]:
     out: dict[int, Node] = {}
     clashes: set[int] = set()
     stack = [root]
     while stack:
         n = stack.pop()
-        if n.type in ("method_declaration", "constructor_declaration"):
+        if n.type in types:
             line = n.start_point[0] + 1
             if line in out:
                 clashes.add(line)
@@ -34,6 +38,17 @@ def method_nodes(root: Node) -> dict[int, Node]:
     for line in clashes:
         del out[line]
     return out
+
+
+#: Type declarations a class record is read from: C# and VB.
+_TYPE_DECLARATIONS = ("class_declaration", "struct_declaration", "record_declaration",
+                      "class_block", "structure_block")
+
+
+def type_nodes(root: Node) -> dict[int, Node]:
+    """Class and struct declarations by start line — the line their ``Class`` record starts at
+    (C# and VB), as :func:`method_nodes`."""
+    return _by_line(root, _TYPE_DECLARATIONS)
 
 
 def attribute_nodes(method: Node) -> list[Node]:
