@@ -19,8 +19,10 @@ no ``"main"`` (``"includes"`` only)     none
 ======================================  ===================================================
 
 A leading language prefix (``groovy:com.acme.App``) selects the verticle factory, not the
-class: it is stripped from ``endpoint``, as from the File's ``verticleMain``, and a
-``groovy:`` class is looked up among the repository's Groovy classes only. A class is found
+class: it is stripped from ``endpoint``, as from the File's ``verticleMain``. A ``groovy:``
+class is looked up among the repository's Groovy classes first, then its Java classes: the
+Groovy factory loads a compiled class by name, so a Java verticle deployed through it runs as
+written. A class is found
 through the language index by its fully-qualified name, and ``start`` only in the file that
 name maps to (``handler_sites.locate_method`` with ``within``); a name declared twice, or two
 ``start`` declarations there (``start()`` and ``start(Future)``), leave it unlocated.
@@ -67,9 +69,9 @@ def module_deploy(path: str, text: str, data: Any, repo_root: Path,
         if (repo_root / script).is_file():
             handler_path = script
     else:
-        languages = ("groovy",) if prefix and prefix.group(1) == "groovy" else \
-            ("java",) if prefix else ("java", "groovy")
-        site = _start_site(name, languages, indexes)
+        groovy = prefix is not None and prefix.group(1) == "groovy"
+        languages = ("groovy", "java") if groovy else ("java",) if prefix else ("java", "groovy")
+        site = _start_site(name, languages, indexes, first=groovy)
         if site is not None:
             handler = _START
             line, handler_path = handler_location(site, path)
@@ -91,10 +93,11 @@ def module_deploy(path: str, text: str, data: Any, repo_root: Path,
     )
 
 
-def _start_site(fqcn: str, languages: tuple[str, ...],
-                indexes: Mapping[str, Any]) -> tuple[str, int] | None:
+def _start_site(fqcn: str, languages: tuple[str, ...], indexes: Mapping[str, Any], *,
+                first: bool = False) -> tuple[str, int] | None:
     """``(file, line)`` of ``start`` declared by the class ``fqcn``, looked up in each of
-    ``languages``; None unless exactly one language declares the class and its ``start``."""
+    ``languages``; None unless exactly one language declares the class and its ``start``.
+    With ``first``, the first of ``languages`` that declares the class decides alone."""
     found: list[tuple[str, int]] = []
     for language in languages:
         index = indexes.get(language)
@@ -104,6 +107,8 @@ def _start_site(fqcn: str, languages: tuple[str, ...],
         site = locate_method(index, language, fqcn, _START, within={file})
         if site is None:
             return None  # the class is here but its own `start` is not (inherited, overloaded)
+        if first:
+            return site
         found.append(site)
     return found[0] if len(found) == 1 else None
 
