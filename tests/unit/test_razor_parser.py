@@ -259,3 +259,76 @@ def test_a_razor_page_links_its_script_files(tmp_path) -> None:
     assert rec.importFiles == []  # ~/ and a rooted path from Pages/ match no file there
     rec = _parse(tmp_path, "wwwroot/index.cshtml", page)
     assert rec.importFiles == ["wwwroot/js/site.js"]
+
+
+# ── layout and partial views as file links; a line-final @expr keeps to its own line ──────
+
+
+def _views(tmp_path, files: dict[str, bytes], target: str) -> FileRecord:
+    for name, src in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(src)
+    return _parse(tmp_path, target, files[target])
+
+
+def test_layout_and_partials_link_to_the_shared_views(tmp_path) -> None:
+    page = (b'@{ Layout = "_Layout"; }\n<partial name="_Menu" />\n'
+            b'@await Html.PartialAsync("_Footer")\n<h1>Home</h1>\n')
+    rec = _views(tmp_path, {
+        "Views/Home/Index.cshtml": page,
+        "Views/Shared/_Layout.cshtml": b"@RenderBody()\n",
+        "Views/Shared/_Menu.cshtml": b"<nav></nav>\n",
+        "Views/Shared/_Footer.cshtml": b"<footer></footer>\n",
+    }, "Views/Home/Index.cshtml")
+    assert rec.importFiles == ["Views/Shared/_Layout.cshtml", "Views/Shared/_Menu.cshtml",
+                               "Views/Shared/_Footer.cshtml"]
+
+
+def test_view_in_its_own_folder_wins_over_shared(tmp_path) -> None:
+    rec = _views(tmp_path, {
+        "Views/Home/Index.cshtml": b'@Html.Partial("_Row")\n',
+        "Views/Home/_Row.cshtml": b"<tr></tr>\n",
+        "Views/Shared/_Row.cshtml": b"<tr></tr>\n",
+    }, "Views/Home/Index.cshtml")
+    assert rec.importFiles == ["Views/Home/_Row.cshtml"]
+
+
+def test_razor_pages_layout_path_from_the_app_root(tmp_path) -> None:
+    rec = _views(tmp_path, {
+        "App/Pages/Admin/Index.cshtml": b'@{ Layout = "~/Pages/Shared/_Admin.cshtml"; }\n',
+        "App/Pages/Shared/_Admin.cshtml": b"@RenderBody()\n",
+    }, "App/Pages/Admin/Index.cshtml")
+    assert rec.importFiles == ["App/Pages/Shared/_Admin.cshtml"]
+
+
+def test_layout_from_a_variable_or_a_missing_view_is_not_linked(tmp_path) -> None:
+    rec = _views(tmp_path, {
+        "Views/Home/Index.cshtml": b'@{ Layout = name; }\n<partial name="_Missing" />\n',
+    }, "Views/Home/Index.cshtml")
+    assert rec.importFiles == []
+
+
+def test_line_final_expression_does_not_take_the_next_line(tmp_path) -> None:
+    rec = _parse(tmp_path, "Index.cshtml",
+                 b'@Html.Partial("_Footer")\n<h1>Home</h1>\n<p>Hi @user.Name.</p>\n')
+    exprs = [(s.name, s.startLine, s.endLine, s.text) for s in rec.statements
+             if s.nodeType == "razor_implicit_expression"]
+    assert exprs == [('Html.Partial("_Footer")', 1, 1, '@Html.Partial("_Footer")'),
+                     ("user.Name", 3, 3, "@user.Name")]
+
+
+def test_razor_page_and_area_fall_back_to_views_shared(tmp_path) -> None:
+    files = {
+        "Web/Pages/_ViewStart.cshtml": b'@{ Layout = "_Layout"; }\n',
+        "Web/Areas/Identity/Pages/Account/Login.cshtml": b'<partial name="_Scripts" />\n',
+        "Web/Areas/Identity/Pages/_ViewStart.cshtml":
+            b'@{ Layout = "/Views/Shared/_Layout.cshtml"; }\n',
+        "Web/Views/Shared/_Layout.cshtml": b"@RenderBody()\n",
+        "Web/Views/Shared/_Scripts.cshtml": b"<script></script>\n",
+    }
+    assert _views(tmp_path, files, "Web/Pages/_ViewStart.cshtml").importFiles == [
+        "Web/Views/Shared/_Layout.cshtml"]
+    assert _views(tmp_path, files, "Web/Areas/Identity/Pages/Account/Login.cshtml").importFiles \
+        == ["Web/Views/Shared/_Scripts.cshtml"]
+    assert _views(tmp_path, files, "Web/Areas/Identity/Pages/_ViewStart.cshtml").importFiles == [
+        "Web/Views/Shared/_Layout.cshtml"]

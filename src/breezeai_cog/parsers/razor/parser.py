@@ -32,6 +32,7 @@ from ..base import BaseParser, HandlerLocator, ParseContext
 from ..csharp.functions import build_method
 from ..template_common.markup import read_page_markup
 from ..template_common.scripts import link_page_scripts, read_page_scripts
+from .views import link_views
 from ..treesitter import parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .markup import markup_copy, razor_tags, script_code_spans
@@ -72,6 +73,7 @@ class RazorParser(BaseParser):
             loc=count_loc(ctx.source.decode("utf-8", "replace")),
         )
         link_page_scripts(record, ctx)
+        link_views(record, ctx)
         if ctx.capture_statements:
             seen_ids: set[str] = set()
             record.statements.extend(
@@ -108,6 +110,7 @@ class RazorParser(BaseParser):
             uiRole="template", loc=count_loc(ctx.source.decode("utf-8", "replace")),
         )
         link_page_scripts(record, ctx)
+        link_views(record, ctx)
         if ctx.capture_statements:
             record.statements.extend(collect_vbhtml_statements(
                 ctx.source, ctx.path, fid, set(), ctx.statement_text_limit))
