@@ -32,6 +32,7 @@ from tree_sitter import Node
 from .emits import Emit
 from ..schemas import Decorator, FileRecord, Function
 from .dotnet_common import named_arg, response_dto, simple_attr_name
+from .dotnet_nodes import attribute_at, method_nodes
 from .index_common import walk_heritage
 from .aspnet_areas import (
     NO_AREA, UNKNOWN, Area, controller_area, convention_endpoint,
@@ -229,36 +230,6 @@ def _route_statement(
     return Emit(node, fields, parent=fn.id, text=text)
 
 
-#: A method's attributes: C# groups them in ``attribute_list``, VB in ``attribute_block``.
-_ATTRIBUTE_GROUPS = ("attribute_list", "attribute_block")
-
-
-def _action_nodes(root: Node) -> dict[int, Node]:
-    """Method declarations by start line — the line an action's ``Function`` record starts at
-    (C# and VB). A line with two declarations maps to none: which one is unknown."""
-    out: dict[int, Node] = {}
-    clashes: set[int] = set()
-    stack = [root]
-    while stack:
-        n = stack.pop()
-        if n.type in ("method_declaration", "constructor_declaration"):
-            line = n.start_point[0] + 1
-            if line in out:
-                clashes.add(line)
-            out[line] = n
-        stack.extend(n.named_children)
-    for line in clashes:
-        del out[line]
-    return out
-
-
-def _attribute_nodes(method: Node) -> list[Node]:
-    """A method's ``attribute`` nodes in declaration order — the order of its record's
-    ``decorators``."""
-    return [a for group in method.children if group.type in _ATTRIBUTE_GROUPS
-            for a in group.named_children if a.type == "attribute"]
-
-
 def _class_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
     """C# class declarations by (name, start line) — the line a Class record starts at."""
     out: dict[tuple[str, int], Node] = {}
@@ -321,15 +292,13 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
     if not controllers:
         return []
 
-    actions = _action_nodes(root)
+    actions = method_nodes(root)
     routes: list[Emit] = []
     for fn in record.functions:
         info = controllers.get(fn.parentId)
         if info is None:
             continue
         action = actions.get(fn.startLine)
-        attrs = _attribute_nodes(action) if action is not None else []
-        aligned = len(attrs) == len(fn.decorators)
         base, cls_guards, resolved, has_class_route, cls_name, is_api, area = info
         prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
@@ -362,9 +331,10 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
                 if (verb, endpoint) in bound:
                     continue
                 bound.add((verb, endpoint))
-                at = attrs[i] if aligned else action
+                at = attribute_at(action, fn, i)
                 routes.append(_route_statement(
-                    root, at, fn, verb, endpoint, None if aligned else f"[{dec.name}]",
+                    root, at, fn, verb, endpoint,
+                    None if at is not None and at.type == "attribute" else f"[{dec.name}]",
                     auth_required, all_guards))
         # Classic MVC convention: a public action with NO [HttpX] attribute defaults to a GET at
         # /{controller}/{action} (or a bare method-level [Route], if any). Skipped for
