@@ -32,7 +32,7 @@ from ..typescript.imports import (
     runtime_path_template,
 )
 from ..typescript.scopes import file_consts
-from ..typescript_http_common import mw_name, package_locals
+from ..typescript_http_common import inline_handler, mw_name, package_locals
 from ..wiring import compose_guards
 from .mounts import (
     _PATH_EXPRESSIONS, _is_require_express, express_mounts, is_router_call, router_locals,
@@ -202,7 +202,7 @@ def _handler(
     if last is None:
         return None, None
     if last.type in _FUNCTIONS:
-        return None, last.start_point[0] + 1
+        return inline_handler(last, source)
     if last.type in ("identifier", "member_expression"):
         name = node_text(last, source)
         return name, decl_lines.get(name)

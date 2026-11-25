@@ -110,7 +110,7 @@ scopes depends on where it is:
 
 | Walking… | Nested scopes (classes, methods, lambdas) | Why |
 |---|---|---|
-| The file root or a class body | **Stops** at them | They are extracted as their own `Class` / `Function`, with their own statements. |
+| The file root or a class body | **Stops** at them (JS/TS: at those extracted as a `Class` / `Function`, walking into nameless ones — below) | They are extracted as their own `Class` / `Function`, with their own statements. |
 | A function body | **Walks into inline lambdas** and gives their statements to the function | A lambda is not a `Function` record, so its statements belong to the enclosing function. |
 
 **Functions without a name of their own.** Each piece of code is recorded once:
@@ -118,7 +118,8 @@ scopes depends on where it is:
 - An **inline** function (a callback argument, a `go`/`defer` literal, an array value) is never
   a `Function`. Its statements belong to the enclosing function. In Go and PHP, an inline
   function at the file root gives its statements to the file
-  (Laravel `Route::get('/health', function () { return …; })`).
+  (Laravel `Route::get('/health', function () { return …; })`); in JS/TS too, and one in a
+  class field initializer or `static { … }` block gives them to the class (below).
 - A function **stored in a variable or class field** (`const save = (x) => …`,
   `var notify = func(msg string) {…}`, `$notify = function ($msg) {…};`,
   `handle = () => {…}`) is one `Function`, named after the variable (`type`
@@ -128,6 +129,19 @@ scopes depends on where it is:
 - An arrow function with an **expression body** (`const save = (x) => db.insert(x)`) gets
   that expression as its one statement, with the expression's own `nodeType`
   (`call_expression`), so the call is recorded under the Function.
+
+**JS/TS code outside any function or class.** At file level and in a class's field
+initializers and `static { … }` blocks, a function with a name of its own (`setInterval(function
+tick() {…})`), or bound to a name in a nameless callback, is a `Function` of the file (or the
+class). A function stored where callers find it by name is one too, named there:
+`exports.x = …` / `module.exports.x = …` → `x`, `module.exports = …` and an anonymous
+`export default` → `default`, `X.prototype.m = …` → `m` with `receiverType` X; never a name
+that two places give (`exports.a = exports.b = …`, a target assigned twice). Everything else
+there — nameless callbacks included (`process.on('SIGTERM', () => {…})`, `$('#b').click(function
+() {…})`) — is the file's or the class's own: its statements are theirs, and its calls are
+`File.calls` / `Class.calls` (the shape of `Function.calls`), without `require(…)` (an import)
+or a decorator. The body of an anonymous route handler is then the statements inside the route
+record's line range ([entry points §5](entry-points.md#anonymous-handlers)).
 
 **Java anonymous classes** (`new T(…) { … }`) are a `Class` each (`isAnonymous: true`), with
 their methods as `Function`s; the enclosing method keeps only its own statements and calls.

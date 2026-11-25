@@ -182,8 +182,22 @@ It is still an entry point. Record it with:
 | `handlerPath` | empty — an inline handler is in the record's own file, except on a property of an imported object (`Query: queries`, [GraphQL in TypeScript](../entry-point-roles/graphql-typescript.md)), where it is that object's file |
 
 A function is **named** when the source gives it a name: a declaration (`function getUser`), a
-method, or a function assigned to a variable or property (`const getUser = async () => …`). Only
-a function with none of these is anonymous.
+method, a function assigned to a variable or property (`const getUser = async () => …`), or a
+named function expression written inline (`app.post('/users', function createUser(req, res) {
+… })` → `handler: "createUser"`, the `Function` cog records for it). Only a function with none of
+these is anonymous.
+
+**The body of an anonymous handler** is the statements inside the record's line range: it has no
+`Function`, so its statements and calls belong to the code it is written in — the enclosing
+function, else the file (`File.calls`) or the class (`Class.calls`) — and a reader takes those
+whose lines fall between the record's `startLine` and `endLine`:
+
+```ts
+app.get('/users/:id', async (req, res) => {   // route, lines 2–5, handler "", handlerLine 2
+  const u = await repo.find(req.params.id);   // line 3  db_method_call — the body
+  res.json(u);                                // line 4 — the body
+});
+```
 
 A Java **anonymous class** passed as the handler (`new Handler<Message>() { public void handle(…)
 { … } }`) is a `Class` of its own, and its method is a named `Function` (`Svc$1#handle`). Where

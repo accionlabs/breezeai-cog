@@ -62,3 +62,15 @@ def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
                         if prop.type == "shorthand_property_identifier_pattern":
                             out[node_text(prop, source)] = (module, node_text(prop, source))
     return out
+
+
+#: Function values a handler may be written as inline.
+INLINE_FUNCTIONS = ("arrow_function", "function_expression", "function", "generator_function")
+
+
+def inline_handler(node: Node, source: bytes) -> tuple[str | None, int]:
+    """(handler, handlerLine) of a handler written inline (entry-point contract §5): its own
+    name when it has one (``app.post('/users', function createUser(req, res) {…})`` →
+    ``createUser``, the Function cog records for it), else none; the line where it starts."""
+    name = node.child_by_field_name("name") if node.type != "arrow_function" else None
+    return (node_text(name, source) if name is not None else None), node.start_point[0] + 1
