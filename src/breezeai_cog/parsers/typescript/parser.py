@@ -23,6 +23,8 @@ from .classes import build_class
 from ..callresolve import make_resolver
 from .decorators import extract_decorators
 from .functions import (
+    _calls as body_calls,
+    track_built,
     build_function,
     collect_nested_functions,
     defined_names,
@@ -65,6 +67,13 @@ _TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.", ".mock.")
 
 
 _FUNC_VALUES = ("arrow_function", "function_expression")
+#: Class nodes: their code is the class's (its methods, field initializers), never the file's.
+_CLASS_NODES = frozenset({"class_declaration", "class", "abstract_class_declaration"})
+#: What the file-level pass does not enter: classes, namespaces (walked on their own) and
+#: decorators (a decorator is not a call the file makes).
+_FILE_OPAQUE = _CLASS_NODES | frozenset({"internal_module", "module", "decorator"})
+#: Bare calls not recorded in ``File.calls``: ``require(…)`` is an import (``importFiles``).
+_FILE_SKIP_CALLS = frozenset({"require"})
 #: `namespace X {…}` and the legacy `module X {…}` — a declaration scope, not a value.
 _MODULE_TYPES = ("internal_module", "module")
 
@@ -194,6 +203,10 @@ class TypeScriptParser(BaseParser):
         #: Spans of the declaration values extracted as Functions (`const f = () => …`): a
         #: statement that only binds them is not emitted.
         built: set[tuple[int, int]] = set()
+        #: Statements of the Functions found inside file-level code (`setInterval(function
+        #: tick() {…})`): listed after the file's own, as a function's nested ones follow its
+        #: own, so a detector enriching "the statement on this line" finds the outer call.
+        nested_statements: list[Statement] = []
 
         def walk(scope: Node) -> None:
             """Dispatch every declaration in ``scope``, descending into namespace/module
@@ -223,6 +236,22 @@ class TypeScriptParser(BaseParser):
                 decl, exp_decs = _unwrap_export(child)
                 decorators = pending + exp_decs
                 pending = []
+                if decl is None and child.type != "export_statement":
+                    # Code at file level (`setInterval(function tick() {…})`, `$('#b').click(
+                    # function () {…})`): a function with a name of its own, or bound to a name
+                    # inside a nameless callback, is a Function of the file; the rest of the
+                    # code is the file's own (File.calls and statements, after the walk).
+                    for value_node, nested_name, nested_kind in collect_nested_functions(
+                        child, source
+                    ):
+                        fns, fn_stmts = build_function(
+                            value_node, name=nested_name, kind=nested_kind, decorators=[],
+                            source=source, path=path, parent_id=fid, class_name=None,
+                            seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                        )
+                        functions.extend(fns)
+                        nested_statements.extend(fn_stmts)
+                    continue
                 if decl is None:
                     # `export default <expr>` is not a declaration, so it isn't handled above —
                     # but it commonly wraps a named function: `export default React.memo(function
@@ -266,14 +295,22 @@ class TypeScriptParser(BaseParser):
                     built,
                 )
 
-        walk(root)
+        with track_built() as built_spans:
+            walk(root)
 
+        # The file's own code: everything outside a Function or a Class, nameless callbacks
+        # included (`process.on('SIGTERM', () => { … })`) — its statements and its calls.
+        owned = frozenset(built_spans)
         statements.extend(
             extract_statements(
                 root, source, path, parent_id=fid, capture=capture, limit=limit,
-                seen_ids=seen_ids, built=frozenset(built),
+                seen_ids=seen_ids, built=frozenset(built), descend_all=True,
+                barriers=owned, opaque=_FILE_OPAQUE,
             )
         )
+        statements.extend(nested_statements)
+        file_calls = body_calls(root, source, resolve, None, owned,
+                                opaque=_FILE_OPAQUE, skip=_FILE_SKIP_CALLS)
 
         if capture:
             statements.extend(
@@ -296,6 +333,7 @@ class TypeScriptParser(BaseParser):
             functions=functions,
             classes=classes,
             statements=statements,
+            calls=file_calls or None,
         )
         # Additive detectors (parsers/additive.py) — layered on top of base + framework
         # extraction for every TS parser that inherits extract, so they also fire in files owned

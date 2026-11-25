@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from tree_sitter import Node
 
@@ -160,6 +163,21 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
 
 NESTED_FN_VALUE_TYPES = ("arrow_function", "function_expression", "function")
 
+#: Spans of the nodes :func:`build_function` turned into a Function during one file's parse
+#: (:func:`track_built`): the file-level pass stops there, since their code is theirs.
+_BUILT: ContextVar[set[tuple[int, int]] | None] = ContextVar("ts_built_functions", default=None)
+
+
+@contextmanager
+def track_built() -> Iterator[set[tuple[int, int]]]:
+    """Collect the span of every node built as a Function while the block runs."""
+    spans: set[tuple[int, int]] = set()
+    token = _BUILT.set(spans)
+    try:
+        yield spans
+    finally:
+        _BUILT.reset(token)
+
 
 def _span(node: Node) -> tuple[int, int]:
     """Stable identity for a node within one parse (used as a barrier key)."""
@@ -283,9 +301,11 @@ def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, barriers: frozenset[tuple[int, int]] = frozenset(),
     self_call: tuple[str, str, str] | None = None,
+    opaque: frozenset[str] = frozenset(), skip: frozenset[str] = frozenset(),
 ) -> list[Call]:
     """``self_call``: (own name, stored name, this file) — a bare call to the function's own name
-    is a call to the function itself, recorded under the name callers use."""
+    is a call to the function itself, recorded under the name callers use. ``opaque``: node
+    types not descended (a class, a decorator); ``skip``: bare call names not recorded."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -306,6 +326,8 @@ def _calls(
                     seen.add(self_call[1])
                     calls.append(Call(name=self_call[1], path=self_call[2]))
                 return
+            if receiver is None and name in skip:
+                return
             if name.isidentifier() and name not in seen:
                 seen.add(name)
                 calls.append(Call(name=name, path=resolve(name, receiver, owner)))
@@ -315,7 +337,7 @@ def _calls(
         # named enclosing function — but stop at ``barriers``: the spans of nested
         # named functions extracted as their own scope. See build_function.
         for child in node.named_children:
-            if _span(child) in barriers:
+            if _span(child) in barriers or child.type in opaque:
                 continue
             if child.type == "call_expression":
                 record(child)
@@ -344,6 +366,9 @@ def build_function(
     typed_db_ids: frozenset[str] | None = None,
 ) -> tuple[list[Function], list[Statement]]:
     start, end = line_span(node)
+    built = _BUILT.get()
+    if built is not None:
+        built.add(_span(node))
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     body = node.child_by_field_name("body")
     # Nested named functions (in-body `function`/`const f = () =>`) are extracted as

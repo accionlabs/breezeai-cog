@@ -347,6 +347,7 @@ def _iter_in_scope(
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
     built: frozenset[tuple[int, int]] = frozenset(),
+    opaque: frozenset[str] = frozenset(),
 ) -> Iterator[Node]:
     """Yield EMIT_TYPES statement nodes. When ``descend_all`` is False (file-root /
     class-body scope) nested scopes remain barriers — they are extracted as their own
@@ -359,7 +360,8 @@ def _iter_in_scope(
     A declaration that only binds functions extracted as their own ``Function`` (their
     value spans are in ``built``) is skipped: the Function is the record of that code."""
     for child in node.named_children:
-        if _span(child) in barriers or _duplicates_functions(child, built):
+        if _span(child) in barriers or _duplicates_functions(child, built) \
+                or child.type in opaque:
             continue
         if not descend_all and child.type in NESTED_SCOPES:
             continue
@@ -371,7 +373,7 @@ def _iter_in_scope(
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child, descend_all, barriers, built)
+        yield from _iter_in_scope(child, descend_all, barriers, built, opaque)
 
 
 def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
@@ -395,11 +397,12 @@ def extract_statements(
     barriers: frozenset[tuple[int, int]] = frozenset(),
     built: frozenset[tuple[int, int]] = frozenset(),
     typed_db_ids: frozenset[str] | None = None,
+    opaque: frozenset[str] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all, barriers, built):
+    for node in _iter_in_scope(body, descend_all, barriers, built, opaque):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
