@@ -129,3 +129,13 @@ export function load(apiUrl: string) { return axios.get(`${apiUrl}/orders`); }
 export function items(id: string) { return axios.get(`/api/orders/${id}/items`); }
 """})
     assert got == [("orders.ts", 2, "GET", "${apiUrl}/orders"), ("orders.ts", 3, "GET", "/api/orders/{id}/items")]
+
+
+def test_same_name_on_a_map_is_not_the_helper(api_calls) -> None:
+    got = api_calls({"src/api.ts": """import axios from 'axios';
+export class Api {
+  get(url: string) { return axios.get(url); }
+  run(cache: Map<string, string>) { const k = cache.get('key'); return this.get('/orders'); }
+}
+"""})
+    assert got == [("api.ts", 4, "GET", "/orders")]

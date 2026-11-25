@@ -384,6 +384,11 @@ def _detect(dc: DetectContext) -> Detection | None:
                     keys.add(hit)
         if len(keys) != 1:
             continue  # not a helper call, or two helpers it may be: unsure
+        obj = n.child_by_field_name("object") if n.type == "method_invocation" else None
+        if obj is not None and node_text(obj, source) != "this" and any(
+                c.name == name and not c.path for c in fn.calls):
+            continue  # another `name` here resolves nowhere (`map.get(…)`): only an unqualified
+            # or `this.` call is surely the helper's
         helper = helpers.get(next(iter(keys)))
         if helper is None or helper[0] >= len(args):
             continue
