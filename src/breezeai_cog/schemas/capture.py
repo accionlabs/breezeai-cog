@@ -68,6 +68,31 @@ class Call(BaseModel):
     path: str | None = None
 
 
+class HandlerStep(BaseModel):
+    """One handler of a route's ``handlerChain``, in the order the framework runs them."""
+
+    order: int
+    #: ``router`` — a path-less registration that runs for many routes (``router.route()``);
+    #: ``route`` — registered on the route's own method and path.
+    scope: Literal["router", "route"]
+    #: Line of the registration that adds it.
+    registeredAt: int
+    #: The handler as written (``BodyHandler``, ``save``); None for an inline lambda.
+    name: str | None = None
+    #: Where the handler is declared, as for a route's own ``handlerPath`` / ``handlerLine``.
+    handlerPath: str | None = None
+    handlerLine: int | None = None
+
+
+class FailureHandler(BaseModel):
+    """A handler a route runs only when one of its handlers fails (``failureHandler``)."""
+
+    registeredAt: int
+    name: str | None = None
+    handlerPath: str | None = None
+    handlerLine: int | None = None
+
+
 class Statement(BaseModel):
     """Flat statement. Two-axis type: ``nodeType`` (structural, always present)
     + ``semanticType`` (set only on route/db/api/event detection)."""
@@ -115,6 +140,13 @@ class Statement(BaseModel):
     requestDTO: str | None = None
     responseDTO: str | None = None
     dataLoaders: list[str] | None = None
+    #: Every handler that runs for the route, in order (Vert.x-web: a route registered over
+    #: several statements, and the path-less middleware before it).
+    handlerChain: list[HandlerStep] | None = None
+    #: The route's failure handlers, run only when a handler fails.
+    failureHandlers: list[FailureHandler] | None = None
+    #: HTTP status an error handler answers (``routeKind: error_handler``).
+    statusCode: int | None = None
     # db_method_call-only
     dataAccessHint: str | None = None
     # graphql_entity-only: the key field(s) that identify a federated/stitched entity

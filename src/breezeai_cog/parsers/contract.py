@@ -10,7 +10,8 @@ is worse than missing (§8): a parser leaves a handler empty when it cannot name
 ``endpoint`` empty. Tests fail on errors; gaps are counted, as a completeness measure.
 
 The entry points are the ``route``, ``eventbus_consumer`` and ``timer`` records whose
-``routeKind`` is not ``field_resolver``, ``mount``, ``layout`` or ``navigation`` (contract §5).
+``routeKind`` is not ``field_resolver``, ``mount``, ``layout``, ``navigation``, ``middleware`` or
+``error_handler`` (contract §5).
 Wiring has no record, except a mount whose routes aren't in the repo (``route`` / ``mount``, the
 Target Spec's current form: its address is recorded nowhere else); ``layout`` is no longer
 written. Neither is an entry point. A link (``route`` / ``navigation``) is outbound and checked
@@ -68,10 +69,12 @@ ENTRY_POINT_TYPES = frozenset(
 )
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
-NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation"})
+NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation",
+                                   "middleware", "error_handler"})
 
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({
+    "TRACE", "CONNECT",  # HTTP verbs few frameworks route (Vert.x RouteMatcher / Router)
     "ANY", "WEBSOCKET",
     "QUERY", "MUTATION", "SUBSCRIPTION", "RESOLVE_FIELD", "RESOLVE_REFERENCE",
     "RPC",

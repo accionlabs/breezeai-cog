@@ -42,7 +42,7 @@ The other fields depend on the meaning:
 | `id`, `parentId`, `nodeType`, `text`, `startLine`, `endLine`, `path` | Every statement |
 | `name` | Declarations (`int retries = 3` → `retries`), enum members; an MCP tool's or prompt's name (= `endpoint`), an MCP resource's declared literal name, else its URI |
 | `method`, `endpoint`, `framework` | Routes, API calls, events |
-| `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
+| `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders`, `handlerChain` (every handler in run order: `order`, `scope` `router` / `route`, `registeredAt`, `name`, `handlerPath`, `handlerLine`), `failureHandlers` (`registeredAt`, `name`, `handlerPath`, `handlerLine`), `statusCode` (an `error_handler`) | Routes |
 | `dataAccessHint` | `db_method_call` (which ORM / database) |
 | `keyFields` | `graphql_entity` |
 | `platform` | `iac_*` |

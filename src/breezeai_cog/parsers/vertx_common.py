@@ -53,7 +53,21 @@ TIMERS = {"setTimer": "TIMER", "setPeriodic": "PERIODIC"}
 #: Deployment calls → ``verticle_deploy``: 3.x+ ``deployVerticle`` and the 2.x ``Container``
 #: family (``deployWorkerVerticle``, ``deployModule``); the first argument names what starts.
 DEPLOYS = {"deployVerticle", "deployWorkerVerticle", "deployModule"}
-HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
+HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "trace", "connect"}
+#: Registrations that serve every method: ``route(…)`` and the 2.x ``RouteMatcher.all(…)``.
+ANY_METHOD = {"route", "all"}
+#: Suffix of a registration whose path is a regular expression: 2.x ``getWithRegEx`` /
+#: ``allWithRegEx``, 3.x+ ``getWithRegex`` / ``routeWithRegex``.
+_REGEX_SUFFIXES = ("WithRegEx", "WithRegex")
+
+
+def route_verb(method: str) -> tuple[str, bool]:
+    """A registration method → (its verb, whether the path is a regex):
+    ``getWithRegEx`` → ``("get", True)``, ``get`` → ``("get", False)``."""
+    for suffix in _REGEX_SUFFIXES:
+        if method.endswith(suffix) and len(method) > len(suffix):
+            return method[: -len(suffix)], True
+    return method, False
 
 #: Service proxies: the builder ``setAddress(...)`` is called on decides the side. The service
 #: (``ServiceBinder…register``) consumes the address; a client (``ServiceProxyBuilder…build``)
@@ -126,6 +140,24 @@ def router_vars(source: bytes) -> frozenset[str]:
                      for n in rx.findall(code))
 
 
+#: A variable, field or parameter declared with a named type: ``Map<String, String> router2 =``,
+#: ``Foo routes;``, ``(Bar rm)``. Group 1 is the type, group 2 the name.
+_TYPED_DECL = re.compile(rb"\b([A-Z]\w*)(?:\s*<[^;=(){}]*>)?(?:\s*\[\s*\])*\s+(\w+)\s*[=;,)]")
+_ROUTER_TYPES = {b"Router", b"RouteMatcher"}
+
+
+def non_router_vars(source: bytes) -> frozenset[str]:
+    """Names declared in this file (outside comments) with a type other than ``Router`` /
+    ``RouteMatcher``, so ``Map<String, String> router2`` is not taken for a router by its name.
+    A name also declared as a router (:func:`router_vars`) keeps counting as one."""
+    lowered = source.lower()
+    if b"route" not in lowered and b"rm" not in lowered:  # no receiver a name could make a router
+        return frozenset()
+    code = _without_comments(source)
+    return frozenset(name.decode() for typ, name in _TYPED_DECL.findall(code)
+                     if typ not in _ROUTER_TYPES)
+
+
 def is_bus_receiver(obj: str) -> bool:
     """Whether a receiver denotes an EventBus (``vertx.eventBus()``, ``eb``, a ``…Bus`` var).
     The single source of truth for ``classify_call`` and the wrapper detector alike, so an
@@ -143,19 +175,24 @@ def classify_call(
     route_scope: bool = False,
     service_vars: dict[str, str] | None = None,
     routers: frozenset[str] = frozenset(),
+    non_routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """Map one call to ``(semanticType, method, endpoint, routeKind)`` or ``None``.
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call,
-                  and what an event-bus address on the bus itself is named after when it does
-                  not render (``${config:a}``, ``${address}``; :func:`event_template`).
+    ``first_arg`` raw text of the first argument: the delay of a timer call, and what an
+                  event-bus address on the bus itself is named after when it does not render
+                  (``${config:a}``, ``${address}``; :func:`event_template`). A deployed name
+                  never falls back to it: an unresolved one stays empty.
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``service_vars`` variable → service-proxy builder type (:func:`service_builder_vars`), so a
                   ``setAddress`` on a builder held in a variable still finds its side.
     ``routers``   names this file declares as a ``Router`` / ``RouteMatcher``
                   (:func:`router_vars`): such a receiver is a router whatever its name.
+    ``non_routers`` names this file declares with another type (:func:`non_router_vars`): such
+                  a receiver is not a router by its name (``Map router2``), unless it is
+                  also in ``routers``.
     ``route_scope`` marks a *bare* HTTP-verb call (no receiver) that the caller has
                   determined is lexically inside a RouteMatcher scope — the Vert.x 2.x
                   ``rm.with { get('/x', h) }`` idiom — so it should still count as a route.
@@ -166,6 +203,8 @@ def classify_call(
     """
     obj_l = obj.lower()
     is_router = is_route_receiver(obj_l)
+    if is_router and router_name(obj) in non_routers and router_name(obj) not in routers:
+        is_router = False  # `Map<String, String> router2`: its declared type says it is no router
     if not is_router and router_name(obj) in routers:
         # A router only by a file-wide declared type: the same name may be another variable in
         # another method (`Map<String, String> r` … `r.get("customerId")`). Real route paths
@@ -184,16 +223,18 @@ def classify_call(
         delay = (first_arg or "").replace("_", "").rstrip("lL")
         return "timer", TIMERS[method], delay if delay.isdigit() else None, None
     if method in DEPLOYS:
-        return "verticle_deploy", None, path or first_arg, None
+        # What starts is the folded string; a variable or `new X()` is unknown → empty.
+        return "verticle_deploy", None, _known_path(path) if path else None, None
     if method == "setAddress":
         side = _service_side(obj, service_vars)
         if side is None:
             return None
         # the service's event-bus address: its one argument (`setAddress(addr)`)
         return side, None, event_template(path, first_arg), None
-    if method in HTTP_VERBS and path and (is_router or route_scope):
-        return "route", method.upper(), _known_path(path), "route"
-    if method == "route" and path and is_router:
+    verb, _ = route_verb(method)
+    if verb in HTTP_VERBS and path and (is_router or route_scope):
+        return "route", verb.upper(), _known_path(path), "route"
+    if verb in ANY_METHOD and path and is_router:
         return "route", None, _known_path(path), "route"
     return None
 
@@ -492,16 +533,16 @@ def vertx_emit(
     call: Node, semantic: str, method: str | None, endpoint: str | None,
     route_kind: str | None, handler: str | None, handler_line: int | None,
     *, unknown_base: bool = False, handler_path: str | None = None,
-    guards: list[str] | None = None,
+    guards: list[str] | None = None, is_regex: bool | None = None,
 ) -> Emit:
     """A Vert.x detection for :func:`~.emits.apply`: it enriches whatever statement is on the
     call's line (``any``) — the type and framework always, the rest only where known — else
     it is a new record (a call inside a lambda, which the base parser skips). An unresolvable
     sub-router mount clears the address (unknown). ``guards`` is the middleware that runs before
-    the route (``java_vertx/route_guards.py``)."""
+    the route (``java_vertx/route_guards.py``); ``is_regex`` marks a regex path (``getWithRegEx``)."""
     fill: dict[str, Any] = {"method": method, "routeKind": route_kind, "handler": handler,
                             "handlerLine": handler_line, "handlerPath": handler_path,
-                            "guards": guards}
+                            "guards": guards, "isRegex": is_regex}
     fields: dict[str, Any] = {"semanticType": semantic, "framework": "vertx"}
     if unknown_base:
         fields["endpoint"] = None

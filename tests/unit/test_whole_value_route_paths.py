@@ -24,7 +24,7 @@ public class Main extends AbstractVerticle {
     Router router = Router.router(vertx);
     String path = config().getString("orders.path");
     router.get(path).handler(this::list);
-    router.get(config().getString("orders.path")).handler(this::list);
+    router.get(config().getString("orders.list")).handler(this::list);
     router.get(this.basePath).handler(this::list);
     router.post(System.getenv("ORDERS")).handler(this::list);
     router.get(path);
@@ -38,7 +38,8 @@ public class Main extends AbstractVerticle {
 }
 """}), VERTX)
     assert got[10] == ("GET", "${config:orders.path}", "list")  # a local read once from config
-    assert got[11] == ("GET", "${config:orders.path}", "list")
+    # its own key: the same path read twice would be one endpoint, grouped into line 10's route
+    assert got[11] == ("GET", "${config:orders.list}", "list")
     assert got[12] == ("GET", "${basePath}", "list")  # `this.` dropped
     assert got[13] == ("POST", "${env:ORDERS}", "list")
     assert 14 not in got  # no handler
