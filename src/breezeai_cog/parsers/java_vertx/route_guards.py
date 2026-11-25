@@ -153,6 +153,21 @@ def handler_name(node: Node, source: bytes) -> str | None:
     return None
 
 
+def library_name(arg: Node, source: bytes, is_library: Callable[[str], bool]) -> str | None:
+    """The name of a Vert.x-web library handler built by ``arg`` (``BodyHandler.create()``,
+    ``new CorsHandler(…)``, also configured: ``BodyHandler.create().setUploadsDirectory(d)``,
+    whose setters return the handler), else None. Only a class can be one: a method reference
+    or a variable is the app's whatever its name."""
+    while arg.type == "method_invocation" and (
+            (inner := arg.child_by_field_name("object")) is not None
+            and inner.type in ("method_invocation", "object_creation_expression")):
+        arg = inner  # `X.create().setY(…)`: the handler the configuration calls are made on
+    if arg.type not in ("method_invocation", "object_creation_expression"):
+        return None
+    name = handler_name(arg, source)
+    return name if name is not None and is_library(name) else None
+
+
 def library_handlers(
     singles: list[str], wildcards: list[str], package: str, declared: set[str], index: object | None
 ) -> Callable[[str], bool]:
@@ -237,5 +252,5 @@ def route_guards(
             ):
                 names.extend(hs)
     own = chained_handlers(call, source)[:-1]  # the last one is the route's handler
-    names.extend(n for h in own if (n := handler_name(h, source)) is not None and is_library(n))
+    names.extend(n for h in own if (n := library_name(h, source, is_library)) is not None)
     return list(dict.fromkeys(names)) or None
