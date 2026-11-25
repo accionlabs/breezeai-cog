@@ -86,3 +86,15 @@ def test_a_one_line_named_handler_leaves_the_route_on_the_outer_call(tmp_path: P
     # the file's own statement is listed before the nested function's on the same line
     assert rec.statements.index(outer) < rec.statements.index(inner)
     assert inner.parentId.endswith("createUser@1")
+
+
+def test_a_named_inline_route_handler_names_the_route_handler(analyze_files) -> None:
+    st = analyze_files({"package.json": '{"dependencies": {"express": "4"}}',
+                        "app.js": """const express = require('express');
+const app = express();
+app.post('/users', function createUser(req, res) { save(); });
+app.get('/a', (req, res) => res.end());
+function reg() { app.put('/x', function updateX(req, res) { saveX(); }); }
+"""})
+    routes = {s.endpoint: (s.handler, s.handlerLine) for s in st if s.semanticType == "route"}
+    assert routes == {"/users": ("createUser", 3), "/a": (None, 4), "/x": ("updateX", 5)}
