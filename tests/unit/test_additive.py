@@ -62,7 +62,7 @@ def test_inventory_in_run_order() -> None:
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda", "go-mcpgo", "go-mcpgo-client", "go-mcp", "go-mcp-client"],
         "java": ["quartz", "struts2", "java-springai", "java-mcp", "java-mcp-client", "apache-httpclient",
-                 "vertx"],
+                 "java-http-helpers", "vertx"],
         "kotlin": ["kotlin-springai", "kotlin-mcp", "kotlin-mcp-client"],
         "mdx": ["nextjs-mdx-pages"],
         "python": ["celery", "flask", "drf-routers", "django-channels", "python-fastmcp", "python-mcp",
