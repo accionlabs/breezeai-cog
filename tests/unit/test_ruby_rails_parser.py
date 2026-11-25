@@ -33,6 +33,39 @@ def test_rails_routes_and_base_extraction(tmp_path: Path) -> None:
     assert routes[0].handlerLine is None  # the action is in the controller, not on this line
 
 
+def test_rails_route_enriches_one_call_statement_and_preserves_other_calls(
+    tmp_path: Path,
+) -> None:
+    source = b'''require "rails"
+Rails.application.routes.draw do
+  get "/students", to: "students#index"
+  notify("keep this call")
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+
+    route_statements = [
+        item for item in record.statements
+        if item.text.startswith('get "/students"')
+    ]
+    assert len(route_statements) == 1
+    route = route_statements[0]
+    assert route.semanticType == "route"
+    assert route.method == "GET"
+    assert route.endpoint == "/students"
+    assert route.handler == "students#index"
+    assert route.framework == "rails"
+    assert route.routeKind == "route"
+    assert route.parentId == record.id
+
+    ordinary_calls = [
+        item for item in record.statements
+        if item.text.startswith('notify("keep this call")')
+    ]
+    assert len(ordinary_calls) == 1
+    assert ordinary_calls[0].semanticType is None
+
+
 def test_rails_routes_are_gated_and_dynamic_paths_are_honest_null(tmp_path: Path) -> None:
     source = b'''require "rails"\nPATH = ENV["PATH"]\nRails.application.routes.draw do\n  get PATH, to: "users#index"\nend\n'''
     without_capture = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source, False))

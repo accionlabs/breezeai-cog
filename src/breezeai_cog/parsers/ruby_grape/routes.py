@@ -229,6 +229,7 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
                 authRequired=None,
                 routeKind="route",
                 isRegex=False,
-            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
+            ), parent=owner_id(line, record.functions, record.classes, fallback),
+                node_type="call", enrich="same")
         )
     return found

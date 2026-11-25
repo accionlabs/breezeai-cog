@@ -475,7 +475,8 @@ def detect_rails_routes(
                 framework="rails",
                 routeKind="route",
                 isRegex=False,
-            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
+            ), parent=owner_id(line, record.functions, record.classes, fallback),
+                node_type="call", enrich="same")
         )
 
     handler: str | None

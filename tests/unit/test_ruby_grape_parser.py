@@ -36,6 +36,42 @@ def test_grape_routes_and_nested_prefixes(tmp_path: Path) -> None:
     assert {item.name for item in record.classes} >= {"API"}
 
 
+def test_grape_route_enriches_one_call_statement_and_preserves_other_calls(
+    tmp_path: Path,
+) -> None:
+    source = b'''require "grape"
+class API < Grape::API
+  get "/students" do
+    notify("keep this call")
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+
+    route_statements = [
+        item for item in record.statements
+        if item.text.startswith('get "/students"')
+    ]
+    assert len(route_statements) == 1
+    route = route_statements[0]
+    assert route.semanticType == "route"
+    assert route.method == "GET"
+    assert route.endpoint == "/students"
+    assert route.framework == "grape"
+    assert route.routeKind == "route"
+    assert route.handler is None
+    assert route.handlerLine == 3
+    api = next(item for item in record.classes if item.name == "API")
+    assert route.parentId == api.id
+
+    ordinary_calls = [
+        item for item in record.statements
+        if item.text.startswith('notify("keep this call")')
+    ]
+    assert len(ordinary_calls) == 1
+    assert ordinary_calls[0].semanticType is None
+
+
 def test_grape_dynamic_prefix_is_not_guessed(tmp_path: Path) -> None:
     source = b'''require "grape"\nclass API < Grape::API\n  namespace API_NAMESPACE do\n    get "/users" do\n    end\n  end\nend\n'''
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))

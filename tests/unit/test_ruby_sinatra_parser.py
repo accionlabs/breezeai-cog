@@ -35,6 +35,61 @@ def test_sinatra_routes_and_base_extraction(tmp_path: Path) -> None:
     assert {item.name for item in record.classes} >= {"API"}
 
 
+def test_sinatra_application_subclass_routes_are_detected(tmp_path: Path) -> None:
+    source = b'''class API < Sinatra::Application
+  get "/users" do
+    "ok"
+  end
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "api.rb", source))
+
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [("GET", "/users")]
+
+
+def test_sinatra_new_block_routes_are_detected(tmp_path: Path) -> None:
+    source = b'''app = Sinatra.new do
+  get "/users" do
+    "ok"
+  end
+end
+'''
+    parser = SinatraParser()
+    assert parser.claims("app.rb", source)
+    record = parser.parse_file(_context(tmp_path, "app.rb", source))
+
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [("GET", "/users")]
+
+
+def test_sinatra_does_not_detect_routes_in_unrelated_classes_or_modules(
+    tmp_path: Path,
+) -> None:
+    source = b'''require "sinatra"
+class Student
+  get "/students" do
+    "hello"
+  end
+end
+
+module Unrelated
+  post "/unrelated" do
+    "hello"
+  end
+end
+
+def helper
+  get "/method" do
+    "hello"
+  end
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+
+    assert not any(item.semanticType == "route" for item in record.statements)
+
+
 def test_sinatra_routes_require_literal_paths_and_capture(tmp_path: Path) -> None:
     source = b'''require "sinatra"\nPATH = ENV["PATH"]\nget PATH do\n  "ok"\nend\n'''
     without_capture = SinatraParser().parse_file(_context(tmp_path, "app.rb", source, False))

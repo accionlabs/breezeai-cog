@@ -85,38 +85,33 @@ def _visibility(node: Node, source: bytes) -> str:
     parent = node.parent
     if parent is None:
         return visibility
-    for sibling in parent.named_children:
-        if sibling == node:
-            break
-        if sibling.type == "identifier":
-            marker = node_text(sibling, source)
-            if marker in _VISIBILITY_MARKERS:
-                visibility = marker
-            continue
-        if sibling.type != "call" or sibling.child_by_field_name("receiver") is not None:
-            continue
-        if sibling.child_by_field_name("arguments") is not None:
-            continue
-        method = sibling.child_by_field_name("method")
-        if method is not None:
-            marker = node_text(method, source)
-            if marker in _VISIBILITY_MARKERS:
-                visibility = marker
-
     name_node = next((c for c in node.named_children if c.type == "identifier"), None)
-    if name_node is None:
+    name = node_text(name_node, source) if name_node is not None else None
+    siblings = parent.named_children
+    method_index = next((i for i, sibling in enumerate(siblings) if sibling == node), None)
+    if method_index is None:
         return visibility
-    name = node_text(name_node, source)
-    after = False
-    for sibling in parent.named_children:
-        if sibling == node:
-            after = True
+
+    directives: list[tuple[int, str]] = []
+    for index, sibling in enumerate(siblings):
+        if index < method_index:
+            marker = None
+            if sibling.type == "identifier":
+                marker = node_text(sibling, source)
+            elif sibling.type == "call" and sibling.child_by_field_name("receiver") is None:
+                if sibling.child_by_field_name("arguments") is None:
+                    method = sibling.child_by_field_name("method")
+                    marker = node_text(method, source) if method is not None else None
+            if marker in _VISIBILITY_MARKERS:
+                directives.append((index, marker))
+
+        if name is None or sibling.type != "call":
             continue
-        if not after or sibling.type != "call" or sibling.child_by_field_name("receiver") is not None:
+        if sibling.child_by_field_name("receiver") is not None:
             continue
-        args = sibling.child_by_field_name("arguments")
         method = sibling.child_by_field_name("method")
-        if args is None or method is None:
+        args = sibling.child_by_field_name("arguments")
+        if method is None or args is None:
             continue
         marker = node_text(method, source)
         if marker not in _VISIBILITY_MARKERS:
@@ -134,7 +129,10 @@ def _visibility(node: Node, source: bytes) -> str:
                 if content is not None:
                     names.add(node_text(content, source))
         if name in names:
-            visibility = marker
+            directives.append((index, marker))
+
+    if directives:
+        return max(directives, key=lambda directive: directive[0])[1]
     return visibility
 
 def _calls_in_block(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:

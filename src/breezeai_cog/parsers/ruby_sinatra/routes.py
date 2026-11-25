@@ -94,7 +94,62 @@ def _is_app_class(node: Node, source: bytes) -> bool:
     if node.type != "class":
         return False
     sup = node.child_by_field_name("superclass")
-    return sup is not None and "Sinatra::" in node_text(sup, source)
+    return (
+        sup is not None
+        and node_text(sup, source).lstrip("<").strip()
+        in {"Sinatra::Base", "Sinatra::Application"}
+    )
+
+
+def _is_sinatra_new(call: Node, source: bytes, route: Node) -> bool:
+    receiver = call.child_by_field_name("receiver")
+    method = call.child_by_field_name("method")
+    block = call.child_by_field_name("block")
+    return (
+        call.type == "call"
+        and receiver is not None
+        and node_text(receiver, source) == "Sinatra"
+        and method is not None
+        and node_text(method, source) == "new"
+        and block is not None
+        and block.start_byte <= route.start_byte
+        and route.end_byte <= block.end_byte
+    )
+
+
+def _has_classic_sinatra_require(root: Node, source: bytes) -> bool:
+    for node in root.named_children:
+        if node.type != "call" or node.child_by_field_name("receiver") is not None:
+            continue
+        method = node.child_by_field_name("method")
+        args = _arguments(node)
+        if (
+            method is not None
+            and node_text(method, source) == "require"
+            and args
+            and _string_value(args[0], source) == "sinatra"
+        ):
+            return True
+    return False
+
+
+def _in_sinatra_context(call: Node, source: bytes, classic_app: bool) -> bool:
+    """Whether a route belongs to a modular, block-based, or classic Sinatra application."""
+    in_method = False
+    node = call.parent
+    while node is not None:
+        if node.type == "class":
+            return _is_app_class(node, source)
+        if node.type == "module":
+            return False
+        if node.type == "method":
+            in_method = True
+        if _is_sinatra_new(node, source, call):
+            return True
+        if node.type == "program":
+            return classic_app and not in_method
+        node = node.parent
+    return False
 
 
 def _scope(call: Node, source: bytes) -> Node:
@@ -168,10 +223,15 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
     fallback = file_id(path)
     found: list[Emit] = []
     hooks = _global_guards(root, source) if b"before" in source or b"use " in source else []
+    classic_app = _has_classic_sinatra_require(root, source)
 
     for call in _calls(root):
         method = _method(call, source)
-        if method not in _HTTP_METHODS or not _has_route_block(call):
+        if (
+            method not in _HTTP_METHODS
+            or not _has_route_block(call)
+            or not _in_sinatra_context(call, source, classic_app)
+        ):
             continue
         args = _arguments(call)
         local = _string_value(args[0], source) if args else None
