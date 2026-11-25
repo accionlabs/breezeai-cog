@@ -12,6 +12,8 @@ local bound once in the file to ``inject(HttpClient)`` or typed ``HttpClient``
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
@@ -81,23 +83,32 @@ def _first_arg(call: Node, source: bytes) -> str | None:
     return node_text(first, source) if first is not None else None
 
 
-def _detect(dc: DetectContext) -> Detection | None:
-    types = imported_locals(dc.root, dc.source, _MODULE, frozenset({"HttpClient"}))
-    fields = http_client_fields(dc.root, dc.source, types) if types else frozenset()
-    locals_ = http_client_locals(dc.root, dc.source, types) if types else frozenset()
+def angular_evidence(root: Node, source: bytes) -> Callable[[Node], bool] | None:
+    """Whether a call of this file is made on an injected Angular ``HttpClient``; None when the
+    file has none."""
+    types = imported_locals(root, source, _MODULE, frozenset({"HttpClient"}))
+    fields = http_client_fields(root, source, types) if types else frozenset()
+    locals_ = http_client_locals(root, source, types) if types else frozenset()
     if not fields and not locals_:
         return None
 
     def evidenced(call: Node) -> bool:
-        member = this_member_call(call, dc.source)
+        member = this_member_call(call, source)
         if member is not None:
             return member[0] in fields and member[1] in _METHODS
         fn = call.child_by_field_name("function")
         prop = fn.child_by_field_name("property") \
             if fn is not None and fn.type == "member_expression" else None
-        return callee_root(call, dc.source) in locals_ and prop is not None \
-            and node_text(prop, dc.source) in _METHODS
+        return callee_root(call, source) in locals_ and prop is not None \
+            and node_text(prop, source) in _METHODS
 
+    return evidenced
+
+
+def _detect(dc: DetectContext) -> Detection | None:
+    evidenced = angular_evidence(dc.root, dc.source)
+    if evidenced is None:
+        return None
     emits = label_http_client(dc.root, dc.source, dc.path, dc.record, "angular", evidenced)
     return Detection(emits) if emits else None
 

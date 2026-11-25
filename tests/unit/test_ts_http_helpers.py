@@ -139,3 +139,41 @@ export class Api {
 }
 """})
     assert got == [("api.ts", 4, "GET", "/orders")]
+
+
+def _frameworks(tmp_path: Path, files: dict[str, str]) -> dict[tuple[str, int], str | None]:
+    repo = tmp_path / "fw"
+    for rel, src in files.items():
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src)
+    return {(r.path.rsplit("/", 1)[-1], s.startLine): s.framework
+            for r in iter_file_records(repo) for s in r.statements if s.semanticType == "api_call"}
+
+
+def test_call_site_carries_the_helpers_client_label(tmp_path: Path) -> None:
+    got = _frameworks(tmp_path, {
+        "http.ts": HTTP + """export async function raw(url: string) {
+  return fetch(url);
+}
+export function viaApi(path: string) {
+  return getRequest('/api' + path, {});
+}
+""",
+        "client.ts": """export async function load(url: string) {
+  return http.get(url);
+}
+""",
+        "svc.ts": """import { getRequest, raw, viaApi } from './http';
+import { load } from './client';
+export async function run() {
+  await getRequest('https://a.example/x', {});
+  await raw('https://a.example/y');
+  await viaApi('/orders');
+  await load('https://a.example/z');
+}
+"""})
+    assert got[("svc.ts", 4)] == "axios"
+    assert got[("svc.ts", 5)] == "fetch"
+    assert got[("svc.ts", 6)] == "axios"   # through a relay
+    assert got[("svc.ts", 7)] is None      # `http` is no client the detectors vouch for
