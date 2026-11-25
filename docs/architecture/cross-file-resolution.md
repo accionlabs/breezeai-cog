@@ -365,6 +365,17 @@ finds annotated or constructed. A library class (`requests.Session`) → unchang
 +1,212 CALLS edges (strategy downloaders `self.session = DefaultDownloader()`), none removed or
 moved; the Python HTTP-helper detector then finds 71 more call sites. Capture time +3–5%.
 
+**C#: a static call on a type named only as its receiver** (`parsers/csharp/static_calls.py`).
+A `using` names a namespace, so a type is bound to its file where the file names it as a type
+(a base, a declared type, `new X()`). `ClauseRequest.Create(id)` names `ClauseRequest` only as the
+receiver; it now resolves when nothing else can be meant: a bare capitalized identifier; no
+variable, parameter, field, property or event of the file has that name; it resolves to one
+other file by the namespaces in scope (the import-edge rules) or is a class of this file; and that
+class (one of that name in the index) or an in-repo ancestor declares the method — the path is the
+declaring file. A method declared by another class of the same name (the index merges same-named
+classes with one base) → no path. source-catalogue +1,170 call paths, test-repos/net +8,899
+(SplendidCRM `Sql.*`, `Security.*`, `SplendidError.*`), none removed; capture time +2–4%.
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |
