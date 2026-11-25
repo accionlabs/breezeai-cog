@@ -309,7 +309,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def record(call: Node) -> None:
         fn = call.child_by_field_name("function")
@@ -322,15 +322,17 @@ def _calls(
             if self_call is not None and receiver is None and name == self_call[0]:
                 # `factorial(n - 1)` inside `const fact = function factorial`: `fact` itself,
                 # never a same-name function elsewhere in the file
-                if self_call[1] not in seen:
-                    seen.add(self_call[1])
+                if (self_call[1], self_call[2]) not in seen:
+                    seen.add((self_call[1], self_call[2]))
                     calls.append(Call(name=self_call[1], path=self_call[2]))
                 return
             if receiver is None and name in skip:
                 return
-            if name.isidentifier() and name not in seen:
-                seen.add(name)
-                calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+            if name.isidentifier():
+                path = resolve(name, receiver, owner)
+                if (name, path) not in seen:  # one entry per name and target file
+                    seen.add((name, path))
+                    calls.append(Call(name=name, path=path))
 
     def visit(node: Node) -> None:
         # Descend into inline callbacks/lambdas — their calls belong to the nearest

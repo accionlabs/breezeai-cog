@@ -164,7 +164,8 @@ their methods as `Function`s; the enclosing method keeps only its own statements
 **Java code outside any method** — field initializers, `static { … }` and `{ … }` initializer
 blocks, enum constants' arguments — runs when the class loads or an object is built, yet no
 `Function` holds it. Its calls are the **class's** (`Class.calls`, the shape of
-`Function.calls`: one per name in order of first appearance, present only when there is one), so
+`Function.calls`: one per name and target file in order of first appearance, present only when
+there is one), so
 they do not depend on statement capture, and statements never carry calls:
 `static { bus.put(A, new WriteHandler()); }` in `ServiceServer` → the `ServiceServer` Class has
 `calls: [{name: "put"}, {name: "WriteHandler", path: "…/WriteHandler.java"}]`. An anonymous

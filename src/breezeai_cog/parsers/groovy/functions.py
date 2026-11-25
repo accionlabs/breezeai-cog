@@ -155,7 +155,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def visit(node: Node, inner: bool) -> None:
         # Descend into every scope, including inline closures — their calls belong to
@@ -164,11 +164,12 @@ def _calls(
         for child in node.named_children:
             if child.type in ("method_invocation", "command_chain"):
                 name, receiver, resolvable = _callee(child, source)
-                if name and name not in seen:
-                    seen.add(name)
+                if name:
                     path = (resolve(name, receiver, None if inner else owner, scope)
                             if resolvable else None)
-                    calls.append(Call(name=name, path=path))
+                    if (name, path) not in seen:
+                        seen.add((name, path))
+                        calls.append(Call(name=name, path=path))
             visit(child, inner or child.type == "class_body")
 
     visit(body, False)

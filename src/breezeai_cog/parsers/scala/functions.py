@@ -107,7 +107,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def record(n: Node) -> None:
         if n.type != "call_expression":
@@ -126,9 +126,10 @@ def _calls(
             receiver = node_text(val, source) if val is not None else None
         elif fn.type == "identifier":
             name = node_text(fn, source)
-        if name and name not in seen:
-            seen.add(name)
-            calls.append(Call(name=name, path=resolve(name, receiver)))
+        path = resolve(name, receiver) if name else None
+        if name and (name, path) not in seen:
+            seen.add((name, path))
+            calls.append(Call(name=name, path=path))
 
     def visit(n: Node) -> None:
         # Descend through control flow and lambdas — those calls belong to the nearest

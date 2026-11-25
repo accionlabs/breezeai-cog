@@ -56,7 +56,23 @@ def _f(name: str) -> str:
     return f"{_ROOT}/{name}"
 
 
-# --- one entry per name; its path is the first call of the name that resolves -----------------
+def _entries(tmp_path: Path, files: dict[str, str], target: str, fn: str) -> list[tuple]:
+    """A function's calls as written: a name may appear once per target file."""
+    for rel, src in files.items():
+        p = tmp_path / _ROOT / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src)
+    parser = JavaParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    rel = f"{_ROOT}/{target}"
+    path = tmp_path / rel
+    ctx = ParseContext(path=rel, abs_path=path, source=path.read_bytes(), repo_root=tmp_path,
+                       resolution_index=index)
+    [f] = [f for f in parser.parse_file(ctx).functions if f.name == fn]
+    return [(c.name, c.path) for c in f.calls]
+
+
+# --- one entry per name and target file; an unresolved call once per name ---------------------
 
 _SAME_NAME = """package com.acme;
 import org.vertx.java.core.json.JsonObject;
@@ -69,24 +85,37 @@ public class Svc {
 """
 
 
-def test_a_later_in_repo_call_gives_the_name_its_file(tmp_path: Path) -> None:
-    calls = _calls(tmp_path, {"Svc.java": _SAME_NAME, "JsonUtil.java": _JSON_UTIL,
-                              "Helper.java": _HELPER}, "Svc.java")
-    assert calls["libraryFirst"] == {"getString": _f("JsonUtil.java")}
-    assert calls["repoFirst"] == {"getString": _f("JsonUtil.java")}
+_FILES = {"Svc.java": _SAME_NAME, "JsonUtil.java": _JSON_UTIL, "Helper.java": _HELPER}
+
+
+def test_a_name_called_on_a_library_object_and_a_repo_class_is_two_entries(tmp_path: Path) -> None:
+    # neither hides the other, whichever comes first
+    assert _entries(tmp_path, _FILES, "Svc.java", "libraryFirst") == [
+        ("getString", None), ("getString", _f("JsonUtil.java"))]
+    assert _entries(tmp_path, _FILES, "Svc.java", "repoFirst") == [
+        ("getString", _f("JsonUtil.java")), ("getString", None)]
 
 
 def test_a_name_only_called_on_library_objects_stays_unresolved(tmp_path: Path) -> None:
-    calls = _calls(tmp_path, {"Svc.java": _SAME_NAME, "JsonUtil.java": _JSON_UTIL,
-                              "Helper.java": _HELPER}, "Svc.java")
-    assert calls["libraryOnly"] == {"getString": None}
+    # two unresolved calls of one name: one entry
+    assert _entries(tmp_path, _FILES, "Svc.java", "libraryOnly") == [("getString", None)]
 
 
-def test_calls_keep_one_entry_per_name_in_first_appearance_order(tmp_path: Path) -> None:
-    calls = _calls(tmp_path, {"Svc.java": _SAME_NAME, "JsonUtil.java": _JSON_UTIL,
-                              "Helper.java": _HELPER}, "Svc.java")
-    assert list(calls["order"].items()) == [
-        ("size", None), ("getString", _f("JsonUtil.java")), ("util", _f("Helper.java"))]
+def test_calls_keep_first_appearance_order(tmp_path: Path) -> None:
+    assert _entries(tmp_path, _FILES, "Svc.java", "order") == [
+        ("size", None), ("getString", None), ("util", _f("Helper.java")),
+        ("getString", _f("JsonUtil.java"))]
+
+
+def test_same_name_calls_to_different_files_are_each_kept(tmp_path: Path) -> None:
+    src = """package com.acme;
+public class Main {
+    void start() { Helper.util(); Other.util(); Helper.util(); }
+}
+"""
+    other = "package com.acme;\npublic class Other { public static void util() {} }\n"
+    assert _entries(tmp_path, {"Main.java": src, "Helper.java": _HELPER, "Other.java": other},
+                    "Main.java", "start") == [("util", _f("Helper.java")), ("util", _f("Other.java"))]
 
 
 # --- `Outer.this.m()` -------------------------------------------------------------------------
