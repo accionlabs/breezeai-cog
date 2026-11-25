@@ -169,3 +169,18 @@ def test_no_chain_when_one_endpoint_is_written_two_ways(analyze_files) -> None:
     String p = config().getString("p");
     router.get(p).handler(this::a);
     router.get(config().getString("p")).handler(this::b);""") == [(10, "a", None), (11, "b", None)]
+
+
+def test_a_configured_library_handler_is_still_the_frameworks(analyze_files) -> None:
+    # `BodyHandler.create().setUploadsDirectory(d)`: its setters return the BodyHandler
+    [route] = _routes(analyze_files(_main("""    Router router = Router.router(vertx);
+    router.post("/x")
+        .handler(BodyHandler.create().setUploadsDirectory("tmp"))
+        .handler(this::a);""")))
+    assert (route.handler, route.guards, route.handlerChain) == ("a", ["BodyHandler"], None)
+
+
+def test_a_step_known_by_nothing_leaves_the_records_as_before(analyze_files) -> None:
+    assert _separate(analyze_files, """    Router router = Router.router(vertx);
+    router.get("/x").handler(handlers().next());
+    router.get("/x").handler(this::a);""") == [(9, None, None), (10, "a", None)]

@@ -26,6 +26,7 @@ one record per registration (a partial chain would bring back a wrong endpoint c
    and the last of them that might match the path (a path-less registration of the verb, a
    regex route, a mount, a path that cannot be told apart from it).
 
+A step that cannot be named or located at all (``handlers.next()``) leaves the group as it was.
 The steps are each ``.handler(…)`` / ``.blockingHandler(…)`` in registration order, then the
 ``.failureHandler(…)``\\ s on the path with ``phase: "failure"``. A Vert.x-web library handler
 (``BodyHandler``) ahead of the first app step goes into ``guards``; after one it stays a step,
@@ -47,7 +48,7 @@ from ..emits import Emit
 from ..handler_sites import handler_info, handler_location, locate_method
 from .handler_factories import FactoryCalls
 from .java_syntax import anonymous_handle, handler_class
-from .route_guards import Scope, handler_name
+from .route_guards import Scope, handler_name, library_name
 
 #: ``phase`` of a failure handler on the route's own path.
 FAILURE = "failure"
@@ -116,18 +117,14 @@ class Locator:
     is_library: Callable[[str], bool]
 
     def library(self, arg: Node) -> str | None:
-        """The name of a Vert.x-web library handler built here (``BodyHandler.create()``,
-        ``new CorsHandler(…)``), else None. Only a class can be one: a method reference or a
-        variable is the app's whatever its name."""
-        if arg.type not in ("method_invocation", "object_creation_expression"):
-            return None
-        name = handler_name(arg, self.source)
-        return name if name is not None and self.is_library(name) else None
+        """The name of a Vert.x-web library handler built here, else None (:func:`library_name`)."""
+        return library_name(arg, self.source, self.is_library)
 
     def __call__(self, arg: Node, phase: str | None = None) -> HandlerStep:
+        own = self.library(arg)
+        if own is not None:
+            return HandlerStep(name=own, phase=phase)  # Vert.x-web's own: nothing to open
         name = handler_name(arg, self.source)
-        if self.library(arg) is not None:
-            return HandlerStep(name=name, phase=phase)  # Vert.x-web's own: nothing to open
         handler, line = handler_info(arg, self.source, self.methods)
         where: str | None = None
         if handler is None:
@@ -240,6 +237,9 @@ def _record(members: list[Registration], first: Registration, locate: Locator,
     failures = [locate(arg, FAILURE) for reg in members for arg in reg.failures]
     if not steps:
         return None
+    if any(s.name is None and s.handler is None and s.handlerLine is None
+           for s in (*steps, *failures)):
+        return None  # a step known by nothing (`factory().build()`): not a chain a reader can use
     if len(members) == 1 and len(steps) == 1 and not failures:
         return None  # one registration with one app step: its record is already right
     assert first.emit is not None
