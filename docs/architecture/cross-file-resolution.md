@@ -236,6 +236,14 @@ void load(JsonObject o) {
 A call in a field initializer (`static final String BUS = Constant.of("ORDERS");`) belongs to no
 function, so it is in no `calls[]`.
 
+In JavaScript / TypeScript a named function expression stored under another name (`const fact
+= function factorial(n) { … }`) keeps its own name as `Function.alias`. That name exists only in
+its own body, so a bare call to it there (`factorial(n - 1)`) is the function itself: it is
+recorded under the stored name with this file's path (`{name: "fact", path: <this file>}`),
+before any lookup — a same-name function elsewhere in the file is never it. A parameter or a
+local of that name hides it (the call is then resolved as usual); calls elsewhere are never
+matched by an alias.
+
 Resolution stops at the first certain answer:
 
 ```mermaid

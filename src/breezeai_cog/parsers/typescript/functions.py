@@ -242,10 +242,50 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
     return out
 
 
+#: Function values that may carry a name of their own (``function factorial() {}``).
+_NAMED_VALUES = ("function_expression", "function", "generator_function")
+#: Nodes that bind a name in a function body (a local hiding the function's own name).
+_BINDINGS = ("variable_declarator", "function_declaration", "generator_function_declaration",
+             "class_declaration", "required_parameter", "optional_parameter")
+
+
+def own_name(node: Node, source: bytes) -> str | None:
+    """The name a function expression gives itself (``function factorial() {}`` →
+    ``factorial``), else None. Only the function's own body can call it by that name."""
+    if node.type not in _NAMED_VALUES:
+        return None
+    nm = node.child_by_field_name("name")
+    return node_text(nm, source) if nm is not None else None
+
+
+def _binds(node: Node, name: str, source: bytes) -> bool:
+    """Whether a parameter or a declaration anywhere in ``node`` binds ``name`` (it then hides
+    the function's own name there)."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type in _BINDINGS:
+            target = n.child_by_field_name("name") or n.child_by_field_name("pattern")
+            if target is not None and target.type == "identifier" and node_text(target, source) == name:
+                return True
+        elif n.type == "identifier" and n.parent is not None and n.parent.type in (
+                "formal_parameters", "catch_clause") or (
+                n.type == "identifier" and n.parent is not None
+                and n.parent.type == "arrow_function"
+                and n.parent.child_by_field_name("parameter") == n):
+            if node_text(n, source) == name:
+                return True
+        stack.extend(n.named_children)
+    return False
+
+
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, barriers: frozenset[tuple[int, int]] = frozenset(),
+    self_call: tuple[str, str, str] | None = None,
 ) -> list[Call]:
+    """``self_call``: (own name, stored name, this file) — a bare call to the function's own name
+    is a call to the function itself, recorded under the name callers use."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -259,6 +299,13 @@ def _calls(
             callee = node_text(fn, source).replace("?.", ".")
             name = callee.rsplit(".", 1)[-1]
             receiver = callee.rsplit(".", 1)[0] if "." in callee else None
+            if self_call is not None and receiver is None and name == self_call[0]:
+                # `factorial(n - 1)` inside `const fact = function factorial`: `fact` itself,
+                # never a same-name function elsewhere in the file
+                if self_call[1] not in seen:
+                    seen.add(self_call[1])
+                    calls.append(Call(name=self_call[1], path=self_call[2]))
+                return
             if name.isidentifier() and name not in seen:
                 seen.add(name)
                 calls.append(Call(name=name, path=resolve(name, receiver, owner)))
@@ -304,6 +351,12 @@ def build_function(
     # this function does not also fold their calls/statements.
     nested = collect_nested_functions(body, source)
     barriers = frozenset(_span(v) for v, _, _ in nested)
+    # `const fact = function factorial() {…}`: `factorial` is the function's own name, the one
+    # stack traces show (alias); inside its body a bare `factorial()` is the function itself,
+    # unless a parameter or a local of that name hides it.
+    own = own_name(node, source)
+    alias = own if own and name and own != name.rsplit(".", 1)[-1] else None
+    self_call = (own, name, path) if alias and not _binds(node, alias, source) else None
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -317,9 +370,10 @@ def build_function(
         params=extract_params(node.child_by_field_name("parameters"), source),
         decorators=decorators,
         returnType=_type_text(node.child_by_field_name("return_type"), source),
+        alias=alias,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name, barriers),
+        calls=_calls(body, source, resolve, class_name, barriers, self_call),
     )
     statements: list[Statement] = []
     if (body is not None and node.type == "arrow_function" and body.type != "statement_block"
