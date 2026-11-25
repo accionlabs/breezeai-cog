@@ -115,6 +115,59 @@ def _module_block(node: Node) -> Node | None:
     return None
 
 
+#: Where a module stores what it exports: `exports.x`, `module.exports.x`, `module.exports`.
+_EXPORTS = ("exports", "module.exports")
+
+
+def _assignment(node: Node) -> Node | None:
+    """The ``assignment_expression`` a statement is made of, else None."""
+    if node.type != "expression_statement":
+        return None
+    inner = [c for c in node.named_children if c.type != "comment"]
+    return inner[0] if len(inner) == 1 and inner[0].type == "assignment_expression" else None
+
+
+def _assignment_counts(root: Node, source: bytes) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for child in root.named_children:
+        a = _assignment(child)
+        left = a.child_by_field_name("left") if a is not None else None
+        if left is not None:
+            key = "".join(node_text(left, source).split())
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _assigned_function(
+    node: Node, source: bytes, counts: dict[str, int],
+) -> tuple[Node, str, str | None] | None:
+    """A function stored where callers find it by name (Rule 2a): (value, name, receiverType).
+    ``exports.x = …`` / ``module.exports.x = …`` → ``x``; ``module.exports = …`` →
+    ``default`` (what ``require`` returns, as an ES default export); ``X.prototype.m = …`` →
+    ``m`` with receiver ``X``. Never an ambiguous name: a chain (``exports.a = exports.b =
+    …``) or a target assigned twice in the file gives None."""
+    a = _assignment(node)
+    if a is None:
+        return None
+    left, right = a.child_by_field_name("left"), a.child_by_field_name("right")
+    if left is None or right is None or right.type not in _FUNC_VALUES + ("function",):
+        return None
+    target = "".join(node_text(left, source).split())
+    if counts.get(target, 0) != 1:
+        return None
+    if target == "module.exports":
+        return right, "default", None
+    owner, _, member = target.rpartition(".")
+    if not member.isidentifier():
+        return None
+    if owner in _EXPORTS:
+        return right, member, None
+    base, _, proto = owner.rpartition(".")
+    if proto == "prototype" and base.isidentifier():
+        return right, member, base
+    return None
+
+
 def _bears_function(obj: Node) -> bool:
     """Whether an object literal *transitively* contains a function-valued property.
     The guard for descending a sub-object (G2): we recurse into a nested object only if
@@ -236,6 +289,22 @@ class TypeScriptParser(BaseParser):
                 decl, exp_decs = _unwrap_export(child)
                 decorators = pending + exp_decs
                 pending = []
+                assigned = _assigned_function(child, source, assignments)
+                if assigned is not None:
+                    # `exports.load = function loadAll() {…}`: a Function named where it is
+                    # stored (Rule 2a); its own name, if any, is its alias.
+                    value, fn_name, receiver = assigned
+                    built.add((value.start_byte, value.end_byte))
+                    fns, fn_stmts = build_function(
+                        value, name=fn_name, kind=value.type, decorators=[], source=source,
+                        path=path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve,
+                    )
+                    if receiver is not None and fns:
+                        fns[0].receiverType = receiver
+                    functions.extend(fns)
+                    nested_statements.extend(fn_stmts)
+                    continue
                 if decl is None and child.type != "export_statement":
                     # Code at file level (`setInterval(function tick() {…})`, `$('#b').click(
                     # function () {…})`): a function with a name of its own, or bound to a name
@@ -300,6 +369,9 @@ class TypeScriptParser(BaseParser):
                     built,
                 )
 
+        # How many times each target is assigned at file level: one assigned twice
+        # (`exports.x = …` then `exports.x = …`) names no Function (Rule 2e).
+        assignments = _assignment_counts(root, source)
         with track_built() as built_spans:
             walk(root)
 

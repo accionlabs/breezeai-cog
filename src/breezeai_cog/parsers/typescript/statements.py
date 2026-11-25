@@ -296,8 +296,17 @@ _FIELDS = ("public_field_definition", "field_definition")
 
 
 def _bound_values(node: Node) -> list[Node] | None:
-    """The values a declaration or class field binds, or None when ``node`` is neither or one
-    of its declarators has no value."""
+    """The values a declaration, a class field or an assignment statement (``exports.load =
+    function …``) binds, or None when ``node`` is none of these or one of its declarators has
+    no value."""
+    if node.type == "expression_statement":
+        inner = [c for c in node.named_children if c.type != "comment"]
+        if len(inner) != 1 or inner[0].type != "assignment_expression":
+            return None
+        node = inner[0]
+    if node.type == "assignment_expression":
+        right = node.child_by_field_name("right")
+        return [right] if right is not None else None
     if node.type in _FIELDS:
         value = node.child_by_field_name("value")
         return [value] if value is not None else None
