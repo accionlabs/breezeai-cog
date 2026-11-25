@@ -52,6 +52,7 @@ _DECLS = (
     "interface_declaration",
     "enum_declaration",
     "function_declaration",
+    "generator_function_declaration",  # `function* g()` / `async function* g()`
     "lexical_declaration",
     "variable_declaration",
 )
@@ -68,7 +69,7 @@ _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
 _TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.", ".mock.")
 
 
-_FUNC_VALUES = ("arrow_function", "function_expression")
+_FUNC_VALUES = ("arrow_function", "function_expression", "generator_function")
 #: Class nodes: their code is the class's (its methods, field initializers), never the file's.
 _CLASS_NODES = frozenset({"class_declaration", "class", "abstract_class_declaration"})
 #: What the file-level pass does not enter: classes, namespaces (walked on their own) and
@@ -463,7 +464,7 @@ class TypeScriptParser(BaseParser):
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_stmts)
-        elif decl.type == "function_declaration":
+        elif decl.type in ("function_declaration", "generator_function_declaration"):
             name_node = decl.child_by_field_name("name")
             fns, fn_stmts = build_function(
                 decl,

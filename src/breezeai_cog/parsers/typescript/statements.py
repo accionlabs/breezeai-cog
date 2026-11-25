@@ -290,7 +290,7 @@ def _wraps_module(node: Node) -> bool:
 
 #: Values that make a declaration or class field a function binding (``const f = () => …``,
 #: ``handle = function () {…}``) — the binding is then extracted as that ``Function``.
-FUNCTION_VALUES = ("arrow_function", "function_expression")
+FUNCTION_VALUES = ("arrow_function", "function_expression", "generator_function")
 _BINDINGS = ("lexical_declaration", "variable_declaration")
 _FIELDS = ("public_field_definition", "field_definition")
 
