@@ -350,6 +350,21 @@ a `Protocol` default calling its implementers' methods) → no path, not the sam
 `object`, `ABC`, `Generic`, `Protocol` add no methods. etl_harvestor: +2,172 CALLS edges (most
 `super().__init__()` and inherited strategy methods), 3 same-file guesses withdrawn.
 
+**Python: calls on a typed receiver** (`parsers/python/receivers.py`, same module). `x.m()` on a
+local and `self.x.m()` on an attribute go through the same resolution order when the receiver
+holds one repository class, read from how it is bound: an annotation (`repo: OrderRepo`,
+`Optional[OrderRepo]`, `OrderRepo | None`, a class-level `repo: OrderRepo`), a constructor call
+(`repo = OrderRepo()`, `self.repo = mod.OrderRepo()`), or `self.repo = repo` with an annotated
+parameter. **Every** binding must name that class — in the function for a local; for an
+attribute in the class, its repository ancestors and every repository subclass that binds it (an
+instance may be one). Any other binding (`x = make()`, `for x in …`, `with … as x`, a tuple target,
+a comprehension or lambda variable of that name, a second class, a method or property of that
+name) → the call keeps what it had. `= None` neither types nor spoils. Each class's attributes are
+in the `python.callables` fact; a local's bindings are read only for a name a cheap text check
+finds annotated or constructed. A library class (`requests.Session`) → unchanged. etl_harvestor:
++1,212 CALLS edges (strategy downloaders `self.session = DefaultDownloader()`), none removed or
+moved; the Python HTTP-helper detector then finds 71 more call sites. Capture time +3–5%.
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |
@@ -359,7 +374,7 @@ a `Protocol` default calling its implementers' methods) → no path, not the sam
 | Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
 | Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | ✓ (+ a bare call is `this`; the class's own and its traits' methods first) |
 | Kotlin, Scala | ✓ | ✓ | — | — |
-| Python | ✓ (package re-exports and submodules followed; declared names only) | `Class.m()` on a repository class (its resolution order) | — | ✓ (`self.m()` / `cls.m()` / `super().m()` through Python's method resolution order) |
+| Python | ✓ (package re-exports and submodules followed; declared names only) | `Class.m()` on a repository class, and a local or `self.x` every binding of which names one repository class (its resolution order) | — | ✓ (`self.m()` / `cls.m()` / `super().m()` through Python's method resolution order) |
 | VB, Ruby | same file only | — | — | — |
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
 | C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
