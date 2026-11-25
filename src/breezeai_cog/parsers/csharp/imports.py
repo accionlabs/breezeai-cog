@@ -711,6 +711,28 @@ def bind_static_import_members(
         bindings[member] = member_file
 
 
+def type_resolver(root: Node, source: bytes, index: CSharpIndex | None, file_path: str):
+    """A simple type name written in this file → the **other** file declaring it, by the same
+    rules as an import edge (:func:`_resolve`, the file's namespaces in scope — read at the
+    first lookup, once)."""
+    if index is None:
+        return lambda name: None
+    scopes: list[set[str]] = []
+
+    def lookup(name: str) -> str | None:
+        if not scopes:
+            found = _file_scopes(root, source) | index.global_usings
+            for child in root.named_children:
+                if child.type == "using_directive":
+                    kind, used, _ = _classify_using(child, source)
+                    if kind in ("using", "global") and used:
+                        found.add(used)
+            scopes.append(found)
+        return _resolve(name, scopes[0], index, file_path)
+
+    return lookup
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, index: CSharpIndex | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
