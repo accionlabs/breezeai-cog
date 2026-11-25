@@ -197,11 +197,10 @@ def test_address_forwarding_helper_binds_at_each_call_site(analyze_files) -> Non
 """
         }
     )
-    # Each call site binds its own address; the helper's own call keeps its record, its address
-    # unknown (a parameter).
+    # Each call site binds its own address; the helper's own call on its address parameter only
+    # defines the registration: no record.
     got = sorted((r.semanticType, r.endpoint or "") for r in _eps(st))
-    assert got == [("eventbus_consumer", "${address}"), ("eventbus_consumer", "svc.a"),
-                   ("eventbus_consumer", "svc.b")]
+    assert got == [("eventbus_consumer", "svc.a"), ("eventbus_consumer", "svc.b")]
 
 
 def test_timer_is_binding(analyze_files) -> None:

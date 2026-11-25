@@ -281,13 +281,13 @@ public class AppVerticle extends Verticle {
 def test_delegation_wrapper_promotes_call_sites(analyze_files) -> None:
     # A private wrapper that forwards its address parameter to registerHandler is an address
     # forwarder: each call site is a consumer with its own address folded, and the wrapper's own
-    # registerHandler keeps its record with no address (never the parameter name).
     st = analyze_files({"src/com/acme/AppVerticle.java": _WRAPPER_SRC.decode()})
     consumers = sorted((s.startLine, s.endpoint or "") for s in st
                        if s.semanticType == "eventbus_consumer")
     # `app` is a local variable: a call site built from it keeps it marked where it stands.
-    assert consumers == [(11, "FULL_${app}/formal"), (12, "${app}/submit"), (13, "view/APP"),
-                         (17, "${address}")]
+    # The wrapper's own registerHandler (line 17) on its address parameter only defines the
+    # registration: no record.
+    assert consumers == [(11, "FULL_${app}/formal"), (12, "${app}/submit"), (13, "view/APP")]
 
 
 def test_send_wrapper_promotes_call_sites(analyze_files) -> None:
