@@ -48,6 +48,7 @@ Every framework construct a parser recognises has **exactly one** role:
 | **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` · a `<ProtectedRoute/>` layout element |
 | **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
 | **None** | is not inbound, or names one handler that has no address of its own | nothing | start-up calls, GraphQL data-type fields, everything else |
+| **Chain step** | adds a step to a route registered before it on the same router, path and verb, in the same statement list (Vert.x `router.get(p).handler(b)` after `router.get(p).handler(a)`) | **no record of its own** — the step goes into that route's `handlerChain` ([§3](#one-chain-one-binding)) | Vert.x-web: one path registered several times, `.handler(a).handler(b)`, `.failureHandler(h)` on the path |
 
 The **handler** is the declaration a binding points at: a method, a function or a component —
 named, or anonymous (an inline function, [§5](#anonymous-handlers)).
@@ -90,6 +91,21 @@ flowchart TD
 
 Layouts, partials, child components and modals never reach the test: no inbound construct
 targets them.
+
+### One chain, one binding
+
+Some frameworks let one address run several handlers in sequence, each passing the request on
+(`ctx.next()`). A **chain** of registrations is **one binding**: it identifies one handler, its
+first step, and its record lives at the first registration with every step in `handlerChain`
+([§5](#5-what-a-binding-records)). Registrations are one chain only when the code shows for
+certain that they are steps of one endpoint in a known order — the same router variable, the same
+verb form and verb, the same path written as the same expression, all in one statement list, no
+`.order(n)` / `.last()`, no differing alternatives (`.produces()` / `.consumes()` /
+`.virtualHost()`), not under a mounted sub-router, and nothing registered on the router between
+the first and the last of them that might match the path. **If any check fails for any
+registration, the whole group keeps one record per registration**, as before: a partial chain
+would give a wrong endpoint count and lose the earlier steps. Which constructs chain is written in
+the framework's role table ([Vert.x](../entry-point-roles/vertx.md)).
 
 > **Decision —** two checks, both about what the source shows: one handler, and an address.
 > **Why:** an earlier check ("not reached only through another binding") asked how the code
@@ -147,7 +163,7 @@ the route-table entry, or — for a registered container — the member.
 | `handlerLine` | Line of the handler's declaration — the start line of its `Function` record, which for C# / Java includes attributes and annotations (for an anonymous handler, the line where the function starts); a line of `handlerPath` when that is set | Yes |
 | `handlerPath` | Repo-relative file of the handler, when it is not the record's own file. A handler that can't be located, or is declared twice, leaves `handlerPath` and `handlerLine` empty — never a guessed file | When different |
 | `guards` | Names of the guards that apply to it, outermost first — scoped ones (on the handler, its class, its route) and global ones (app-wide middleware, filters, router hooks) alike, when the code shows for certain that they cover this binding | When present |
-| `handlerChain` | The steps of a route served by several handlers in sequence, in run order: each `{name, handler, handlerLine, handlerPath, phase}`, every key optional (an anonymous step has `handlerLine` / `handlerPath` only; one that can't be located its `name` only). Steps without `phase` run in list order while each passes the request on (`ctx.next()`, `next()`, `c.Next()`); `phase: "failure"` marks a failure handler on the route's own method and path, which runs when a guard or a step fails, instead of the remaining steps, and is listed after them. `guards` run before the first step; the record's `handler` / `handlerLine` / `handlerPath` are the first step's. Stored as a property, no edges. Schema 2.8; no parser fills it yet | When the route has 2 or more steps, or a failure handler |
+| `handlerChain` | The steps of a route served by several handlers in sequence, in run order: each `{name, handler, handlerLine, handlerPath, phase}`, every key optional (an anonymous step has `handlerLine` / `handlerPath` only; one that can't be located its `name` only). Steps without `phase` run in list order while each passes the request on (`ctx.next()`, `next()`, `c.Next()`); `phase: "failure"` marks a failure handler on the route's own method and path, which runs when a guard or a step fails, instead of the remaining steps, and is listed after them. `guards` run before the first step; the record's `handler` / `handlerLine` / `handlerPath` are the first step's. Stored as a property, no edges. Schema 2.8; filled for Vert.x-web in Java ([§3](#one-chain-one-binding)) | When the route has 2 or more steps, or a failure handler |
 
 ### Anonymous handlers
 
@@ -555,7 +571,9 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
 - **One binding, one record.** Wiring and guards never produce entry-point records (wiring the
-  Target Spec records today is written in its form, §5).
+  Target Spec records today is written in its form, §5). A chain of registrations is one binding
+  as a whole ([§3](#one-chain-one-binding)); a group that fails any chain check keeps one record
+  per registration.
 - **Every record leads to its handler** (`handler` + `handlerLine` + `handlerPath`; for an
   anonymous handler, `handlerLine` alone) — that is where the rest of the flow starts.
 

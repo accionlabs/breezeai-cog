@@ -19,9 +19,8 @@ A ``.order(n)`` or ``.last()`` on either side makes the run order differ from th
 order: that path-less handler is then left out. A handler written inline (a lambda, an anonymous
 class) has no name and is left out, as Express does.
 
-Each registration keeps its own route record: the app's own handlers registered one after
-another on one path are steps of one endpoint, not guards, and no existing field holds them in
-order; they are not merged into one record here.
+The app's own handlers registered one after another on one path are steps of one endpoint,
+not guards: ``route_chains.py`` makes such registrations one record with its ``handlerChain``.
 """
 
 from __future__ import annotations
@@ -31,7 +30,8 @@ from typing import Callable
 from tree_sitter import Node
 
 from ..treesitter import node_text
-from ..vertx_common import HANDLER_CALLS, HTTP_VERBS, is_route_receiver, router_name
+from ..vertx_common import (FAILURE_HANDLER_CALL, HANDLER_CALLS, HTTP_VERBS, is_route_receiver,
+                            router_name)
 
 #: Statement lists: registrations directly in the same one run one after the other.
 _BLOCKS = frozenset({"block", "constructor_body", "switch_block_statement_group", "program"})
@@ -60,7 +60,7 @@ Scope = tuple[int, int]
 Middleware = tuple[Scope, str, str, int, list[str]]
 
 
-def _scope(node: Node) -> Scope:
+def scope_of(node: Node) -> Scope:
     """The statement list ``node`` is directly in (its braces)."""
     child, parent = node, node.parent
     while parent is not None:
@@ -91,10 +91,34 @@ def _chain(call: Node, source: bytes) -> list[tuple[str, Node | None]]:
     return out
 
 
-def _handlers(call: Node, source: bytes) -> list[Node]:
+def chained_handlers(call: Node, source: bytes) -> list[Node]:
     """The arguments of the ``.handler(…)`` / ``.blockingHandler(…)`` calls chained on ``call``
     (``failureHandler`` is not one: it runs only when a handler fails)."""
     return [arg for name, arg in _chain(call, source) if name in HANDLER_CALLS and arg is not None]
+
+
+def failure_args(call: Node, source: bytes) -> list[Node]:
+    """The arguments of the ``.failureHandler(…)`` calls chained on ``call``, in order."""
+    return [arg for name, arg in _chain(call, source)
+            if name == FAILURE_HANDLER_CALL and arg is not None]
+
+
+#: Chained calls that make a registration one of several alternatives for a path.
+_ALTERNATIVES = frozenset({"produces", "consumes", "virtualHost"})
+
+
+def alternatives(call: Node, source: bytes) -> tuple[str, ...]:
+    """``.produces(…)`` / ``.consumes(…)`` / ``.virtualHost(…)`` chained on ``call``, as written,
+    sorted: registrations that differ in these are alternatives for a path, not steps."""
+    return tuple(sorted(
+        f"{name}({node_text(arg, source) if arg is not None else ''})"
+        for name, arg in _chain(call, source) if name in _ALTERNATIVES
+    ))
+
+
+def chained_names(call: Node, source: bytes) -> list[str]:
+    """The names of the calls chained on ``call``, in order."""
+    return [name for name, _ in _chain(call, source)]
 
 
 def reordered(call: Node, source: bytes) -> bool:
@@ -168,9 +192,32 @@ def pathless_middleware(calls: list[Node], source: bytes, routers: frozenset[str
             continue
         if reordered(call, source):
             continue
-        names = [n for h in _handlers(call, source) if (n := handler_name(h, source)) is not None]
+        names = [n for h in chained_handlers(call, source)
+                 if (n := handler_name(h, source)) is not None]
         if names:
-            out.append((_scope(call), recv, verb, call.start_byte, names))
+            out.append((scope_of(call), recv, verb, call.start_byte, names))
+    return out
+
+
+def pathless_calls(calls: list[Node], source: bytes,
+                   routers: frozenset[str]) -> list[tuple[Node, str, str]]:
+    """Every path-less registration on a router — ``router.route()``, ``router.post()`` … with
+    whatever is chained on it (a handler, a failure handler, an order) — as (call, router, verb
+    or ``route``): what may run for a request between two steps of a chain."""
+    out: list[tuple[Node, str, str]] = []
+    for call in calls:
+        name = call.child_by_field_name("name")
+        args = call.child_by_field_name("arguments")
+        if name is None or (args is not None and args.named_children):
+            continue
+        verb = node_text(name, source)
+        if verb != _ANY and verb not in HTTP_VERBS:
+            continue
+        obj = call.child_by_field_name("object")
+        recv = router_name(node_text(obj, source)) if obj is not None else ""
+        if recv and (is_route_receiver(recv.lower()) or recv in routers) \
+                and _chain(call, source):
+            out.append((call, recv, verb))
     return out
 
 
@@ -189,6 +236,6 @@ def route_guards(
                 m_verb == _ANY or (method is not None and m_verb.upper() == method)
             ):
                 names.extend(hs)
-    own = _handlers(call, source)[:-1]  # the last one is the route's handler
+    own = chained_handlers(call, source)[:-1]  # the last one is the route's handler
     names.extend(n for h in own if (n := handler_name(h, source)) is not None and is_library(n))
     return list(dict.fromkeys(names)) or None
