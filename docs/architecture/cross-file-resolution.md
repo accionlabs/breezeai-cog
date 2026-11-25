@@ -339,6 +339,17 @@ a `pkg/a.py` binds `a` to that module. A path is then kept only when the file de
 has none. etl_harvestor: paths to a file declaring no such name 245 → 0, 17 new CALLS edges, none
 lost (a constructor call `Foo()` keeps the file declaring class `Foo`).
 
+**Python: method calls through the class hierarchy** (same module). Each file's classes — bases as
+written, declared methods — are in the `python.callables` fact, keyed by (file, class); a base is
+resolved through that file's imports (re-exports followed, `module.Class` too). `self.m()` /
+`cls.m()` in a method of class `C`, `super().m()` (the order after `C`) and `Klass.m()` on a
+repository class go to the first class of Python's method resolution order (C3) that declares
+`m`. A base outside the repository (a library class, an unresolved name) before that class → no
+path: it may declare `m`. No class in the order declaring `m` (an attribute holding a callable,
+a `Protocol` default calling its implementers' methods) → no path, not the same-file guess.
+`object`, `ABC`, `Generic`, `Protocol` add no methods. etl_harvestor: +2,172 CALLS edges (most
+`super().__init__()` and inherited strategy methods), 3 same-file guesses withdrawn.
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |
@@ -348,7 +359,7 @@ lost (a constructor call `Foo()` keeps the file declaring class `Foo`).
 | Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
 | Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | ✓ (+ a bare call is `this`; the class's own and its traits' methods first) |
 | Kotlin, Scala | ✓ | ✓ | — | — |
-| Python | ✓ (package re-exports and submodules followed; declared names only) | — | — | — |
+| Python | ✓ (package re-exports and submodules followed; declared names only) | `Class.m()` on a repository class (its resolution order) | — | ✓ (`self.m()` / `cls.m()` / `super().m()` through Python's method resolution order) |
 | VB, Ruby | same file only | — | — | — |
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
 | C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
