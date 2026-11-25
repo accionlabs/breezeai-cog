@@ -371,7 +371,8 @@ def test_a_qualified_nested_type_resolves_through_its_outer_class(tmp_path: Path
     assert calls["qualified"] == {"setAppId": _f("Getter.java")}  # same package, no import
     assert calls["generic"] == {"put": _f("Getter.java")}
     assert calls["ownOuter"] == {"own": _f("Handler.java")}  # `Handler.Context` is this file's
-    assert calls["simple"] == {"own": _f("Handler.java")}  # a simple name keeps today's rule
+    # a simple name keeps today's rule; `new Context(…)` is this file's nested class's constructor
+    assert calls["simple"] == {"Context": _f("Handler.java"), "own": _f("Handler.java")}
 
 
 def test_a_method_the_nested_class_does_not_declare_has_no_path(tmp_path: Path) -> None:

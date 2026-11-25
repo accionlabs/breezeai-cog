@@ -90,6 +90,106 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
+#: Declarations of a named type: the scopes a simple type name is looked up in.
+_TYPE_DECLARATIONS = frozenset({
+    "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
+    "annotation_type_declaration",
+})
+
+
+def _type_name(decl: Node, source: bytes) -> str | None:
+    nm = decl.child_by_field_name("name")
+    return node_text(nm, source) if nm is not None else None
+
+
+def _member_types(body: Node, source: bytes) -> set[str]:
+    """The names of the types declared directly in a class, interface or enum body."""
+    return {name for m in class_members(body)
+            if m.type in _TYPE_DECLARATIONS and (name := _type_name(m, source))}
+
+
+class _FileTypes:
+    """The type declarations of one file, gathered in one pass so a lookup per ``new X()`` costs
+    the depth of its node, not the size of the file. Keyed by node start byte (unique per node
+    type here): ``members`` — a class, interface, enum or anonymous class body → the names of the
+    types declared directly in it; ``locals`` — a block → its local type declarations as (start
+    byte, name); ``top`` — the file's top-level types; ``declared`` — every type name, any
+    depth."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        self.members: dict[int, set[str]] = {}
+        self.locals: dict[int, list[tuple[int, str]]] = {}
+        self.top = {name for c in root.named_children
+                    if c.type in _TYPE_DECLARATIONS and (name := _type_name(c, source))}
+        declared: set[str] = set()
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.type in _TYPE_DECLARATIONS and (name := _type_name(node, source)):
+                declared.add(name)
+                parent = node.parent
+                if parent is not None and parent.type in _BLOCKS:
+                    self.locals.setdefault(parent.start_byte, []).append((node.start_byte, name))
+            elif node.type in _BODIES:
+                self.members[node.start_byte] = _member_types(node, source)
+            stack.extend(node.named_children)
+        self.declared = frozenset(declared)
+
+
+#: Bodies whose directly declared types are member types.
+_BODIES = frozenset({"class_body", "interface_body", "enum_body", "annotation_type_body"})
+#: Statement lists a local class may be declared in.
+_BLOCKS = frozenset({"block", "switch_block_statement_group", "constructor_body"})
+
+#: The source last scanned, with its :class:`_FileTypes`.
+_file_types_cache: tuple[bytes, _FileTypes] | None = None
+
+
+def _file_types(root: Node, source: bytes) -> _FileTypes:
+    global _file_types_cache
+    cached = _file_types_cache  # read once: another thread may replace it meanwhile
+    if cached is None or cached[0] is not source:
+        cached = (source, _FileTypes(root, source))
+        _file_types_cache = cached
+    return cached[1]
+
+
+def _own_type_in_scope(name: str, at: Node, source: bytes) -> bool | None:
+    """Whether the simple type name ``name``, written at ``at``, means a type this file declares.
+
+    True: a type in scope there is named ``name``. Java looks a simple type name up from the
+    inside out: a local class declared earlier in an enclosing block, each enclosing type (its
+    own name and its member types), then the file's top-level types; any of these hides a
+    same-package or imported type of the same name (``new Builder()`` inside ``Foo`` is
+    ``Foo.Builder``, not ``a/Builder.java``). None: the file declares a type of that name that is
+    not in scope there (another class's member type, a local class of another method), so which
+    type it means is not known for certain. False: the file declares no type of that name.
+
+    A member type the enclosing class inherits from another file also hides a top-level type of
+    this file; that case (both a type of this file and an inherited member type share the
+    name) is not looked for."""
+    root = at
+    while root.parent is not None:
+        root = root.parent
+    types = _file_types(root, source)
+    if name not in types.declared:
+        return False
+    node: Node | None = at
+    child = at
+    while node is not None:
+        if node.type in _TYPE_DECLARATIONS and _type_name(node, source) == name:
+            return True
+        if node.type in _BODIES and name in types.members.get(node.start_byte, ()):
+            return True  # a member type of an enclosing (or anonymous) class
+        if node.type in _BLOCKS and any(
+                start < child.start_byte and local == name
+                for start, local in types.locals.get(node.start_byte, ())):
+            return True  # a local class declared earlier in the block
+        child = node
+        node = node.parent
+    return True if name in types.top else None
+
+
 def _created_class(
     creation: Node, source: bytes, owner: str | None = None, kind_of: _KindOf | None = None,
 ) -> str | None:
@@ -174,9 +274,10 @@ def _calls(
     ``through``: the body is a method of an anonymous or local class (each enclosing such
     class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
     calls in an anonymous class body are that class's methods' own, so they are left out.
-    ``own_path``: this file; given, ``new X(…)`` of a class of another repository file is a
-    call named ``X`` (its constructor's Function name) with that file's path — an anonymous
-    subclass's too (``_created_class``, with ``kind_of``). ``stop``: a node it is true for is
+    ``own_path``: this file; given, ``new X(…)`` of a repository class is a call named ``X``
+    (its constructor's Function name) with the file declaring X — this file for a type of this
+    file in scope there (:func:`_own_type_in_scope`) — an anonymous subclass's too
+    (``_created_class``, with ``kind_of``). ``stop``: a node it is true for is
     not walked (a method or nested type of a class body, :func:`class_calls`)."""
     if body is None:
         return []
@@ -214,14 +315,22 @@ def _calls(
             if child.type == "object_creation_expression" and own_path is not None:
                 built = _created_class(child, source, owner, kind_of)
                 # `new X(…)` calls X's constructor (a Function named X) when X resolves as Java
-                # resolves a type name (an import, this package, a member type the class
-                # inherits) to another file of the repository. A library class or one of this
-                # file adds nothing.
+                # resolves a type name: a type of this file in scope there (this file; a
+                # factory `create()` returning `new X(…)` reaches X's constructor), else an
+                # import, this package, a member type the class inherits (that file). A
+                # library class adds nothing, and so does a type this file declares out of
+                # scope there, since which X is meant is not certain.
                 if built is not None and (built not in at or calls[at[built]].path is None):
-                    path = resolve(built, None)
-                    if path is None and owner is not None:
-                        path = resolve(built, None, owner, as_type=True)
-                    if path is not None and path != own_path:
+                    own = _own_type_in_scope(built, child, source)
+                    if own:
+                        path = own_path
+                    elif own is None:
+                        path = None
+                    else:
+                        path = resolve(built, None)
+                        if path is None and owner is not None:
+                            path = resolve(built, None, owner, as_type=True)
+                    if path is not None:
                         if built not in at:
                             at[built] = len(calls)
                             calls.append(Call(name=built, path=path))
