@@ -258,6 +258,11 @@ class TypeScriptParser(BaseParser):
                     # Foo(){…})`, `export default function bar(){}`. Descend it with the named-only
                     # collector so the component (and, via build_function's recursion, its nested
                     # handlers) are seeded. Anonymous `export default () => …` yields nothing.
+                    if child.type == "export_statement" and self._export_default(
+                        child, decorators, source, path, fid, seen_ids, capture, limit,
+                        functions, classes, statements, resolve,
+                    ):
+                        continue
                     if child.type == "export_statement":
                         for value_node, nested_name, nested_kind in collect_nested_functions(
                             child, source
@@ -462,6 +467,40 @@ class TypeScriptParser(BaseParser):
                         )
                         functions.extend(fns)
                         statements.extend(fn_stmts)
+
+    def _export_default(
+        self, export, decorators, source, path, fid, seen_ids, capture, limit, functions,
+        classes, statements, resolve,
+    ) -> bool:
+        """``export default () => …`` / ``export default function () {…}``: a Function named
+        ``default`` — what an importer of the default export calls; ``export default class {…}``:
+        a Class ``default``, ``isAnonymous``. True when handled; a named value, an object or
+        any other expression is left to the caller."""
+        if not any(c.type == "default" for c in export.children):
+            return False
+        value = next((c for c in export.named_children
+                      if c.type not in ("decorator", "comment")), None)
+        if value is None:
+            return False
+        if value.type in _FUNC_VALUES and value.child_by_field_name("name") is None:
+            fns, fn_stmts = build_function(
+                value, name="default", kind=value.type, decorators=[], source=source,
+                path=path, parent_id=fid, class_name=None, seen_ids=seen_ids, capture=capture,
+                limit=limit, resolve=resolve,
+            )
+            functions.extend(fns)
+            statements.extend(fn_stmts)
+            return True
+        if value.type == "class" and value.child_by_field_name("name") is None:
+            cls, methods, cls_stmts = build_class(
+                value, decorators, source, path, parent_id=fid, seen_ids=seen_ids,
+                capture=capture, limit=limit, resolve=resolve, default_name="default",
+            )
+            classes.append(cls)
+            functions.extend(methods)
+            statements.extend(cls_stmts)
+            return True
+        return False
 
     def _object_functions(
         self,

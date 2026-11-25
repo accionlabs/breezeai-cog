@@ -73,9 +73,15 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    default_name: str | None = None,
 ) -> tuple[Class, list[Function], list[Statement]]:
+    """``default_name``: the name of a class written without one (``export default class {…}``
+    → ``default``); the Class is then ``isAnonymous``."""
     name_node = cnode.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else ""
+    anonymous = not name and default_name is not None
+    if anonymous:
+        name = default_name
     start, end = line_span(cnode)
     cid = disambiguate(class_id(path, name), seen_ids)
     extends, implements = _heritage(cnode, source)
@@ -248,6 +254,7 @@ def build_class(
         constructorParams=ctor_params,
         decorators=extract_decorators(decorator_nodes, source),
         calls=class_calls or None,
+        isAnonymous=True if anonymous else None,
         startLine=start,
         endLine=end,
     )
