@@ -46,7 +46,7 @@ Every framework construct a parser recognises has **exactly one** role:
 | **Binding** | names **one** handler as the target of an inbound trigger | **one entry-point record** | `@GetMapping("/x")` on a method · `r.get('/x', h)` · `{ path, component }` · `@KafkaListener` · `@Scheduled` |
 | **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; a record is written only when what it carries is recorded nowhere else ([§5](#how-wiring-is-written-today)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
 | **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` · a `<ProtectedRoute/>` layout element |
-| **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
+| **Outbound** | is our code calling something outside | an outbound record at the call that runs with its target (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …), not inside a helper of the repo that only passes the target on ([§5](#where-an-outbound-record-is-written)) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
 | **None** | is not inbound, or names one handler that has no address of its own | nothing | start-up calls, GraphQL data-type fields, everything else |
 | **Chain step** | adds a step to a route registered before it on the same router, path and verb, in the same statement list (Vert.x `router.get(p).handler(b)` after `router.get(p).handler(a)`) | **no record of its own** — the step goes into that route's `handlerChain` ([§3](#one-chain-one-binding)) | Vert.x-web: one path registered several times, `.handler(a).handler(b)`, `.failureHandler(h)` on the path |
 
@@ -271,6 +271,56 @@ The entry points are the `mcp_tool`, `mcp_resource` and `mcp_prompt` records, an
 > point. **Cost:** wiring in another file must reach the binding's record through the repository
 > index ([cross-file route composition](cross-file-resolution.md#8-cross-file-route-composition)).
 
+### Where an outbound record is written
+
+An outbound record is written **where the call runs with its target**, not where the code that
+performs it is defined. It is the outbound twin of the rule above: an entry point lives at the
+binding, which names the handler; an outbound record lives at the call that names the target.
+
+A **helper** is a function of the repository that makes an outbound call on an address taken from
+one of its own parameters, whole or as a part. A **relay** passes its own parameter on to a
+helper's address (an overload, a `getClient(url)` that calls `requestClient(GET, url)`); it is a
+helper too.
+
+```ts
+async function getRequest(url: string) { return axios.get(url); }      // helper
+
+const url = `https://${domain}.atlassian.net/rest/api/3/field`;
+await getRequest(url);                                                  // the call that runs
+```
+
+When a parser **follows** a helper:
+
+| Where | Recorded |
+|---|---|
+| Each call of the helper | The outbound record, its address the caller's argument folded into the helper's address ([§6](#6-address-format-endpoint)); `api_call`: `method` from the helper (fixed, or the argument that carries it). Above: `api_call` `GET https://${domain}.atlassian.net/rest/api/3/field` |
+| The helper's (and each relay's) call on its address parameter | A plain statement: each call of the helper is that call with its target, so a record here would count the request again with no target (`${url}`). A helper that is never called makes no outbound call |
+| A call of the helper the parser cannot link to it (no resolved path) | A plain statement, as before |
+
+Following is per kind and per language, written in the framework's role table: a helper is
+followed only when the parser proves it — a function of the repo, whose outbound call takes the
+parameter as written (a helper that rewrites the address, `"x/" + address`, or one declared with a
+different shape in two files, is not followed). Where a kind is **not followed**, its call keeps
+its record at the call, the parameter marked (`${url}`, [§6](#a-part-read-at-runtime-name)).
+
+| Outbound kind | Helpers followed | Where |
+|---|---|---|
+| `eventbus_send` / `eventbus_publish` | Vert.x (Java) address forwarders | [Vert.x](../entry-point-roles/vertx.md) |
+| `api_call` | Not yet: proposed for Java, TypeScript / JavaScript, Python (BREEZEAI-1654) | — |
+| `route` (`navigation`), `mcp_call` | Not yet | — |
+
+Inbound registrations made through a helper (`registerHandler(address, this)` called with each
+caller's address) follow the binding rules: each call of the helper is a binding
+([Vert.x](../entry-point-roles/vertx.md)).
+
+> **Decision —** an outbound call is recorded where it runs with its target; a helper's own call
+> on its parameter is a plain statement, whether or not its callers resolve.
+> **Why:** the address is known only at the call. A record in the helper carries no target
+> (`${url}` matches nothing), and with its callers recorded too, one request would count twice.
+> **Cost:** when no call of a helper resolves (a shared library whose callers are in another
+> repository, a call the resolver cannot link), the repository shows no record for that request
+> — missing, not wrong.
+
 ### MCP tools
 
 A tool an MCP server exposes is an entry point an AI client calls by name. Every tool is one
@@ -481,7 +531,7 @@ only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such a
 | `router.get(path).handler(h)`, `app.get(ordersPath, h)`, `app.get(routes.orders, h)` (a whole path that is one value: [how it is told from another argument](#a-path-that-is-one-value)) | route | `${path}`, `${ordersPath}`, `${routes.orders}`; `${config:orders.path}` / `${env:ORDERS_PATH}` when the variable is read once from there |
 | `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + order.id })` — and the same shapes in every language's HTTP calls | outbound | `${config.contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{order.id}` |
 | `$.get("/api/users/" + user.id + "/roles")`, `` $.getJSON(`/api/users/${id}`) `` — a jQuery URL reads exactly as the same `axios` URL | outbound | `/api/users/{user.id}/roles`, `/api/users/{id}` |
-| `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` |
+| `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` — when `url` is a parameter of a helper the parser follows, the record is at each call of the helper instead ([§5](#where-an-outbound-record-is-written)) |
 | `new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + fileApiPath)` | outbound | `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}` |
 | `send(config().getObject("api-verticle").getString("address"), …)`, `consumer(config().getString("address"), h)`, `send(System.getenv("BUS") + ".orders", …)` | event bus | `${config:api-verticle.address}`, `${config:address}`, `${env:BUS}.orders` |
 | `axios.get(buildUrl(a, b) \|\| fallback)` | outbound | empty: no part has a name |
@@ -582,6 +632,9 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
   `${name}` where it stands ([§6](#a-part-read-at-runtime-name)), never dropped (a partial path
   would read as the whole address) and never written `{name}` (a path parameter). A message address that can't be resolved
   is empty on both sides — consumer and sender — rather than the symbol it was read from.
+- **One outbound call, one record, where it runs.** An outbound record sits at the call that
+  names its target; inside a followed helper, the call on its own address parameter is a plain
+  statement ([§5](#where-an-outbound-record-is-written)).
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
 - **One binding, one record.** Wiring and guards never produce entry-point records (wiring the
