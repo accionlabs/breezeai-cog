@@ -492,7 +492,10 @@ def detect_vertx(
         tables, replaced = registration_tables(calls, source, consts, index, path, built_by)
         suppress |= replaced
         found.extend(tables)
-        found.extend(http_client_calls(root, calls, source, record, consts))
+        from ..java_http_helpers import defining_requests  # lazy: it imports this package
+        defining = defining_requests(root, source, path, index) \
+            if b"org.vertx.java.core.http" in source else frozenset()
+        found.extend(http_client_calls(root, calls, source, record, consts, defining))
     # Calls to an address forwarder (forwarders.py), any Vert.x version.
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
                                      index, suppress, built_by)

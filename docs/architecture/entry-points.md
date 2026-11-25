@@ -306,7 +306,7 @@ its record at the call, the parameter marked (`${url}`, [§6](#a-part-read-at-ru
 | Outbound kind | Helpers followed | Where |
 |---|---|---|
 | `eventbus_send` / `eventbus_publish` (and `eventbus_consumer` registrations) | Vert.x (Java) address forwarders | [Vert.x](../entry-point-roles/vertx.md) |
-| `api_call` | Not yet: proposed for Java, TypeScript / JavaScript, Python (BREEZEAI-1654) | — |
+| `api_call` | Java: methods whose Vert.x 2 `HttpClient` or Apache `HttpGet`… request takes its URL from a parameter, and relays to them (varargs included); TypeScript / JavaScript and Python: not yet (BREEZEAI-1654) | `parsers/java_http_helpers.py` |
 | `route` (`navigation`), `mcp_call` | Not yet | — |
 
 Inbound registrations made through a helper follow the same rule: each call of the helper is
