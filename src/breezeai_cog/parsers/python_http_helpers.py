@@ -163,12 +163,13 @@ def _rewritten(fn: Node, source: bytes) -> set[str]:
     return out
 
 
-def _arguments(call: Node, source: bytes) -> tuple[list[Node], dict[str, Node], bool]:
-    """(positional arguments, keyword arguments, a ``*args`` / ``**kw`` among the positional)."""
+def _arguments(call: Node, source: bytes) -> tuple[list[Node], dict[str, Node], bool, bool]:
+    """(positional arguments, keyword arguments, a ``*args`` among them, a ``**kw`` among them —
+    it may carry any keyword, the verb too)."""
     args = call.child_by_field_name("arguments")
     positional: list[Node] = []
     keywords: dict[str, Node] = {}
-    splat = False
+    splat = kw_splat = False
     for a in args.named_children if args is not None else []:
         if a.type == "keyword_argument":
             nm, value = a.child_by_field_name("name"), a.child_by_field_name("value")
@@ -177,10 +178,10 @@ def _arguments(call: Node, source: bytes) -> tuple[list[Node], dict[str, Node], 
         elif a.type == "list_splat":
             splat = True
         elif a.type == "dictionary_splat":
-            continue
+            kw_splat = True
         elif a.type != "comment":
             positional.append(a)
-    return positional, keywords, splat
+    return positional, keywords, splat, kw_splat
 
 
 def http_request(call: Node, source: bytes) -> tuple[str | None, Node | None, Node] | None:
@@ -191,7 +192,7 @@ def http_request(call: Node, source: bytes) -> tuple[str | None, Node | None, No
     verb = match_api(callee, callee.rsplit(".", 1)[-1], None, "python")
     if verb is None:
         return None
-    positional, keywords, splat = _arguments(call, source)
+    positional, keywords, splat, _ = _arguments(call, source)
     if splat:
         return None
     if len(positional) >= 2:
@@ -278,7 +279,7 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
             target = node_text(callee, source).removeprefix("self.") if callee is not None else ""
             if not target.isidentifier():
                 continue
-            positional, keywords, splat = _arguments(call, source)
+            positional, keywords, splat, _ = _arguments(call, source)
             if splat:
                 continue
             pairs = []
@@ -459,7 +460,7 @@ def _detect(dc: DetectContext) -> Detection | None:
                 # own-class call is surely the helper's
             url_idx, url_name, template, slot, verb, vidx, vname, vdefault, is_method = \
                 helpers[next(iter(keys))]
-            positional, keywords, splat = _arguments(n, source)
+            positional, keywords, splat, kw_splat = _arguments(n, source)
             if splat or (is_method and receiver[:1].isupper() and receiver.isidentifier()):
                 continue  # `Client.get(c, url)`: the instance passed first shifts the positions
             arg = positional[url_idx] if url_idx < len(positional) else keywords.get(url_name)
@@ -474,7 +475,9 @@ def _detect(dc: DetectContext) -> Detection | None:
                 continue
             if vidx >= 0:
                 vnode = positional[vidx] if vidx < len(positional) else keywords.get(vname)
-                lit = _render_url(vnode, source) if vnode is not None else vdefault
+                # not passed: the parameter's default — unless a `**kw` may pass it
+                lit = _render_url(vnode, source) if vnode is not None \
+                    else (None if kw_splat else vdefault)
                 verb = lit.upper() if lit and lit.upper() in _VERBS else None
             found.append(Emit(n, {"semanticType": "api_call", "method": verb,
                                   "endpoint": template.replace(slot, value)},

@@ -460,7 +460,10 @@ def _detect(dc: DetectContext) -> Detection | None:
             url, template, slot, verb, vidx, framework = helpers[next(iter(keys))]
             args = n.child_by_field_name("arguments")
             named = list(args.named_children) if args is not None else []
-            if url >= len(named) or _relayed(named[url], path, helpers, scopes, source):
+            # a spread (`...args`) may hold any number of arguments: positions from it on are unknown
+            spread = next((i for i, a in enumerate(named) if a.type == "spread_element"),
+                          len(named))
+            if url >= spread or _relayed(named[url], path, helpers, scopes, source):
                 continue  # a relay passing its own parameter on: its callers make the request
             arg = named[url]
             if arg.type == "identifier":
@@ -472,7 +475,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             if value is None:
                 continue
             if vidx >= 0:
-                lit = render_url(named[vidx], source) if vidx < len(named) else None
+                lit = render_url(named[vidx], source) if vidx < spread else None
                 verb = lit.upper() if lit and lit.upper() in _VERBS else None
             fields = {"semanticType": "api_call", "method": verb,
                       "endpoint": template.replace(slot, value)}
