@@ -16,7 +16,14 @@ a class not in the repository           ``endpoint`` only
 a script verticle (``app.js``)          ``endpoint`` the script; ``handlerPath`` when the
                                         file sits next to ``mod.json``
 no ``"main"`` (``"includes"`` only)     none
+no sign of Vert.x (below)               none
 ======================================  ===================================================
+
+A file named ``mod.json`` with a ``"main"`` is not always a Vert.x descriptor. It is one only
+with a Vert.x verticle factory prefix, a key only a module descriptor has (``worker``,
+``multi-threaded``, ``includes``, ``preserve-cwd``, ``auto-redeploy``, ``resident``,
+``system``), or a ``"main"`` naming a Java or Groovy class of the repository; otherwise it
+gives no statement (a wrong deploy is worse than a missing one).
 
 A leading language prefix (``groovy:com.acme.App``) selects the verticle factory, not the
 class: it is stripped from ``endpoint``, as from the File's ``verticleMain``. A ``groovy:``
@@ -48,6 +55,15 @@ _SCRIPT_EXTENSIONS = (".js", ".groovy", ".rb", ".py", ".java", ".scala", ".clj",
 _MAIN_KEY = re.compile(r'"main"\s*:')
 #: The method Vert.x calls on the verticle it creates.
 _START = "start"
+#: Verticle factory prefixes of Vert.x 2's ``langs.properties`` (and the usual extra ones).
+_VERTX_LANGUAGES = frozenset({
+    "java", "groovy", "rhino", "nashorn", "nodyn", "js", "jruby", "ruby", "jython", "python",
+    "scala", "clojure",
+})
+#: Keys only a Vert.x 2 module descriptor has (``main`` aside, which other tools use too).
+_MODULE_KEYS = frozenset({
+    "worker", "multi-threaded", "includes", "preserve-cwd", "auto-redeploy", "resident", "system",
+})
 
 
 def module_deploy(path: str, text: str, data: Any, repo_root: Path,
@@ -61,6 +77,8 @@ def module_deploy(path: str, text: str, data: Any, repo_root: Path,
     main = main.strip()
     prefix = _LANGUAGE_PREFIX.match(main)
     name = main[prefix.end():] if prefix else main
+    if not _is_vertx_module(data, prefix.group(1) if prefix else None, name, indexes):
+        return None  # a `mod.json` of another tool: no verticle is deployed
     handler: str | None = None
     line: int | None = None
     handler_path: str | None = None
@@ -91,6 +109,19 @@ def module_deploy(path: str, text: str, data: Any, repo_root: Path,
         handlerLine=line,
         handlerPath=handler_path,
     )
+
+
+def _is_vertx_module(data: dict[str, Any], language: str | None, name: str,
+                    indexes: Mapping[str, Any]) -> bool:
+    """Whether a ``mod.json`` with a ``"main"`` is a Vert.x 2 module descriptor. The file name and
+    a ``"main"`` key alone are not enough (other tools write them); any one of these is: a Vert.x
+    verticle factory prefix (``groovy:``), a key only a module descriptor has (``worker``,
+    ``includes`` …), or a ``"main"`` naming a Java or Groovy class of the repository."""
+    if language is not None and language in _VERTX_LANGUAGES:
+        return True
+    if _MODULE_KEYS & data.keys():
+        return True
+    return any(getattr(indexes.get(lang), "fqcn", {}).get(name) for lang in ("java", "groovy"))
 
 
 def _start_site(fqcn: str, languages: tuple[str, ...], indexes: Mapping[str, Any], *,
