@@ -316,11 +316,26 @@ different types:
 | A name no in-repo ancestor declares (a field of a library base) takes the file's type for that name, only while every typed declaration of it in the file agrees | constructor `Service(Repo repo) { super(repo) }`, `run() { repo.save() }` | `Repo` |
 | Java, inside an anonymous class body: a bare name is an outer (or inherited outer) field only when the anonymous class's type is a JDK interface that declares no fields (`Runnable`, `Callable`); `this.name` there is the anonymous class's own | `new Runnable() { public void run() { helper.run(); } }` | `Helper`; under a framework's handler (`new Handler<Message>() { … }`) or `new org.lib.Task() { … }` the other rules apply |
 
+**TypeScript / JavaScript: the file must declare what is called** (`parsers/typescript/call_targets.py`).
+A `calls[].path` is kept only when that file declares a function, method or class of that name —
+the `typescript.callables` fact (every name a file binds to a function or class at any depth,
+signatures included: a superset of the Functions the parser emits). Before that check:
+
+| Call | Path |
+|---|---|
+| `foo()`, `Foo.m()`, a type `Foo` imported from a barrel (`import { foo } from './infra'`, `infra/index.ts` re-exporting it) | the file that declares `foo` / `Foo`, re-exports followed (`typescript.declarations`) |
+| `m.fn()` on a module object (`import * as m`, `const m = require('./m')`) | the file declaring the module's export `fn`, re-exports followed |
+| `Foo.m()`, `x.m()` with `x: Foo`, `Foo` a repository class | the file of `Foo` or its nearest in-repo ancestor that declares `m`; none when none does (a library base's method: `find` on a LoopBack repository) |
+| `CHAT_MODES.join()`, `db.transaction()` on an imported value; `x.m()` with `x` of an interface type | the import's / type's file, only when it declares `m` |
+
+Measured on breezeai-backend, hubexo lead-v1 and nimbus-tools: paths to a file with no such
+function 5,166 → 9 (of ~20,500 with a path), 2,385 new CALLS edges, none lost.
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |
 |---|---|---|---|---|
-| TypeScript / JavaScript | ✓ | ✓ (+ built-in guard) | — | ✓ |
+| TypeScript / JavaScript | ✓ (re-exports followed to the declaring file) | ✓ (+ built-in guard; declared methods only, ancestors included) | — | ✓ |
 | C# | ✓ (+ `using static`) | ✓ | ✓ | ✓ |
 | Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
 | Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | ✓ (+ a bare call is `this`; the class's own and its traits' methods first) |

@@ -586,8 +586,16 @@ def _collect_heritage(root: Node, source: bytes, rel: str) -> dict[str, ClassHer
                     extends, _ = _heritage(child, source)
                     methods: dict[str, str | None] = {}
                     for m in (body.named_children if body is not None else []):
-                        if m.type == "method_definition":
+                        if m.type in ("method_definition", "abstract_method_signature"):
                             mn = m.child_by_field_name("name")
+                            if mn is not None:
+                                methods[node_text(mn, source)] = rel
+                        elif m.type in ("public_field_definition", "field_definition") \
+                                and (v := m.child_by_field_name("value")) is not None \
+                                and v.type in ("arrow_function", "function_expression",
+                                               "function"):
+                            # `save = async () => {…}`: a method callers call like any other
+                            mn = m.child_by_field_name("name") or m.child_by_field_name("property")
                             if mn is not None:
                                 methods[node_text(mn, source)] = rel
                     out[node_text(nm, source)] = ClassHeritage(extends=extends, decorators=[], methods=methods)

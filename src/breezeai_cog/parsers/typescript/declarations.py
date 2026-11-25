@@ -370,12 +370,24 @@ register_fact(FactSpec(
     collect=_collect_with_path, resolve=_resolve,
 ))
 
+#: The last index's merged exports: (its facts dict, the merge). An index is read-only once
+#: built, so the merge is made once per index, not on every lookup (a call resolution asks for
+#: it for each import and each call on a module).
+_MERGED: tuple[object, dict[str, FileExports]] | None = None
+
+
 def module_exports(index: Any | None) -> dict[str, FileExports]:
+    global _MERGED
     facts = getattr(index, "facts", None) or {}
+    cached = _MERGED
+    if cached is not None and cached[0] is facts and facts:
+        return cached[1]
     merged: dict[str, FileExports] = {}
     for name in sorted(n for n in facts if n.startswith(FACT_PREFIX)):
         merged.update(facts[name] or {})
     merged.update(index_fact(index, FACT) or {})
+    if facts:
+        _MERGED = (facts, merged)
     return merged
 
 

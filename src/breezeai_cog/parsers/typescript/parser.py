@@ -31,6 +31,8 @@ from .functions import (
     type_map,
 )
 from ..statements_common import reset_http_client_ids, set_http_client_ids
+from .call_targets import checked_resolver, follow_reexports, module_objects
+from .declarations import import_bindings
 from .handlers import handler_locator
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from ..comments_common import comment_statements_for
@@ -241,14 +243,23 @@ class TypeScriptParser(BaseParser):
         internal, external, exports, bindings = extract_imports(
             root, source, path, ctx.repo_root, ctx.resolution_index
         )
-        resolve = make_resolver(  # calls[].path (Tiers 1+2 + Phase 2 + inherited this.M())
-            bindings,
-            defined_names(root, source),
-            path,
-            type_map(root, source),
-            heritage=getattr(ctx.resolution_index, "class_heritage", None),
-            builtin_methods=JS_BUILTIN_METHODS,
-            array_types=JS_ARRAY_TYPES,
+        # calls[].path: an import followed through re-exports to its declaring file, and a path
+        # kept only when that file declares what is called (call_targets.py)
+        imported = import_bindings(root, source)
+        called = follow_reexports(bindings, imported, ctx.resolution_index)
+        types = type_map(root, source)
+        resolve = checked_resolver(
+            make_resolver(  # Tiers 1+2 + Phase 2 + inherited this.M()
+                called,
+                defined_names(root, source),
+                path,
+                types,
+                heritage=getattr(ctx.resolution_index, "class_heritage", None),
+                builtin_methods=JS_BUILTIN_METHODS,
+                array_types=JS_ARRAY_TYPES,
+            ),
+            path=path, bindings=called, types=types, index=ctx.resolution_index,
+            namespaces=module_objects(root, source, imported),
         )
         functions: list[Function] = []
         classes = []
