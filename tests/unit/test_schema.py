@@ -176,3 +176,40 @@ def test_generated_json_schema_is_valid() -> None:
     combined = export_json_schema()
     assert combined["x-version"] == SCHEMA_VERSION
     assert "oneOf" in combined and len(combined["oneOf"]) == 2
+
+
+def test_schema_2_8_fields_round_trip_and_validate() -> None:
+    # Class.calls, FileRecord.calls, Function.alias, Statement.handlerChain (HandlerStep)
+    route = Statement(
+        id="Main.java:41:4", parentId="Main.java#Main#start@24", nodeType="expression_statement",
+        text="router.get(p).handler(a).handler(b);", startLine=41, endLine=41,
+        semanticType="route", handler="handle", handlerLine=52, handlerPath="SessionHandler.java",
+        handlerChain=[
+            {"name": "SessionHandler", "handler": "handle", "handlerLine": 52,
+             "handlerPath": "SessionHandler.java"},
+            {"handlerLine": 44},  # an inline lambda: no name
+            {"name": "BodyHandler"},  # outside the repository: name only
+            {"name": "FailureHandler", "phase": "failure"},
+        ],
+    )
+    fn = Function(id="m.js#fact@1", parentId="m.js", name="fact", type="function_expression",
+                  startLine=1, endLine=1, alias="factorial")
+    record = FileRecord(id="m.js", path="m.js", type="code", language="javascript", loc=3,
+                        functions=[fn], statements=[route],
+                        calls=[Call(name="exit"), Call(name="shutdown", path="s.js")])
+    data = _dump(record)
+    _validate(data, FileRecord)
+    assert data["calls"] == [{"name": "exit"}, {"name": "shutdown", "path": "s.js"}]
+    assert data["functions"][0]["alias"] == "factorial"
+    assert data["statements"][0]["handlerChain"] == [
+        {"name": "SessionHandler", "handler": "handle", "handlerLine": 52,
+         "handlerPath": "SessionHandler.java"},
+        {"handlerLine": 44},
+        {"name": "BodyHandler"},
+        {"name": "FailureHandler", "phase": "failure"},
+    ]
+    # absent when not set: no empty `calls`, `alias` or `handlerChain` keys
+    bare = _dump(FileRecord(id="n.js", path="n.js", type="code", language="javascript", loc=1,
+                            functions=[Function(id="n.js#f@1", parentId="n.js", name="f",
+                                                type="function", startLine=1, endLine=1)]))
+    assert "calls" not in bare and "alias" not in bare["functions"][0]
