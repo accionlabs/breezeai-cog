@@ -173,7 +173,7 @@ def test_address_through_a_helper_or_constructor_is_resolved_at_each_call_site(
         ("Caller.java", "eventbus_consumer", "orders/info", "handle", "InfoHandler.java"),
         ("Caller.java", "eventbus_consumer", "orders/view", "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
+        # the helper's own send on its address parameter only defines the send: no record
         ("MessageHandler.java", "eventbus_consumer", "${address}", "handle", None),
     ]
 
@@ -187,7 +187,6 @@ def test_forwarded_argument_that_is_not_a_constant_leaves_the_address_empty(
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_consumer", "${where}", "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", "${where}", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
         ("MessageHandler.java", "eventbus_consumer", "${address}", "handle", None),
     ]
 
@@ -355,8 +354,8 @@ def test_helper_overload_relaying_to_the_real_helper_is_followed(analyze_files) 
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
         ("Caller.java", "eventbus_send", "orders/direct", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
+        # the overload relaying its address parameter and the real helper's send: definitions;
+        # a send to a constant inside the helper is executed there
         ("EventBusUtil.java", "eventbus_send", "orders/fixed", None, None),
     ]
 
@@ -463,8 +462,9 @@ def test_vertx3_helper_passing_its_address_on_is_followed(analyze_files) -> None
     # own record (address unknown).
     got = sorted(((s.semanticType, s.parentId.rsplit("#", 1)[-1].split("@")[0], s.endpoint or "")
                   for s in st if s.semanticType in ("eventbus_consumer", "eventbus_send")))
+    # `ping` sends on its address parameter: executed, and recorded, where `start` calls it
     assert got == [("eventbus_consumer", "listen", "${address}"), ("eventbus_consumer", "start", "orders.created"),
-                   ("eventbus_send", "ping", "${address}"), ("eventbus_send", "start", "orders.ping")]
+                   ("eventbus_send", "start", "orders.ping")]
 
 
 def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:
@@ -480,19 +480,19 @@ def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:
         == [("eventbus_consumer", "${k}")]
 
 
-# ── a helper keeps its own record ───────────────────────────────────────────────────────────
+# ── a send is recorded where it is executed, not where it is defined ────────────────────────
 
-def test_helper_never_called_keeps_its_own_record(analyze_files) -> None:
-    assert _bus(analyze_files(dict(UTIL))) == [
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None)]
+def test_helper_never_called_sends_nothing(analyze_files) -> None:
+    # its send on its own address parameter only defines one; nothing executes it
+    assert _bus(analyze_files(dict(UTIL))) == []
 
 
-def test_helper_called_only_from_a_file_without_vertx_keeps_its_own_record(analyze_files) -> None:
+def test_helper_called_from_a_file_without_vertx_is_recorded_at_that_call(analyze_files) -> None:
     files = {**UTIL, f"{SRC}Plain.java": "package com.acme;\npublic class Plain { void go() {"
              ' EventBusUtil.send(null, null, null, "orders/plain", 5L); } }\n'}
-    # The detector does not read Plain.java (no Vert.x marker): the helper's send is the record.
+    # Plain.java has no Vert.x marker but names the forwarder's class: its call is the send
     assert _bus(analyze_files(files)) == [
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None)]
+        ("Plain.java", "eventbus_send", "orders/plain", None, None)]
 
 
 def test_helper_declared_with_two_shapes_keeps_both_records(analyze_files) -> None:
