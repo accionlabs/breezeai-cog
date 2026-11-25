@@ -177,3 +177,14 @@ export async function run() {
     assert got[("svc.ts", 5)] == "fetch"
     assert got[("svc.ts", 6)] == "axios"   # through a relay
     assert got[("svc.ts", 7)] is None      # `http` is no client the detectors vouch for
+
+
+def test_a_spread_argument_makes_later_positions_unknown(api_calls) -> None:
+    got = api_calls({"t.ts": """export async function request(method: string, url: string) {
+  return fetch(url, { method });
+}
+""", "u.ts": """import { request } from './t';
+export async function a(m: string[]) { await request(...m, 'https://x.example/c'); }
+export async function b() { await request('POST', 'https://x.example/d'); }
+"""})
+    assert got == [("u.ts", 3, "POST", "https://x.example/d")]
