@@ -546,7 +546,7 @@ def _detect(dc: DetectContext) -> Detection | None:
 
 # Calls in test / fixture files go to a stub (moto, botocore Stubber), so those files are skipped.
 register_detector(Detector(
-    name="aws-sdk-calls", gate=Gate("python", order=50, guard=b"boto3", skip_fixtures=True),
+    name="aws-sdk-calls", gate=Gate("python", order=80, guard=b"boto3", skip_fixtures=True),
     detect=_detect,
     frameworks=("aws-s3", "aws-ssm", "aws-cognito", "aws-lambda", "aws-sns", "aws-sqs",
                 "aws-eventbridge"),
