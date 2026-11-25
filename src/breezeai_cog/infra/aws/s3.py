@@ -48,13 +48,14 @@ def _default_client(settings: Settings) -> Any:
                     "mode": "adaptive",
                 },
                 connect_timeout=settings.storage_connect_timeout,
-                read_timeout=settings.storage_read_timeout,
-            )
-
+                **({"s3": {"addressing_style": "path"}} if settings.aws_endpoint_url_s3 else {}),            
+                )
+            endpoint = {"endpoint_url": settings.aws_endpoint_url_s3} if settings.aws_endpoint_url_s3 else {}
             _client = boto3.client(
                 "s3",
                 region_name=settings.aws_region,
                 config=config,
+                **endpoint,
                 **settings.aws_credentials_kwargs,
             )
 
