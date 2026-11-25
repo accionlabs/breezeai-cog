@@ -30,13 +30,15 @@ proven (the parameter rewritten, two parameters, a config object ``axios({ url }
 (``get(url) { return this.request('GET', url); }``); a helper too.
 
 **Call site** — a call the TypeScript call resolver links (``calls[].path``) to a helper's file
-under the helper's name. A name two functions of one file share is not followed.
+under the helper's name. A name two functions of one file share is not followed. It carries the
+``framework`` the helper's own request would get (``axios``, ``fetch``, ``angular``: the client
+detectors' evidence, read in the helper's file); none when no detector, or two, vouch for it.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -64,8 +66,8 @@ _SCOPES = frozenset({"function_declaration", "generator_function_declaration",
                      "generator_function", "class_declaration", "class"})
 
 #: A helper: (URL parameter index, URL template, its slot, fixed verb or None, verb parameter
-#: index or -1).
-Helper = tuple[int, str, str, str | None, int]
+#: index or -1, the client's framework label or None — what its own request is labelled with).
+Helper = tuple[int, str, str, str | None, int, str | None]
 #: A relay: (own name, callee name, (callee argument index, own parameter index, the argument
 #: rendered with the parameter as ``{name}``, the parameter's name) entries, (callee argument index, verb literal)
 #: pairs). An argument is the parameter itself (``{url}``) or an expression holding it once
@@ -211,6 +213,7 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]], li
                                               list[str]]:
     """This file's helpers (name, helper, the request node), relays and function names."""
     client_ids = collect_http_client_ids(root, source)
+    labels: list[tuple[str, Callable[[Node], bool] | None]] = []
     helpers: list[tuple[str, Helper, Node]] = []
     relays: list[Relay] = []
     names: list[str] = []
@@ -240,7 +243,8 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]], li
                     if verb_arg is not None \
                     and verb_arg.type in ("identifier", "shorthand_property_identifier") \
                     and node_text(verb_arg, source) in usable else -1
-                helpers.append((name, (params.index(refs[0]), template, slot, verb, vidx), call))
+                helpers.append((name, (params.index(refs[0]), template, slot, verb, vidx,
+                                       _framework(call, root, source, labels)), call))
                 continue
             callee = call.child_by_field_name("function")
             text = node_text(callee, source) if callee is not None else ""
@@ -261,6 +265,23 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]], li
             if mapping:
                 relays.append((name, target, mapping, literals))
     return helpers, relays, names
+
+
+def _framework(call: Node, root: Node, source: bytes,
+               labels: list[tuple[str, Callable[[Node], bool] | None]]) -> str | None:
+    """The label the client detectors give this request (``axios``, ``fetch``, ``angular``):
+    the same evidence, read once per file (``labels``). None when none, or more than one,
+    vouches for it."""
+    if not labels:
+        from .typescript_angular.http_client import angular_evidence
+        from .typescript_axios.calls import axios_evidence
+        from .typescript_fetch.calls import fetch_evidence
+        labels.extend((("axios", axios_evidence(root, source)),
+                       ("fetch", fetch_evidence(root, source)),
+                       ("angular", angular_evidence(root, source)
+                        if b"@angular/common/http" in source else None)))
+    hits = [name for name, evidenced in labels if evidenced is not None and evidenced(call)]
+    return hits[0] if len(hits) == 1 else None
 
 
 #: A word an HTTP call of the shared classifier needs in the file: a client name it knows
@@ -313,7 +334,7 @@ def _resolve(values: list[tuple[str, list[tuple[str, Helper]], list[Relay], list
                 own = {i: (p, shown, pname) for i, p, shown, pname in mapping}
                 if name in known or name in twice or helper is None or helper[0] not in own:
                     continue
-                url, template, slot, verb, vidx = helper
+                url, template, slot, verb, vidx, framework = helper
                 param, shown, pname = own[url]
                 new_vidx = -1
                 if vidx >= 0:
@@ -324,7 +345,7 @@ def _resolve(values: list[tuple[str, list[tuple[str, Helper]], list[Relay], list
                         verb = lit if lit in _VERBS else None
                 new_slot = "{" + pname + "}"
                 record_distinct(new, name, (param, template.replace(slot, shown), new_slot, verb,
-                                            new_vidx))
+                                            new_vidx, framework))
             added = {n: h for n, h in new.items() if h is not None}
             if not added:
                 break
@@ -436,7 +457,7 @@ def _detect(dc: DetectContext) -> Detection | None:
             if receiver not in ("", "this") and any(c.name == name and not c.path for c in calls):
                 continue  # another `name` here resolves nowhere (`map.get(…)`): only a bare or
                 # `this.` call is surely the helper's
-            url, template, slot, verb, vidx = helpers[next(iter(keys))]
+            url, template, slot, verb, vidx, framework = helpers[next(iter(keys))]
             args = n.child_by_field_name("arguments")
             named = list(args.named_children) if args is not None else []
             if url >= len(named) or _relayed(named[url], path, helpers, scopes, source):
@@ -453,9 +474,11 @@ def _detect(dc: DetectContext) -> Detection | None:
             if vidx >= 0:
                 lit = render_url(named[vidx], source) if vidx < len(named) else None
                 verb = lit.upper() if lit and lit.upper() in _VERBS else None
-            found.append(Emit(n, {"semanticType": "api_call", "method": verb,
-                                  "endpoint": template.replace(slot, value)},
-                              enrich="unclassified"))
+            fields = {"semanticType": "api_call", "method": verb,
+                      "endpoint": template.replace(slot, value)}
+            if framework:  # the helper's client: its label moves with the request
+                fields["framework"] = framework
+            found.append(Emit(n, fields, enrich="unclassified"))
     return Detection(found) if found else None
 
 
