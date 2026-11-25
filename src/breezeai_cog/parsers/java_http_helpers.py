@@ -22,7 +22,9 @@ statement, whether or not any of its callers resolve.
 
 **Helper** — a method or constructor of the repository whose HTTP client request (a Vert.x 2
 ``HttpClient`` request, an Apache ``new HttpGet(…)`` …, matched exactly as capture matches them)
-takes its URL from one of its parameters, whole or as one part (``apiPath + url``). It keeps the
+takes its URL from one of its parameters, whole or as its last part (``apiPath + url``); a method
+whose URL only takes a base or an id from a parameter (``base + "/orders"``) names its endpoint
+itself and keeps its record. It keeps the
 URL template (``{apiPath}{url}``, the slot ``{url}``) and the verb: fixed by the request, or the
 parameter that carries it (``request(method, …)``).
 
@@ -182,8 +184,8 @@ def _scan_file(root: Node, source: bytes, rel: str
                     continue  # no parameter (an ordinary call), two, or the varargs: no slot
                 slot = "{" + refs[0] + "}"
                 template = request_address(uri, source, {}) or ""
-                if template.count(slot) != 1:
-                    continue
+                if template.count(slot) != 1 or not template.endswith(slot):
+                    continue  # a base or an id from the parameter: the method names its endpoint
                 vidx = -1
                 if verb is None and verb_arg is not None and verb_arg.type == "identifier" \
                         and name_of(verb_arg, source) in params \
