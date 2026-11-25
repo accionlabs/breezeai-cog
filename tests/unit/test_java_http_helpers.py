@@ -183,3 +183,15 @@ def test_method_naming_its_own_endpoint_is_no_helper(api_calls) -> None:
 }}
 """})
     assert got == [("Orders.java", 6, "GET", "${base}/orders")]
+
+
+def test_same_name_on_a_map_is_not_the_helper(api_calls) -> None:
+    got = api_calls({P + "Svc.java": f"""package com.acme;
+{V2}import java.util.Map;
+public class Svc {{
+  private HttpClient client;
+  public HttpClientRequest get(String url) {{ return client.get(url, null); }}
+  public void run(Map<String, String> m) {{ String k = m.get("key"); get("/orders"); }}
+}}
+"""})
+    assert got == [("Svc.java", 8, "GET", "/orders")]

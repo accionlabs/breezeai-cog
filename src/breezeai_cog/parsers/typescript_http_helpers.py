@@ -432,6 +432,10 @@ def _detect(dc: DetectContext) -> Detection | None:
                     and (c.path, name) in helpers}
             if len(keys) != 1:
                 continue
+            receiver = callee.rsplit(".", 1)[0] if "." in callee else ""
+            if receiver not in ("", "this") and any(c.name == name and not c.path for c in calls):
+                continue  # another `name` here resolves nowhere (`map.get(…)`): only a bare or
+                # `this.` call is surely the helper's
             url, template, slot, verb, vidx = helpers[next(iter(keys))]
             args = n.child_by_field_name("arguments")
             named = list(args.named_children) if args is not None else []
