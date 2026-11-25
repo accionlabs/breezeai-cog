@@ -702,16 +702,18 @@ class KotlinParser(BaseParser):
 
     def _collect_calls(self, body: Node, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
         calls: list[Call] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
         def visit(node: Node) -> None:
             for child in node.named_children:
                 if child.type == "call_expression":
                     name = self._call_name(child, source)
-                    if name and name not in seen:
-                        seen.add(name)
+                    if name:
                         receiver = self._call_receiver(child, source)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+                        path = resolve(name, receiver)
+                        if (name, path) not in seen:
+                            seen.add((name, path))
+                            calls.append(Call(name=name, path=path))
                 visit(child)
 
         visit(body)

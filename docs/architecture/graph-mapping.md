@@ -151,6 +151,7 @@ What this means for cog:
 |---|---|
 | `calls: [{name: "findAll", path: "src/order.repo.ts"}]` | `CALLS` to `findAll` in that file (to every overload, if there are several) |
 | `calls: [{name: "map"}]` (no path) | no edge — correct for external or unresolved calls |
+| `calls: [{name: "create", path: "a.ts"}, {name: "create", path: "b.ts"}]` | one `CALLS` per entry: a name appears once per target file, so same-name calls to two files are two edges |
 | `extends: "BaseController"` | `EXTENDS` to every class named `BaseController` in the repo |
 | `extends: "com.acme.BaseController"` or `"Repo<Order>"` | **no edge** — no class has that exact name |
 | a statement whose `parentId` matches nothing in the file | the statement is not stored |

@@ -222,15 +222,21 @@ Vite configs of the **nearest folder that has any** decide together:
 Each function's `calls[]` lists the names it calls. `parsers/callresolve.py` fills
 `calls[].path` with the file that defines the callee, when that can be proven.
 
-In Java a name appears once per function, in order of first appearance, and its `path` comes
-from the first of its calls that resolves:
+A function's `calls` holds **one entry per name and target file**, in order of first appearance,
+in every language. Two calls with the same name that go to different files are two entries, so
+each gets its `CALLS` edge; a call that resolves to no file is kept once per name, beside those
+that do:
 
 ```java
 void load(JsonObject o) {
     String a = container.config().getString("a");  // a library call: no file
     String b = JsonUtil.getString(o, "b");          // a repository class
+    var h = SessionHandler.create(opts);            // `create` in one file …
+    var p = PageHandler.create(opts);               // … and in another
 }
-// calls: [..., { name: "getString", path: ".../JsonUtil.java" }]
+// calls: [..., { name: "getString" }, { name: "getString", path: ".../JsonUtil.java" },
+//         { name: "create", path: ".../SessionHandler.java" },
+//         { name: "create", path: ".../PageHandler.java" }]
 ```
 
 A call in a field initializer (`static final String BUS = Constant.of("ORDERS");`) belongs to no

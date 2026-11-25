@@ -117,7 +117,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def visit(node: Node) -> None:
         # Descend into inline lambdas/anonymous methods — their calls belong to the
@@ -130,9 +130,10 @@ def _calls(
                 func = child.child_by_field_name("function")
                 if func is not None:
                     name, receiver = _callee(func, source)
-                    if name and name not in seen:
-                        seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+                    path = resolve(name, receiver, owner) if name else None
+                    if name and (name, path) not in seen:
+                        seen.add((name, path))
+                        calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)

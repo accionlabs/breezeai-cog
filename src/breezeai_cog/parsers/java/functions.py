@@ -232,7 +232,7 @@ def class_calls(
     """The calls of a class's code outside any method — its field initializers, its
     ``static { … }`` and ``{ … }`` initializer blocks and its enum constants' arguments, the code
     that runs when the class loads or an object is built — in the shape of ``Function.calls``:
-    one per name, in order of first appearance. Methods, constructors, nested types and
+    one per name and target file, in order of first appearance. Methods, constructors, nested types and
     anonymous class bodies have their own calls. Variables resolve with the class's ``fields``
     and the locals of its initializer blocks."""
     if body is None:
@@ -263,13 +263,15 @@ def _calls(
     own_path: str | None = None, kind_of: _KindOf | None = None,
     stop: Callable[[Node], bool] | None = None,
 ) -> list[Call]:
-    """The calls in a method body, one per name in order of first appearance. ``owner`` is the
+    """The calls in a method body, one per name and target file, in order of first appearance
+    (``AppOptions.create()`` and ``SessionHandler.create()`` are two). ``owner`` is the
     simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
     (Java's implicit ``this``), may resolve to an inherited method. ``scope`` is the method's own
     variable types (``method_types``).
 
-    A name's ``path`` comes from the first of its calls that resolves: in ``config.getString(k)``
-    then ``JsonUtil.getString(o, k)`` the second, in-repo call gives ``getString`` its file.
+    A call that resolves to no file is kept once per name, beside those that do:
+    ``config.getString(k)`` then ``JsonUtil.getString(o, k)`` give ``getString`` with no path
+    and ``getString`` with ``JsonUtil``'s file.
 
     ``through``: the body is a method of an anonymous or local class (each enclosing such
     class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
@@ -282,7 +284,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    at: dict[str, int] = {}
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
     # In an anonymous or local class body `this.x` is that class's field, not the outer one's.
     inner_scope = None if scope is None else {k: v for k, v in scope.items() if not k.startswith("this.")}
 
@@ -320,7 +322,7 @@ def _calls(
                 # import, this package, a member type the class inherits (that file). A
                 # library class adds nothing, and so does a type this file declares out of
                 # scope there, since which X is meant is not certain.
-                if built is not None and (built not in at or calls[at[built]].path is None):
+                if built is not None:
                     own = _own_type_in_scope(built, child, source)
                     if own:
                         path = own_path
@@ -330,25 +332,20 @@ def _calls(
                         path = resolve(built, None)
                         if path is None and owner is not None:
                             path = resolve(built, None, owner, as_type=True)
-                    if path is not None:
-                        if built not in at:
-                            at[built] = len(calls)
-                            calls.append(Call(name=built, path=path))
-                        else:
-                            calls[at[built]] = Call(name=built, path=path)
+                    if path is not None and (built, path) not in seen:
+                        seen.add((built, path))
+                        calls.append(Call(name=built, path=path))
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
                     name = node_text(name_node, source)
                     obj = child.child_by_field_name("object")
                     receiver = node_text(obj, source) if obj is not None else None
-                    if name and (name not in at or calls[at[name]].path is None):
+                    if name:
                         path = target(name, receiver, through)
-                        if name not in at:
-                            at[name] = len(calls)
+                        if (name, path) not in seen:
+                            seen.add((name, path))
                             calls.append(Call(name=name, path=path))
-                        elif path is not None:
-                            calls[at[name]] = Call(name=name, path=path)
             nested = through
             if child.type == "class_body":
                 created = node.child_by_field_name("type") \
