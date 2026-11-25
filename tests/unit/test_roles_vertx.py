@@ -630,15 +630,14 @@ def test_pathless_registration_is_a_guard_of_later_routes(analyze_files) -> None
     assert (r.startLine, r.method, r.guards) == (10, "POST", ["BodyHandler"])
 
 
-def test_registrations_of_one_path_keep_their_own_records(analyze_files) -> None:
-    # the app's own handlers on one path are steps of the endpoint, not guards: each
-    # registration stays a binding with its own handler
+def test_registrations_of_one_path_are_one_binding(analyze_files) -> None:
+    # the app's own handlers on one path are steps of the endpoint, not guards: one binding,
+    # at the first registration, leading to the first step, every step in its handlerChain
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);
     router.post("/orders").handler(this::check);
     router.post("/orders").handler(this::handle);""")
     )
-    assert [(r.startLine, r.handler, r.guards) for r in _eps(st)] == [
-        (9, "check", None),
-        (10, "handle", None),
-    ]
+    [r] = _eps(st)
+    assert (r.startLine, r.handler, r.guards) == (9, "check", None)
+    assert [s.handler for s in r.handlerChain] == ["check", "handle"]

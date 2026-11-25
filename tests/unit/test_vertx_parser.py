@@ -412,7 +412,9 @@ def test_route_and_consumer_handlers(tmp_path) -> None:
            if s.semanticType in ("route", "eventbus_consumer", "eventbus_send")}
     assert got == {
         "/a": ("list", 20),            # this::list — declared in this class
-        "/b": (None, 10),              # last chained .handler is the lambda (BodyHandler runs before)
+        # BodyHandler is not imported here, so not Vert.x-web's own: the first step, known by
+        # name only; the lambda is the second step (handlerChain)
+        "/b": (None, None),
         "/c": ("update", None),        # other::update — another object's method: no line
         "/d": (None, None),            # a factory call names no handler
         "q.one": ("onOne", 21),
