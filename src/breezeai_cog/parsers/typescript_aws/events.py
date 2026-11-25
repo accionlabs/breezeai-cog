@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
+from ...emit import file_id
 from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..aws_deploy import deployed_handlers
@@ -318,6 +319,22 @@ def _untyped_cjs_handler(
     return "eventbus_consumer", "aws-lambda", None, hname
 
 
+#: Nodes whose body is a scope of its own: a declaration inside one is not at file level.
+_SCOPES = frozenset({"function_declaration", "function_expression", "arrow_function",
+                     "method_definition", "class_body", "generator_function_declaration"})
+
+
+def _at_file_level(node: Node) -> bool:
+    """Whether a declaration is the file's own code, outside every function and class: its
+    handler record then belongs to the file, not to the handler Function on the same line."""
+    parent = node.parent
+    while parent is not None:
+        if parent.type in _SCOPES:
+            return False
+        parent = parent.parent
+    return True
+
+
 def detect_aws_events(
     root: Node, source: bytes, path: str, *, is_fixture: bool = False
 ) -> Detection | None:
@@ -366,7 +383,7 @@ def detect_aws_events(
             # The handler is declared by this declarator/assignment: its line is the handler's.
             "framework": fw, "handler": hname, "handlerLine": line if hname else None,
             "routeKind": route_kind, "method": "PERIODIC" if sem == "timer" else None,
-        }))
+        }, parent=file_id(path) if _at_file_level(decl) else None))
         is_lambda = True
 
     if not found:
