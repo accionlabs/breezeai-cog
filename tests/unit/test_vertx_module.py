@@ -31,12 +31,16 @@ _FILES = {
     f"inherit/{JAVA}/Base.java": (
         "package com.acme;\n"
         "public class Base extends org.vertx.java.platform.Verticle { public void start() {} }\n"),
-    # a class that is not in the repository
-    f"ext/{RES}/mod.json": '{"main": "io.vertx.Missing"}',
+    # a class that is not in the repository (a module key says it is a Vert.x descriptor)
+    f"ext/{RES}/mod.json": '{"main": "io.vertx.Missing", "multi-threaded": false}',
     # a script verticle next to mod.json, and one that is not in the repository
-    "js/mod.json": '{"main": "app.js"}',
+    "js/mod.json": '{"main": "app.js", "auto-redeploy": true}',
     "js/app.js": "vertx.eventBus();\n",
-    "rb/mod.json": '{"main": "app.rb"}',
+    "rb/mod.json": '{"main": "jruby:app.rb"}',
+    # no sign of Vert.x: a mod.json of another tool, with a "main" of its own
+    "npm/mod.json": '{"name": "x", "main": "index.js"}',
+    "npm/index.js": "module.exports = 1;\n",
+    f"nocls/{RES}/mod.json": '{"main": "com.acme.Nowhere"}',
     # a Groovy class, through the language prefix
     f"gmod/{RES}/mod.json": '{"main": "groovy:com.acme.GV"}',
     "gmod/src/main/groovy/com/acme/GV.groovy": (
@@ -111,6 +115,8 @@ def test_mod_json_main_is_a_verticle_deploy(tmp_path: Path, jobs: int) -> None:
         "over": (d + (1, "com.acme.Over", None, None, None),),
         "lib": (),
         "other": (),
+        "npm": (),
+        "nocls": (),
     }
 
 
