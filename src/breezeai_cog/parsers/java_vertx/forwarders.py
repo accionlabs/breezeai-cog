@@ -12,8 +12,11 @@ The ``vertx.address-forwarders`` fact lists them repo-wide by fully-qualified
 ``pkg.Class.method/arity`` (``pkg.Class.<init>/arity``); each call site is then a record too,
 with its own argument folded (unfoldable → ``endpoint`` empty). The forwarder's own call keeps
 its record (address unknown): it is the call that sends or registers, and a helper whose call
-sites the detector does not read (never called, called from a file without a Vert.x marker, or
-declared with two shapes) would otherwise leave no record at all.
+sites the detector does not read (never called, or declared with two shapes) would otherwise
+leave no record at all — except a **send or publish** on the forwarder's own address parameter:
+that line only defines the send, executed (and recorded) where the forwarder is called with an
+address, so it is a plain statement (:func:`forwarded_addresses`). The call sites are read in
+every Java file that names a forwarder's class, Vert.x marker or not (:func:`has_forwarder_sites`).
 
 A subclass constructor's ``super(…)`` (or a ``this(…)``) calling a self-registering constructor
 is a call site too: the object registered is the subclass, so the record sits on that call with
@@ -431,6 +434,7 @@ def forwarder_sites(
     simple = {c.rsplit(".", 1)[-1] for c in classes}
     names_of = _Names(root, source, index)
     typed = typed_vars(root, source, simple)
+    forwarded = forwarded_addresses(root, source, index)
     methods = method_lines(record.functions)
     found: list[Emit] = []
     spans: set[tuple[int, int]] = set()
@@ -439,6 +443,12 @@ def forwarder_sites(
         # A relay's own call (an overload passing its address parameter on) is a record too,
         # its address unknown: like the helper's own call, it is kept whoever calls it.
         semantic, addr, hidx, own = fwd
+        if semantic != "eventbus_consumer" and addr < len(args) \
+                and passes_own_address(args[addr], forwarded, source):
+            # `send(…, address, …)` inside a forwarder, on its own address parameter: an
+            # overload passing it on defines the send; the forwarder's callers execute it
+            spans.add((node.start_byte, node.end_byte))
+            return
         endpoint = event_address(args[addr], source, consts) if addr < len(args) else None
         handler: str | None = None
         line: int | None = None
@@ -543,21 +553,63 @@ def forwarder_sites(
     return found, spans
 
 
-def has_constructor_sites(source: bytes, index: object | None) -> bool:
-    """The repo has a forwarding constructor and this file calls a ``super(…)`` / ``this(…)``:
-    the cheap check before a file without a Vert.x marker is read (a subclass of a
-    self-registering handler need not name Vert.x)."""
-    if _CTOR_CALL.search(source) is None:
-        return False
+def has_forwarder_sites(source: bytes, index: object | None) -> bool:
+    """The cheap check before a file without a Vert.x marker is read for forwarder call sites:
+    it names a forwarder's class (``EventBusUtil.send(…)``, ``new Relay(…)``, a variable of
+    that type), or calls a ``super(…)`` / ``this(…)`` in a repo with a forwarding constructor (a
+    subclass of a self-registering handler need not name Vert.x)."""
     table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
-    return any("<init>/" in k for k in table)
+    if not table:
+        return False
+    if any("<init>/" in k for k in table) and _CTOR_CALL.search(source) is not None:
+        return True
+    return any(_class_of(k).rsplit(".", 1)[-1].encode() in source for k in table)
 
 
-def constructor_sites(root: Node, source: bytes, path: str, record: FileRecord,
-                      consts: dict[str, str], index: object | None) -> list[Emit]:
-    """The forwarder records of a file without a Vert.x marker: its ``super(…)`` / ``this(…)``
-    calls to a forwarding constructor, and nothing else."""
-    ctors = [n for n in calls_and_creations(root)[1]
-             if n.type == "explicit_constructor_invocation"]
-    return forwarder_sites(root, [], ctors, source, path, record, consts, index, set())[0] \
-        if ctors else []
+def foreign_forwarder_sites(root: Node, source: bytes, path: str, record: FileRecord,
+                            consts: dict[str, str], index: object | None) -> list[Emit]:
+    """The forwarder records of a file without a Vert.x marker: its calls to forwarders (a
+    helper's ``send(…)``, a ``new``, a ``super(…)`` / ``this(…)``), and nothing else — the sends
+    are executed there, whatever the file imports."""
+    calls, creations = calls_and_creations(root)
+    return forwarder_sites(root, calls, creations, source, path, record, consts, index,
+                           set())[0]
+
+
+def forwarded_addresses(root: Node, source: bytes, index: object | None
+                        ) -> dict[tuple[int, int], str]:
+    """This file's send / publish forwarders → the parameter each passes on as the address, by
+    the declaration's span. A send on that parameter inside the forwarder only defines the send:
+    it is executed, and recorded, where the forwarder is called (:func:`passes_own_address`)."""
+    table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
+    if not table:
+        return {}
+    out: dict[tuple[int, int], str] = {}
+    for cls in _scan(root, source, _Names(root, source)):
+        for d in cls.decls:
+            names = _params(d.node, source)
+            if names is None:
+                continue
+            ctor = d.node.type == "constructor_declaration"
+            mname = "<init>" if ctor else name_of(d.node.child_by_field_name("name"), source)
+            fwd = table.get(f"{cls.name}.{mname}/{len(names)}")
+            if fwd is not None and fwd[0] in ("eventbus_send", "eventbus_publish") \
+                    and fwd[1] < len(names):
+                out[(d.node.start_byte, d.node.end_byte)] = names[fwd[1]]
+    return out
+
+
+def passes_own_address(address: Node | None, forwarded: dict[tuple[int, int], str],
+                       source: bytes) -> bool:
+    """Whether ``address`` (a send's address argument) is the address parameter of a forwarder
+    it is written in: the send's definition, not an executed send."""
+    if not forwarded or address is None or address.type != "identifier":
+        return False
+    name = name_of(address, source)
+    node = address.parent
+    while node is not None:
+        if node.type in ("method_declaration", "constructor_declaration"):
+            if forwarded.get((node.start_byte, node.end_byte)) == name:
+                return True
+        node = node.parent
+    return False

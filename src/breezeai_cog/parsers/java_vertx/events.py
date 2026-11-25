@@ -34,7 +34,7 @@ from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
                           invocations, java_string, local_value, value_source)
-from .forwarders import forwarder_sites
+from .forwarders import forwarded_addresses, forwarder_sites, passes_own_address
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
 from .route_chains import Locator, Other, Registration, chain_emits
@@ -211,6 +211,11 @@ def _registration(
         alternatives=alternatives(call, source), chainable=not_mounted and bool(recv),
         emit=None,
     )
+
+
+def _first_arg(call: Node) -> Node | None:
+    args = call.child_by_field_name("arguments")
+    return args.named_children[0] if args is not None and args.named_children else None
 
 
 def _chained(call: Node, source: bytes) -> list[str]:
@@ -496,6 +501,7 @@ def detect_vertx(
     # Calls to an address forwarder (forwarders.py), any Vert.x version.
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
                                      index, suppress, built_by)
+    forwarded = forwarded_addresses(root, source, index)
     found.extend(sites)
     # Middleware for the routes' `guards` (route_guards.py): path-less registrations, and the
     # Vert.x library handlers chained ahead of a route's own handler.
@@ -528,6 +534,11 @@ def detect_vertx(
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
+        if semantic in ("eventbus_send", "eventbus_publish") and passes_own_address(
+                _first_arg(call), forwarded, source):
+            # `sendWithTimeout(address, …)` inside a forwarder, on its own address parameter:
+            # the definition of the send — executed, and recorded, where the forwarder is called
+            continue
         # `router.get(p).failureHandler(h)` alone: error wiring, no request lands here; a chain
         # on that path lists `h` as its failure handler (route_chains.py).
         failure_only = semantic == "route" and failure_handler_only(_chained(call, source))

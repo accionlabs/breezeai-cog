@@ -302,7 +302,8 @@ def test_send_wrapper_promotes_call_sites(analyze_files) -> None:
     )
     st = analyze_files({"src/x/V.java": src})
     sends = sorted((s.startLine, s.endpoint or "") for s in st if s.semanticType == "eventbus_send")
-    assert sends == [(4, "orders.audit"), (6, "${address}")]  # the call site; the wrapper's own send
+    # the call site; the wrapper's own send on its address parameter only defines the send
+    assert sends == [(4, "orders.audit")]
 
 
 def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:

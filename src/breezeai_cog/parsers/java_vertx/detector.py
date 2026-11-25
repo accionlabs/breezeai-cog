@@ -20,20 +20,20 @@ from ..constfold import resolve_all
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from .events import detect_vertx
-from .forwarders import constructor_sites, has_constructor_sites
+from .forwarders import foreign_forwarder_sites, has_forwarder_sites
 
 
 def _detect(dc: DetectContext) -> Detection | None:
     marked = b"io.vertx" in dc.source or b"org.vertx" in dc.source
     index = dc.ctx.resolution_index
-    if not marked and not has_constructor_sites(dc.source, index):
+    if not marked and not has_forwarder_sites(dc.source, index):
         return None
     cross = index.consts if isinstance(index, JavaIndex) else {}  # repo-wide constants
     consts = resolve_all(collect_constants(dc.root, dc.source), base=cross)
     if marked:
         found = detect_vertx(dc.root, dc.source, dc.path, dc.record, consts, index)
     else:
-        found = constructor_sites(dc.root, dc.source, dc.path, dc.record, consts, index)
+        found = foreign_forwarder_sites(dc.root, dc.source, dc.path, dc.record, consts, index)
     return Detection(found, label="vertx") if found else None
 
 
