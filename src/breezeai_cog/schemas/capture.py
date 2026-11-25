@@ -68,6 +68,24 @@ class Call(BaseModel):
     path: str | None = None
 
 
+class HandlerStep(BaseModel):
+    """One step of a route served by several handlers in sequence (``Statement.handlerChain``).
+    Every key is optional: an anonymous step (an inline lambda) has ``handlerLine`` /
+    ``handlerPath`` only, a step that cannot be located (declared outside the repository, or not
+    resolved) has its ``name`` only — never a guessed file."""
+
+    #: The class or function name as written (``SessionHandler``, ``checkSession``).
+    name: str | None = None
+    #: ``handler`` / ``handlerLine`` / ``handlerPath``: as on the route record itself.
+    handler: str | None = None
+    handlerLine: int | None = None
+    handlerPath: str | None = None
+    #: When the step runs: omitted for a normal step; ``failure`` for a failure handler on the
+    #: route's own method and path (Vert.x ``router.get(p).failureHandler(h)``), which runs when a
+    #: guard or a step fails, instead of the remaining steps.
+    phase: str | None = None
+
+
 class Statement(BaseModel):
     """Flat statement. Two-axis type: ``nodeType`` (structural, always present)
     + ``semanticType`` (set only on route/db/api/event detection)."""
@@ -112,6 +130,13 @@ class Statement(BaseModel):
     version: str | None = None
     authRequired: bool | None = None
     guards: list[str] | None = None
+    #: The steps of a route served by several handlers in sequence (Vert.x repeated
+    #: ``router.get(p).handler(…)`` / ``.handler(a).handler(b)``; Express, Gin, Fiber
+    #: ``app.get(p, a, b, h)``), in run order, then the failure handlers (``phase: "failure"``).
+    #: Present only when the route has 2 or more steps or a failure handler; the record's own
+    #: ``handler`` / ``handlerLine`` / ``handlerPath`` are the first step's. ``guards`` run before
+    #: the first step. No edges: a reader parses it for the steps after the first.
+    handlerChain: list[HandlerStep] | None = None
     requestDTO: str | None = None
     responseDTO: str | None = None
     dataLoaders: list[str] | None = None
@@ -153,6 +178,11 @@ class Function(BaseModel):
     # extension-function receiver type, e.g. "String" for `fun String.slugify()`
     # (Kotlin; C# `this`-parameter extension methods are the analogue). Base type only.
     receiverType: str | None = None
+    #: The function's other name, given in the same declaration, when it differs from ``name``:
+    #: the own name of a named function expression stored in a variable (``const fact = function
+    #: factorial() {…}`` → name ``fact``, alias ``factorial``) — the name stack traces show. Never
+    #: a name given elsewhere (``export { load as fetch }``). Calls are never matched by it.
+    alias: str | None = None
     # see FileRecord.uiRole (a function-anchored component / composable / hook)
     uiRole: str | None = None
     metadata: dict[str, Any] | None = None
@@ -234,6 +264,10 @@ class FileRecord(BaseModel):
     # ALL statements (file / class / function-scoped), flat — each links to its owning
     # file/class/function via parentId (HAS_STATEMENT). Not nested inside Function/Class.
     statements: list[Statement] = Field(default_factory=list)
+    #: The calls of the file's code that no function or class holds — top-level statements and the
+    #: bodies of nameless functions at file level (``process.on('SIGTERM', () => exit(0))``) — in
+    #: the shape of ``Function.calls``. Absent when that code makes no call.
+    calls: list[Call] | None = None
     metadata: dict[str, Any] | None = None  # parsed config metadata (config files only)
 
 
