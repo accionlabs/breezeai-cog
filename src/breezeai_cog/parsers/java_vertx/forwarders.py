@@ -10,12 +10,13 @@ is, since the construction is not a send.
 
 The ``vertx.address-forwarders`` fact lists them repo-wide by fully-qualified
 ``pkg.Class.method/arity`` (``pkg.Class.<init>/arity``); each call site is then a record too,
-with its own argument folded (unfoldable → ``endpoint`` empty). The forwarder's own call keeps
-its record (address unknown): it is the call that sends or registers, and a helper whose call
-sites the detector does not read (never called, or declared with two shapes) would otherwise
-leave no record at all — except a **send or publish** on the forwarder's own address parameter:
-that line only defines the send, executed (and recorded) where the forwarder is called with an
-address, so it is a plain statement (:func:`forwarded_addresses`). The call sites are read in
+with its own argument folded (unfoldable → ``endpoint`` empty). The forwarder's own bus call —
+a send, publish or registration on its address parameter, or on the field its constructor sets —
+only defines it: each call of the forwarder makes it, recorded there with its address, so the
+forwarder's own call (and a relay's, on its own parameter) is a plain statement
+(:func:`defining_calls`, :func:`passes_own_address`; contract §5, "Where an outbound record is
+written"). A forwarder declared with two shapes is not in the fact, and keeps its record. The
+call sites are read in
 every Java file that names a forwarder's class, Vert.x marker or not (:func:`has_forwarder_sites`).
 
 A subclass constructor's ``super(…)`` (or a ``this(…)``) calling a self-registering constructor
@@ -280,11 +281,14 @@ def _scan(root: Node, source: bytes, names_of: _Names) -> list[_Class]:
     return classes
 
 
-def _forwarders(root: Node, source: bytes, rel: str
+def _forwarders(root: Node, source: bytes, rel: str,
+                defs: list[tuple[str, SemanticType, Node]] | None = None
                 ) -> tuple[list[tuple[str, Forwarder]], list[Relay]]:
     """This file's address forwarders by ``Class.method/arity`` and its relays (calls passing a
     parameter on to another method of a class, resolved repo-wide). One walk (:func:`_scan`);
-    each method's calls and assignments are then read from what it collected."""
+    each method's calls and assignments are then read from what it collected. ``defs``, when
+    given, also gets each forwarder's own bus call — (key, semantic, call) — for
+    :func:`defining_calls`."""
     found: list[tuple[str, Forwarder]] = []
     relays: list[Relay] = []
     names_of = _Names(root, source)
@@ -330,6 +334,8 @@ def _forwarders(root: Node, source: bytes, rel: str
                 if args[0].type == "identifier" and addr in names and addr not in reassigned:
                     hidx, own = _handler_ref(semantic, args, names, source, rel)
                     found.append((key, (semantic, names.index(addr), hidx, own)))
+                    if defs is not None:
+                        defs.append((key, semantic, call))
                 elif args[0].type in ("identifier", "field_access") and addr not in names \
                         and plain(addr) in stable and not ctor \
                         and semantic == "eventbus_consumer" and len(args) >= 2 \
@@ -342,6 +348,8 @@ def _forwarders(root: Node, source: bytes, rel: str
                         arity = len(_params(node, source) or [])
                         found.append((f"{cls.name}.<init>/{arity}",
                                       (semantic, index, -1, own)))
+                        if defs is not None:
+                            defs.append((f"{cls.name}.<init>/{arity}", semantic, call))
     return found, relays
 
 
@@ -434,19 +442,17 @@ def forwarder_sites(
     simple = {c.rsplit(".", 1)[-1] for c in classes}
     names_of = _Names(root, source, index)
     typed = typed_vars(root, source, simple)
-    forwarded = forwarded_addresses(root, source, index)
+    forwarded = own_addresses(root, source, index)
     methods = method_lines(record.functions)
     found: list[Emit] = []
     spans: set[tuple[int, int]] = set()
 
     def emit(node: Node, cls: str, fwd: Forwarder, args: list[Node]) -> None:
-        # A relay's own call (an overload passing its address parameter on) is a record too,
-        # its address unknown: like the helper's own call, it is kept whoever calls it.
         semantic, addr, hidx, own = fwd
-        if semantic != "eventbus_consumer" and addr < len(args) \
-                and passes_own_address(args[addr], forwarded, source):
-            # `send(…, address, …)` inside a forwarder, on its own address parameter: an
-            # overload passing it on defines the send; the forwarder's callers execute it
+        if addr < len(args) and passes_own_address(args[addr], forwarded, source):
+            # `send(…, address, …)` / `register(address, h)` inside a forwarder, on its own
+            # address parameter: an overload passing it on defines the send or registration;
+            # the forwarder's callers make it
             spans.add((node.start_byte, node.end_byte))
             return
         endpoint = event_address(args[addr], source, consts) if addr < len(args) else None
@@ -576,11 +582,29 @@ def foreign_forwarder_sites(root: Node, source: bytes, path: str, record: FileRe
                            set())[0]
 
 
-def forwarded_addresses(root: Node, source: bytes, index: object | None
-                        ) -> dict[tuple[int, int], str]:
-    """This file's send / publish forwarders → the parameter each passes on as the address, by
-    the declaration's span. A send on that parameter inside the forwarder only defines the send:
-    it is executed, and recorded, where the forwarder is called (:func:`passes_own_address`)."""
+def defining_calls(root: Node, source: bytes, index: object | None
+                   ) -> set[tuple[int, int]]:
+    """This file's bus calls that **define** a forwarder: a send, publish or registration on the
+    forwarder's own address — its parameter (``send(address, …)``,
+    ``registerHandler(address, handler)``) or the field its constructor sets
+    (``registerHandler(address, this)`` in ``deploy()``). Only forwarders the repo-wide fact
+    keeps count (one declared twice with a different shape is not followed). Each call of the
+    forwarder is the send or the registration, recorded there with its address; the defining
+    call is a plain statement (contract §5, "Where an outbound record is written")."""
+    table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
+    if not table:
+        return set()
+    defs: list[tuple[str, SemanticType, Node]] = []
+    _forwarders(root, source, "", defs)
+    return {(call.start_byte, call.end_byte) for key, semantic, call in defs
+            if (fwd := table.get(key)) is not None and fwd[0] == semantic}
+
+
+def own_addresses(root: Node, source: bytes, index: object | None
+                  ) -> dict[tuple[int, int], str]:
+    """This file's forwarders → the parameter each takes its address from, by the declaration's
+    span: a call made on that parameter inside the forwarder (a relay to an overload) defines the
+    send or registration; the forwarder's callers make it (:func:`passes_own_address`)."""
     table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}
     if not table:
         return {}
@@ -593,16 +617,15 @@ def forwarded_addresses(root: Node, source: bytes, index: object | None
             ctor = d.node.type == "constructor_declaration"
             mname = "<init>" if ctor else name_of(d.node.child_by_field_name("name"), source)
             fwd = table.get(f"{cls.name}.{mname}/{len(names)}")
-            if fwd is not None and fwd[0] in ("eventbus_send", "eventbus_publish") \
-                    and fwd[1] < len(names):
+            if fwd is not None and fwd[1] < len(names):
                 out[(d.node.start_byte, d.node.end_byte)] = names[fwd[1]]
     return out
 
 
 def passes_own_address(address: Node | None, forwarded: dict[tuple[int, int], str],
                        source: bytes) -> bool:
-    """Whether ``address`` (a send's address argument) is the address parameter of a forwarder
-    it is written in: the send's definition, not an executed send."""
+    """Whether ``address`` (an address argument) is the address parameter of a forwarder it is
+    written in: the definition of a send or registration, not one that is made."""
     if not forwarded or address is None or address.type != "identifier":
         return False
     name = name_of(address, source)

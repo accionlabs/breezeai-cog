@@ -305,13 +305,14 @@ its record at the call, the parameter marked (`${url}`, [§6](#a-part-read-at-ru
 
 | Outbound kind | Helpers followed | Where |
 |---|---|---|
-| `eventbus_send` / `eventbus_publish` | Vert.x (Java) address forwarders | [Vert.x](../entry-point-roles/vertx.md) |
+| `eventbus_send` / `eventbus_publish` (and `eventbus_consumer` registrations) | Vert.x (Java) address forwarders | [Vert.x](../entry-point-roles/vertx.md) |
 | `api_call` | Not yet: proposed for Java, TypeScript / JavaScript, Python (BREEZEAI-1654) | — |
 | `route` (`navigation`), `mcp_call` | Not yet | — |
 
-Inbound registrations made through a helper (`registerHandler(address, this)` called with each
-caller's address) follow the binding rules: each call of the helper is a binding
-([Vert.x](../entry-point-roles/vertx.md)).
+Inbound registrations made through a helper follow the same rule: each call of the helper is
+the binding, with its address, and the helper's own registration on its parameter, or on the
+field its constructor sets (`registerHandler(address, this)`), is a plain statement — one
+consumer, one record ([Vert.x](../entry-point-roles/vertx.md)).
 
 > **Decision —** an outbound call is recorded where it runs with its target; a helper's own call
 > on its parameter is a plain statement, whether or not its callers resolve.
