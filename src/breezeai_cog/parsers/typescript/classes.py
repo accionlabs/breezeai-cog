@@ -170,9 +170,10 @@ def build_class(
                     # `static { register(() => …); }`: runs when the class loads — the class's code.
                     _nested_members(child, name, cid, source, path, seen_ids, capture, limit,
                                     resolve, typed_db_ids, methods, statements)
-                elif is_interface and child.type == "method_signature":
-                    # Interface method signature (no body). Same contract shape as an
-                    # abstract method — a callable member with params + return type; emit as
+                elif child.type == "abstract_method_signature" or (
+                        is_interface and child.type == "method_signature"):
+                    # Interface method signature, or an abstract class's `abstract m(): T;` (no
+                    # body). The same contract shape — a callable member with params + return type; emit as
                     # a Function (calls:[]) so callers of the interface method resolve to
                     # implementers via IMPLEMENTS + name match. Other member kinds (field +
                     # call/construct/index signatures) fall to the Statement branch below.

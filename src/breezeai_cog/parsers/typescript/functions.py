@@ -36,7 +36,7 @@ def defined_names(root: Node, source: bytes) -> set[str]:
                 for d in c.named_children:
                     if d.type == "variable_declarator":
                         val = d.child_by_field_name("value")
-                        if val is not None and val.type in ("arrow_function", "function_expression", "function"):
+                        if val is not None and val.type in ("arrow_function", "function_expression", "function", "generator_function"):
                             nm = d.child_by_field_name("name")
                             if nm is not None:
                                 names.add(node_text(nm, source))
@@ -161,7 +161,7 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-NESTED_FN_VALUE_TYPES = ("arrow_function", "function_expression", "function")
+NESTED_FN_VALUE_TYPES = ("arrow_function", "function_expression", "function", "generator_function")
 
 #: Spans of the nodes :func:`build_function` turned into a Function during one file's parse
 #: (:func:`track_built`): the file-level pass stops there, since their code is theirs.
