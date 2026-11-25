@@ -73,7 +73,7 @@ def test_inventory_in_run_order() -> None:
         "scala": ["akka-events", "spark"],
         "typescript": ["express", "fastify", "aws-events", "nestjs-clients", "hubspot",
                        "chargebee", "ts-force", "apollo", "aws-sdk-calls", "jquery-calls", "axios-calls", "fetch-calls",
-                       "angular-http-client",
+                       "angular-http-client", "typescript-http-helpers",
                        "graphql-client",
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",

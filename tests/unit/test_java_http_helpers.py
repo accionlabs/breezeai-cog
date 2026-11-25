@@ -172,3 +172,14 @@ def test_varargs_helper_and_relay(api_calls) -> None:
 }}
 """})
     assert got == [("Use.java", 5, "GET", "/a"), ("Use.java", 6, "GET", "/b")]
+
+
+def test_method_naming_its_own_endpoint_is_no_helper(api_calls) -> None:
+    got = api_calls({P + "Orders.java": f"""package com.acme;
+{V2}public class Orders {{
+  private HttpClient client;
+  public void load(String base) {{ HttpClientRequest r = client.get(base + "/orders", null); }}
+  public void call() {{ load("http://svc"); }}
+}}
+"""})
+    assert got == [("Orders.java", 6, "GET", "${base}/orders")]
