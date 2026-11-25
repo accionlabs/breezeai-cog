@@ -152,6 +152,15 @@ body is its own, and so are its decorators (`@retry(3)` is in `decorators`, not 
 parameter defaults. A module-level local's class is not read for these calls (any function may
 rebind it with `global`).
 
+**C# code outside any method.** Field and event initializers (`int _seed = Rules.Run();`,
+`event EventHandler E = (s, e) => Log();`) and property bodies and initializers (`get { … }`,
+`set { … }`, `bool IsValid => Check(Name);`, `{ get; } = new X()`) run when the object is built
+or the property is read; no `Function` holds them. Their calls are the class's (`Class.calls`,
+the shape of `Function.calls`, present only when there is one). A nested type's members are its
+own. A constructor's `: base(…)` / `: this(…)` arguments run as part of the constructor: their
+calls are first in the constructor's own `calls`. `nameof(…)` is a compile-time name, not a
+call.
+
 **Java anonymous classes** (`new T(…) { … }`) are a `Class` each (`isAnonymous: true`), with
 their methods as `Function`s; the enclosing method keeps only its own statements and calls.
 
