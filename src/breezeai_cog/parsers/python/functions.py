@@ -120,7 +120,7 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
 def _extract_calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     barriers: frozenset[tuple[int, int]] = frozenset(), owner: str | None = None,
-    params: Node | None = None,
+    params: Node | None = None, typed_locals: bool = True,
 ) -> list[Call]:
     """``owner``: the class the function is a method of (``self.m()`` / ``super().m()``).
     ``params``: the function's parameters, for the classes its local names hold (read once, at
@@ -145,7 +145,7 @@ def _extract_calls(
                     callee = node_text(fn, source)
                     name = callee.rsplit(".", 1)[-1]
                     receiver = callee.rsplit(".", 1)[0] if "." in callee else None
-                    if receiver is not None and receiver.isidentifier() \
+                    if typed_locals and receiver is not None and receiver.isidentifier() \
                             and receiver not in ("self", "cls"):
                         nonlocal scope, candidates
                         if candidates is None:  # a cheap check first, the full walk if needed
@@ -164,6 +164,30 @@ def _extract_calls(
 
     visit(body)
     return calls
+
+
+_DEFINITIONS = frozenset({"function_definition", "class_definition", "decorated_definition"})
+
+
+def scope_calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver
+                ) -> list[Call]:
+    """The calls of a module's or class body's own code: everything outside its ``def`` and
+    ``class`` definitions (their bodies are their own; decorators are no call the scope makes —
+    they are the definition's ``decorators``) — control-flow blocks (``if __name__ ==
+    "__main__":``, ``with DAG(…):``) and lambdas included. A module-level name may be rebound in
+    any function (``global``), so no local's class is read here."""
+    if body is None:
+        return []
+    spans: set[tuple[int, int]] = set()
+    stack = [body]
+    while stack:
+        n = stack.pop()
+        for c in n.named_children:
+            if c.type in _DEFINITIONS:
+                spans.add(_span(c))
+            else:
+                stack.append(c)
+    return _extract_calls(body, source, resolve, frozenset(spans), None, None, typed_locals=False)
 
 
 def build_function(
