@@ -118,8 +118,9 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
 
 def _extract_calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
-    barriers: frozenset[tuple[int, int]] = frozenset(),
+    barriers: frozenset[tuple[int, int]] = frozenset(), owner: str | None = None,
 ) -> list[Call]:
+    """``owner``: the class the function is a method of (``self.m()`` / ``super().m()``)."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -138,7 +139,7 @@ def _extract_calls(
                     callee = node_text(fn, source)
                     name = callee.rsplit(".", 1)[-1]
                     receiver = callee.rsplit(".", 1)[0] if "." in callee else None
-                    path = resolve(name, receiver) if name else None
+                    path = resolve(name, receiver, owner) if name else None
                     if name and (name, path) not in seen:
                         seen.add((name, path))
                         calls.append(Call(name=name, path=path))
@@ -191,7 +192,7 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_extract_calls(body, source, resolve, barriers),
+        calls=_extract_calls(body, source, resolve, barriers, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

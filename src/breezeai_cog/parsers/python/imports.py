@@ -25,6 +25,21 @@ this file (:class:`_Roots`), and linked only when exactly one place has it:
 Only ancestors are searched, so a sibling app is never linked; a module found at two places is
 ambiguous and stays external. Checked on two multi-app repositories: 2,675 links, every imported
 name present in the linked file.
+
+**A package folder put on ``sys.path``** (:func:`import_roots`). Some runners add a folder that is
+itself a package: Airflow its ``plugins/`` folder, pytest a ``tests/`` package's folder. The code
+inside then imports its packages without the folder's name::
+
+    harvestor-v2/plugins/__init__.py
+    harvestor-v2/plugins/strategies/dach/ag_baden_crawl.py:  from strategies.base.crawl_strategy import …
+    harvestor-v2/plugins/utils/string_helper.py              ← `from utils.string_helper import …`
+
+A package folder ``P`` above a file is a root when the repository's own code shows it: a file in
+``P/<pkg>/…`` imports ``<pkg>`` absolutely (``P``'s name left out), which only runs with ``P`` on
+``sys.path``. Every import of a file under ``P`` may then resolve there — a dotted one or a single
+name (``from utils import x``) — except a standard-library name, which Python finds first.
+Checked on etl_harvestor: 5,788 more imports linked, every imported name present in the linked
+file (6,305 of 6,305).
 """
 
 from __future__ import annotations
@@ -35,6 +50,9 @@ from pathlib import Path
 
 from tree_sitter import Node
 
+import functools
+import re
+
 from ...utils import repo_relative
 from ..treesitter import node_text
 
@@ -44,6 +62,48 @@ def _dotted(node: Node, source: bytes) -> str:
 
 
 _PROJECT_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
+#: An import line's first module name: ``from a.b import c`` / ``import a.b`` → ``a``.
+_IMPORT_LINE = re.compile(rb"^[ \t]*(?:from[ \t]+([A-Za-z_]\w*)[\w.]*[ \t]+import\b|"
+                          rb"import[ \t]+([A-Za-z_]\w*))", re.M)
+#: Folders never read for evidence: virtual environments, installed and generated code.
+_SKIP_DIRS = frozenset({".git", ".venv", "venv", "env", ".tox", "node_modules", "site-packages",
+                        "__pycache__", "build", "dist"})
+_STDLIB = frozenset(sys.stdlib_module_names)
+
+
+@functools.lru_cache(maxsize=8)
+def import_roots(repo_root: Path) -> frozenset[Path]:
+    """Package folders the repository's code shows are on ``sys.path`` (module docstring): ``P``
+    when a file under ``P/<pkg>/`` imports ``<pkg>`` absolutely. One scan of the repository's
+    ``.py`` files per process, by pattern (no parse)."""
+    found: set[Path] = set()
+    for folder, dirs, files in os.walk(repo_root):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+        here = Path(folder)
+        if here == repo_root or not any(f.endswith(".py") for f in files):
+            continue
+        # (P, <pkg>) for each package ancestor P of this folder below the root
+        rel = here.relative_to(repo_root).parts
+        pairs = [(repo_root.joinpath(*rel[:i]), rel[i]) for i in range(1, len(rel))
+                 if (repo_root.joinpath(*rel[:i]) / "__init__.py").is_file()]
+        pairs = [(p, pkg) for p, pkg in pairs if p not in found and pkg not in _STDLIB]
+        if not pairs:
+            continue
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            try:
+                text = (here / name).read_bytes()
+            except OSError:
+                continue
+            heads = {(m.group(1) or m.group(2)).decode() for m in _IMPORT_LINE.finditer(text)}
+            for p, pkg in pairs:
+                if pkg in heads:
+                    found.add(p)
+            pairs = [(p, pkg) for p, pkg in pairs if p not in found]
+            if not pairs:
+                break
+    return frozenset(found)
 
 
 def _module_file(base: Path, parts: list[str]) -> Path | None:
@@ -68,6 +128,7 @@ class _Roots:
 
     def __init__(self, file_path: str, repo_root: Path) -> None:
         self.repo_root = repo_root
+        self.evidence = import_roots(repo_root)
         self.folder = (repo_root / file_path).parent
         self._seen: dict[tuple[Path, str], bool] = {}
         self._listing: dict[Path, frozenset[str]] = {}
@@ -125,6 +186,8 @@ class _Roots:
                     folders.append(folder / "src")
             elif here and len(parts) > 1 and not self._is_package(folder):
                 folders.append(folder)
+            elif here and folder in self.evidence and first not in _STDLIB:
+                folders.append(folder)  # a package folder the code shows is on sys.path
         if (len(parts) == 1 and self.folder not in folders and self._holds(self.folder, first)
                 and not self._is_package(self.folder)):
             folders.insert(0, self.folder)  # a script: its own folder is on sys.path

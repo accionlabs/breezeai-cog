@@ -145,7 +145,7 @@ How each language turns an import into a file:
 | C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s, and `<Using Include>` from the project's `.csproj` or a `Directory.Build.props` above it). A type in another project counts only if this project references it (`<ProjectReference>`, transitively). Bound only if exactly one other file matches; on a tie between types, the one in the same `.csproj` wins. A type declared only in this file is ignored, so `class MassUpdate : SplendidCRM.MassUpdate` still links to the base. The same rules (`type_files`) bind additive detectors' names. | every namespace `using`; unresolved static / alias targets |
 | VB | Not resolved (`Imports` names namespaces) | every `Imports` |
 | TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias or Vite `resolve.alias` entry, then that config's `baseUrl` (`from 'src/x'` with `"baseUrl": "./"` → `src/x.ts`; only when the import's first segment names a file or folder there, so a package import is never looked for on disk). Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
-| Python | `import a.b` / `from a.b import x` from the repo root first; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. Then the folders Python could find it in from the file (an app run from its own folder): a dotted import under a non-package folder above the file (a `sys.path` entry), a single name only in a script's own folder; either under a declared project (`pyproject.toml` / `setup.py` / `setup.cfg`) and its `src/`. Only ancestors, never a sibling app; found at two places → not linked | anything not found, or ambiguous |
+| Python | `import a.b` / `from a.b import x` from the repo root first; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. Then the folders Python could find it in from the file (an app run from its own folder): a dotted import under a non-package folder above the file (a `sys.path` entry), a single name only in a script's own folder; either under a declared project (`pyproject.toml` / `setup.py` / `setup.cfg`) and its `src/`; and any import (a single name too, never a standard-library name) under a **package** folder above the file that the repository's code shows is on `sys.path` — a file in `P/<pkg>/…` imports `<pkg>` without `P.` (Airflow's `plugins/`, a pytest `tests/`). Only ancestors, never a sibling app; found at two places → not linked | anything not found, or ambiguous |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
 | C++, C | `#include "x.h"` looked up by file **basename** across the C and C++ indexes (a header is in one of them) | `<system>` includes; unknown or ambiguous basenames |
 
@@ -339,6 +339,17 @@ a `pkg/a.py` binds `a` to that module. A path is then kept only when the file de
 has none. etl_harvestor: paths to a file declaring no such name 245 → 0, 17 new CALLS edges, none
 lost (a constructor call `Foo()` keeps the file declaring class `Foo`).
 
+**Python: method calls through the class hierarchy** (same module). Each file's classes — bases as
+written, declared methods — are in the `python.callables` fact, keyed by (file, class); a base is
+resolved through that file's imports (re-exports followed, `module.Class` too). `self.m()` /
+`cls.m()` in a method of class `C`, `super().m()` (the order after `C`) and `Klass.m()` on a
+repository class go to the first class of Python's method resolution order (C3) that declares
+`m`. A base outside the repository (a library class, an unresolved name) before that class → no
+path: it may declare `m`. No class in the order declaring `m` (an attribute holding a callable,
+a `Protocol` default calling its implementers' methods) → no path, not the same-file guess.
+`object`, `ABC`, `Generic`, `Protocol` add no methods. etl_harvestor: +2,172 CALLS edges (most
+`super().__init__()` and inherited strategy methods), 3 same-file guesses withdrawn.
+
 **Which languages use which steps:**
 
 | Language | Imports + same file | Receiver type | Extension methods | Inherited methods |
@@ -348,7 +359,7 @@ lost (a constructor call `Foo()` keeps the file declaring class `Foo`).
 | Java | ✓ | ✓ (declared methods only) | — | ✓ (+ a bare call is `this`) |
 | Groovy | ✓ | ✓ (declared methods only, property accessors and traits included) | — | ✓ (+ a bare call is `this`; the class's own and its traits' methods first) |
 | Kotlin, Scala | ✓ | ✓ | — | — |
-| Python | ✓ (package re-exports and submodules followed; declared names only) | — | — | — |
+| Python | ✓ (package re-exports and submodules followed; declared names only) | `Class.m()` on a repository class (its resolution order) | — | ✓ (`self.m()` / `cls.m()` / `super().m()` through Python's method resolution order) |
 | VB, Ruby | same file only | — | — | — |
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
 | C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
