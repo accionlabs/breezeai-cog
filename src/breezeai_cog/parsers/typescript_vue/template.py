@@ -129,14 +129,13 @@ def collect_vue_template_statements(
         node = stack.pop()
         start, col = node.start_point[0] + 1, node.start_point[1]
         text = node_text(node, source)
-        clip = text if len(text) <= limit else text[:limit]
 
         def _emit(**fields: object) -> None:
             out.append(
                 Statement(
                     id=disambiguate(statement_id(path, start, col), seen_ids),
                     parentId=parent_id,
-                    text=clip,
+                    text=text,
                     startLine=start,
                     endLine=node.end_point[0] + 1,
                     path=path,

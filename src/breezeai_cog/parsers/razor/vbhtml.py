@@ -95,7 +95,7 @@ def collect_vbhtml_statements(
         text = source[start:end].decode("utf-8", "replace").rstrip()
         out.append(Statement(
             id=disambiguate(statement_id(path, line, col), seen_ids), parentId=parent_id,
-            nodeType="synthetic", text=text[:limit], startLine=line, endLine=line, path=path,
+            nodeType="synthetic", text=text, startLine=line, endLine=line, path=path,
             **fields,  # type: ignore[arg-type]
         ))
 
