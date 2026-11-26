@@ -209,7 +209,7 @@ Route::get('/h', function () use ($c) {
     assert [(call.method, call.endpoint, call.text) for call in calls] == [
         ("GET", "https://h.example.com", "$c->get('https://h.example.com');")
     ]
-    assert calls[0].parentId == "routes/web.php#<anonymous>@7"
+    assert calls[0].parentId == "routes/web.php"
 
 
 def test_php_guzzle_client_detection_supports_short_names_and_fully_qualified_constructors() -> None:
