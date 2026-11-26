@@ -19,7 +19,10 @@ Hit = tuple[str, str | None, str | None, str | None]
 
 CALL_TYPES = frozenset({"method_invocation", "dml_expression", "query_expression"})
 
-_DML_METHODS = frozenset({"insert", "update", "upsert", "delete", "undelete", "merge"})
+_DML_METHODS = frozenset({
+    "insert", "update", "upsert", "delete", "undelete", "merge",
+    "convertlead", "emptyrecyclebin",
+})
 #: Lower-cased ``Database`` query method → its documented spelling, which is what is emitted.
 _QUERY_METHODS = {
     name.lower(): name
@@ -69,6 +72,36 @@ def _declarators(scope: Node, kinds: tuple[str, ...], *, stop: tuple[str, ...]) 
     return out
 
 
+_DECLARED_TYPE_CACHE: dict[tuple[int, tuple[str, ...], tuple[str, ...], int], dict[str, str | None]] = {}
+
+
+def _scope_declared_types(
+    scope: Node,
+    kinds: tuple[str, ...],
+    *,
+    stop: tuple[str, ...],
+    source: bytes,
+) -> dict[str, str | None]:
+    key = (scope.id, kinds, stop, len(source))
+    if key in _DECLARED_TYPE_CACHE:
+        return _DECLARED_TYPE_CACHE[key]
+    if len(_DECLARED_TYPE_CACHE) > 512:
+        _DECLARED_TYPE_CACHE.clear()
+
+    type_map: dict[str, set[str]] = {}
+    for name_node, typ_node in _declarators(scope, kinds, stop=stop):
+        name = node_text(name_node, source).lower()
+        typ = node_text(typ_node, source)
+        type_map.setdefault(name, set()).add(typ)
+
+    res: dict[str, str | None] = {
+        name: (types.pop() if len({t.lower() for t in types}) == 1 else None)
+        for name, types in type_map.items()
+    }
+    _DECLARED_TYPE_CACHE[key] = res
+    return res
+
+
 def declared_type(name: str, at: Node, source: bytes) -> str | None:
     """Declared type (source spelling) of variable ``name`` as seen from ``at``: a parameter or
     local of the enclosing method, else a field of the enclosing class. ``None`` when it is
@@ -84,10 +117,9 @@ def declared_type(name: str, at: Node, source: bytes) -> str | None:
         scopes.append((body, ("field_declaration",)))
     for scope, kinds in scopes:
         stop = _FUNCTION_SCOPES + _TYPE_SCOPES if scope is not fn else _TYPE_SCOPES
-        types = {node_text(t, source) for n, t in _declarators(scope, kinds, stop=stop)
-                 if node_text(n, source).lower() == want}
-        if types:
-            return types.pop() if len({t.lower() for t in types}) == 1 else None
+        types = _scope_declared_types(scope, kinds, stop=stop, source=source)
+        if want in types:
+            return types[want]
     return None
 
 
@@ -133,6 +165,53 @@ def _nearest_block(node: Node) -> Node | None:
     return cur
 
 
+class _ScopeRequestIndex:
+    __slots__ = ("assigned", "setters")
+
+    def __init__(self) -> None:
+        self.assigned: dict[str, list[Node]] = {}
+        self.setters: dict[str, dict[str, list[Node]]] = {}
+
+
+_SCOPE_REQUEST_CACHE: dict[tuple[int, int], _ScopeRequestIndex] = {}
+
+
+def _get_scope_request_index(scope: Node, source: bytes) -> _ScopeRequestIndex:
+    key = (scope.id, len(source))
+    if key in _SCOPE_REQUEST_CACHE:
+        return _SCOPE_REQUEST_CACHE[key]
+    if len(_SCOPE_REQUEST_CACHE) > 512:
+        _SCOPE_REQUEST_CACHE.clear()
+
+    idx = _ScopeRequestIndex()
+    stack = [scope]
+    while stack:
+        node = stack.pop()
+        if node.type == "variable_declarator":
+            name = node.child_by_field_name("name")
+            if name is not None:
+                var_name = node_text(name, source).lower()
+                idx.assigned.setdefault(var_name, []).append(node)
+        elif node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            if left is not None:
+                var_name = node_text(left, source).lower()
+                idx.assigned.setdefault(var_name, []).append(node)
+        elif node.type == "method_invocation":
+            name = node.child_by_field_name("name")
+            obj = node.child_by_field_name("object")
+            if name is not None and obj is not None:
+                setter = node_text(name, source).lower()
+                if setter in ("setmethod", "setendpoint"):
+                    var_name = node_text(obj, source).lower()
+                    var_setters = idx.setters.setdefault(var_name, {"setmethod": [], "setendpoint": []})
+                    var_setters[setter].append(node)
+        stack.extend(node.named_children)
+
+    _SCOPE_REQUEST_CACHE[key] = idx
+    return idx
+
+
 def _request_settings(call: Node, source: bytes) -> tuple[Node | None, Node | None]:
     """The ``setMethod`` / ``setEndpoint`` argument that is in force for ``send(<request>)``:
     the last setter written after the request variable's last assignment and before the
@@ -143,6 +222,12 @@ def _request_settings(call: Node, source: bytes) -> tuple[Node | None, Node | No
     if args is None or scope is None or not args.named_children:
         return None, None
     request = node_text(args.named_children[0], source).lower()
+    idx = _get_scope_request_index(scope, source)
+    req_assigned = idx.assigned.get(request)
+    req_setters = idx.setters.get(request)
+    if not req_assigned and not req_setters:
+        return None, None
+
     enclosing = set()
     cur = call.parent
     while cur is not None:
@@ -153,39 +238,21 @@ def _request_settings(call: Node, source: bytes) -> tuple[Node | None, Node | No
         block = _nearest_block(node)
         return block is not None and block.id in enclosing
 
-    assigned: list[Node] = []
-    setters: dict[str, list[Node]] = {"setmethod": [], "setendpoint": []}
-    stack = [scope]
-    while stack:
-        node = stack.pop()
-        if node.start_byte >= call.start_byte:
-            continue
-        if node.type == "variable_declarator":
-            name = node.child_by_field_name("name")
-            if name is not None and node_text(name, source).lower() == request:
-                assigned.append(node)
-        elif node.type == "assignment_expression":
-            left = node.child_by_field_name("left")
-            if left is not None and node_text(left, source).lower() == request:
-                assigned.append(node)
-        elif node.type == "method_invocation":
-            name = node.child_by_field_name("name")
-            obj = node.child_by_field_name("object")
-            setter = node_text(name, source).lower() if name is not None else ""
-            if setter in setters and obj is not None and node_text(obj, source).lower() == request:
-                setters[setter].append(node)
-        stack.extend(node.named_children)
-
-    last = max(assigned, key=lambda n: n.start_byte, default=None)
+    call_start = call.start_byte
+    relevant_assigned = [n for n in (req_assigned or []) if n.start_byte < call_start]
+    last = max(relevant_assigned, key=lambda n: n.start_byte, default=None)
     if last is not None and not on_path(last):
         return None, None
     after = last.start_byte if last is not None else -1
 
     def in_force(kind: str) -> Node | None:
-        found = sorted((n for n in setters[kind] if n.start_byte > after), key=lambda n: n.start_byte)
+        if not req_setters:
+            return None
+        found = [n for n in req_setters[kind] if after < n.start_byte < call_start]
         if not found or not all(on_path(n) for n in found):
             return None
-        call_args = found[-1].child_by_field_name("arguments")
+        last_setter = max(found, key=lambda n: n.start_byte)
+        call_args = last_setter.child_by_field_name("arguments")
         return call_args.named_children[0] if call_args is not None and call_args.named_children else None
 
     return in_force("setmethod"), in_force("setendpoint")
