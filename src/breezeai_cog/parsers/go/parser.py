@@ -24,7 +24,7 @@ from .functions import (
     scan_file,
 )
 from .declarations import Declarations, declarations, package_dir
-from .imports import GoIndex, build_fqcn_index, extract_imports
+from .imports import GoIndex, build_fqcn_index, extract_imports, import_aliases
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 from .gomod import parse_gomod
@@ -143,6 +143,10 @@ class GoParser(BaseParser):
 
         idx = ctx.resolution_index
         external, packages = extract_imports(root, source, idx if isinstance(idx, GoIndex) else None)
+        resty_imported = any(
+            module in {"github.com/go-resty/resty/v2", "github.com/go-resty/resty/v3"}
+            for module in import_aliases(root, source).values()
+        )
         scan = scan_file(root, source)
         decls = declarations(idx)
         resolve = _resolver(packages, scan.names, scan.types, path, decls)
@@ -193,6 +197,7 @@ class GoParser(BaseParser):
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
+                    resty_imported=resty_imported,
                     resolve=resolve,
                     barriers=bound,
                 )
@@ -221,6 +226,7 @@ class GoParser(BaseParser):
                 parent_id=owner_ids.get(enclosing.start_byte, fid) if enclosing is not None else fid,
                 package_level=enclosing is None,
                 seen_ids=seen_ids, capture=capture, limit=limit,
+                resty_imported=resty_imported,
                 barriers=bound - {(node.start_byte, node.end_byte)}, resolve=resolve,
             )
             functions.append(fn)
@@ -233,7 +239,8 @@ class GoParser(BaseParser):
         # same-line trailing comment rides on the statement's `text`.
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture,
-                               limit=limit, seen_ids=seen_ids, barriers=bound)
+                               limit=limit, seen_ids=seen_ids, resty_imported=resty_imported,
+                               barriers=bound)
         )
 
         if capture:

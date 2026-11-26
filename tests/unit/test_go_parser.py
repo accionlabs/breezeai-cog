@@ -470,6 +470,36 @@ func callAPI() {
     ]
 
 
+def test_go_resty_builder_chains_are_api_calls(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import restyAlias "github.com/go-resty/resty/v2"
+
+func callAPI() {
+    client := restyAlias.New()
+    client.R().Get("https://example.test/a")
+    client.R().SetBody("x").Post("https://example.test/b")
+}
+''')
+
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(s.method, s.endpoint) for s in calls] == [
+        ("GET", "https://example.test/a"),
+        ("POST", "https://example.test/b"),
+    ]
+
+
+def test_go_r_method_without_resty_import_is_not_an_api_call(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+func run(client *Router) {
+    client.R().Get("/route")
+}
+''')
+
+    assert not any(s.semanticType == "api_call" for s in record.statements)
+
+
 def test_go_switch_inc_and_package_level_declarations_are_captured(tmp_path) -> None:
     record = _parse(tmp_path, b'''package p
 

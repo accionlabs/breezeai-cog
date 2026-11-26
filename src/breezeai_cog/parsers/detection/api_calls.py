@@ -158,7 +158,7 @@ def match_api(
         return None
     receiver = _receiver_text(callee)
     if language == "go":
-        if low.startswith("resty.") or ".r." in low or low.endswith(".r") or ".r()" in low:
+        if low.startswith("resty."):
             return m.upper()
         if m == "do":
             recv_parts = [p.lower() for p in receiver.split(".")]

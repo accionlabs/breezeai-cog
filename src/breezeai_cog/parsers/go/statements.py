@@ -46,7 +46,23 @@ def _render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
+def _is_resty_request(call: Node, source: bytes) -> bool:
+    fn = call.child_by_field_name("function")
+    operand = fn.child_by_field_name("operand") if fn is not None else None
+    while operand is not None and operand.type == _CALL_TYPE:
+        inner_fn = operand.child_by_field_name("function")
+        if inner_fn is None or inner_fn.type != "selector_expression":
+            return False
+        field = inner_fn.child_by_field_name("field")
+        if field is not None and node_text(field, source) == "R":
+            return True
+        operand = inner_fn.child_by_field_name("operand")
+    return False
+
+
+def _call_details(
+    call: Node, source: bytes, *, resty_imported: bool = False,
+) -> tuple[str, str, str | None] | None:
     if call.type != "call_expression":
         return None
     fn = call.child_by_field_name("function")
@@ -62,7 +78,13 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         method = callee
     args = call.child_by_field_name("arguments")
     arg_nodes: list[Node] = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(arg_nodes, source, _render_url, method=url_first(callee, method))
+    resty_request = resty_imported and _is_resty_request(call, source)
+    if resty_request:
+        callee = f"resty.{callee}"
+    endpoint, override = resolve_endpoint(
+        arg_nodes, source, _render_url,
+        method=method if resty_request else url_first(callee, method),
+    )
     if override is not None:
         method = override
     elif method == "Do" and arg_nodes:
@@ -301,6 +323,7 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    resty_imported: bool = False,
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Statement]:
@@ -320,7 +343,9 @@ def extract_statements(
                 control_flow=CONTROL_FLOW,
                 call_type=_CALL_TYPE,
                 name_of=_name_of,
-                call_details=_call_details,
+                call_details=lambda call, src: _call_details(
+                    call, src, resty_imported=resty_imported,
+                ),
                 language="go",
                 decorators=[],
             )
