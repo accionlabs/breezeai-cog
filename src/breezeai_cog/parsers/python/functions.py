@@ -123,7 +123,7 @@ def _extract_calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def visit(node: Node) -> None:
         # Descend into lambdas — their calls belong to the nearest named enclosing
@@ -138,9 +138,10 @@ def _extract_calls(
                     callee = node_text(fn, source)
                     name = callee.rsplit(".", 1)[-1]
                     receiver = callee.rsplit(".", 1)[0] if "." in callee else None
-                    if name and name not in seen:
-                        seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+                    path = resolve(name, receiver) if name else None
+                    if name and (name, path) not in seen:
+                        seen.add((name, path))
+                        calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)

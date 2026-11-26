@@ -526,8 +526,9 @@ def test_member_call_typed_by_smart_pointer(tmp_path) -> None:
     (tmp_path / "judge.cpp").write_bytes(b"int Judge::Decide() { return 1; }\n")
     (tmp_path / "svc.cpp").write_bytes(
         b"void go(std::shared_ptr<Judge> j, std::vector<Judge> v) { j->Decide(); v.Decide(); }\n")
-    calls = {c.name: c.path for c in _fn(_parse_with_index(tmp_path, "svc.cpp"), "go").calls}
-    assert calls["Decide"] == "judge.cpp"  # j (shared_ptr<Judge>) → Judge::Decide; v (vector) → null-keyed
+    calls = [(c.name, c.path) for c in _fn(_parse_with_index(tmp_path, "svc.cpp"), "go").calls]
+    # j (shared_ptr<Judge>) → Judge::Decide; v (vector) → unresolved: one entry each
+    assert calls == [("Decide", "judge.cpp"), ("Decide", None)]
 
 
 def test_member_call_typed_by_field(tmp_path) -> None:

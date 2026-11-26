@@ -42,7 +42,7 @@ The other fields depend on the meaning:
 | `id`, `parentId`, `nodeType`, `text`, `startLine`, `endLine`, `path` | Every statement |
 | `name` | Declarations (`int retries = 3` → `retries`), enum members; an MCP tool's or prompt's name (= `endpoint`), an MCP resource's declared literal name, else its URI |
 | `method`, `endpoint`, `framework` | Routes, API calls, events |
-| `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
+| `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `handlerChain`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes (`handlerChain`: [entry points §5](entry-points.md#5-what-a-binding-records)) |
 | `dataAccessHint` | `db_method_call` (which ORM / database) |
 | `keyFields` | `graphql_entity` |
 | `platform` | `iac_*` |
@@ -110,7 +110,7 @@ scopes depends on where it is:
 
 | Walking… | Nested scopes (classes, methods, lambdas) | Why |
 |---|---|---|
-| The file root or a class body | **Stops** at them | They are extracted as their own `Class` / `Function`, with their own statements. |
+| The file root or a class body | **Stops** at them (JS/TS: at those extracted as a `Class` / `Function`, walking into nameless ones — below) | They are extracted as their own `Class` / `Function`, with their own statements. |
 | A function body | **Walks into inline lambdas** and gives their statements to the function | A lambda is not a `Function` record, so its statements belong to the enclosing function. |
 
 **Functions without a name of their own.** Each piece of code is recorded once:
@@ -118,7 +118,8 @@ scopes depends on where it is:
 - An **inline** function (a callback argument, a `go`/`defer` literal, an array value) is never
   a `Function`. Its statements belong to the enclosing function. In Go and PHP, an inline
   function at the file root gives its statements to the file
-  (Laravel `Route::get('/health', function () { return …; })`).
+  (Laravel `Route::get('/health', function () { return …; })`); in JS/TS too, and one in a
+  class field initializer or `static { … }` block gives them to the class (below).
 - A function **stored in a variable or class field** (`const save = (x) => …`,
   `var notify = func(msg string) {…}`, `$notify = function ($msg) {…};`,
   `handle = () => {…}`) is one `Function`, named after the variable (`type`
@@ -128,6 +129,19 @@ scopes depends on where it is:
 - An arrow function with an **expression body** (`const save = (x) => db.insert(x)`) gets
   that expression as its one statement, with the expression's own `nodeType`
   (`call_expression`), so the call is recorded under the Function.
+
+**JS/TS code outside any function or class.** At file level and in a class's field
+initializers and `static { … }` blocks, a function with a name of its own (`setInterval(function
+tick() {…})`), or bound to a name in a nameless callback, is a `Function` of the file (or the
+class). A function stored where callers find it by name is one too, named there:
+`exports.x = …` / `module.exports.x = …` → `x`, `module.exports = …` and an anonymous
+`export default` → `default`, `X.prototype.m = …` → `m` with `receiverType` X; never a name
+that two places give (`exports.a = exports.b = …`, a target assigned twice). Everything else
+there — nameless callbacks included (`process.on('SIGTERM', () => {…})`, `$('#b').click(function
+() {…})`) — is the file's or the class's own: its statements are theirs, and its calls are
+`File.calls` / `Class.calls` (the shape of `Function.calls`), without `require(…)` (an import)
+or a decorator. The body of an anonymous route handler is then the statements inside the route
+record's line range ([entry points §5](entry-points.md#anonymous-handlers)).
 
 **Java anonymous classes** (`new T(…) { … }`) are a `Class` each (`isAnonymous: true`), with
 their methods as `Function`s; the enclosing method keeps only its own statements and calls.
@@ -141,8 +155,23 @@ their methods as `Function`s; the enclosing method keeps only its own statements
   numbered in source order within the named class, `Svc$1`, `Svc$2` (`Svc$1$1` nested). The
   statement that creates it keeps its head, the body shown as `{ … }`.
 - The type after `new` is `extends` when it is certainly a class (constructor arguments, or a
-  class of this file, the repository or a known JDK type) and `implements` when it is certainly
-  an interface; a library type gives neither.
+  class of this file, the repository — a member type the enclosing class inherits from an
+  in-repo ancestor included — or a known JDK type) and `implements` when it is certainly an
+  interface; a library type gives neither. When it is a class of another repository file, the
+  creating method (or, outside any method, the class) also calls its constructor (`calls`
+  entry named after it).
+
+**Java code outside any method** — field initializers, `static { … }` and `{ … }` initializer
+blocks, enum constants' arguments — runs when the class loads or an object is built, yet no
+`Function` holds it. Its calls are the **class's** (`Class.calls`, the shape of
+`Function.calls`: one per name and target file in order of first appearance, present only when
+there is one), so
+they do not depend on statement capture, and statements never carry calls:
+`static { bus.put(A, new WriteHandler()); }` in `ServiceServer` → the `ServiceServer` Class has
+`calls: [{name: "put"}, {name: "WriteHandler", path: "…/WriteHandler.java"}]`. An anonymous
+class's own initializers (`new HashMap<>() {{ put(…); }}`) are that anonymous Class's calls; a
+field-stored anonymous subclass's constructor call (`ResponseHandler onError = new
+ResponseHandler() { … }`) is the enclosing class's.
 - **An enum constant's body** (`RED("r") { String tag() { … } }`) is an anonymous subclass of
   the enum, as Java compiles it: named after the constant (`Color.RED`), `extends` the enum, its
   methods under it. The constant stays an `enum_member` statement of the enum.

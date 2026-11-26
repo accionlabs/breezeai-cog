@@ -81,6 +81,7 @@ from ..mcp_common import (
     prompt_params,
     uri_template_params,
 )
+from ..typescript_http_common import inline_handler
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings, top_level_declarations
 from .lowlevel import detect_lowlevel
@@ -397,7 +398,7 @@ def _handler(
     if cb.type == "member_expression":
         name = node_text(cb, source)
         return name, functions.get(name)
-    return None, cb.start_point[0] + 1
+    return inline_handler(cb, source)
 
 
 def _template_names(root: Node, source: bytes) -> set[str]:

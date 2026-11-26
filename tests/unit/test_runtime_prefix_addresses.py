@@ -674,7 +674,8 @@ fastify.register(require('./items'), { prefix: PREFIX });
 """,
         }
     )
-    assert _addr(_one(st, "route", "web/items.js", 1)) == "/v2/items/:id"
+    # the plugin body is file-level code (a nameless function): the route is its own statement
+    assert _addr(_one(st, "route", "web/items.js", 2)) == "/v2/items/:id"
     assert [
         s.endpoint
         for s in st

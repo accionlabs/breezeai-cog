@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from tree_sitter import Node
 
@@ -13,6 +13,11 @@ from ..callresolve import CallResolver, method_types, noop_resolver
 from ..index_common import record_distinct
 from ..treesitter import line_span, node_text
 from .statements import extract_statements, is_anonymous_body
+
+#: ``anonymous.KindOf`` (that module imports this one): a type as written, and the simple name
+#: of the named class it is written in → its declaration's tree-sitter type, or None.
+_KindOf = Callable[..., "str | None"]
+_COMMENTS = ("line_comment", "block_comment")
 
 
 def modifiers_node(node: Node) -> Node | None:
@@ -85,40 +90,201 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _created_class(creation: Node, source: bytes) -> str | None:
-    """The class ``new X(…)`` / ``new X<T>(…)`` builds, as written without type arguments;
-    None for an anonymous class (``new X() { … }``) or a qualified name (``new a.b.X()``)."""
-    if any(c.type == "class_body" for c in creation.named_children):
-        return None
+#: Declarations of a named type: the scopes a simple type name is looked up in.
+_TYPE_DECLARATIONS = frozenset({
+    "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
+    "annotation_type_declaration",
+})
+
+
+def _type_name(decl: Node, source: bytes) -> str | None:
+    nm = decl.child_by_field_name("name")
+    return node_text(nm, source) if nm is not None else None
+
+
+def _member_types(body: Node, source: bytes) -> set[str]:
+    """The names of the types declared directly in a class, interface or enum body."""
+    return {name for m in class_members(body)
+            if m.type in _TYPE_DECLARATIONS and (name := _type_name(m, source))}
+
+
+class _FileTypes:
+    """The type declarations of one file, gathered in one pass so a lookup per ``new X()`` costs
+    the depth of its node, not the size of the file. Keyed by node start byte (unique per node
+    type here): ``members`` — a class, interface, enum or anonymous class body → the names of the
+    types declared directly in it; ``locals`` — a block → its local type declarations as (start
+    byte, name); ``top`` — the file's top-level types; ``declared`` — every type name, any
+    depth."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        self.members: dict[int, set[str]] = {}
+        self.locals: dict[int, list[tuple[int, str]]] = {}
+        self.top = {name for c in root.named_children
+                    if c.type in _TYPE_DECLARATIONS and (name := _type_name(c, source))}
+        declared: set[str] = set()
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.type in _TYPE_DECLARATIONS and (name := _type_name(node, source)):
+                declared.add(name)
+                parent = node.parent
+                if parent is not None and parent.type in _BLOCKS:
+                    self.locals.setdefault(parent.start_byte, []).append((node.start_byte, name))
+            elif node.type in _BODIES:
+                self.members[node.start_byte] = _member_types(node, source)
+            stack.extend(node.named_children)
+        self.declared = frozenset(declared)
+
+
+#: Bodies whose directly declared types are member types.
+_BODIES = frozenset({"class_body", "interface_body", "enum_body", "annotation_type_body"})
+#: Statement lists a local class may be declared in.
+_BLOCKS = frozenset({"block", "switch_block_statement_group", "constructor_body"})
+
+#: The source last scanned, with its :class:`_FileTypes`.
+_file_types_cache: tuple[bytes, _FileTypes] | None = None
+
+
+def _file_types(root: Node, source: bytes) -> _FileTypes:
+    global _file_types_cache
+    cached = _file_types_cache  # read once: another thread may replace it meanwhile
+    if cached is None or cached[0] is not source:
+        cached = (source, _FileTypes(root, source))
+        _file_types_cache = cached
+    return cached[1]
+
+
+def _own_type_in_scope(name: str, at: Node, source: bytes) -> bool | None:
+    """Whether the simple type name ``name``, written at ``at``, means a type this file declares.
+
+    True: a type in scope there is named ``name``. Java looks a simple type name up from the
+    inside out: a local class declared earlier in an enclosing block, each enclosing type (its
+    own name and its member types), then the file's top-level types; any of these hides a
+    same-package or imported type of the same name (``new Builder()`` inside ``Foo`` is
+    ``Foo.Builder``, not ``a/Builder.java``). None: the file declares a type of that name that is
+    not in scope there (another class's member type, a local class of another method), so which
+    type it means is not known for certain. False: the file declares no type of that name.
+
+    A member type the enclosing class inherits from another file also hides a top-level type of
+    this file; that case (both a type of this file and an inherited member type share the
+    name) is not looked for."""
+    root = at
+    while root.parent is not None:
+        root = root.parent
+    types = _file_types(root, source)
+    if name not in types.declared:
+        return False
+    node: Node | None = at
+    child = at
+    while node is not None:
+        if node.type in _TYPE_DECLARATIONS and _type_name(node, source) == name:
+            return True
+        if node.type in _BODIES and name in types.members.get(node.start_byte, ()):
+            return True  # a member type of an enclosing (or anonymous) class
+        if node.type in _BLOCKS and any(
+                start < child.start_byte and local == name
+                for start, local in types.locals.get(node.start_byte, ())):
+            return True  # a local class declared earlier in the block
+        child = node
+        node = node.parent
+    return True if name in types.top else None
+
+
+def _created_class(
+    creation: Node, source: bytes, owner: str | None = None, kind_of: _KindOf | None = None,
+) -> str | None:
+    """The class ``new X(…)`` / ``new X<T>(…)`` builds, as written without type arguments; None
+    for a qualified name (``new a.b.X()``).
+
+    An anonymous class (``new X(…) { … }``) builds X too — its constructor runs first — when X
+    is certainly a class: it takes constructor arguments (an interface takes none), or
+    ``kind_of`` (written in ``owner``) finds it declared as a class. An interface, or a type
+    whose kind is not known (a library's), gives None: it has no constructor to call."""
     typ = creation.child_by_field_name("type")
     if typ is not None and typ.type == "generic_type":
         typ = typ.named_children[0] if typ.named_children else None
-    return node_text(typ, source) if typ is not None and typ.type == "type_identifier" else None
+    if typ is None or typ.type != "type_identifier":
+        return None
+    name = node_text(typ, source)
+    if any(c.type == "class_body" for c in creation.named_children):
+        args = creation.child_by_field_name("arguments")
+        if args is not None and any(c.type not in _COMMENTS for c in args.named_children):
+            return name
+        kind = kind_of(name, owner) if kind_of is not None else None
+        return name if kind == "class_declaration" else None
+    return name
+
+
+#: Members of a class body whose code is not the class's own initialization: methods and
+#: constructors are Functions, nested types are Classes.
+_NOT_INITIALIZATION = frozenset({
+    "method_declaration", "constructor_declaration", "compact_constructor_declaration",
+    "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
+    "annotation_type_declaration",
+})
+
+
+def class_calls(
+    body: Node | None, source: bytes, resolve: CallResolver, owner: str | None,
+    fields: Mapping[str, str | None], *, own_path: str, kind_of: _KindOf | None = None,
+    through: tuple[str | None, ...] | None = None,
+) -> list[Call]:
+    """The calls of a class's code outside any method — its field initializers, its
+    ``static { … }`` and ``{ … }`` initializer blocks and its enum constants' arguments, the code
+    that runs when the class loads or an object is built — in the shape of ``Function.calls``:
+    one per name and target file, in order of first appearance. Methods, constructors, nested types and
+    anonymous class bodies have their own calls. Variables resolve with the class's ``fields``
+    and the locals of its initializer blocks."""
+    if body is None:
+        return []
+    locals_: list[tuple[str, str | None]] = []
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            locals_.extend(declarations(c, source))
+            walk(c)
+
+    for member in class_members(body):
+        if member.type in ("static_initializer", "block"):
+            walk(member)
+    scope = method_types(fields, [], locals_)
+
+    def stop(child: Node) -> bool:
+        return child.type in _NOT_INITIALIZATION
+
+    return _calls(body, source, resolve, owner, scope, through=through, own_anonymous=True,
+                  own_path=own_path, kind_of=kind_of, stop=stop)
 
 
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, scope: Mapping[str, str | None] | None = None,
     *, through: tuple[str | None, ...] | None = None, own_anonymous: bool = False,
-    own_path: str | None = None,
+    own_path: str | None = None, kind_of: _KindOf | None = None,
+    stop: Callable[[Node], bool] | None = None,
 ) -> list[Call]:
-    """The calls in a method body, one per name in order of first appearance. ``owner`` is the
+    """The calls in a method body, one per name and target file, in order of first appearance
+    (``AppOptions.create()`` and ``SessionHandler.create()`` are two). ``owner`` is the
     simple name of the class it is declared in: a call on ``this`` or ``super``, or a bare call
     (Java's implicit ``this``), may resolve to an inherited method. ``scope`` is the method's own
     variable types (``method_types``).
 
-    A name's ``path`` comes from the first of its calls that resolves: in ``config.getString(k)``
-    then ``JsonUtil.getString(o, k)`` the second, in-repo call gives ``getString`` its file.
+    A call that resolves to no file is kept once per name, beside those that do:
+    ``config.getString(k)`` then ``JsonUtil.getString(o, k)`` give ``getString`` with no path
+    and ``getString`` with ``JsonUtil``'s file.
 
     ``through``: the body is a method of an anonymous or local class (each enclosing such
     class's type, innermost first), resolved as a call written there. ``own_anonymous``: the
     calls in an anonymous class body are that class's methods' own, so they are left out.
-    ``own_path``: this file; given, ``new X(…)`` of a class of another repository file is a
-    call named ``X`` (its constructor's Function name) with that file's path."""
+    ``own_path``: this file; given, ``new X(…)`` of a repository class is a call named ``X``
+    (its constructor's Function name) with the file declaring X — this file for a type of this
+    file in scope there (:func:`_own_type_in_scope`) — an anonymous subclass's too
+    (``_created_class``, with ``kind_of``). ``stop``: a node it is true for is
+    not walked (a method or nested type of a class body, :func:`class_calls`)."""
     if body is None:
         return []
     calls: list[Call] = []
-    at: dict[str, int] = {}
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
     # In an anonymous or local class body `this.x` is that class's field, not the outer one's.
     inner_scope = None if scope is None else {k: v for k, v in scope.items() if not k.startswith("this.")}
 
@@ -146,33 +312,40 @@ def _calls(
         for child in node.named_children:
             if own_anonymous and is_anonymous_body(child):
                 continue
+            if stop is not None and stop(child):
+                continue
             if child.type == "object_creation_expression" and own_path is not None:
-                built = _created_class(child, source)
+                built = _created_class(child, source, owner, kind_of)
                 # `new X(…)` calls X's constructor (a Function named X) when X resolves as Java
-                # resolves a type name (an import, this package) to another file of the
-                # repository. A library class or one of this file adds nothing; an anonymous
-                # class links through its `extends` instead.
-                if built is not None and (built not in at or calls[at[built]].path is None):
-                    path = resolve(built, None)
-                    if path is not None and path != own_path:
-                        if built not in at:
-                            at[built] = len(calls)
-                            calls.append(Call(name=built, path=path))
-                        else:
-                            calls[at[built]] = Call(name=built, path=path)
+                # resolves a type name: a type of this file in scope there (this file; a
+                # factory `create()` returning `new X(…)` reaches X's constructor), else an
+                # import, this package, a member type the class inherits (that file). A
+                # library class adds nothing, and so does a type this file declares out of
+                # scope there, since which X is meant is not certain.
+                if built is not None:
+                    own = _own_type_in_scope(built, child, source)
+                    if own:
+                        path = own_path
+                    elif own is None:
+                        path = None
+                    else:
+                        path = resolve(built, None)
+                        if path is None and owner is not None:
+                            path = resolve(built, None, owner, as_type=True)
+                    if path is not None and (built, path) not in seen:
+                        seen.add((built, path))
+                        calls.append(Call(name=built, path=path))
             if child.type == "method_invocation":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
                     name = node_text(name_node, source)
                     obj = child.child_by_field_name("object")
                     receiver = node_text(obj, source) if obj is not None else None
-                    if name and (name not in at or calls[at[name]].path is None):
+                    if name:
                         path = target(name, receiver, through)
-                        if name not in at:
-                            at[name] = len(calls)
+                        if (name, path) not in seen:
+                            seen.add((name, path))
                             calls.append(Call(name=name, path=path))
-                        elif path is not None:
-                            calls[at[name]] = Call(name=name, path=path)
             nested = through
             if child.type == "class_body":
                 created = node.child_by_field_name("type") \
@@ -361,9 +534,11 @@ def build_method(
     through: tuple[str | None, ...] | None = None,
     scope_node: Node | None = None,
     own_anonymous: bool = False,
+    kind_of: _KindOf | None = None,
 ) -> tuple[Function, list[Statement]]:
     """``fields``: the enclosing class's fields (outer classes' included), for the method's
-    variable types; omitted, its calls use the resolver's file-wide types.
+    variable types; omitted, its calls use the resolver's file-wide types. ``kind_of``: whether
+    the type of an anonymous class created in the body is a class (``_created_class``).
 
     ``own_anonymous``: anonymous classes in the body are captured as their own Class, so their
     calls and statements are not this method's. ``through`` and ``scope_node`` are for a method
@@ -396,7 +571,7 @@ def build_method(
         endLine=end,
         calls=_calls(body, source, resolve, class_name,
                      None if fields is None else method_scope(scope_node or node, source, fields),
-                     through=through, own_anonymous=own_anonymous, own_path=path),
+                     through=through, own_anonymous=own_anonymous, own_path=path, kind_of=kind_of),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

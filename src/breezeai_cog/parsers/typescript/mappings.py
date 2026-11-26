@@ -58,7 +58,9 @@ JS_BUILTIN_METHODS = frozenset({
 #: Scopes whose inner statements belong to that nested scope.
 NESTED_SCOPES = {
     "function_declaration",
+    "generator_function_declaration",
     "function_expression",
+    "generator_function",
     "arrow_function",
     "method_definition",
     "class_declaration",

@@ -60,7 +60,7 @@ import re
 from collections.abc import Container, Mapping
 from typing import Callable
 
-from .index_common import ClassHeritage, record_distinct, walk_heritage
+from .index_common import ClassHeritage, inherited_member_type, record_distinct, walk_heritage
 
 CallResolver = Callable[..., str | None]
 
@@ -403,7 +403,11 @@ def make_resolver(
         name: str, receiver: str | None, owner: str | None = None,
         scope: Mapping[str, str | None] | None = None,
         *, field_owner: str | None = None, through: tuple[str | None, ...] = (),
+        as_type: bool = False,
     ) -> str | None:
+        """``as_type``: ``name`` is a type (``new name(…)``), not a method: one neither imported
+        nor declared in this file may be a member type ``owner`` inherits from an in-repo
+        ancestor, declared in that ancestor's file."""
         if receiver in ("self", "this"):
             if name in _own(owner):  # same-file method
                 return path
@@ -417,6 +421,9 @@ def make_resolver(
                 return bindings[name]
             if name in _own(owner):  # same-file function/class
                 return path
+            if as_type and name not in local_defs:  # an inherited member type
+                hit = inherited_member_type(name, owner, heritage)
+                return hit[1] if hit is not None else None
             return None
         # `Imported.method()` → Imported's file — unless a variable of the method has that name
         if receiver in bindings and (scope is None or receiver not in scope):
