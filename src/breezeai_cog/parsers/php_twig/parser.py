@@ -127,7 +127,7 @@ def _template_references(root: Node, source: bytes) -> list[str]:
     return list(dict.fromkeys(references))
 
 
-def _statements(root: Node, source: bytes, path: str, parent_id: str, limit: int) -> list[Statement]:
+def _statements(root: Node, source: bytes, path: str, parent_id: str) -> list[Statement]:
     statements: list[Statement] = []
     seen: set[str] = set()
     for wrapper in _walk(root):
@@ -150,8 +150,6 @@ def _statements(root: Node, source: bytes, path: str, parent_id: str, limit: int
 
         start, end = line_span(wrapper)
         text = node_text(wrapper, source).strip()
-        if len(text) > limit:
-            text = text[:limit]
         name = (
             _statement_name(statement_node, source)
             if statement_node.type != "output_directive"
@@ -220,7 +218,7 @@ class TwigParser(BaseParser):
             else []
         )
         statements = (
-            _statements(root, ctx.source, path, fid, ctx.statement_text_limit)
+            _statements(root, ctx.source, path, fid)
             if ctx.capture_statements
             else []
         )

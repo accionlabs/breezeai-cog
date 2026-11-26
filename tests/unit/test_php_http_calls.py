@@ -64,3 +64,13 @@ def test_names_alone_are_not_http_clients(analyze_files) -> None:
 def test_facade_needs_the_import(analyze_files) -> None:
     stmts = analyze_files({"app/T.php": "<?php\nnamespace App;\nclass T { function f() { Http::get('/x'); } }\n"})
     assert [s for s in stmts if s.semanticType == "api_call"] == []
+
+
+def test_file_level_client_is_an_api_call(analyze_files) -> None:
+    statements = analyze_files({
+        "bootstrap.php": "<?php\nuse GuzzleHttp\\Client;\n"
+        "$client = new Client();\n$client->get('https://api.example.com/users');\n",
+    })
+    assert [(s.method, s.endpoint) for s in statements if s.semanticType == "api_call"] == [
+        ("GET", "https://api.example.com/users")
+    ]

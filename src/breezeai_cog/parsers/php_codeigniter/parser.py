@@ -47,7 +47,6 @@ _CODEIGNITER_ROUTE_CALL = re.compile(
     rb"\$[A-Za-z_]\w*\s*->\s*(?:get|post|put|patch|delete|options|head|any|add|match|group|resource|presenter|map|addRedirect|cli|view|environment)\s*\("
 )
 _ROUTE_FILE = re.compile(rb"(?:^|/)(?:routes?|routing)(?:/|\.php$)", re.IGNORECASE)
-_CODEIGNITER_DOC = re.compile(rb"(?:^|/)user_guide_src/", re.IGNORECASE)
 
 
 def _group_prefix(call: Node, source: bytes) -> str | None:
@@ -345,6 +344,8 @@ class CodeIgniterParser(PhpParser):
     frameworks = ["codeigniter"]
 
     def claims(self, path: str, source: bytes) -> bool:
+        if b"namespace illuminate\\" in source.lower():
+            return False
         if _CODEIGNITER_DECLARATION.search(source):
             return True
         # A filename is not framework evidence.  Route configuration without an

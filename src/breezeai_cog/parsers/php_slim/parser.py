@@ -191,8 +191,17 @@ class SlimParser(PhpParser):
     priority = 30
     frameworks = ["slim"]
 
+    def fixture_markers(self) -> tuple[str, ...]:
+        return (*super().fixture_markers(), "scoper.inc.php")
+
     def claims(self, path: str, source: bytes) -> bool:
         lower = source.lower()
+        if b"namespace wordpress\\" in lower:
+            return False
+        # Slim's PSR-7 and exception classes appear in other stacks' bridges; a file that
+        # also registers Laravel routes is Laravel's, and its routes would be lost here.
+        if b"illuminate\\support\\facades\\route" in lower or b"illuminate\\routing\\" in lower:
+            return False
         return any(marker in lower for marker in (
             b"slim\\", b"namespace slim;", b"routecollectorproxy",
             b"routecollectorinterface", b"slim\\app",
