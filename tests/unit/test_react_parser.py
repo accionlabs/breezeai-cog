@@ -481,3 +481,34 @@ def test_vue_style_route_array_without_react_is_not_a_react_route(analyze_files)
         ),
     })
     assert all(s.framework != "react" for s in st if s.semanticType == "route")
+
+
+def _routes(rec: FileRecord) -> list[str]:
+    return sorted(s.endpoint for s in rec.statements if s.semanticType == "route")
+
+
+def test_method_and_shorthand_route_keys_are_routes(tmp_path) -> None:
+    head = "import { createBrowserRouter } from 'react-router-dom';\nimport { loader } from './s';\n"
+    for i, body in enumerate([
+        "{ path: '/r', loader() { return null; } }",
+        "{ path: '/r', loader }",
+        "{ path: '/r', Component() { return null; } }",
+        "{ path: '/r', async lazy() { return {}; } }",
+        "{ path: '/r', loader: () => null }",
+    ]):
+        src = f"{head}export const r = createBrowserRouter([ {body} ]);\n".encode()
+        assert _routes(_parse(tmp_path, src, f"R{i}.tsx")) == ["/r"], body
+
+
+def test_shorthand_path_is_not_read_as_a_url(tmp_path) -> None:
+    src = (b"import { createBrowserRouter } from 'react-router-dom';\n"
+           b"const path = '/x';\nexport const r = createBrowserRouter([ { path, loader() {} } ]);\n")
+    assert _routes(_parse(tmp_path, src, "P.tsx")) == []
+
+
+def test_file_without_router_import_has_no_routes(tmp_path) -> None:
+    src = (b"import React from 'react';\n"
+           b"export const tabs = [ { path: '/t1', component: T1 }, { path: '/t2', component: T2 } ];\n"
+           b"export default function A() { return null; }\n")
+    rec = _parse(tmp_path, src, "Tabs.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route" and s.framework == "react"] == []

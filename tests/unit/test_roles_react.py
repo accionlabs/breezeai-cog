@@ -285,6 +285,23 @@ def test_breadcrumb_array_in_a_router_file_is_not_routes(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st)] == ["/x"]
 
 
+def test_shorthand_path_and_component_are_resolved_routes(analyze_files) -> None:
+    src = (
+        HEAD
+        + "import { createBrowserRouter } from 'react-router-dom';\n"
+        + "import { path, Component } from './shared';\n"
+        + "export const router = createBrowserRouter([{ path, Component }]);\n"
+    )
+    st = analyze_files({
+        "package.json": PKG,
+        "src/router.tsx": src,
+        "src/shared.ts": "export const path = '/resolved';\n"
+        "export function Component() { return null; }\n",
+    })
+    [route] = _at(st, "/resolved", "src/router.tsx")
+    assert route.framework == "react"
+
+
 def test_jsx_route_node_type_is_the_real_one(analyze_files) -> None:
     st = _jsx(analyze_files,
               '      <Route path="u" element={<U />} />\n'
