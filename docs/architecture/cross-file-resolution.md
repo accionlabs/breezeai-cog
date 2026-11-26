@@ -328,7 +328,7 @@ signatures included: a superset of the Functions the parser emits). Before that 
 | `Foo.m()`, `x.m()` with `x: Foo`, `Foo` a repository class | the file of `Foo` or its nearest in-repo ancestor that declares `m`; none when none does (a library base's method: `find` on a LoopBack repository) |
 | `CHAT_MODES.join()`, `db.transaction()` on an imported value; `x.m()` with `x` of an interface type | the import's / type's file, only when it declares `m` |
 
-Measured on breezeai-backend, hubexo lead-v1 and nimbus-tools: paths to a file with no such
+Measured on breezeai-backend and two TypeScript services: paths to a file with no such
 function 5,166 → 9 (of ~20,500 with a path), 2,385 new CALLS edges, none lost.
 
 **Python: the file must declare what is called** (`parsers/python/call_targets.py`). A
@@ -336,7 +336,7 @@ function 5,166 → 9 (of ~20,500 with a path), 2,385 new CALLS edges, none lost.
 `import *`) to the file that declares it; `from pkg import a` with no `a` in `pkg/__init__.py` and
 a `pkg/a.py` binds `a` to that module. A path is then kept only when the file declares a `def` or
 `class` of that name (the `python.callables` fact): `logger.info()` on an imported logger object
-has none. etl_harvestor: paths to a file declaring no such name 245 → 0, 17 new CALLS edges, none
+has none. A Python ETL repository: paths to a file declaring no such name 245 → 0, 17 new CALLS edges, none
 lost (a constructor call `Foo()` keeps the file declaring class `Foo`).
 
 **Python: method calls through the class hierarchy** (same module). Each file's classes — bases as
@@ -347,7 +347,7 @@ repository class go to the first class of Python's method resolution order (C3) 
 `m`. A base outside the repository (a library class, an unresolved name) before that class → no
 path: it may declare `m`. No class in the order declaring `m` (an attribute holding a callable,
 a `Protocol` default calling its implementers' methods) → no path, not the same-file guess.
-`object`, `ABC`, `Generic`, `Protocol` add no methods. etl_harvestor: +2,172 CALLS edges (most
+`object`, `ABC`, `Generic`, `Protocol` add no methods. A Python ETL repository: +2,172 CALLS edges (most
 `super().__init__()` and inherited strategy methods), 3 same-file guesses withdrawn.
 
 **Python: calls on a typed receiver** (`parsers/python/receivers.py`, same module). `x.m()` on a
@@ -361,7 +361,7 @@ instance may be one). Any other binding (`x = make()`, `for x in …`, `with …
 a comprehension or lambda variable of that name, a second class, a method or property of that
 name) → the call keeps what it had. `= None` neither types nor spoils. Each class's attributes are
 in the `python.callables` fact; a local's bindings are read only for a name a cheap text check
-finds annotated or constructed. A library class (`requests.Session`) → unchanged. etl_harvestor:
+finds annotated or constructed. A library class (`requests.Session`) → unchanged. A Python ETL repository:
 +1,212 CALLS edges (strategy downloaders `self.session = DefaultDownloader()`), none removed or
 moved; the Python HTTP-helper detector then finds 71 more call sites. Capture time +3–5%.
 

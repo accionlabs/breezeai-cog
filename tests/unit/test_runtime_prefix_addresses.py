@@ -575,11 +575,11 @@ public class Main extends AbstractVerticle {
 
 
 def test_a_wrapper_named_like_a_bus_does_not_take_its_first_argument(analyze_files) -> None:
-    # `EventBusUtil.send(container, …)` holds "Bus" in its name; its first argument is no address
+    # `MessageBusUtil.send(container, …)` holds "Bus" in its name; its first argument is no address
     st = analyze_files({VERTX: """package a;
 import org.vertx.java.platform.Verticle;
 public class Main extends Verticle {
-  public void start() { EventBusUtil.send(container, vertx, "x"); }
+  public void start() { MessageBusUtil.send(container, vertx, "x"); }
 }
 """})
     assert all(s.endpoint is None for s in st if s.semanticType == "eventbus_send")

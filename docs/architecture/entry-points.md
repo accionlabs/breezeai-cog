@@ -525,7 +525,7 @@ The URL of a call is taken from a variable only when the call takes its URL firs
 (`get`, `post`, …), `fetch`, a `url(…)` / `uri(…)` builder, a RestTemplate verb — and never from a
 verb on a request builder (`ws.url(u).post(body)`: `post` takes the body); an event-bus address
 only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such as
-`EventBusUtil.send(container, …)`).
+`MessageBusUtil.send(container, …)`).
 
 | Code | Kind | `endpoint` |
 |---|---|---|

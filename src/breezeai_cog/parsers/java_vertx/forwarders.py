@@ -573,7 +573,7 @@ def forwarder_sites(
 
 def has_forwarder_sites(source: bytes, index: object | None) -> bool:
     """The cheap check before a file without a Vert.x marker is read for forwarder call sites:
-    it names a forwarder's class (``EventBusUtil.send(…)``, ``new Relay(…)``, a variable of
+    it names a forwarder's class (``MessageBusUtil.send(…)``, ``new Relay(…)``, a variable of
     that type), or calls a ``super(…)`` / ``this(…)`` in a repo with a forwarding constructor (a
     subclass of a self-registering handler need not name Vert.x)."""
     table: dict[str, Forwarder] = index_fact(index, FORWARDERS) or {}

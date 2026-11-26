@@ -325,7 +325,7 @@ client name that starts a word there, because the last word of a name says what 
 
 | Receiver | Client? |
 |---|---|
-| `dataApiClient`, `new P3APIClient(uri)`, `DefaultHttpClient`, `this._http`, `$http`, `axios.create()` | yes |
+| `dataApiClient`, `new OrderApiClient(uri)`, `DefaultHttpClient`, `this._http`, `$http`, `axios.create()` | yes |
 | `apiClientPool` (a pool), `HttpRuntime.Cache` (a cache), `httpContextProvider`, `fetched` | no |
 | `sky`, `forgot` (`ky` and `got` do not start a word) | no |
 

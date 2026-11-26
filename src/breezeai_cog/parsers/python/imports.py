@@ -7,9 +7,9 @@ drive the IMPORTS edge; everything else is recorded as an external/library impor
 **Import roots.** An absolute import resolves from the repository root first. A repository often
 holds several apps, each run from its own folder (that folder is on ``sys.path``)::
 
-    etl/hubexo-etl/dags/eu/planning_dag.py:   from src.constants import REGION
-    etl/hubexo-etl/src/constants.py           ← what it means (the app runs from hubexo-etl/)
-    etl/harvestor-v2/src/constants.py         ← another app's: never picked
+    etl/orders-etl/dags/eu/planning_dag.py:   from src.constants import REGION
+    etl/orders-etl/src/constants.py           ← what it means (the app runs from orders-etl/)
+    etl/crawler-v2/src/constants.py           ← another app's: never picked
 
 So when the root does not resolve it, the import is looked up where Python could find it from
 this file (:class:`_Roots`), and linked only when exactly one place has it:
@@ -30,15 +30,15 @@ name present in the linked file.
 itself a package: Airflow its ``plugins/`` folder, pytest a ``tests/`` package's folder. The code
 inside then imports its packages without the folder's name::
 
-    harvestor-v2/plugins/__init__.py
-    harvestor-v2/plugins/strategies/dach/ag_baden_crawl.py:  from strategies.base.crawl_strategy import …
-    harvestor-v2/plugins/utils/string_helper.py              ← `from utils.string_helper import …`
+    crawler-v2/plugins/__init__.py
+    crawler-v2/plugins/strategies/dach/ag_baden_crawl.py:  from strategies.base.crawl_strategy import …
+    crawler-v2/plugins/utils/string_helper.py              ← `from utils.string_helper import …`
 
 A package folder ``P`` above a file is a root when the repository's own code shows it: a file in
 ``P/<pkg>/…`` imports ``<pkg>`` absolutely (``P``'s name left out), which only runs with ``P`` on
 ``sys.path``. Every import of a file under ``P`` may then resolve there — a dotted one or a single
 name (``from utils import x``) — except a standard-library name, which Python finds first.
-Checked on etl_harvestor: 5,788 more imports linked, every imported name present in the linked
+Checked on a Python ETL repository: 5,788 more imports linked, every imported name present in the linked
 file (6,305 of 6,305).
 """
 

@@ -94,7 +94,7 @@ def test_claims_selects_vertx() -> None:
 
 
 # Vert.x 2.x ServiceServer idiom: registerHandler in a loop over a handler map.
-_V2_SRC = b'''package jp.co.payroll.p3.service;
+_V2_SRC = b'''package com.acme.service;
 
 import org.vertx.java.platform.Verticle;
 import org.vertx.java.core.Handler;
@@ -469,7 +469,7 @@ def test_sub_router_prefix_composes_and_mount_is_not_a_route(tmp_path) -> None:
 
 # Vert.x 2.x verticle: a router held under any name, every Container deploy call, and the
 # verticle itself registered as the handler (`registerHandler(addr, this)`).
-_V2_VERTICLE = b"""package p3;
+_V2_VERTICLE = b"""package app;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.Message;
 import org.vertx.java.core.http.RouteMatcher;
@@ -478,8 +478,8 @@ public class W extends Verticle implements Handler<Message<Object>> {
     private RouteMatcher matcher;
     public void start() {
         vertx.eventBus().registerHandler("wizard.load", this);
-        container.deployVerticle("p3.WorkerVerticle");
-        container.deployWorkerVerticle("p3.DocWorker");
+        container.deployVerticle("app.WorkerVerticle");
+        container.deployWorkerVerticle("app.DocWorker");
         container.deployModule("mod-x~1.0");
         RouteMatcher routes = new RouteMatcher();
         routes.get("/docdef/:id", h);
@@ -503,7 +503,7 @@ def _v2_verticle(tmp_path) -> FileRecord:
 def test_vertx2_worker_and_module_deploys_are_verticle_deploys(tmp_path) -> None:
     rec = _v2_verticle(tmp_path)
     deploys = [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"]
-    assert deploys == ["p3.WorkerVerticle", "p3.DocWorker", "mod-x~1.0"]
+    assert deploys == ["app.WorkerVerticle", "app.DocWorker", "mod-x~1.0"]
 
 
 def test_router_detected_by_declared_type_not_name(tmp_path) -> None:
@@ -521,24 +521,24 @@ def test_this_as_handler_is_the_verticles_handle_method(tmp_path) -> None:
 
 # A Java address with escapes is the decoded string, whole (it used to stop at the backslash);
 # a deploy of something that is not a constant string leaves the endpoint empty.
-_V2_EDGES = rb"""package p3;
+_V2_EDGES = rb"""package app;
 import org.vertx.java.core.http.RouteMatcher;
 import org.vertx.java.platform.Verticle;
 import java.util.Map;
 public class E extends Verticle {
-    static final String QUOTED = "p3.const\"q";
+    static final String QUOTED = "app.const\"q";
     public void start() {
         String dyn = container.config().getString("v");
-        vertx.eventBus().send("p3.with\"quote", "x");
-        vertx.eventBus().send("p3.tab\there", "x");
-        vertx.eventBus().send("p3.caf\u00e9", "x");
+        vertx.eventBus().send("app.with\"quote", "x");
+        vertx.eventBus().send("app.tab\there", "x");
+        vertx.eventBus().send("app.caf\u00e9", "x");
         vertx.eventBus().send(QUOTED, "x");
-        vertx.eventBus().send("p3." + "back\\slash", "x");
+        vertx.eventBus().send("app." + "back\\slash", "x");
         container.deployVerticle(dyn);
         container.deployWorkerVerticle(dyn, null, 2);
         container.deployModule(dyn);
         vertx.deployVerticle(new Worker());
-        container.deployVerticle("p3.Fixed");
+        container.deployVerticle("app.Fixed");
         RouteMatcher rm = new RouteMatcher();
         rm.trace("/t", h);
         rm.connect("/c", h);
@@ -563,13 +563,13 @@ def _v2_edges(tmp_path) -> FileRecord:
 def test_java_escapes_in_an_address_are_decoded(tmp_path) -> None:
     rec = _v2_edges(tmp_path)
     sends = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"]
-    assert sends == ['p3.with"quote', "p3.tab\there", "p3.café", 'p3.const"q', "p3.back\\slash"]
+    assert sends == ['app.with"quote', "app.tab\there", "app.café", 'app.const"q', "app.back\\slash"]
 
 
 def test_deploy_of_a_variable_or_instance_has_no_endpoint(tmp_path) -> None:
     rec = _v2_edges(tmp_path)
     deploys = [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"]
-    assert deploys == [None, None, None, None, "p3.Fixed"]
+    assert deploys == [None, None, None, None, "app.Fixed"]
 
 
 def test_routematcher_trace_connect_all_and_regex_routes(tmp_path) -> None:

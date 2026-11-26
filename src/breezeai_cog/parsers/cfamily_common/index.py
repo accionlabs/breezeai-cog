@@ -97,7 +97,7 @@ class CFamilyIndex:
     #: method a class *inherits*. ``None`` when the name is declared with differing bases
     #: (ambiguous → the resolver must not walk through it).
     heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
-    #: **fully-qualified** class name (``Payroll::DataFlow::Judge``) → the declaring class's
+    #: **fully-qualified** class name (``Acme::DataFlow::Judge``) → the declaring class's
     #: node id (``header.h#Judge``), or ``None`` when ambiguous. Lets an out-of-class
     #: ``Scope::method`` definition attach to the class node in the header rather than orphaning
     #: to its own file. Keyed on the *qualified* name (not the simple name) so a definition binds

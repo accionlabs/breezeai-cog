@@ -356,13 +356,13 @@ def test_mod_json_verticle_main() -> None:
         "mod.json",
         '{\n'
         '  // Compiled Groovy verticle\n'
-        '  "main":"groovy:jp.co.payroll.p3.async.Main",\n'
+        '  "main":"groovy:com.acme.async.Main",\n'
         '  "homepage": "http://example/page",  // url must survive comment stripping\n'
         '  "auto-redeploy": true\n'
         '}\n',
     )
     assert md["kind"] == "mod.json"
-    assert md["verticleMain"] == "jp.co.payroll.p3.async.Main"  # groovy: prefix stripped
+    assert md["verticleMain"] == "com.acme.async.Main"  # groovy: prefix stripped
     assert "parseError" not in md
 
 

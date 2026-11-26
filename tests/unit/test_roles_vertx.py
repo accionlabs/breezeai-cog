@@ -464,15 +464,15 @@ def test_handler_class_instance_is_its_handle_method_in_another_file(analyze_fil
     # Vert.x 2.x: `registerHandler(addr, new LoadHandler(eb))` — the class implements `Handler`,
     # whose one method `handle` is the code that runs; it lives in its own file.
     st = analyze_files({
-        "src/main/java/p3/Main.java": """package p3;
+        "src/main/java/app/Main.java": """package app;
 import org.vertx.java.platform.Verticle;
 public class Main extends Verticle {
   public void start() {
-    vertx.eventBus().registerHandler("p3.wizard.load", new LoadHandler(vertx.eventBus()));
+    vertx.eventBus().registerHandler("app.wizard.load", new LoadHandler(vertx.eventBus()));
   }
 }
 """,
-        "src/main/java/p3/LoadHandler.java": """package p3;
+        "src/main/java/app/LoadHandler.java": """package app;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.EventBus;
 import org.vertx.java.core.eventbus.Message;
@@ -485,7 +485,7 @@ public class LoadHandler implements Handler<Message<Object>> {
     })
     [c] = _eps(st)
     assert (c.semanticType, c.endpoint, c.handler, c.handlerLine, c.handlerPath) == (
-        "eventbus_consumer", "p3.wizard.load", "handle", 8, "src/main/java/p3/LoadHandler.java",
+        "eventbus_consumer", "app.wizard.load", "handle", 8, "src/main/java/app/LoadHandler.java",
     )
 
 

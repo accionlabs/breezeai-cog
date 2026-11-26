@@ -334,7 +334,7 @@ def test_clone_timeout_removes_its_temp_dir(monkeypatch: pytest.MonkeyPatch, tmp
 
 # --- resolve_repo_ref: the gitProvider override, shared with /api/git/* -------------
 
-_DC_URL = "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+_DC_URL = "https://stash.example.com/stash/scm/proj/order-batch-create.git"
 
 
 def test_resolve_repo_ref_honours_bitbucket_server_without_scm_instances() -> None:
@@ -344,8 +344,8 @@ def test_resolve_repo_ref_honours_bitbucket_server_without_scm_instances() -> No
         {"repoUrl": _DC_URL, "gitProvider": "bitbucket_server"}, {}
     )
     assert ref == RepoRef(
-        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
-        host="stash.payroll.co.jp", context_path="/stash",
+        "bitbucket_server", "proj", "order-batch-create",
+        host="stash.example.com", context_path="/stash",
     )
 
 
@@ -355,7 +355,7 @@ def test_resolve_repo_ref_without_the_slug_cannot_see_a_data_center_host() -> No
 
 def test_resolve_repo_ref_still_uses_scm_instances_without_the_slug() -> None:
     ref = git_mod.resolve_repo_ref(
-        {"repoUrl": _DC_URL}, {"stash.payroll.co.jp": "bitbucket_server"}
+        {"repoUrl": _DC_URL}, {"stash.example.com": "bitbucket_server"}
     )
     assert ref is not None and ref.provider == "bitbucket_server"
 

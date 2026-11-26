@@ -61,7 +61,7 @@ class RepoRef:
 
     Note:
         For ``bitbucket_server`` the two name fields carry Data Center's vocabulary:
-        ``owner`` is the **project key** (``P3``, or ``~jdoe`` for a personal project)
+        ``owner`` is the **project key** (``PROJ``, or ``~jdoe`` for a personal project)
         and ``repo`` is the **repository slug**. They address
         ``/projects/{owner}/repos/{repo}``, not Bitbucket Cloud's workspace pair.
     """

@@ -126,7 +126,7 @@ def test_table_filled_in_another_file_keeps_the_loop_record(analyze_files) -> No
 
 # ── address forwarders ──────────────────────────────────────────────────────────────────────
 
-UTIL = _java("EventBusUtil", """public class EventBusUtil {
+UTIL = _java("MessageBusUtil", """public class MessageBusUtil {
   public static Object send(Container c, Vertx v, JsonObject msg, String address, long timeout) {
     return v.eventBus().sendWithTimeout(address, msg, timeout, null);
   }
@@ -163,7 +163,7 @@ def _caller(body: str, members: str = "") -> dict[str, str]:
 def test_address_through_a_helper_or_constructor_is_resolved_at_each_call_site(
         analyze_files) -> None:
     files = {**UTIL, **MESSAGE_HANDLER, **INFO, **_caller("""
-    EventBusUtil.send(container, vertx, new JsonObject(), TARGET, 5000L);
+    MessageBusUtil.send(container, vertx, new JsonObject(), TARGET, 5000L);
     register("orders/info", new InfoHandler());
     new MessageHandler(vertx, container, "orders/view");""", _REGISTER)}
     # Each call site is a record with its own address. A helper's own send or registration, on
@@ -180,7 +180,7 @@ def test_forwarded_argument_that_is_not_a_constant_leaves_the_address_empty(
         analyze_files) -> None:
     files = {**UTIL, **MESSAGE_HANDLER, **_caller("""
     String where = pick();
-    EventBusUtil.send(container, vertx, new JsonObject(), where, 5000L);
+    MessageBusUtil.send(container, vertx, new JsonObject(), where, 5000L);
     new MessageHandler(vertx, container, where);""")}
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_consumer", "${where}", "handle", "MessageHandler.java"),
@@ -256,9 +256,9 @@ def test_helper_that_rewrites_the_address_is_not_a_forwarder(analyze_files) -> N
 def test_same_helper_with_two_shapes_across_files_is_not_followed(analyze_files) -> None:
     other = "src/other/java/com/acme/"
     files = {**UTIL, **_caller(
-        '    EventBusUtil.send(container, vertx, new JsonObject(), "orders/x", 5000L);')}
-    # The same `EventBusUtil.send/5` elsewhere forwards a different parameter as the address.
-    files[f"{other}EventBusUtil.java"] = files[f"{SRC}EventBusUtil.java"].replace(
+        '    MessageBusUtil.send(container, vertx, new JsonObject(), "orders/x", 5000L);')}
+    # The same `MessageBusUtil.send/5` elsewhere forwards a different parameter as the address.
+    files[f"{other}MessageBusUtil.java"] = files[f"{SRC}MessageBusUtil.java"].replace(
         "JsonObject msg, String address", "String address, JsonObject msg")
     got = [r for r in _bus(analyze_files(files)) if r[0] == "Caller.java"]
     # Which helper the call reaches is unsure: no address taken from it.
@@ -322,7 +322,7 @@ def test_get_on_something_that_is_not_a_vertx2_http_client_is_not_an_api_call(
     assert _api(st) == []
 
 
-RELAY_UTIL = _java("EventBusUtil", """public class EventBusUtil {
+RELAY_UTIL = _java("MessageBusUtil", """public class MessageBusUtil {
   public static Object send(Container c, Vertx v, JsonObject msg, String address, Object o) {
     return send(c, v, msg, address, o, 5000L);
   }
@@ -338,21 +338,21 @@ RELAY_UTIL = _java("EventBusUtil", """public class EventBusUtil {
 
 def test_helper_overload_relaying_to_the_real_helper_is_followed(analyze_files) -> None:
     files = {**RELAY_UTIL, **_caller("""
-    EventBusUtil.send(container, vertx, new JsonObject(), TARGET, null);
-    EventBusUtil.send(container, vertx, new JsonObject(), "orders/direct", null, 10L);""")}
-    # Both overloads resolve at the caller. The relay inside EventBusUtil and the real
+    MessageBusUtil.send(container, vertx, new JsonObject(), TARGET, null);
+    MessageBusUtil.send(container, vertx, new JsonObject(), "orders/direct", null, 10L);""")}
+    # Both overloads resolve at the caller. The relay inside MessageBusUtil and the real
     # helper's own send keep their records (address unknown).
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
         ("Caller.java", "eventbus_send", "orders/direct", None, None),
         # the overload relaying its address parameter and the real helper's send: definitions;
         # a send to a constant inside the helper is executed there
-        ("EventBusUtil.java", "eventbus_send", "orders/fixed", None, None),
+        ("MessageBusUtil.java", "eventbus_send", "orders/fixed", None, None),
     ]
 
 
 def test_relay_that_does_not_pass_the_address_on_is_not_a_forwarder(analyze_files) -> None:
-    files = {**RELAY_UTIL, **_caller('    EventBusUtil.other(container, vertx, "orders/nope");')}
+    files = {**RELAY_UTIL, **_caller('    MessageBusUtil.other(container, vertx, "orders/nope");')}
     got = [r for r in _bus(analyze_files(files)) if r[0] == "Caller.java"]
     # `other` passes its parameter as the message, not the address: the call is no EventBus call.
     assert got == []
@@ -481,7 +481,7 @@ def test_helper_never_called_sends_nothing(analyze_files) -> None:
 
 def test_helper_called_from_a_file_without_vertx_is_recorded_at_that_call(analyze_files) -> None:
     files = {**UTIL, f"{SRC}Plain.java": "package com.acme;\npublic class Plain { void go() {"
-             ' EventBusUtil.send(null, null, null, "orders/plain", 5L); } }\n'}
+             ' MessageBusUtil.send(null, null, null, "orders/plain", 5L); } }\n'}
     # Plain.java has no Vert.x marker but names the forwarder's class: its call is the send
     assert _bus(analyze_files(files)) == [
         ("Plain.java", "eventbus_send", "orders/plain", None, None)]
@@ -490,8 +490,8 @@ def test_helper_called_from_a_file_without_vertx_is_recorded_at_that_call(analyz
 def test_helper_declared_with_two_shapes_keeps_both_records(analyze_files) -> None:
     other = "src/other/java/com/acme/"
     files = dict(UTIL)
-    files[f"{other}EventBusUtil.java"] = files[f"{SRC}EventBusUtil.java"].replace(
+    files[f"{other}MessageBusUtil.java"] = files[f"{SRC}MessageBusUtil.java"].replace(
         "JsonObject msg, String address", "String address, JsonObject msg")
     assert _bus(analyze_files(files)) == [
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None)]
+        ("MessageBusUtil.java", "eventbus_send", "${address}", None, None),
+        ("MessageBusUtil.java", "eventbus_send", "${address}", None, None)]

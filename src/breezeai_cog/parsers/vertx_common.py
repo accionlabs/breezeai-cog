@@ -216,7 +216,7 @@ def classify_call(
         # marked ${…} where it stands (addresses.py) — the source of the address, never a
         # value it is joined on.
         # a bare argument is named only on the event bus itself: a wrapper whose name merely
-        # holds "bus" (`EventBusUtil.send(container, …)`) takes other arguments first
+        # holds "bus" (`MessageBusUtil.send(container, …)`) takes other arguments first
         named = first_arg if _EVENT_BUS_ITSELF.search(obj) else None
         return EVENTBUS[method], None, event_template(path, named), None
     if method in TIMERS:

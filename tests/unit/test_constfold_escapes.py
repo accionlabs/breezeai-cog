@@ -49,8 +49,8 @@ def test_a_text_block_or_lone_surrogate_is_not_read() -> None:
 
 
 def test_init_tokens_decodes_java_escapes() -> None:
-    code = b'class A { String s = "p3.with\\"quote"; }'
-    assert init_tokens(_literal("java", code), code) == [("lit", 'p3.with"quote')]
+    code = b'class A { String s = "app.with\\"quote"; }'
+    assert init_tokens(_literal("java", code), code) == [("lit", 'app.with"quote')]
 
 
 def test_groovy_literals_are_unchanged() -> None:

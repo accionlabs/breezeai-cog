@@ -154,7 +154,7 @@ public class Catchable {{
 
 
 def test_varargs_helper_and_relay(api_calls) -> None:
-    # P3's shape: `ResponseHandler... endHandler` after the URL — the fixed positions decide
+    # A common shape: `ResponseHandler... endHandler` after the URL — the fixed positions decide
     got = api_calls({P + "ApiUtil.java": UTIL, P + "Api.java": f"""package com.acme;
 {V2}public class Api {{
   private HttpClient client;
@@ -225,7 +225,7 @@ public class Accessor {
 
 
 def test_call_through_an_interface_whose_implementations_agree(api_calls) -> None:
-    # CommonBatch: `HttpClient client = new HttpClientImpl()`; every implementation of the
+    # A shared batch library: `HttpClient client = new HttpClientImpl()`; every implementation of the
     # interface method is a helper with the same request, so the call is that request
     got = api_calls({
         P + "Client.java": CLIENT,
@@ -300,7 +300,7 @@ public class Reader {
 def _accessor(field_type: str, made: str) -> str:
     return f"""package com.acme;
 import java.util.Map;
-public class AccessorBase {{
+public class Accessor {{
   protected {field_type} client = new {made}();
   private Map<String, Object> cache;
   public Object put(String uri, Object values) {{ return this.client.put(uri, values); }}
@@ -315,19 +315,19 @@ public class AccessorBase {{
 
 
 def test_relay_through_a_field_of_a_helper_class(api_calls) -> None:
-    # CommonBatch: AccessorBase.put(uri, …) passes its parameter on to `this.client.put(uri, …)`;
-    # the request is made at each caller of AccessorBase.put
+    # A shared batch library: Accessor.put(uri, …) passes its parameter on to `this.client.put(uri, …)`;
+    # the request is made at each caller of Accessor.put
     got = api_calls({P + "ClientImpl.java": _impl("ClientImpl", ""),
-                     P + "AccessorBase.java": _accessor("ClientImpl", "ClientImpl")})
-    assert got == [("AccessorBase.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]
+                     P + "Accessor.java": _accessor("ClientImpl", "ClientImpl")})
+    assert got == [("Accessor.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]
 
 
 def test_relay_through_a_field_typed_as_an_interface(api_calls) -> None:
     got = api_calls({P + "Client.java": CLIENT, P + "ClientImpl.java": _impl("ClientImpl"),
                      P + "NoLogClientImpl.java": _impl("NoLogClientImpl"),
-                     P + "AccessorBase.java": _accessor("Client", "ClientImpl")})
+                     P + "Accessor.java": _accessor("Client", "ClientImpl")})
     # a Map field's `put` is no request: `keep` has no record
-    assert got == [("AccessorBase.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]
+    assert got == [("Accessor.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]
 
 
 def test_url_converted_to_text_is_named_after_the_value(api_calls) -> None:

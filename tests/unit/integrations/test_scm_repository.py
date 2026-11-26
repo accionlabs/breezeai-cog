@@ -138,7 +138,7 @@ def test_legacy_shim_ignores_self_hosted_until_wired() -> None:
 
 # ── Bitbucket Data Center ──────────────────────────────────────────────────
 
-_STASH = {"stash.payroll.co.jp": "bitbucket_server"}
+_STASH = {"stash.example.com": "bitbucket_server"}
 
 
 @pytest.mark.parametrize(
@@ -146,42 +146,42 @@ _STASH = {"stash.payroll.co.jp": "bitbucket_server"}
     [
         # The clone URL, under a /stash context path.
         (
-            "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git",
-            RepoRef("bitbucket_server", "p3", "zaike-non-unity-kit-create",
-                    host="stash.payroll.co.jp", context_path="/stash"),
+            "https://stash.example.com/stash/scm/proj/order-batch-create.git",
+            RepoRef("bitbucket_server", "proj", "order-batch-create",
+                    host="stash.example.com", context_path="/stash"),
         ),
         # Browse URL, same instance.
         (
-            "https://stash.payroll.co.jp/stash/projects/P3/repos/cog/browse",
-            RepoRef("bitbucket_server", "P3", "cog",
-                    host="stash.payroll.co.jp", context_path="/stash"),
+            "https://stash.example.com/stash/projects/PROJ/repos/cog/browse",
+            RepoRef("bitbucket_server", "PROJ", "cog",
+                    host="stash.example.com", context_path="/stash"),
         ),
         # Pull-request URL keeps the slug, not the trailing segments.
         (
-            "https://stash.payroll.co.jp/stash/projects/P3/repos/cog/pull-requests/42/overview",
-            RepoRef("bitbucket_server", "P3", "cog",
-                    host="stash.payroll.co.jp", context_path="/stash"),
+            "https://stash.example.com/stash/projects/PROJ/repos/cog/pull-requests/42/overview",
+            RepoRef("bitbucket_server", "PROJ", "cog",
+                    host="stash.example.com", context_path="/stash"),
         ),
         # Served at the root: no context path.
         (
-            "https://stash.payroll.co.jp/scm/P3/cog.git",
-            RepoRef("bitbucket_server", "P3", "cog", host="stash.payroll.co.jp"),
+            "https://stash.example.com/scm/PROJ/cog.git",
+            RepoRef("bitbucket_server", "PROJ", "cog", host="stash.example.com"),
         ),
         # A personal repository: /users/{name} normalises to the API's ~{name}.
         (
-            "https://stash.payroll.co.jp/users/jdoe/repos/cog/browse",
-            RepoRef("bitbucket_server", "~jdoe", "cog", host="stash.payroll.co.jp"),
+            "https://stash.example.com/users/jdoe/repos/cog/browse",
+            RepoRef("bitbucket_server", "~jdoe", "cog", host="stash.example.com"),
         ),
         (
-            "https://stash.payroll.co.jp/projects/~jdoe/repos/cog/browse",
-            RepoRef("bitbucket_server", "~jdoe", "cog", host="stash.payroll.co.jp"),
+            "https://stash.example.com/projects/~jdoe/repos/cog/browse",
+            RepoRef("bitbucket_server", "~jdoe", "cog", host="stash.example.com"),
         ),
         # A context path literally named "scm" still resolves: only one index leaves
         # exactly two trailing segments.
         (
-            "https://stash.payroll.co.jp/scm/scm/P3/cog.git",
-            RepoRef("bitbucket_server", "P3", "cog",
-                    host="stash.payroll.co.jp", context_path="/scm"),
+            "https://stash.example.com/scm/scm/PROJ/cog.git",
+            RepoRef("bitbucket_server", "PROJ", "cog",
+                    host="stash.example.com", context_path="/scm"),
         ),
     ],
 )
@@ -192,9 +192,9 @@ def test_bitbucket_server_urls(url, expected) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "https://stash.payroll.co.jp/stash/projects/P3/browse",   # no /repos segment
-        "https://stash.payroll.co.jp/stash/scm/P3",               # slug missing
-        "https://stash.payroll.co.jp/stash/dashboard",            # not a repository URL
+        "https://stash.example.com/stash/projects/PROJ/browse",   # no /repos segment
+        "https://stash.example.com/stash/scm/PROJ",               # slug missing
+        "https://stash.example.com/stash/dashboard",            # not a repository URL
     ],
 )
 def test_bitbucket_server_rejects_urls_it_cannot_address(url) -> None:
@@ -204,25 +204,25 @@ def test_bitbucket_server_rejects_urls_it_cannot_address(url) -> None:
 def test_bitbucket_server_is_unreachable_without_an_instance_entry() -> None:
     """Data Center has no public-cloud pattern, so an unregistered host is a 400."""
     assert parse_repo_url(
-        "https://stash.payroll.co.jp/stash/scm/p3/cog.git", {}
+        "https://stash.example.com/stash/scm/proj/cog.git", {}
     ) is None
 
 
 def test_parse_bitbucket_server_url_needs_no_instances_entry() -> None:
     """What `gitProvider: "bitbucket_server"` on a request buys: an unregistered host."""
     assert parse_bitbucket_server_url(
-        "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+        "https://stash.example.com/stash/scm/proj/order-batch-create.git"
     ) == RepoRef(
-        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
-        host="stash.payroll.co.jp", context_path="/stash",
+        "bitbucket_server", "proj", "order-batch-create",
+        host="stash.example.com", context_path="/stash",
     )
 
 
 @pytest.mark.parametrize(
     "url",
     [
-        "https://stash.payroll.co.jp/stash/dashboard",  # no repository anchor
-        "/stash/scm/p3/kit.git",                        # no host
+        "https://stash.example.com/stash/dashboard",  # no repository anchor
+        "/stash/scm/proj/kit.git",                        # no host
     ],
 )
 def test_parse_bitbucket_server_url_rejects_what_it_cannot_address(url) -> None:
@@ -235,12 +235,12 @@ def test_parse_bitbucket_server_url_rejects_what_it_cannot_address(url) -> None:
     ("url", "origin", "context"),
     [
         # Data Center's stock HTTP port, served at the root.
-        ("http://bb.corp:7990/scm/P3/kit.git", "http://bb.corp:7990", ""),
+        ("http://bb.corp:7990/scm/PROJ/kit.git", "http://bb.corp:7990", ""),
         # Behind a TLS proxy on 8443, under a /stash context path.
-        ("https://bb.corp:8443/stash/scm/P3/kit.git", "https://bb.corp:8443", "/stash"),
+        ("https://bb.corp:8443/stash/scm/PROJ/kit.git", "https://bb.corp:8443", "/stash"),
         # A port equal to the scheme default normalises away.
-        ("https://bb.corp:443/stash/scm/P3/kit.git", "https://bb.corp", "/stash"),
-        ("http://bb.corp:80/scm/P3/kit.git", "http://bb.corp", ""),
+        ("https://bb.corp:443/stash/scm/PROJ/kit.git", "https://bb.corp", "/stash"),
+        ("http://bb.corp:80/scm/PROJ/kit.git", "http://bb.corp", ""),
     ],
 )
 def test_bitbucket_server_keeps_scheme_and_port(url, origin, context) -> None:
@@ -253,7 +253,7 @@ def test_a_browsed_file_path_containing_scm_is_not_read_as_the_project() -> None
     """`projects`/`repos` is matched before `scm`, so a directory called `scm` inside a
     browsed path cannot be mistaken for the project key."""
     ref = parse_bitbucket_server_url(
-        "https://bb.corp/stash/projects/P3/repos/app/browse/scm/dir/f.py"
+        "https://bb.corp/stash/projects/PROJ/repos/app/browse/scm/dir/f.py"
     )
     assert ref is not None
-    assert (ref.owner, ref.repo, ref.context_path) == ("P3", "app", "/stash")
+    assert (ref.owner, ref.repo, ref.context_path) == ("PROJ", "app", "/stash")
