@@ -110,10 +110,10 @@ def _calls(
         parts = _call_parts(call, source)
         if parts is not None:
             _, receiver, method = parts
-            key = (method, receiver)
-            if key not in seen:
-                seen.add(key)
-                found.append(Call(name=method, path=resolve(method, receiver)))
+            path = resolve(method, receiver)
+            if (method, path) not in seen:  # one entry per name and target file
+                seen.add((method, path))
+                found.append(Call(name=method, path=path))
 
     def visit(node: Node) -> None:
         for child in node.named_children:

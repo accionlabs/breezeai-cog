@@ -197,11 +197,10 @@ def test_address_forwarding_helper_binds_at_each_call_site(analyze_files) -> Non
 """
         }
     )
-    # Each call site binds its own address; the helper's own call keeps its record, its address
-    # unknown (a parameter).
+    # Each call site binds its own address; the helper's own call on its address parameter only
+    # defines the registration: no record.
     got = sorted((r.semanticType, r.endpoint or "") for r in _eps(st))
-    assert got == [("eventbus_consumer", "${address}"), ("eventbus_consumer", "svc.a"),
-                   ("eventbus_consumer", "svc.b")]
+    assert got == [("eventbus_consumer", "svc.a"), ("eventbus_consumer", "svc.b")]
 
 
 def test_timer_is_binding(analyze_files) -> None:
@@ -465,15 +464,15 @@ def test_handler_class_instance_is_its_handle_method_in_another_file(analyze_fil
     # Vert.x 2.x: `registerHandler(addr, new LoadHandler(eb))` — the class implements `Handler`,
     # whose one method `handle` is the code that runs; it lives in its own file.
     st = analyze_files({
-        "src/main/java/p3/Main.java": """package p3;
+        "src/main/java/app/Main.java": """package app;
 import org.vertx.java.platform.Verticle;
 public class Main extends Verticle {
   public void start() {
-    vertx.eventBus().registerHandler("p3.wizard.load", new LoadHandler(vertx.eventBus()));
+    vertx.eventBus().registerHandler("app.wizard.load", new LoadHandler(vertx.eventBus()));
   }
 }
 """,
-        "src/main/java/p3/LoadHandler.java": """package p3;
+        "src/main/java/app/LoadHandler.java": """package app;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.EventBus;
 import org.vertx.java.core.eventbus.Message;
@@ -486,7 +485,7 @@ public class LoadHandler implements Handler<Message<Object>> {
     })
     [c] = _eps(st)
     assert (c.semanticType, c.endpoint, c.handler, c.handlerLine, c.handlerPath) == (
-        "eventbus_consumer", "p3.wizard.load", "handle", 8, "src/main/java/p3/LoadHandler.java",
+        "eventbus_consumer", "app.wizard.load", "handle", 8, "src/main/java/app/LoadHandler.java",
     )
 
 
@@ -630,15 +629,14 @@ def test_pathless_registration_is_a_guard_of_later_routes(analyze_files) -> None
     assert (r.startLine, r.method, r.guards) == (10, "POST", ["BodyHandler"])
 
 
-def test_registrations_of_one_path_keep_their_own_records(analyze_files) -> None:
-    # the app's own handlers on one path are steps of the endpoint, not guards: each
-    # registration stays a binding with its own handler
+def test_registrations_of_one_path_are_one_binding(analyze_files) -> None:
+    # the app's own handlers on one path are steps of the endpoint, not guards: one binding,
+    # at the first registration, leading to the first step, every step in its handlerChain
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);
     router.post("/orders").handler(this::check);
     router.post("/orders").handler(this::handle);""")
     )
-    assert [(r.startLine, r.handler, r.guards) for r in _eps(st)] == [
-        (9, "check", None),
-        (10, "handle", None),
-    ]
+    [r] = _eps(st)
+    assert (r.startLine, r.handler, r.guards) == (9, "check", None)
+    assert [s.handler for s in r.handlerChain] == ["check", "handle"]

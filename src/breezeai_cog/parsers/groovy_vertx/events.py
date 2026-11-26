@@ -40,7 +40,9 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    non_router_vars,
     route_template,
+    route_verb,
     router_vars,
     service_builder_vars,
     sub_router_bases,
@@ -414,6 +416,7 @@ def detect_vertx_groovy(
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
+    non_routers = non_router_vars(source)
 
     for call in calls:
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
@@ -423,13 +426,15 @@ def detect_vertx_groovy(
             uses_routematcher and obj == "" and endpoint_path and "/" in endpoint_path
         )
         info = classify_call(method, endpoint_path, first_arg, obj, route_scope=route_scope,
-                             service_vars=service_vars, routers=routers)
+                             service_vars=service_vars, routers=routers,
+                             non_routers=non_routers)
         if info is None:
             continue
         semantic, verb, endpoint, route_kind = info
         if semantic == "route" and failure_handler_only(_chained(call, source)):
             continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
-        if semantic == "route" and endpoint is None:
+        is_regex = True if semantic == "route" and route_verb(method)[1] else None
+        if semantic == "route" and endpoint is None and not is_regex:  # `{3}` is a quantifier
             # A path with a part read at runtime (`"${prefix}/x"`): `${prefix}/x`.
             endpoint = route_template(endpoint_path)
         unknown_base = False
@@ -457,6 +462,7 @@ def detect_vertx_groovy(
         )
 
         found.append(vertx_emit(call, semantic, verb, endpoint, route_kind, handler,
-                                handler_line, unknown_base=unknown_base))
+                                handler_line, unknown_base=unknown_base,
+                                is_regex=is_regex))
 
     return found

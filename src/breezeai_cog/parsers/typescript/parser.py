@@ -23,12 +23,16 @@ from .classes import build_class
 from ..callresolve import make_resolver
 from .decorators import extract_decorators
 from .functions import (
+    _calls as body_calls,
+    track_built,
     build_function,
     collect_nested_functions,
     defined_names,
     type_map,
 )
 from ..statements_common import reset_http_client_ids, set_http_client_ids
+from .call_targets import checked_resolver, follow_reexports, module_objects
+from .declarations import import_bindings
 from .handlers import handler_locator
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from ..comments_common import comment_statements_for
@@ -48,6 +52,7 @@ _DECLS = (
     "interface_declaration",
     "enum_declaration",
     "function_declaration",
+    "generator_function_declaration",  # `function* g()` / `async function* g()`
     "lexical_declaration",
     "variable_declaration",
 )
@@ -64,7 +69,14 @@ _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
 _TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.", ".mock.")
 
 
-_FUNC_VALUES = ("arrow_function", "function_expression")
+_FUNC_VALUES = ("arrow_function", "function_expression", "generator_function")
+#: Class nodes: their code is the class's (its methods, field initializers), never the file's.
+_CLASS_NODES = frozenset({"class_declaration", "class", "abstract_class_declaration"})
+#: What the file-level pass does not enter: classes, namespaces (walked on their own) and
+#: decorators (a decorator is not a call the file makes).
+_FILE_OPAQUE = _CLASS_NODES | frozenset({"internal_module", "module", "decorator"})
+#: Bare calls not recorded in ``File.calls``: ``require(…)`` is an import (``importFiles``).
+_FILE_SKIP_CALLS = frozenset({"require"})
 #: `namespace X {…}` and the legacy `module X {…}` — a declaration scope, not a value.
 _MODULE_TYPES = ("internal_module", "module")
 
@@ -103,6 +115,59 @@ def _module_block(node: Node) -> Node | None:
         return next((c for c in node.named_children if c.type == "statement_block"), None)
     if node.type == "statement_block":  # `declare global { … }`
         return node
+    return None
+
+
+#: Where a module stores what it exports: `exports.x`, `module.exports.x`, `module.exports`.
+_EXPORTS = ("exports", "module.exports")
+
+
+def _assignment(node: Node) -> Node | None:
+    """The ``assignment_expression`` a statement is made of, else None."""
+    if node.type != "expression_statement":
+        return None
+    inner = [c for c in node.named_children if c.type != "comment"]
+    return inner[0] if len(inner) == 1 and inner[0].type == "assignment_expression" else None
+
+
+def _assignment_counts(root: Node, source: bytes) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for child in root.named_children:
+        a = _assignment(child)
+        left = a.child_by_field_name("left") if a is not None else None
+        if left is not None:
+            key = "".join(node_text(left, source).split())
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _assigned_function(
+    node: Node, source: bytes, counts: dict[str, int],
+) -> tuple[Node, str, str | None] | None:
+    """A function stored where callers find it by name (Rule 2a): (value, name, receiverType).
+    ``exports.x = …`` / ``module.exports.x = …`` → ``x``; ``module.exports = …`` →
+    ``default`` (what ``require`` returns, as an ES default export); ``X.prototype.m = …`` →
+    ``m`` with receiver ``X``. Never an ambiguous name: a chain (``exports.a = exports.b =
+    …``) or a target assigned twice in the file gives None."""
+    a = _assignment(node)
+    if a is None:
+        return None
+    left, right = a.child_by_field_name("left"), a.child_by_field_name("right")
+    if left is None or right is None or right.type not in _FUNC_VALUES + ("function",):
+        return None
+    target = "".join(node_text(left, source).split())
+    if counts.get(target, 0) != 1:
+        return None
+    if target == "module.exports":
+        return right, "default", None
+    owner, _, member = target.rpartition(".")
+    if not member.isidentifier():
+        return None
+    if owner in _EXPORTS:
+        return right, member, None
+    base, _, proto = owner.rpartition(".")
+    if proto == "prototype" and base.isidentifier():
+        return right, member, base
     return None
 
 
@@ -179,14 +244,23 @@ class TypeScriptParser(BaseParser):
         internal, external, exports, bindings = extract_imports(
             root, source, path, ctx.repo_root, ctx.resolution_index
         )
-        resolve = make_resolver(  # calls[].path (Tiers 1+2 + Phase 2 + inherited this.M())
-            bindings,
-            defined_names(root, source),
-            path,
-            type_map(root, source),
-            heritage=getattr(ctx.resolution_index, "class_heritage", None),
-            builtin_methods=JS_BUILTIN_METHODS,
-            array_types=JS_ARRAY_TYPES,
+        # calls[].path: an import followed through re-exports to its declaring file, and a path
+        # kept only when that file declares what is called (call_targets.py)
+        imported = import_bindings(root, source)
+        called = follow_reexports(bindings, imported, ctx.resolution_index)
+        types = type_map(root, source)
+        resolve = checked_resolver(
+            make_resolver(  # Tiers 1+2 + Phase 2 + inherited this.M()
+                called,
+                defined_names(root, source),
+                path,
+                types,
+                heritage=getattr(ctx.resolution_index, "class_heritage", None),
+                builtin_methods=JS_BUILTIN_METHODS,
+                array_types=JS_ARRAY_TYPES,
+            ),
+            path=path, bindings=called, types=types, index=ctx.resolution_index,
+            namespaces=module_objects(root, source, imported),
         )
         functions: list[Function] = []
         classes = []
@@ -194,6 +268,10 @@ class TypeScriptParser(BaseParser):
         #: Spans of the declaration values extracted as Functions (`const f = () => …`): a
         #: statement that only binds them is not emitted.
         built: set[tuple[int, int]] = set()
+        #: Statements of the Functions found inside file-level code (`setInterval(function
+        #: tick() {…})`): listed after the file's own, as a function's nested ones follow its
+        #: own, so a detector enriching "the statement on this line" finds the outer call.
+        nested_statements: list[Statement] = []
 
         def walk(scope: Node) -> None:
             """Dispatch every declaration in ``scope``, descending into namespace/module
@@ -223,12 +301,49 @@ class TypeScriptParser(BaseParser):
                 decl, exp_decs = _unwrap_export(child)
                 decorators = pending + exp_decs
                 pending = []
+                assigned = _assigned_function(child, source, assignments)
+                if assigned is not None:
+                    # `exports.load = function loadAll() {…}`: a Function named where it is
+                    # stored (Rule 2a); its own name, if any, is its alias.
+                    value, fn_name, receiver = assigned
+                    built.add((value.start_byte, value.end_byte))
+                    fns, fn_stmts = build_function(
+                        value, name=fn_name, kind=value.type, decorators=[], source=source,
+                        path=path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve,
+                    )
+                    if receiver is not None and fns:
+                        fns[0].receiverType = receiver
+                    functions.extend(fns)
+                    nested_statements.extend(fn_stmts)
+                    continue
+                if decl is None and child.type != "export_statement":
+                    # Code at file level (`setInterval(function tick() {…})`, `$('#b').click(
+                    # function () {…})`): a function with a name of its own, or bound to a name
+                    # inside a nameless callback, is a Function of the file; the rest of the
+                    # code is the file's own (File.calls and statements, after the walk).
+                    for value_node, nested_name, nested_kind in collect_nested_functions(
+                        child, source
+                    ):
+                        fns, fn_stmts = build_function(
+                            value_node, name=nested_name, kind=nested_kind, decorators=[],
+                            source=source, path=path, parent_id=fid, class_name=None,
+                            seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                        )
+                        functions.extend(fns)
+                        nested_statements.extend(fn_stmts)
+                    continue
                 if decl is None:
                     # `export default <expr>` is not a declaration, so it isn't handled above —
                     # but it commonly wraps a named function: `export default React.memo(function
                     # Foo(){…})`, `export default function bar(){}`. Descend it with the named-only
                     # collector so the component (and, via build_function's recursion, its nested
                     # handlers) are seeded. Anonymous `export default () => …` yields nothing.
+                    if child.type == "export_statement" and self._export_default(
+                        child, decorators, source, path, fid, seen_ids, capture, limit,
+                        functions, classes, statements, resolve,
+                    ):
+                        continue
                     if child.type == "export_statement":
                         for value_node, nested_name, nested_kind in collect_nested_functions(
                             child, source
@@ -266,14 +381,25 @@ class TypeScriptParser(BaseParser):
                     built,
                 )
 
-        walk(root)
+        # How many times each target is assigned at file level: one assigned twice
+        # (`exports.x = …` then `exports.x = …`) names no Function (Rule 2e).
+        assignments = _assignment_counts(root, source)
+        with track_built() as built_spans:
+            walk(root)
 
+        # The file's own code: everything outside a Function or a Class, nameless callbacks
+        # included (`process.on('SIGTERM', () => { … })`) — its statements and its calls.
+        owned = frozenset(built_spans)
         statements.extend(
             extract_statements(
                 root, source, path, parent_id=fid, capture=capture, limit=limit,
-                seen_ids=seen_ids, built=frozenset(built),
+                seen_ids=seen_ids, built=frozenset(built), descend_all=True,
+                barriers=owned, opaque=_FILE_OPAQUE,
             )
         )
+        statements.extend(nested_statements)
+        file_calls = body_calls(root, source, resolve, None, owned,
+                                opaque=_FILE_OPAQUE, skip=_FILE_SKIP_CALLS)
 
         if capture:
             statements.extend(
@@ -296,6 +422,7 @@ class TypeScriptParser(BaseParser):
             functions=functions,
             classes=classes,
             statements=statements,
+            calls=file_calls or None,
         )
         # Additive detectors (parsers/additive.py) — layered on top of base + framework
         # extraction for every TS parser that inherits extract, so they also fire in files owned
@@ -337,7 +464,7 @@ class TypeScriptParser(BaseParser):
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_stmts)
-        elif decl.type == "function_declaration":
+        elif decl.type in ("function_declaration", "generator_function_declaration"):
             name_node = decl.child_by_field_name("name")
             fns, fn_stmts = build_function(
                 decl,
@@ -424,6 +551,40 @@ class TypeScriptParser(BaseParser):
                         )
                         functions.extend(fns)
                         statements.extend(fn_stmts)
+
+    def _export_default(
+        self, export, decorators, source, path, fid, seen_ids, capture, limit, functions,
+        classes, statements, resolve,
+    ) -> bool:
+        """``export default () => …`` / ``export default function () {…}``: a Function named
+        ``default`` — what an importer of the default export calls; ``export default class {…}``:
+        a Class ``default``, ``isAnonymous``. True when handled; a named value, an object or
+        any other expression is left to the caller."""
+        if not any(c.type == "default" for c in export.children):
+            return False
+        value = next((c for c in export.named_children
+                      if c.type not in ("decorator", "comment")), None)
+        if value is None:
+            return False
+        if value.type in _FUNC_VALUES and value.child_by_field_name("name") is None:
+            fns, fn_stmts = build_function(
+                value, name="default", kind=value.type, decorators=[], source=source,
+                path=path, parent_id=fid, class_name=None, seen_ids=seen_ids, capture=capture,
+                limit=limit, resolve=resolve,
+            )
+            functions.extend(fns)
+            statements.extend(fn_stmts)
+            return True
+        if value.type == "class" and value.child_by_field_name("name") is None:
+            cls, methods, cls_stmts = build_class(
+                value, decorators, source, path, parent_id=fid, seen_ids=seen_ids,
+                capture=capture, limit=limit, resolve=resolve, default_name="default",
+            )
+            classes.append(cls)
+            functions.extend(methods)
+            statements.extend(cls_stmts)
+            return True
+        return False
 
     def _object_functions(
         self,

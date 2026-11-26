@@ -94,7 +94,7 @@ def test_claims_selects_vertx() -> None:
 
 
 # Vert.x 2.x ServiceServer idiom: registerHandler in a loop over a handler map.
-_V2_SRC = b'''package jp.co.payroll.p3.service;
+_V2_SRC = b'''package com.acme.service;
 
 import org.vertx.java.platform.Verticle;
 import org.vertx.java.core.Handler;
@@ -281,13 +281,13 @@ public class AppVerticle extends Verticle {
 def test_delegation_wrapper_promotes_call_sites(analyze_files) -> None:
     # A private wrapper that forwards its address parameter to registerHandler is an address
     # forwarder: each call site is a consumer with its own address folded, and the wrapper's own
-    # registerHandler keeps its record with no address (never the parameter name).
     st = analyze_files({"src/com/acme/AppVerticle.java": _WRAPPER_SRC.decode()})
     consumers = sorted((s.startLine, s.endpoint or "") for s in st
                        if s.semanticType == "eventbus_consumer")
     # `app` is a local variable: a call site built from it keeps it marked where it stands.
-    assert consumers == [(11, "FULL_${app}/formal"), (12, "${app}/submit"), (13, "view/APP"),
-                         (17, "${address}")]
+    # The wrapper's own registerHandler (line 17) on its address parameter only defines the
+    # registration: no record.
+    assert consumers == [(11, "FULL_${app}/formal"), (12, "${app}/submit"), (13, "view/APP")]
 
 
 def test_send_wrapper_promotes_call_sites(analyze_files) -> None:
@@ -302,7 +302,8 @@ def test_send_wrapper_promotes_call_sites(analyze_files) -> None:
     )
     st = analyze_files({"src/x/V.java": src})
     sends = sorted((s.startLine, s.endpoint or "") for s in st if s.semanticType == "eventbus_send")
-    assert sends == [(4, "orders.audit"), (6, "${address}")]  # the call site; the wrapper's own send
+    # the call site; the wrapper's own send on its address parameter only defines the send
+    assert sends == [(4, "orders.audit")]
 
 
 def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:
@@ -412,7 +413,9 @@ def test_route_and_consumer_handlers(tmp_path) -> None:
            if s.semanticType in ("route", "eventbus_consumer", "eventbus_send")}
     assert got == {
         "/a": ("list", 20),            # this::list — declared in this class
-        "/b": (None, 10),              # last chained .handler is the lambda (BodyHandler runs before)
+        # BodyHandler is not imported here, so not Vert.x-web's own: the first step, known by
+        # name only; the lambda is the second step (handlerChain)
+        "/b": (None, None),
         "/c": ("update", None),        # other::update — another object's method: no line
         "/d": (None, None),            # a factory call names no handler
         "q.one": ("onOne", 21),
@@ -466,7 +469,7 @@ def test_sub_router_prefix_composes_and_mount_is_not_a_route(tmp_path) -> None:
 
 # Vert.x 2.x verticle: a router held under any name, every Container deploy call, and the
 # verticle itself registered as the handler (`registerHandler(addr, this)`).
-_V2_VERTICLE = b"""package p3;
+_V2_VERTICLE = b"""package app;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.Message;
 import org.vertx.java.core.http.RouteMatcher;
@@ -475,8 +478,8 @@ public class W extends Verticle implements Handler<Message<Object>> {
     private RouteMatcher matcher;
     public void start() {
         vertx.eventBus().registerHandler("wizard.load", this);
-        container.deployVerticle("p3.WorkerVerticle");
-        container.deployWorkerVerticle("p3.DocWorker");
+        container.deployVerticle("app.WorkerVerticle");
+        container.deployWorkerVerticle("app.DocWorker");
         container.deployModule("mod-x~1.0");
         RouteMatcher routes = new RouteMatcher();
         routes.get("/docdef/:id", h);
@@ -500,7 +503,7 @@ def _v2_verticle(tmp_path) -> FileRecord:
 def test_vertx2_worker_and_module_deploys_are_verticle_deploys(tmp_path) -> None:
     rec = _v2_verticle(tmp_path)
     deploys = [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"]
-    assert deploys == ["p3.WorkerVerticle", "p3.DocWorker", "mod-x~1.0"]
+    assert deploys == ["app.WorkerVerticle", "app.DocWorker", "mod-x~1.0"]
 
 
 def test_router_detected_by_declared_type_not_name(tmp_path) -> None:
@@ -514,3 +517,99 @@ def test_this_as_handler_is_the_verticles_handle_method(tmp_path) -> None:
     rec = _v2_verticle(tmp_path)
     [c] = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
     assert (c.endpoint, c.handler, c.handlerLine) == ("wizard.load", "handle", 19)
+
+
+# A Java address with escapes is the decoded string, whole (it used to stop at the backslash);
+# a deploy of something that is not a constant string leaves the endpoint empty.
+_V2_EDGES = rb"""package app;
+import org.vertx.java.core.http.RouteMatcher;
+import org.vertx.java.platform.Verticle;
+import java.util.Map;
+public class E extends Verticle {
+    static final String QUOTED = "app.const\"q";
+    public void start() {
+        String dyn = container.config().getString("v");
+        vertx.eventBus().send("app.with\"quote", "x");
+        vertx.eventBus().send("app.tab\there", "x");
+        vertx.eventBus().send("app.caf\u00e9", "x");
+        vertx.eventBus().send(QUOTED, "x");
+        vertx.eventBus().send("app." + "back\\slash", "x");
+        container.deployVerticle(dyn);
+        container.deployWorkerVerticle(dyn, null, 2);
+        container.deployModule(dyn);
+        vertx.deployVerticle(new Worker());
+        container.deployVerticle("app.Fixed");
+        RouteMatcher rm = new RouteMatcher();
+        rm.trace("/t", h);
+        rm.connect("/c", h);
+        rm.all("/a", h);
+        rm.getWithRegEx("/g/\\d{3}", h);
+        rm.allWithRegEx("/ar/.*", h);
+        Map<String, String> router2 = null;
+        router2.get("/n/router2");
+    }
+}
+"""
+
+
+def _v2_edges(tmp_path) -> FileRecord:
+    p = tmp_path / "E.java"
+    p.write_bytes(_V2_EDGES)
+    ctx = ParseContext(path="E.java", abs_path=p, source=_V2_EDGES,
+                       repo_root=tmp_path, capture_statements=True)
+    return VertxParser().parse_file(ctx)
+
+
+def test_java_escapes_in_an_address_are_decoded(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    sends = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert sends == ['app.with"quote', "app.tab\there", "app.café", 'app.const"q', "app.back\\slash"]
+
+
+def test_deploy_of_a_variable_or_instance_has_no_endpoint(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    deploys = [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"]
+    assert deploys == [None, None, None, None, "app.Fixed"]
+
+
+def test_routematcher_trace_connect_all_and_regex_routes(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    routes = [(s.method, s.endpoint, s.isRegex) for s in rec.statements
+              if s.semanticType == "route"]
+    assert routes == [("TRACE", "/t", None), ("CONNECT", "/c", None), (None, "/a", None),
+                      ("GET", None, True), (None, "/ar/.*", True)]
+
+
+def test_a_map_named_like_a_router_is_not_one(tmp_path) -> None:
+    rec = _v2_edges(tmp_path)
+    assert not any(s.endpoint == "/n/router2" for s in rec.statements)
+
+
+def test_modern_router_regex_routes(tmp_path) -> None:
+    src = b"""package a;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.ext.web.Router;
+public class M extends AbstractVerticle {
+    public void start() {
+        Router router = Router.router(vertx);
+        router.getWithRegex("/items/[0-9]+").handler(this::item);
+        router.routeWithRegex("/any/.*").handler(this::any);
+    }
+    void item(io.vertx.ext.web.RoutingContext c) { }
+    void any(io.vertx.ext.web.RoutingContext c) { }
+}
+"""
+    p = tmp_path / "M.java"
+    p.write_bytes(src)
+    rec = VertxParser().parse_file(ParseContext(path="M.java", abs_path=p, source=src,
+                                                repo_root=tmp_path, capture_statements=True))
+    routes = [(s.method, s.endpoint, s.isRegex, s.handler) for s in rec.statements
+              if s.semanticType == "route"]
+    assert routes == [("GET", "/items/[0-9]+", True, "item"), (None, "/any/.*", True, "any")]
+
+
+def test_trace_and_connect_routes_meet_the_contract(tmp_path) -> None:
+    from breezeai_cog.parsers.contract import validate
+
+    rec = _v2_edges(tmp_path)
+    assert [v for v in validate(rec) if v.rule == "method"] == []

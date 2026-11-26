@@ -362,7 +362,7 @@ def detect_play_sird_routes(
                             routeKind="route",
                             isRegex=is_regex,
                         ), parent=find_enclosing_parent_id(clause.start_point[0] + 1, record),
-                            node_type="synthetic", text=node_text(clause, source))
+                            text=node_text(clause, source))
                     )
         for child in node.named_children:
             walk(child)

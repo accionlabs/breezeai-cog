@@ -502,9 +502,9 @@ in `BREEZEAI_COG_SCM_INSTANCES` instead. It has no anonymous mode either — a r
 a deployment-wide credential would be sent to whichever host the request named.
 
 ```bash
-BREEZEAI_COG_SCM_INSTANCES='{"stash.payroll.co.jp": "bitbucket_server"}'
+BREEZEAI_COG_SCM_INSTANCES='{"stash.example.com": "bitbucket_server"}'
 # Optional: only needed when REST is not served under the instance's own context path.
-BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING='{"stash.payroll.co.jp": "https://stash.payroll.co.jp/stash/rest/api/1.0"}'
+BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING='{"stash.example.com": "https://stash.example.com/stash/rest/api/1.0"}'
 ```
 
 The credential travels as `gitToken` on each request, in any of three forms: a **bare HTTP access
@@ -512,9 +512,9 @@ token** (`BBDC-…`, what Data Center's own UI issues — sent as `Bearer`), a r
 `username:password`, or a pre-encoded base64 `username:password` (both sent as `Basic`). A
 credential with an empty username is rejected. The URL's scheme and port are honoured, so a stock
 install on `http://host:7990` or a proxied one on `:8443` works. The API base is otherwise derived from the
-repository URL: `https://stash.payroll.co.jp/stash/scm/p3/kit.git` yields the context path `/stash`
-and therefore the base `https://stash.payroll.co.jp/stash/rest/api/1.0`, the project key `p3` and
-the slug `kit`. Browse URLs (`/projects/P3/repos/kit/browse`) and personal repositories
+repository URL: `https://stash.example.com/stash/scm/proj/kit.git` yields the context path `/stash`
+and therefore the base `https://stash.example.com/stash/rest/api/1.0`, the project key `proj` and
+the slug `kit`. Browse URLs (`/projects/PROJ/repos/kit/browse`) and personal repositories
 (`/users/jdoe/...`, normalised to the API's `~jdoe`) parse the same way.
 
 Two values Data Center does not report, left empty rather than guessed: `compare` returns no

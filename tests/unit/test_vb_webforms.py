@@ -103,7 +103,7 @@ def test_a_vb_page_gets_the_records_a_csharp_page_gets(tmp_path: Path) -> None:
     assert orders.framework == "aspnet-webforms"
     assert _routes(orders) == {
         ("page", "GET", "/Orders.aspx", "Orders", 3, "synthetic"),
-        ("route", "POST", "/Orders.aspx/Total", "Total", 11, "synthetic"),
+        ("route", "POST", "/Orders.aspx/Total", "Total", 11, "attribute"),  # at its <WebMethod()>
         # VB is case-insensitive: response.redirect is Response.Redirect
         ("navigation", None, "/Confirm.aspx", "Orders", None, "invocation"),
         ("navigation", None, "/Help.aspx", "Orders", None, "synthetic"),

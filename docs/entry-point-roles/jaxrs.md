@@ -4,7 +4,7 @@ Parser: `src/breezeai_cog/parsers/java_jaxrs/` · Rules: [entry-point contract](
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `@GET` / `@POST` / `@PUT` / `@DELETE` / `@PATCH` / `@HEAD` / `@OPTIONS` on a resource method | Binding | `route`, HTTP verb, `routeKind: route`, full path, `handler` = method | One handler, inbound API |
+| `@GET` / `@POST` / `@PUT` / `@DELETE` / `@PATCH` / `@HEAD` / `@OPTIONS` on a resource method | Binding | `route`, HTTP verb, `routeKind: route`, full path, `handler` = method, at the verb annotation (`nodeType: marker_annotation`, its own line, not the method's) | One handler, inbound API |
 | `@Path` on that method | Part of the binding | joined after the class path in `endpoint` | The method's own address part |
 | `@Path` on a root resource class | Wiring | statement stays plain; prefixes the class's bindings | Points at no handler |
 | `@ApplicationPath` on the `Application` subclass | Wiring | prefix on every binding's `endpoint` in its module | Applies to all handlers |

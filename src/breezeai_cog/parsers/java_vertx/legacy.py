@@ -25,6 +25,8 @@ An address passed through a helper method or constructor is :mod:`.forwarders`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ...schemas import FileRecord
@@ -137,17 +139,31 @@ def _vertx2_http_client(root: Node, source: bytes) -> bool:
     return False
 
 
-def http_client_calls(
-    root: Node, calls: list[Node], source: bytes, record: FileRecord, consts: dict[str, str],
-) -> list[Emit]:
-    """An ``api_call`` for each request made on a Vert.x 2 ``HttpClient`` (module docstring)."""
+def returning_client(root: Node, source: bytes) -> set[str]:
+    """Names of this file's methods declared to return a Vert.x 2 ``HttpClient``."""
+    out: set[str] = set()
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "method_declaration":
+            typ = n.child_by_field_name("type")
+            if typ is not None and node_text(typ, source).split("<", 1)[0].rsplit(".", 1)[-1] \
+                    == "HttpClient":
+                out.add(node_text(n.child_by_field_name("name"), source))
+        stack.extend(n.named_children)
+    return out
+
+
+def client_requests(root: Node, calls: list[Node], source: bytes, returning: set[str],
+                    consts: dict[str, str]) -> Iterator[tuple[Node, str | None, Node | None, Node]]:
+    """Each request made on a Vert.x 2 ``HttpClient`` in ``calls``: (the call, its verb when it
+    folds, the verb argument of ``request(method, uri, …)`` else None, the URI argument). One
+    matcher for capture (:func:`http_client_calls`) and the HTTP-helper index
+    (``java_http_helpers.py``). ``returning``: this file's methods that return an
+    ``HttpClient`` (:func:`returning_client`)."""
     if b"org.vertx.java.core.http" not in source or not _vertx2_http_client(root, source):
-        return []
+        return
     clients = typed_vars(root, source, {"HttpClient"})
-    returning = {f.name for f in record.functions
-                 if f.returnType and f.returnType.split("<", 1)[0].rsplit(".", 1)[-1]
-                 == "HttpClient"}
-    found: list[Emit] = []
     for call in calls:
         method = name_of(call.child_by_field_name("name"), source)
         if method not in _HTTP_CLIENT and method != "request":
@@ -170,9 +186,25 @@ def http_client_calls(
                 continue
             verb_text = known_address(args[0], source, consts)
             verb = verb_text.upper() if verb_text and verb_text.upper() in _VERBS else None
-            uri = args[1]
+            yield call, verb, args[0], args[1]
         else:
-            verb, uri = _HTTP_CLIENT[method], args[0]
+            yield call, _HTTP_CLIENT[method], None, args[0]
+
+
+def http_client_calls(
+    root: Node, calls: list[Node], source: bytes, record: FileRecord, consts: dict[str, str],
+    defining: frozenset[tuple[int, int]] = frozenset(),
+) -> list[Emit]:
+    """An ``api_call`` for each request made on a Vert.x 2 ``HttpClient`` (module docstring).
+    ``defining``: requests made inside an HTTP helper on its own URL parameter — the helper's
+    callers make them (``java_http_helpers.py``), so they are plain statements."""
+    returning = {f.name for f in record.functions
+                 if f.returnType and f.returnType.split("<", 1)[0].rsplit(".", 1)[-1]
+                 == "HttpClient"}
+    found: list[Emit] = []
+    for call, verb, _verb_arg, uri in client_requests(root, calls, source, returning, consts):
+        if (call.start_byte, call.end_byte) in defining:
+            continue
         found.append(Emit(call, {
             "semanticType": "api_call", "framework": "vertx", "method": verb,
             "endpoint": request_address(uri, source, consts),

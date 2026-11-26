@@ -50,12 +50,15 @@ a wrong finding is worse than a missing one.
 - **Keep the report out of the repo.** It goes outside the checkout (e.g. a sibling
   `analyses/` folder). Nothing committed may link to it or use its issue numbers (S1, C1, …);
   a committed fix states its own reasoning.
+- **Keep the client out of the fix too.** The report may name the repositories it measured;
+  nothing committed may. A fix carries the construct into its tests and messages, not the
+  client's package, class, host or repository names (Step 10).
 
 ## 2. Pick the mode
 
 | Mode | When | Guide sections |
 |---|---|---|
-| **Change review** | A branch or PR that adds or changes a parser or detector | §1–§6, plus §8 as a before/after diff on one repo per affected language; Step 9 |
+| **Change review** | A branch or PR that adds or changes a parser or detector | §1–§6, plus §8 as a before/after diff on one repo per affected language; Steps 9–10 |
 | **Gap analysis** | An existing language/framework, or "what does cog miss in this repo" | §2–§8 in full (§1 only if there is a diff), Step 9, and the full Part B report |
 
 Before starting, write down: the parser(s) and frameworks in scope, the cog commit, the
@@ -198,6 +201,21 @@ grep -nE 'subprocess|os\.system|\beval\(|\bexec\(|requests\.|urllib|httpx' $P/*.
 ```
 
 Record each violated row as a Structural issue that names the decision and links its section.
+
+**Step 10 — Client identifiers (change review).** List what identifies the repositories the
+change was measured on: client, company and project names, repository slugs, hostnames,
+package prefixes and class names unique to their code. Grep the change and its messages for
+them:
+
+```bash
+NAMES='<name1>|<name2>|…'      # from the dogfood repositories; never commit this list
+git diff origin/main...HEAD | grep -n -i -E "$NAMES"
+git log --format=%B origin/main..HEAD | grep -n -i -E "$NAMES"
+```
+
+Compare against `origin/main`, not a local `main` that may be stale. Every hit is an Other
+issue: the fix renames it to a neutral name (`com.acme`, `example.com`) or describes the
+measurement by fleet shape. A hit in a commit already on `main` is listed, not rewritten.
 
 ## 4. Write the report
 

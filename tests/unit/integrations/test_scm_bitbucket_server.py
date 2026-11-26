@@ -18,11 +18,11 @@ from breezeai_cog.integrations.scm import CommitInfo, RepoRef, SCMAPIError, SCMC
 from breezeai_cog.integrations.scm.bitbucket_server import BitbucketServerSCMClient
 
 REF = RepoRef(
-    "bitbucket_server", "p3", "zaike-non-unity-kit-create",
-    host="stash.payroll.co.jp", context_path="/stash",
+    "bitbucket_server", "proj", "order-batch-create",
+    host="stash.example.com", context_path="/stash",
 )
-API = "https://stash.payroll.co.jp/stash/rest/api/1.0"
-REPO = f"{API}/projects/p3/repos/zaike-non-unity-kit-create"
+API = "https://stash.example.com/stash/rest/api/1.0"
+REPO = f"{API}/projects/proj/repos/order-batch-create"
 SHA = "a" * 40
 BASE = "b" * 40
 TOKEN = base64.b64encode(b"jdoe:s3cr3t").decode()
@@ -85,7 +85,7 @@ def test_a_bare_token_clones_through_a_header_not_a_url_credential(
 ) -> None:
     c = _client(router, settings, token="BBDC-MDI2Mzg3NTk5MDcw")
     assert c.clone_url(REF) == (
-        "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+        "https://stash.example.com/stash/scm/proj/order-batch-create.git"
     )
     assert c.git_auth_config() == [
         "-c", "http.extraHeader=Authorization: Bearer BBDC-MDI2Mzg3NTk5MDcw",
@@ -214,7 +214,7 @@ def test_compare_raises_on_a_change_with_no_path(router, settings) -> None:
 
 def test_pull_request_reads_full_shas_without_a_second_call(router, settings) -> None:
     router.add(r"/pull-requests/42$", httpx.Response(200, json={
-        "id": 42, "title": "Add zaike kit", "state": "MERGED",
+        "id": 42, "title": "Add order kit", "state": "MERGED",
         "fromRef": {"displayId": "feature/kit", "latestCommit": SHA},
         "toRef": {"displayId": "develop", "latestCommit": BASE},
         "links": {"self": [{"href": f"{REPO}/pull-requests/42"}]},
@@ -247,13 +247,13 @@ def test_clone_url_carries_the_context_path_and_percent_encoded_credentials(
     token = base64.b64encode(b"jdoe:p@ss/w:rd").decode()
     client = _client(router, settings, token=token)
     assert client.clone_url(REF) == (
-        "https://jdoe:p%40ss%2Fw%3Ard@stash.payroll.co.jp/stash"
-        "/scm/p3/zaike-non-unity-kit-create.git"
+        "https://jdoe:p%40ss%2Fw%3Ard@stash.example.com/stash"
+        "/scm/proj/order-batch-create.git"
     )
 
 
 def test_personal_project_key_keeps_its_tilde(router, settings) -> None:
-    ref = RepoRef("bitbucket_server", "~jdoe", "kit", host="stash.payroll.co.jp")
+    ref = RepoRef("bitbucket_server", "~jdoe", "kit", host="stash.example.com")
     router.add(r"/files", httpx.Response(200, json={"values": [], "isLastPage": True}))
     _client(router, settings).tree(ref, SHA)
     assert "/projects/~jdoe/repos/kit/files" in router.urls[0]

@@ -21,6 +21,26 @@ written:
 Otherwise the name is unknown (``None``). The module is the file's dotted path, walking up while
 each folder has an ``__init__.py``. Collected from every file (gate: Celery markers), resolved
 once: file → function → name, and name → the function, for the Celery detector (:mod:`.celery`).
+
+Only a Celery app's tasks count. ``@shared_task`` always does; ``@<x>.task`` does when ``<x>`` is
+a Celery app (:class:`Receivers`): ``celery.current_app``, or a module-level variable of this file
+or of the file it is imported from that is proven to hold one —
+
+* assigned ``Celery(…)``;
+* assigned the result of an app factory (``celery = make_celery(app)``): a module-level function,
+  of this file or imported from another, whose every ``return`` is ``Celery(…)`` or a local
+  variable only ever assigned ``Celery(…)``, and that cannot end without returning;
+* re-exported one step (``from .celery import app as celery_app`` in ``proj/__init__.py``), the
+  re-exporting file assigning that name nothing else.
+
+``@scheduler.task`` is not Celery, whatever else the project uses. The same test decides whether
+``<x>.send_task(…)`` is a send.
+
+A class task (``class Report(Task)``, its body in ``run``) counts when its base is ``Task``
+imported from celery — a base of the project's own is not followed — and it is registered on a
+Celery app: ``app.register_task(Report())`` in its file or in a file that imports it. Its name is
+the class's ``name = "…"``, or Celery's default ``<module>.<Class>`` when the code confirms it, as
+for a function.
 """
 
 from __future__ import annotations
@@ -34,6 +54,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
+from ..python_common import ImportRefs, Origins, attribute_owner, top_statements
 from ..treesitter import node_text
 
 FACT = "celery.tasks"
@@ -52,6 +73,20 @@ class TaskDef:
     explicit: str | None
     decorator: Node
     definition: Node
+    #: ``x`` of ``@x.task``; ``None`` for ``@shared_task``.
+    receiver: Node | None = None
+
+
+@dataclass(frozen=True)
+class ClassTask:
+    """A class whose base is celery's ``Task``: a task once registered on a Celery app."""
+
+    name: str
+    #: ``name = …`` in the class body: its literal, or :data:`UNKNOWN_NAME`; ``None`` = not given.
+    explicit: str | None
+    definition: Node
+    #: Its ``run`` method — the task's body — when the class defines one.
+    run: Node | None
 
 
 @dataclass(frozen=True)
@@ -60,6 +95,11 @@ class CeleryTasks:
     by_file: dict[str, dict[str, str | None]] = field(default_factory=dict)
     #: task name → (file, function); a name two tasks share → ``None``.
     by_name: dict[str, tuple[str, str] | None] = field(default_factory=dict)
+    #: file → the variables that hold a Celery app (``app = Celery(…)`` at module level).
+    apps: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: file → {registered class task → its name, ``None`` when not known}. In ``by_name`` a
+    #: class task's function is ``run``.
+    classes: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 def celery_tasks(index: Any | None) -> CeleryTasks | None:
@@ -108,8 +148,8 @@ def positional(call: Node) -> list[Node]:
 
 
 def task_defs(root: Node, source: bytes) -> list[TaskDef]:
-    """Functions decorated ``@shared_task`` / ``@<app>.task`` (with or without arguments), in a
-    file that uses Celery."""
+    """Functions decorated ``@shared_task`` / ``@<x>.task`` (with or without arguments), in a file
+    that uses Celery. Whether ``<x>`` is a Celery app is for :class:`Receivers` to say."""
     if b"celery" not in source and b"shared_task" not in source:
         return []
     out: list[TaskDef] = []
@@ -126,41 +166,341 @@ def task_defs(root: Node, source: bytes) -> list[TaskDef]:
             call = expr if expr is not None and expr.type == "call" else None
             target = call.child_by_field_name("function") if call is not None else expr
             text = node_text(target, source) if target is not None else ""
-            if text not in ("shared_task", "celery.shared_task") and not (
-                    target is not None and target.type == "attribute" and text.endswith(".task")):
+            shared = text in ("shared_task", "celery.shared_task")
+            receiver = target.child_by_field_name("object") if target is not None and \
+                target.type == "attribute" and text.endswith(".task") else None
+            if not shared and receiver is None:
                 continue
             explicit: str | None = None
             value = kwarg(call, "name", source) if call is not None else None
             if value is not None:
                 explicit = string(value, source) or UNKNOWN_NAME
-            out.append(TaskDef(node_text(name, source), explicit, dec, fdef))
+            out.append(TaskDef(node_text(name, source), explicit, dec, fdef, receiver))
             break
     return out
 
 
+_TASK_CLASSES = frozenset({"celery.Task", "celery.app.task.Task", "celery.task.Task"})
+
+
+def class_tasks(root: Node, source: bytes, origins: Origins) -> list[ClassTask]:
+    """Module-level classes whose base is celery's ``Task`` (``from celery import Task``,
+    ``celery.Task``). A base of the project's own (``class Report(BaseTask)``) is not followed."""
+    out: list[ClassTask] = []
+    for node in top_statements(root):
+        if node.type == "decorated_definition":
+            node = node.child_by_field_name("definition") or node
+        if node.type != "class_definition":
+            continue
+        bases = node.child_by_field_name("superclasses")
+        if bases is None or not any(
+                b.type in ("identifier", "attribute") and _is_task_class(node_text(b, source), origins)
+                for b in bases.named_children):
+            continue
+        name, body = node.child_by_field_name("name"), node.child_by_field_name("body")
+        explicit: str | None = None
+        run: Node | None = None
+        for stmt in body.named_children if body is not None else []:
+            assign = stmt.named_children[0] if stmt.type == "expression_statement" and \
+                stmt.named_children else stmt
+            if assign.type == "assignment":
+                left = assign.child_by_field_name("left")
+                if left is not None and node_text(left, source) == "name":
+                    explicit = string(assign.child_by_field_name("right"), source) or UNKNOWN_NAME
+            fdef = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" \
+                else stmt
+            fname = fdef.child_by_field_name("name") if fdef is not None and \
+                fdef.type == "function_definition" else None
+            if fname is not None and node_text(fname, source) == "run":
+                run = fdef
+        if name is not None:
+            out.append(ClassTask(node_text(name, source), explicit, node, run))
+    return out
+
+
+def _is_task_class(written: str, origins: Origins) -> bool:
+    qualified = origins.qualified(written)
+    if qualified is None:  # not imported by name: only `from celery import *` explains `Task`
+        return written == "Task" and "celery" in origins.star
+    return qualified in _TASK_CLASSES
+
+
+# ── Celery apps ────────────────────────────────────────────────────────────────────────────
+
+_APP_CLASSES = frozenset({"celery.Celery", "celery.app.Celery", "celery.app.base.Celery"})
+_CURRENT_APP = frozenset({"celery.current_app", "celery._state.current_app"})
+
+#: Where a receiver's app is: ``("current",)`` (``celery.current_app``), ``("local", name)`` (a
+#: variable of this file) or ``("ext", file, name)`` (a variable of the file it is imported from).
+Ref = tuple[str, ...]
+
+
+def _is_app_class(callee: str, origins: Origins) -> bool:
+    qualified = origins.qualified(callee)
+    if qualified is None:  # not imported by name: only `from celery import *` explains `Celery`
+        return callee == "Celery" and "celery" in origins.star
+    return qualified in _APP_CLASSES
+
+
+def _app_call(node: Node | None, source: bytes, origins: Origins) -> bool:
+    fn = node.child_by_field_name("function") if node is not None and node.type == "call" else None
+    return fn is not None and _is_app_class(node_text(fn, source), origins)
+
+
+def _own_scope(node: Node) -> Iterator[Node]:
+    """The nodes of a function body, nested functions, classes and lambdas left out."""
+    stack = list(reversed(node.named_children))
+    while stack:
+        n = stack.pop()
+        yield n
+        if n.type not in ("function_definition", "class_definition", "lambda"):
+            stack.extend(reversed(n.named_children))
+
+
+def _is_app_factory(fdef: Node, source: bytes, origins: Origins) -> bool:
+    """Whether every way out of ``fdef`` returns a Celery app: its last statement is a
+    ``return``, and each ``return`` gives ``Celery(…)`` or a local variable that is assigned only
+    ``Celery(…)`` (``celery = Celery(…); …; return celery``) and is not a parameter."""
+    body = fdef.child_by_field_name("body")
+    stmts = [c for c in body.named_children if c.type != "comment"] if body is not None else []
+    if not stmts or stmts[-1].type != "return_statement":
+        return False
+    params = fdef.child_by_field_name("parameters")
+    names = {node_text(p, source) for p in (params.named_children if params is not None else [])
+             if p.type == "identifier"}
+    assigned: dict[str, bool] = {}
+    returns: list[Node | None] = []
+    for n in _own_scope(body):  # type: ignore[arg-type]
+        if n.type == "return_statement":
+            returns.append(next(iter(n.named_children), None))
+        elif n.type in ("assignment", "augmented_assignment"):
+            left = n.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                name = node_text(left, source)
+                ok = n.type == "assignment" and _app_call(n.child_by_field_name("right"), source, origins)
+                assigned[name] = assigned.get(name, True) and ok
+    for value in returns:
+        if _app_call(value, source, origins):
+            continue
+        name = node_text(value, source) if value is not None and value.type == "identifier" else ""
+        if not name or name in names or not assigned.get(name, False):
+            return False
+    return True
+
+
+def app_factories(root: Node, source: bytes, origins: Origins) -> frozenset[str]:
+    """Module-level functions that always return a Celery app (:func:`_is_app_factory`)."""
+    out: set[str] = set()
+    for node in top_statements(root):
+        if node.type == "decorated_definition":
+            node = node.child_by_field_name("definition") or node
+        name = node.child_by_field_name("name") if node.type == "function_definition" else None
+        if name is not None and _is_app_factory(node, source, origins):
+            out.add(node_text(name, source))
+    return frozenset(out)
+
+
+def _module_assignments(root: Node, source: bytes) -> dict[str, list[Node | None]]:
+    """Module-level variable → the right-hand sides it is assigned, in source order."""
+    out: dict[str, list[Node | None]] = {}
+    for node in top_statements(root):
+        if node.type not in ("assignment", "augmented_assignment"):
+            continue
+        left = node.child_by_field_name("left")
+        if left is not None and left.type == "identifier":
+            right = node.child_by_field_name("right") if node.type == "assignment" else None
+            out.setdefault(node_text(left, source), []).append(right)
+    return out
+
+
+def local_apps(root: Node, source: bytes, origins: Origins,
+               factories: frozenset[str] = frozenset()) -> frozenset[str]:
+    """Module-level variables assigned ``Celery(…)`` or a call of one of this file's app
+    ``factories`` — and never anything else (a name that is also another value is not known to be
+    an app)."""
+    def made(right: Node | None) -> bool:
+        if _app_call(right, source, origins):
+            return True
+        fn = right.child_by_field_name("function") if right is not None and right.type == "call" else None
+        return fn is not None and fn.type == "identifier" and node_text(fn, source) in factories
+
+    return frozenset(name for name, rights in _module_assignments(root, source).items()
+                     if all(made(r) for r in rights))
+
+
+class Receivers:
+    """Whether an expression (``app`` of ``app.task`` / ``app.send_task``) is a Celery app."""
+
+    def __init__(self, root: Node, source: bytes, repo_root: Path | None, rel: str) -> None:
+        self._source, self._repo_root, self._rel = source, repo_root, rel
+        self.origins = self._origins = Origins(root, source)
+        self.factories = app_factories(root, source, self._origins) if b"return" in source \
+            else frozenset()
+        self.local = local_apps(root, source, self._origins, self.factories)
+        # `plain`: `import proj.worker` binds `proj`, so `proj.worker.app` can be followed.
+        self._imports = ImportRefs(root, source, repo_root, rel, plain=True)
+        #: Module-level variables assigned only the result of one imported function
+        #: (``celery = make_celery(app)``): an app when that function is an app factory, which
+        #: the fact settles — variable → (file, function).
+        self.made: dict[str, tuple[str, str]] = {}
+        assigned = _module_assignments(root, source)
+        for name, rights in assigned.items():
+            if name in self.local:
+                continue
+            calls = {self._callee(r) for r in rights}
+            if len(calls) == 1 and (one := calls.pop()) is not None:
+                self.made[name] = one
+        self._assigned = frozenset(assigned)
+
+    def _callee(self, right: Node | None) -> tuple[str, str] | None:
+        """(file, function) of an imported function ``right`` calls (``make_celery(…)``,
+        ``factory.make_celery(…)``)."""
+        fn = right.child_by_field_name("function") if right is not None and right.type == "call" else None
+        if fn is None:
+            return None
+        if fn.type == "identifier":
+            ref = self._imports.get(node_text(fn, self._source))
+            return (ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
+        return attribute_owner(fn, self._source, self._imports, self._repo_root)
+
+    def reexports(self) -> dict[str, tuple[str, str]]:
+        """Names this file imports from another file of the repository and assigns nothing
+        else: name → (file, name there). ``from .celery import app as celery_app``."""
+        return {name: (ref[1], ref[2]) for name, ref in self._imports.all().items()
+                if ref[0] == "symbol" and name not in self._assigned}
+
+    def ref(self, expr: Node | None) -> Ref | None:
+        if expr is None:
+            return None
+        text = node_text(expr, self._source)
+        if self._origins.qualified(text) in _CURRENT_APP:
+            return ("current",)
+        if expr.type == "identifier":
+            if text in self.local and self._imports.get(text) is None:
+                return ("local", text)
+            if text in self.made and self._imports.get(text) is None:
+                return ("ext", self._rel, text)  # an app when the fact finds its factory
+            ref = self._imports.get(text)
+            return ("ext", ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
+        # `worker.app`, `proj.worker.app`: a module imported (or a submodule reached through
+        # one), its variable.
+        owner = attribute_owner(expr, self._source, self._imports, self._repo_root)
+        return ("ext", *owner) if owner is not None else None
+
+    def place(self, expr: Node | None, local: set[str], rel: str) -> tuple[str, str] | None:
+        """``(file, name)`` of a class named by ``expr``: one of ``local`` (this file's), or
+        the one it is imported from (``Report``, ``reports.Report``)."""
+        if expr is None:
+            return None
+        if expr.type == "identifier":
+            name = node_text(expr, self._source)
+            ref = self._imports.get(name)
+            if ref is None:
+                return (rel, name) if name in local else None
+            return (ref[1], ref[2]) if ref[0] == "symbol" else None
+        owner = attribute_owner(expr, self._source, self._imports, self._repo_root)
+        return (owner[0], owner[1]) if owner is not None else None
+
+    def task_ref(self, task: TaskDef) -> Ref | None:
+        """The app a task is registered on: ``("shared",)`` for ``@shared_task``."""
+        return ("shared",) if task.receiver is None else self.ref(task.receiver)
+
+
+def registrations(root: Node, source: bytes, rel: str, receivers: "Receivers",
+                  local_classes: set[str]) -> list[tuple[tuple[str, str], Ref | None]]:
+    """``(class, app)`` per ``<app>.register_task(Report())`` (or ``(Report)``): the class as
+    ``(file, name)`` — this file's own, or the one it is imported from — and the app's
+    :class:`Ref`. A class this file cannot place is left out."""
+    out: list[tuple[tuple[str, str], Ref | None]] = []
+    for node in walk(root):
+        fn = node.child_by_field_name("function") if node.type == "call" else None
+        if fn is None or fn.type != "attribute":
+            continue
+        attr = fn.child_by_field_name("attribute")
+        if attr is None or node_text(attr, source) != "register_task":
+            continue
+        args = positional(node)
+        target = args[0] if args else None
+        if target is not None and target.type == "call":  # register_task(Report())
+            target = target.child_by_field_name("function")
+        cls = receivers.place(target, local_classes, rel)
+        if cls is not None:
+            out.append((cls, receivers.ref(fn.child_by_field_name("object"))))
+    return out
+
+
+def is_app(ref: Ref | None, apps: dict[str, frozenset[str]]) -> bool:
+    """Whether ``ref`` (from :meth:`Receivers.ref` / :meth:`~Receivers.task_ref`) is a Celery
+    app, given the module-level apps of every file."""
+    if ref is None:
+        return False
+    if ref[0] in ("shared", "current", "local"):
+        return True
+    return ref[2] in apps.get(ref[1], frozenset())
+
+
+def _is_beat_schedule(node: Node | None, source: bytes) -> bool:
+    return node is not None and node_text(node, source).lower().endswith("beat_schedule")
+
+
+def _beat_entry(entry: Node | None, source: bytes) -> tuple[Node | None, Node | None] | None:
+    """``(task, schedule)`` of one entry's dict value; None when it is not a dict."""
+    if entry is None or entry.type != "dictionary":
+        return None
+    fields = {string(p.child_by_field_name("key"), source): p.child_by_field_name("value")
+              for p in entry.named_children if p.type == "pair"}
+    return fields.get("task"), fields.get("schedule")
+
+
 def beat_entries(root: Node, source: bytes) -> Iterator[tuple[Node, Node | None, Node | None]]:
-    """``(entry, task, schedule)`` per beat-schedule entry: a dict assigned to ``beat_schedule``
-    (``app.conf.beat_schedule = …``, ``CELERY_BEAT_SCHEDULE = …``) or passed as
-    ``beat_schedule=…``, each value a dict with ``"task"`` and ``"schedule"``."""
+    """``(entry, task, schedule)`` per beat-schedule entry, the entry being the node it is
+    written as:
+
+    * each ``pair`` of a dict assigned to ``beat_schedule`` (``app.conf.beat_schedule = {…}``,
+      ``CELERY_BEAT_SCHEDULE = {…}``), passed as ``beat_schedule={…}`` or to
+      ``beat_schedule.update({…})``;
+    * each ``keyword_argument`` of ``beat_schedule.update(nightly={…})``;
+    * the ``assignment`` ``beat_schedule["nightly"] = {…}``.
+
+    Each entry's value is a dict with ``"task"`` and ``"schedule"``."""
     for node in walk(root):
         value: Node | None = None
         if node.type == "assignment":
             left = node.child_by_field_name("left")
-            if left is not None and node_text(left, source).lower().endswith("beat_schedule"):
+            if left is not None and left.type == "subscript" and \
+                    _is_beat_schedule(left.child_by_field_name("value"), source):
+                found = _beat_entry(node.child_by_field_name("right"), source)
+                if found is not None:
+                    yield node, *found
+                continue
+            if _is_beat_schedule(left, source):
                 value = node.child_by_field_name("right")
         elif node.type == "keyword_argument":
             key = node.child_by_field_name("name")
             if key is not None and node_text(key, source) == "beat_schedule":
                 value = node.child_by_field_name("value")
+        elif node.type == "call":
+            fn = node.child_by_field_name("function")
+            if fn is None or fn.type != "attribute":
+                continue
+            attr = fn.child_by_field_name("attribute")
+            if attr is None or node_text(attr, source) != "update" or \
+                    not _is_beat_schedule(fn.child_by_field_name("object"), source):
+                continue
+            args = node.child_by_field_name("arguments")
+            for arg in args.named_children if args is not None else []:
+                if arg.type == "keyword_argument":
+                    found = _beat_entry(arg.child_by_field_name("value"), source)
+                    if found is not None:
+                        yield arg, *found
+            value = next(iter(positional(node)), None)
         if value is None or value.type != "dictionary":
             continue
         for pair in value.named_children:
-            entry = pair.child_by_field_name("value") if pair.type == "pair" else None
-            if entry is None or entry.type != "dictionary":
-                continue
-            fields = {string(p.child_by_field_name("key"), source): p.child_by_field_name("value")
-                      for p in entry.named_children if p.type == "pair"}
-            yield pair, fields.get("task"), fields.get("schedule")
+            found = _beat_entry(pair.child_by_field_name("value"), source) if pair.type == "pair" \
+                else None
+            if found is not None:
+                yield pair, *found
 
 
 def module_name(rel: str, repo_root: Path | None) -> str | None:
@@ -181,9 +521,18 @@ def module_name(rel: str, repo_root: Path | None) -> str | None:
 class _FileTasks:
     rel: str
     module: str | None
-    tasks: tuple[tuple[str, str | None], ...]  # (function, explicit name)
+    tasks: tuple[tuple[str, str | None, Ref | None], ...]  # (function, explicit name, its app)
+    classes: tuple[tuple[str, str | None], ...]  # (class task, explicit name)
+    #: ((file, class), app) per ``register_task`` call
+    registered: tuple[tuple[tuple[str, str], Ref | None], ...]
+    apps: frozenset[str]  # module-level Celery app variables
     used: frozenset[str]  # task names written as literals
     modules: frozenset[str]  # task modules named in Celery's configuration
+    factories: frozenset[str] = frozenset()  # module-level app factory functions
+    #: variable → (file, function) it is assigned the result of (:attr:`Receivers.made`)
+    made: tuple[tuple[str, tuple[str, str]], ...] = ()
+    #: imported name → (file, name there) (:meth:`Receivers.reexports`)
+    reexports: tuple[tuple[str, tuple[str, str]], ...] = ()
 
 
 def _strings(node: Node | None, source: bytes) -> list[str]:
@@ -193,7 +542,11 @@ def _strings(node: Node | None, source: bytes) -> list[str]:
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileTasks | None:
-    tasks = tuple((t.function, t.explicit) for t in task_defs(root, source))
+    receivers = Receivers(root, source, repo_root, rel)
+    tasks = tuple((t.function, t.explicit, receivers.task_ref(t)) for t in task_defs(root, source))
+    classes = tuple((c.name, c.explicit) for c in class_tasks(root, source, receivers.origins))
+    registered = tuple(registrations(root, source, rel, receivers, {c[0] for c in classes})) \
+        if b"register_task" in source else ()
     used: set[str] = set()
     modules: set[str] = set()
     for _, task, _ in beat_entries(root, source):
@@ -219,32 +572,74 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _Fi
             name = node_text(left, source).rsplit(".", 1)[-1] if left is not None else ""
             if name in _CONFIG_LISTS:
                 modules.update(_strings(node.child_by_field_name("right"), source))
-    if not tasks and not used and not modules:
+    made = tuple(sorted(receivers.made.items()))
+    # A file that names an app only by import (`proj/__init__.py`: `from .celery import app as
+    # celery_app`) has no task of its own: what it re-exports is kept for the files using it.
+    reexports = tuple(sorted(receivers.reexports().items()))
+    if not tasks and not classes and not registered and not used and not modules and \
+            not receivers.local and not receivers.factories and not made and not reexports:
         return None
-    return _FileTasks(rel, module_name(rel, repo_root), tasks, frozenset(used), frozenset(modules))
+    return _FileTasks(rel, module_name(rel, repo_root), tasks, classes, registered,
+                      receivers.local, frozenset(used), frozenset(modules),
+                      receivers.factories, made, reexports)
+
+
+def _apps(values: list[_FileTasks]) -> dict[str, frozenset[str]]:
+    """file → its app variables: assigned ``Celery(…)`` or a local factory's result; then, one
+    step each, assigned an imported factory's result, and re-exported from another file."""
+    apps = {v.rel: set(v.apps) for v in values}
+    factories = {v.rel: v.factories for v in values}
+    for v in values:
+        for name, (file, fn) in v.made:
+            if fn in factories.get(file, frozenset()):
+                apps[v.rel].add(name)
+    found = {(v.rel, name) for v in values for name, (file, there) in v.reexports
+             if there in apps.get(file, set())}
+    for rel, name in found:
+        apps[rel].add(name)
+    return {rel: frozenset(names) for rel, names in apps.items() if names}
 
 
 def _resolve(values: list[_FileTasks], index: object) -> CeleryTasks | None:
     used = {n for v in values for n in v.used}
     modules = {m for v in values for m in v.modules}
+    apps = _apps(values)
     by_file: dict[str, dict[str, str | None]] = {}
     by_name: dict[str, tuple[str, str] | None] = {}
+    classes: dict[str, dict[str, str | None]] = {}
+    registered = {cls for v in values for cls, app in v.registered if is_app(app, apps)}
+
+    def confirmed(module: str | None, short: str) -> str | None:
+        derived = f"{module}.{short}" if module else None
+        return derived if derived and (derived in used or module in modules) else None
+
     for v in values:
-        for function, explicit in v.tasks:
+        for function, explicit, app in v.tasks:
+            if not is_app(app, apps):  # `@scheduler.task`: not a Celery task
+                continue
             name: str | None
             if explicit is not None:
                 name = None if explicit == UNKNOWN_NAME else explicit
             else:
-                derived = f"{v.module}.{function}" if v.module else None
-                name = derived if derived and (derived in used or v.module in modules) else None
+                name = confirmed(v.module, function)
             record_distinct(by_file.setdefault(v.rel, {}), function, name)
             if name is not None:
                 record_distinct(by_name, name, (v.rel, function))
-    return CeleryTasks(by_file, by_name) if by_file else None
+        for cls, explicit in v.classes:
+            if (v.rel, cls) not in registered:  # never registered on a Celery app
+                continue
+            if explicit is not None:
+                name = None if explicit == UNKNOWN_NAME else explicit
+            else:
+                name = confirmed(v.module, cls)
+            record_distinct(classes.setdefault(v.rel, {}), cls, name)
+            if name is not None:
+                record_distinct(by_name, name, (v.rel, "run"))
+    return CeleryTasks(by_file, by_name, apps, classes) if by_file or apps or classes else None
 
 
 register_fact(FactSpec(
     name=FACT, language="python",
-    gate=(b"celery", b"CELERY", b"shared_task", b"beat_schedule", b"send_task"),
+    gate=(b"celery", b"CELERY", b"shared_task", b"beat_schedule", b"send_task", b"register_task"),
     collect=_collect, resolve=_resolve,
 ))

@@ -291,8 +291,20 @@ def test_route_shape(tmp_path) -> None:
     rec = _parse(tmp_path, SRC_ROUTES, "AccountApi.cls")
     fns = {f.id: f for f in rec.functions}
     for s in (s for s in rec.statements if s.semanticType == "route"):
-        assert s.nodeType == "synthetic" and s.isRegex is False
+        assert s.isRegex is False
         assert fns[s.parentId].name == s.handler and fns[s.parentId].startLine == s.handlerLine
+    # each record sits at what it was read from: the annotation, or the `webservice` keyword
+    placed = {(s.handler, s.nodeType, s.startLine, s.text)
+              for s in rec.statements if s.semanticType == "route"}
+    assert placed == {
+        ("doGet", "annotation", 4, "@HttpGet"),
+        ("doPost", "annotation", 5, "@HTTPPOST"),
+        ("doPut", "annotation", 6, "@HttpPut"),
+        ("doPatch", "annotation", 7, "@HttpPatch"),
+        ("doDelete", "annotation", 8, "@HttpDelete"),
+        ("list", "annotation", 10, "@AuraEnabled"),
+        ("soap", "modifier", 12, "webservice"),
+    }
 
 
 def test_test_classes_emit_no_routes(tmp_path) -> None:

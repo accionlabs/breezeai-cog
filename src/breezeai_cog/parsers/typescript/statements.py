@@ -3,6 +3,7 @@ with shared API/DB call detection (``parsers/detection``)."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 from tree_sitter import Node
@@ -155,11 +156,58 @@ def _is_http_config_object(obj: Node, source: bytes) -> bool:
     return has_url and has_method
 
 
+#: jQuery ``$.ajax`` settings keys other than ``url`` and ``type`` — the evidence that an
+#: object holding ``type: 'post'`` is request settings, not a record whose type is "post".
+_JQUERY_SETTINGS_KEYS = frozenset({
+    "data", "dataType", "contentType", "processData", "headers", "cache", "timeout", "async",
+    "success", "error", "complete", "beforeSend", "xhrFields", "crossDomain", "jsonp",
+})
+#: Cheap byte test for a ``type: '<verb>'`` pair, so files without one skip the walk.
+_TYPE_VERB = re.compile(
+    rb"""\btype['"]?\s*:\s*['"](?:get|post|put|patch|delete|head|options)['"]""", re.I
+)
+
+
+def _jquery_type_verb(obj: Node, source: bytes) -> str | None:
+    """The verb of a jQuery-style settings object passed to an app's own wrapper
+    (``sendAjax({ type: 'post', url, data, success })`` → ``post``), else None.
+
+    ``type`` is jQuery's original name for the method key, but it is a common key, so it counts
+    only when the object has no ``method`` key and the ``type`` value is an HTTP-verb string
+    literal. The object also needs a ``url`` and one more jQuery setting (``data``,
+    ``dataType``, ``success``, …). ``{ type: 'post', url: permalink }`` (a blog post) has no
+    other setting and stays unmatched."""
+    verb = None
+    has_url = has_setting = False
+    for pair in obj.named_children:
+        if pair.type != "pair":
+            continue
+        key = pair.child_by_field_name("key")
+        if key is None:
+            continue
+        kname = node_text(key, source).strip("'\"")
+        if kname in ("method", "handler"):
+            return None
+        if kname == "url":
+            has_url = True
+        elif kname in _JQUERY_SETTINGS_KEYS:
+            has_setting = True
+        elif kname == "type":
+            val = pair.child_by_field_name("value")
+            if val is None or val.type != "string":
+                return None
+            lit = _string_fragment(val, source).lower()
+            if lit not in _HTTP_VERB_LITERALS:
+                return None
+            verb = lit
+    return verb if has_url and has_setting else None
+
+
 def collect_http_client_ids(root: Node, source: bytes) -> frozenset[str]:
     """Per-file set of names that are HTTP clients but carry no callee hint (see the note
     above). Byte-guarded so files with neither an axios instance nor a config-object call are
     skipped without a walk."""
-    if b"axios" not in source and b"method" not in source:
+    if b"axios" not in source and b"method" not in source and not _TYPE_VERB.search(source):
         return frozenset()
     axios_names = {"axios", "Axios"}
     for node in root.named_children:
@@ -186,10 +234,10 @@ def collect_http_client_ids(root: Node, source: bytes) -> frozenset[str]:
             args = n.child_by_field_name("arguments")
             if fn is not None and args is not None:
                 first = next(iter(args.named_children), None)
-                if (
-                    first is not None
-                    and first.type == "object"
-                    and _is_http_config_object(first, source)
+                if first is not None and first.type == "object" and (
+                    _is_http_config_object(first, source)
+                    # jQuery-style settings to a bare wrapper: sendAjax({ type: 'post', url })
+                    or (fn.type == "identifier" and _jquery_type_verb(first, source))
                 ):
                     recv = node_text(fn, source).split(".", 1)[0]
                     if recv.replace("_", "").replace("$", "").isalnum():
@@ -238,11 +286,12 @@ def render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _resolve_args(args: Node | None, source: bytes, method: str | None = None
-                  ) -> tuple[str | None, str | None]:
+def _resolve_args(args: Node | None, source: bytes, method: str | None = None,
+                  bare: bool = False) -> tuple[str | None, str | None]:
     """(endpoint, override_method) from a call's arguments. Handles the config-object
     form (``axios({ url, method })``) — JS-specific — then falls back to the shared
-    positional resolver (first-arg / verb-first)."""
+    positional resolver (first-arg / verb-first). For a ``bare`` callee (a plain function
+    name), jQuery-style settings give the method from ``type`` (:func:`_jquery_type_verb`)."""
     if args is None:
         return None, None
     named = list(args.named_children)
@@ -261,6 +310,8 @@ def _resolve_args(args: Node | None, source: bytes, method: str | None = None
             elif kname == "method" and val is not None:
                 mv = render_url(val, source)
                 override = mv.lower() if mv else None
+        if override is None and bare:
+            override = _jquery_type_verb(named[0], source)
         return url, override
     return resolve_endpoint(named, source, render_url, method=method)
 
@@ -270,7 +321,8 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     callee = node_text(fn, source) if fn is not None else ""
     method = callee.rsplit(".", 1)[-1]
     endpoint, override = _resolve_args(call.child_by_field_name("arguments"), source,
-                                       url_first(callee, method))
+                                       url_first(callee, method),
+                                       bare=fn is not None and fn.type == "identifier")
     if override is not None:
         method = override
     return callee, method, endpoint
@@ -290,14 +342,23 @@ def _wraps_module(node: Node) -> bool:
 
 #: Values that make a declaration or class field a function binding (``const f = () => …``,
 #: ``handle = function () {…}``) — the binding is then extracted as that ``Function``.
-FUNCTION_VALUES = ("arrow_function", "function_expression")
+FUNCTION_VALUES = ("arrow_function", "function_expression", "generator_function")
 _BINDINGS = ("lexical_declaration", "variable_declaration")
 _FIELDS = ("public_field_definition", "field_definition")
 
 
 def _bound_values(node: Node) -> list[Node] | None:
-    """The values a declaration or class field binds, or None when ``node`` is neither or one
-    of its declarators has no value."""
+    """The values a declaration, a class field or an assignment statement (``exports.load =
+    function …``) binds, or None when ``node`` is none of these or one of its declarators has
+    no value."""
+    if node.type == "expression_statement":
+        inner = [c for c in node.named_children if c.type != "comment"]
+        if len(inner) != 1 or inner[0].type != "assignment_expression":
+            return None
+        node = inner[0]
+    if node.type == "assignment_expression":
+        right = node.child_by_field_name("right")
+        return [right] if right is not None else None
     if node.type in _FIELDS:
         value = node.child_by_field_name("value")
         return [value] if value is not None else None
@@ -347,6 +408,7 @@ def _iter_in_scope(
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
     built: frozenset[tuple[int, int]] = frozenset(),
+    opaque: frozenset[str] = frozenset(),
 ) -> Iterator[Node]:
     """Yield EMIT_TYPES statement nodes. When ``descend_all`` is False (file-root /
     class-body scope) nested scopes remain barriers — they are extracted as their own
@@ -359,7 +421,8 @@ def _iter_in_scope(
     A declaration that only binds functions extracted as their own ``Function`` (their
     value spans are in ``built``) is skipped: the Function is the record of that code."""
     for child in node.named_children:
-        if _span(child) in barriers or _duplicates_functions(child, built):
+        if _span(child) in barriers or _duplicates_functions(child, built) \
+                or child.type in opaque:
             continue
         if not descend_all and child.type in NESTED_SCOPES:
             continue
@@ -371,7 +434,7 @@ def _iter_in_scope(
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child, descend_all, barriers, built)
+        yield from _iter_in_scope(child, descend_all, barriers, built, opaque)
 
 
 def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
@@ -395,11 +458,12 @@ def extract_statements(
     barriers: frozenset[tuple[int, int]] = frozenset(),
     built: frozenset[tuple[int, int]] = frozenset(),
     typed_db_ids: frozenset[str] | None = None,
+    opaque: frozenset[str] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all, barriers, built):
+    for node in _iter_in_scope(body, descend_all, barriers, built, opaque):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,

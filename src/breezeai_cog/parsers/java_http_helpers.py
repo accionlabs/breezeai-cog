@@ -1,0 +1,671 @@
+"""HTTP calls made through the application's own helpers are recorded where they run (BREEZEAI-1654).
+
+An HTTP client call is an ``api_call`` where the client is called. When the application wraps the
+client in its own method, that call is made on the method's parameter and says nothing of where
+the request goes; the method's callers hold the URL::
+
+    // ApiHandler.java
+    public HttpClientRequest getClient(String url, …) {               // a relay
+      return requestClient(ApiUtil.METHOD_GET, url, null, headers, h);
+    }
+    public HttpClientRequest requestClient(String method, String url, …) {   // a helper
+      HttpClientRequest request = client.request(method, apiPath + url, …);
+    }
+    // FileApiHandler.java (extends ApiHandler)
+    String url = "id";
+    HttpClientRequest apiRequest = getClient(url, null, endHandler);  // api_call GET {apiPath}id
+
+Contract §5, "Where an outbound record is written": each call of a helper is the ``api_call``, with
+the caller's URL argument in the helper's URL template and the verb the helper fixes or the
+caller passes; inside the helper (and each relay) the call on its own URL parameter is a plain
+statement, whether or not any of its callers resolve.
+
+**Helper** — a method or constructor of the repository whose HTTP client request (a Vert.x 2
+``HttpClient`` request, an Apache ``new HttpGet(…)`` …, matched exactly as capture matches them)
+takes its URL from one of its parameters, whole or as its last part (``apiPath + url``); a method
+whose URL only takes a base or an id from a parameter (``base + "/orders"``) names its endpoint
+itself and keeps its record. It keeps the
+URL template (``{apiPath}{url}``, the slot ``{url}``) and the verb: fixed by the request, or the
+parameter that carries it (``request(method, …)``).
+
+**Relay** — a method passing its own parameter into a helper's URL position, called on its own
+class (unqualified or ``this.``, its superclasses included), on a class name, through
+``super(…)`` / ``this(…)``, or on a field of its class by the field's declared type
+(``this.client.put(uri, v)`` with ``HttpClient client``; a bare ``client`` only when no parameter
+or local of the method has that name). It is a helper with the same template; its verb is the helper's, the
+parameter it passes into the verb position, or the constant it passes there
+(``ApiUtil.METHOD_GET`` folded through the repository's constants).
+
+A method whose URL slot cannot be proven (the parameter rewritten in the method, used twice, two
+parameters in the URL) is not a helper and keeps its record; one declared with a different shape
+in two files is dropped (unsure).
+
+**Call site** — a call the Java call resolver links to a helper's file under the helper's name,
+with the helper's arity: the ``calls`` entry of the enclosing Function decides, so inherited and
+static calls resolve as the call graph does. Two helpers the entry could mean → nothing.
+
+**Through an interface** — a call on a field or variable typed as an interface links to the
+interface's file (``HttpClient client = new HttpClientImpl(); client.put(uri, v)``). The method
+is then a call site of a helper when the code shows which request runs whatever the object is:
+
+* every concrete class of the repository implementing the interface (directly, through an
+  in-repo base class, or a base's interfaces) runs, for that method, a helper — the first
+  declaration up its in-repo base chain — and all those helpers make the same request (URL
+  parameter, template, verb);
+* the interface has at least two abstract methods (a functional interface may be implemented
+  by a lambda no declaration shows), no interface of the repository extends it, it is not
+  instantiated as an anonymous class anywhere (nor are its implementations), and no type
+  naming it, or naming one of its implementations, in ``implements`` / ``extends`` is left
+  unresolved.
+
+Otherwise which request runs is not known, and the call is no call site.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator, Mapping
+from pathlib import Path
+from typing import Any
+
+from tree_sitter import Node
+
+from ..schemas import FileRecord
+from .additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
+    register_detector, register_fact
+from .constfold import resolve_all
+from .emits import Emit
+from .index_common import record_distinct
+from .java.constants import collect_constants
+from .java.imports import JavaIndex
+from .java_apache_httpclient.http_calls import requests as apache_requests
+from .java_vertx.forwarders import TYPE_DECLARATIONS, _callee, _class_of, _Names, _scan, pick, \
+    superclass_of
+from .java_vertx.java_syntax import (arguments, imports_and_package, known_address,
+                                     local_value, name_of, request_address)
+from .java_vertx.legacy import client_requests, returning_client
+from .treesitter import node_text
+
+FACT = "java.http-helpers"
+_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE",
+                    "CONNECT"})
+#: How many relays deep a helper is followed.
+_DEPTH = 6
+
+#: A helper: (URL parameter index, URL template, its slot, fixed verb or None, verb parameter
+#: index or -1, framework or None).
+Helper = tuple[int, str, str, str | None, int, str | None]
+#: A relay: (key, callee owner candidates, exact, ``method/arity``, (callee argument index, own
+#: parameter index) pairs, (callee argument index, constant text) pairs).
+Relay = tuple[str, tuple[str, ...], bool, str, tuple[tuple[int, int], ...],
+              tuple[tuple[int, str], ...]]
+#: A type name as one file writes it: (fully-qualified candidates, exact) — ``_Names.candidates``.
+Written = tuple[tuple[str, ...], bool]
+#: A type declared in a file: (fully-qualified name, declaration kind, abstract, local (declared
+#: in a method or an initializer), superclass as written or None, its interfaces as written
+#: (``implements``; an interface's ``extends``), its methods as ``name/arity``: those with a
+#: body, or for an interface its abstract ones).
+TypeDecl = tuple[str, str, bool, bool, Written | None, tuple[Written, ...], tuple[str, ...]]
+#: What one file gives the fact: (its path, helpers, relays, (class, superclass candidates,
+#: exact) for each class, its type declarations, the simple names of the types it instantiates
+#: as anonymous classes).
+FileFacts = tuple[str, list[tuple[str, Helper]], list[Relay],
+                  list[tuple[str, tuple[str, ...], bool]], list[TypeDecl], frozenset[str]]
+
+#: Nodes between a type declaration and the next enclosing one that keep it a member type.
+_MEMBER_PARENTS = frozenset({"program", "class_body", "interface_body", "enum_body",
+                             "enum_body_declarations"})
+
+
+def _signature(decl: Node, source: bytes) -> tuple[list[str], bool]:
+    """(parameter names, varargs): a ``T... rest`` parameter is the last name. The positions
+    before it are fixed, so a helper with varargs is still followed — called with at least as
+    many arguments as it has fixed parameters (``name/k+`` in its key)."""
+    params = decl.child_by_field_name("parameters")
+    names: list[str] = []
+    varargs = False
+    for p in params.named_children if params is not None else []:
+        if p.type == "formal_parameter":
+            names.append(name_of(p.child_by_field_name("name"), source))
+        elif p.type == "spread_parameter":
+            declarator = next((c for c in p.named_children if c.type == "variable_declarator"),
+                              None)
+            nm = declarator.child_by_field_name("name") if declarator is not None else None
+            names.append(name_of(nm, source) if nm is not None else "")
+            varargs = True
+    return names, varargs
+
+
+def _arity(names: list[str], varargs: bool) -> str:
+    return f"{len(names) - 1}+" if varargs else str(len(names))
+
+
+def _members(name: str, count: int) -> Iterator[str]:
+    """The keys' ``method/arity`` a call of ``name`` with ``count`` arguments may mean: the exact
+    arity, then a varargs method with at most ``count`` fixed parameters."""
+    yield f"{name}/{count}"
+    for k in range(count, -1, -1):
+        yield f"{name}/{k}+"
+
+
+def _param_refs(node: Node, params: list[str], reassigned: Mapping[str, Any],
+                source: bytes) -> list[str]:
+    """The method's own parameters ``node`` reads (identifiers only, not rewritten in it)."""
+    out: list[str] = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == "identifier":
+            text = node_text(n, source)
+            if text in params and text not in reassigned:
+                out.append(text)
+        stack.extend(n.named_children)
+    return out
+
+
+def _requests(root: Node, calls: list[Node], source: bytes
+              ) -> list[tuple[Node, str | None, Node | None, Node | None, str]]:
+    """This file's HTTP client requests: (node, verb, verb argument, URI argument, framework),
+    matched as capture matches them, in one pass over the file."""
+    found: list[tuple[Node, str | None, Node | None, Node | None, str]] = []
+    if b"HttpClient" in source:
+        returning = returning_client(root, source)
+        found.extend((call, verb, verb_arg, uri, "vertx")
+                     for call, verb, verb_arg, uri in client_requests(root, calls, source,
+                                                                       returning, {}))
+    if b"org.apache.h" in source:
+        singles, wildcards, _ = imports_and_package(root, source)
+        imports = [*singles, *(f"{w}.*" for w in wildcards)]
+        found.extend((node, verb, None, uri, "") for node, verb, uri in
+                     apache_requests(root, source, imports))
+    return found
+
+
+def _scan_file(root: Node, source: bytes, rel: str
+               ) -> tuple[FileFacts, list[tuple[str, tuple[int, int]]]]:
+    """This file's helpers, relays and classes, and each helper's (key, request span): the
+    requests that only define one."""
+    names = _Names(root, source)
+    found_types: list[Node] = []
+    scanned = _scan(root, source, names, found_types)
+    requests = _requests(root, [c for cls in scanned for d in cls.decls for c in d.calls],
+                         source) if b"HttpClient" in source or b"org.apache.h" in source else []
+    helpers: list[tuple[str, Helper]] = []
+    relays: list[Relay] = []
+    classes: list[tuple[str, tuple[str, ...], bool]] = []
+    spans: list[tuple[str, tuple[int, int]]] = []
+    for cls in scanned:
+        fields = _fields(cls.body, source)
+        if cls.superclass:
+            found, exact = names.candidates(cls.superclass)
+            classes.append((cls.name, found, exact))
+        else:
+            classes.append((cls.name, (), True))
+        for d in cls.decls:
+            params, varargs = _signature(d.node, source)
+            if not params or d.node.child_by_field_name("body") is None:
+                continue
+            ctor = d.node.type == "constructor_declaration"
+            mname = "<init>" if ctor else name_of(d.node.child_by_field_name("name"), source)
+            key = f"{cls.name}.{mname}/{_arity(params, varargs)}"
+            fixed = len(params) - 1 if varargs else len(params)
+            lo, hi = d.node.start_byte, d.node.end_byte
+            for node, verb, verb_arg, uri, framework in requests:
+                if uri is None or not lo <= node.start_byte < hi:
+                    continue
+                refs = _param_refs(uri, params, d.assigned, source)
+                if len(refs) != 1 or params.index(refs[0]) >= fixed:
+                    continue  # no parameter (an ordinary call), two, or the varargs: no slot
+                slot = "{" + refs[0] + "}"
+                template = request_address(uri, source, {}) or ""
+                if template.count(slot) != 1 or not template.endswith(slot):
+                    continue  # a base or an id from the parameter: the method names its endpoint
+                vidx = -1
+                if verb is None and verb_arg is not None and verb_arg.type == "identifier" \
+                        and name_of(verb_arg, source) in params \
+                        and name_of(verb_arg, source) not in d.assigned:
+                    vidx = params.index(name_of(verb_arg, source))
+                helpers.append((key, (params.index(refs[0]), template, slot, verb, vidx,
+                                      framework or None)))
+                spans.append((key, (node.start_byte, node.end_byte)))
+            for call in d.calls:
+                args = arguments(call)
+                mapping = tuple((i, params.index(name_of(a, source))) for i, a in enumerate(args)
+                                if a.type == "identifier" and name_of(a, source) in params[:fixed]
+                                and name_of(a, source) not in d.assigned)
+                if not mapping:
+                    continue
+                callee = _callee(call, cls.name, cls.superclass, names, source) \
+                    or _field_callee(call, fields, d.node, params, names, source)
+                if callee is None:
+                    continue
+                constants = tuple((i, node_text(a, source)) for i, a in enumerate(args)
+                                  if a.type in ("string_literal", "field_access", "identifier")
+                                  and not any(i == j for j, _ in mapping))
+                relays.append((key, callee[0], callee[1], callee[2], mapping, constants))
+    decls, anonymous = _types(found_types, source, names)
+    return (rel, helpers, relays, classes, decls, anonymous), spans
+
+
+def _fields(body: Node, source: bytes) -> dict[str, str | None]:
+    """A class body's fields → their declared class type as written (generics dropped); None
+    for a name declared twice. Primitive and array fields are left out."""
+    out: dict[str, str | None] = {}
+    for m in body.named_children:
+        typ = m.child_by_field_name("type") if m.type == "field_declaration" else None
+        if typ is None or typ.type not in ("type_identifier", "scoped_type_identifier",
+                                           "generic_type"):
+            continue
+        written = node_text(typ, source).split("<", 1)[0].strip()
+        for d in m.named_children:
+            if d.type == "variable_declarator":
+                record_distinct(out, name_of(d.child_by_field_name("name"), source), written)
+    return out
+
+
+#: Declarations whose ``name`` is a local of the method they are in.
+_LOCAL_NAMES = frozenset({"variable_declarator", "formal_parameter", "catch_formal_parameter",
+                          "enhanced_for_statement", "spread_parameter"})
+
+
+def _declares_local(decl: Node, name: str, source: bytes) -> bool:
+    """Whether a local variable, a lambda / catch / for parameter of ``decl`` is ``name``."""
+    body = decl.child_by_field_name("body")
+    stack = [body] if body is not None else []
+    while stack:
+        n = stack.pop()
+        if n.type in _LOCAL_NAMES:
+            nm = n.child_by_field_name("name")
+            if nm is not None and node_text(nm, source) == name:
+                return True
+        elif n.type == "lambda_expression":
+            ps = n.child_by_field_name("parameters")
+            if ps is not None and ps.type == "identifier" and node_text(ps, source) == name:
+                return True
+            if ps is not None and ps.type == "inferred_parameters" and any(
+                    node_text(c, source) == name for c in ps.named_children):
+                return True
+        stack.extend(n.named_children)
+    return False
+
+
+def _field_callee(call: Node, fields: Mapping[str, str | None], decl: Node, params: list[str],
+                  names: _Names, source: bytes) -> tuple[tuple[str, ...], bool, str] | None:
+    """(owner candidates, exact, ``method/arity``) of a call on a field of the class
+    (``this.client.put(…)``, or ``client.put(…)`` when no parameter or local is ``client``),
+    by the field's declared type; None otherwise."""
+    obj = call.child_by_field_name("object")
+    if call.type != "method_invocation" or obj is None:
+        return None
+    if obj.type == "field_access":
+        inner = obj.child_by_field_name("object")
+        if inner is None or inner.type != "this":
+            return None
+        field = name_of(obj.child_by_field_name("field"), source)
+    elif obj.type == "identifier":
+        field = node_text(obj, source)
+        if field in params or field not in fields or _declares_local(decl, field, source):
+            return None
+    else:
+        return None
+    written = fields.get(field)
+    if not written:
+        return None
+    found, exact = names.candidates(written)
+    return found, exact, f"{name_of(call.child_by_field_name('name'), source)}/" \
+                         f"{len(arguments(call))}"
+
+
+def _types(nodes: list[Node], source: bytes, names: _Names
+           ) -> tuple[list[TypeDecl], frozenset[str]]:
+    """The file's type declarations and the simple names it instantiates as anonymous classes,
+    from the nodes :func:`_scan` collected (no further walk: each declaration's own members
+    only)."""
+    decls: list[TypeDecl] = []
+    anonymous: set[str] = set()
+    for n in nodes:
+        if n.type == "object_creation_expression":
+            typ = n.child_by_field_name("type")
+            if typ is not None:
+                anonymous.add(name_of(typ, source).split("<", 1)[0].rsplit(".", 1)[-1])
+            continue
+        chain: list[str] = []
+        local = False
+        cur: Node | None = n
+        while cur is not None:
+            if cur.type in TYPE_DECLARATIONS:
+                chain.append(name_of(cur.child_by_field_name("name"), source))
+            elif cur.type not in _MEMBER_PARENTS:
+                local = True
+            cur = cur.parent
+        interface = n.type == "interface_declaration"
+        modifiers = next((node_text(c, source) for c in n.children if c.type == "modifiers"), "")
+        sup = superclass_of(n, source) if n.type == "class_declaration" else None
+        listed = n.child_by_field_name("interfaces") or next(
+            (c for c in n.named_children if c.type == "extends_interfaces"), None)
+        types_list = next((c for c in listed.named_children if c.type == "type_list"), None) \
+            if listed is not None else None
+        interfaces = tuple(names.candidates(name_of(t, source))
+                           for t in (types_list.named_children if types_list is not None else ()))
+        body = n.child_by_field_name("body")
+        members = list(body.named_children) if body is not None else []
+        members += [m for c in members if c.type == "enum_body_declarations"
+                    for m in c.named_children]
+        methods: list[str] = []
+        for m in members:
+            if m.type != "method_declaration":
+                continue
+            has_body = m.child_by_field_name("body") is not None
+            mods = next((node_text(c, source) for c in m.children if c.type == "modifiers"), "")
+            if interface and (has_body or "static" in mods.split()):
+                continue  # a default / static / private method: no implementation to look for
+            if not interface and not has_body:
+                continue  # an abstract method: a subclass declares it
+            params, varargs = _signature(m, source)
+            methods.append(f"{name_of(m.child_by_field_name('name'), source)}/"
+                           f"{_arity(params, varargs)}")
+        decls.append((names.qualify(*reversed(chain)), n.type, "abstract" in modifiers.split(),
+                      local, names.candidates(sup) if sup else None, interfaces,
+                      tuple(methods)))
+    return decls, frozenset(anonymous)
+
+
+#: An interface each of whose implementations is known: (its file, its abstract methods
+#: ``name/arity``, for each concrete implementation its class and in-repo bases, nearest first,
+#: each with the methods it declares).
+Implementations = tuple[str, tuple[str, ...],
+                        tuple[tuple[tuple[str, frozenset[str]], ...], ...]]
+
+
+def _implementations(values: list[FileFacts], types: dict[str, Any]
+                     ) -> dict[str, Implementations]:
+    """The interfaces whose implementations the repository shows in full (module docstring,
+    "Through an interface"), each with them. Linear in the declarations: every concrete class's
+    base chain is walked once."""
+    decls = [(rel, d) for rel, *_, file_decls, _ in values for d in file_decls]
+    anonymous = frozenset().union(*(v[5] for v in values))
+    declared = {d[0] for _, d in decls}
+    by_name: dict[str, tuple[str, TypeDecl] | None] = {}
+    for rel, d in decls:
+        record_distinct(by_name, d[0], (rel, d))
+    unresolved: set[str] = set()  # simple names written in implements / extends, not resolved
+
+    def resolve(written: Written) -> str | None:
+        hit = pick(written[0], written[1], declared, types)
+        if hit is None:
+            unresolved.add(written[0][0].rsplit(".", 1)[-1])
+        return hit
+
+    supers = {d[0]: resolve(d[4]) if d[4] else None for _, d in decls}
+    interfaces = {d[0]: tuple(resolve(w) for w in d[5]) for _, d in decls}
+    methods = {d[0]: frozenset(d[6]) for _, d in decls}
+    extended = {i for _, d in decls if d[1] == "interface_declaration"
+                for i in interfaces[d[0]] if i}
+    chains: dict[str, list[list[str]]] = {}
+    unsure: set[str] = set()
+    for _, d in decls:
+        if d[1] == "interface_declaration" or d[2]:
+            continue  # an interface or an abstract class is never the object itself
+        chain: list[str] = []
+        cur: str | None = d[0]
+        while cur is not None and cur not in chain:
+            if by_name.get(cur) is None:
+                break  # declared twice: which one is meant is not known
+            chain.append(cur)
+            cur = supers.get(cur)
+        else:
+            for implemented in {i for c in chain for i in interfaces[c] if i}:
+                chains.setdefault(implemented, []).append(chain)
+            continue
+        unsure.update(i for c in [*chain, d[0]] for i in interfaces.get(c, ()) if i)
+    out: dict[str, Implementations] = {}
+    for rel, iface in decls:
+        name, kind, _, local, _, _, abstract = iface
+        simple = name.rsplit(".", 1)[-1]
+        found = chains.get(name)
+        if kind != "interface_declaration" or local or len(abstract) < 2 or not found \
+                or by_name.get(name) is None or name in extended or name in unsure \
+                or simple in anonymous or simple in unresolved or any(
+                    c.rsplit(".", 1)[-1] in anonymous or c.rsplit(".", 1)[-1] in unresolved
+                    for ch in found for c in ch):
+            continue
+        out[name] = (rel, abstract, tuple(tuple((c, methods[c]) for c in ch) for ch in found))
+    return out
+
+
+def _agreed(impls: Mapping[str, Implementations], known: Mapping[str, Helper]
+            ) -> dict[tuple[str, str], tuple[str, str]]:
+    """``(interface, method/arity)`` → (the interface's file, the helper key every
+    implementation runs), where all of them run a helper making the same request."""
+    out: dict[tuple[str, str], tuple[str, str]] = {}
+    for iface, (rel, abstract, chains) in impls.items():
+        for member in abstract:
+            runs = {next((f"{c}.{member}" for c, ms in chain if member in ms), "")
+                    for chain in chains}
+            requests = {known.get(k) for k in runs}
+            if "" in runs or None in requests or len(requests) != 1:
+                continue  # not every implementation runs a helper, or not the same request
+            out[(iface, member)] = (rel, min(runs))
+    return out
+
+
+def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileFacts | None:
+    facts, _ = _scan_file(root, source, rel)
+    return facts if any(facts[1:]) else None
+
+
+def _fold(text: str, consts: Mapping[str, str]) -> str | None:
+    """A verb constant as written in a relay: a string literal or a repository constant."""
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        value: str | None = text[1:-1]
+    else:
+        value = consts.get(text)
+    return value.upper() if value and value.upper() in _VERBS else None
+
+
+def _resolve(values: list[FileFacts], index: Any) -> dict[str, Any] | None:
+    """(helpers by key, (file, ``method``, arity) → key, key → file). A key declared twice
+    differently is dropped; relays are followed up to :data:`_DEPTH` deep, through the callee's
+    superclasses when it does not declare the method itself."""
+    merged: dict[str, Helper | None] = {}
+    files: dict[str, str | None] = {}
+    relays: list[tuple[str, Relay]] = []
+    supers_written: dict[str, tuple[tuple[str, ...], bool]] = {}
+    for rel, helpers, rels, classes, _, _ in values:
+        for key, helper in helpers:
+            record_distinct(merged, key, helper)
+            record_distinct(files, key, rel)
+        for relay in rels:
+            relays.append((rel, relay))
+        for cls, found, exact in classes:
+            supers_written[cls] = (found, exact)
+    types: dict[str, Any] = getattr(index, "fqcn", None) or {}
+    consts: Mapping[str, str] = getattr(index, "consts", None) or {}
+    known_classes = set(supers_written)
+    supers = {cls: pick(found, exact, known_classes, types) if found else None
+              for cls, (found, exact) in supers_written.items()}
+    known = {k: v for k, v in merged.items() if v is not None}
+    known_types = known_classes | {d[0] for v in values for d in v[4]}
+    impls = _implementations(values, types)
+    agreed = _agreed(impls, known)
+
+    def lookup(owner: str | None, member: str) -> Helper | None:
+        name, _, count = member.partition("/")
+        seen: set[str] = set()
+        while owner is not None and owner not in seen:
+            seen.add(owner)
+            for m in _members(name, int(count)):
+                hit = known.get(f"{owner}.{m}")
+                if hit is None and (owner, m) in agreed:
+                    hit = known.get(agreed[(owner, m)][1])  # an interface's agreed request
+                if hit is not None:
+                    return hit
+            if name == "<init>":
+                return None
+            owner = supers.get(owner)
+        return None
+
+    for _ in range(_DEPTH):
+        derived: dict[str, Helper | None] = {}
+        derived_files: dict[str, str | None] = {}
+        members = {k.rsplit(".", 1)[-1].partition("/")[0] for k in known}
+        for rel, (key, owners, exact, member, mapping, constants) in relays:
+            if key in merged or member.partition("/")[0] not in members:
+                continue
+            owner = pick(owners, exact, known_types, types)
+            helper = lookup(owner, member)
+            own = dict(mapping)
+            if helper is None or helper[0] not in own:
+                continue
+            url, template, slot, verb, vidx, framework = helper
+            new_vidx = -1
+            if vidx >= 0:
+                if vidx in own:
+                    new_vidx = own[vidx]
+                else:
+                    verb = _fold(dict(constants).get(vidx, ""), consts)
+            record_distinct(derived, key, (own[url], template, slot, verb, new_vidx, framework))
+            record_distinct(derived_files, key, rel)
+        new = {k: v for k, v in derived.items() if v is not None and k not in known}
+        if not new:
+            break
+        known.update(new)
+        agreed = _agreed(impls, known)
+        merged.update(derived)
+        for k in new:
+            files[k] = derived_files.get(k)
+    sites: dict[tuple[str, str], str | None] = {}
+    for key in known:
+        rel = files.get(key)
+        if rel is None:
+            continue
+        member = key.rsplit(".", 1)[-1]
+        name, _, arity = member.partition("/")
+        if name == "<init>":
+            name = _class_of(key).rsplit(".", 1)[-1]
+        record_distinct(sites, (rel, f"{name}/{arity}"), key)
+    for (_, member), (rel, key) in _agreed(impls, known).items():
+        record_distinct(sites, (rel, member), key)
+    return {"helpers": known, "sites": sites, "files": files} if known else None
+
+
+register_fact(FactSpec(name=FACT, language="java", gate=(b"",), collect=_collect,
+                       resolve=_resolve))
+
+
+def defining_requests(root: Node, source: bytes, path: str, index: Any | None
+                      ) -> frozenset[tuple[int, int]]:
+    """This file's requests that only define one: a helper's request on its own URL parameter.
+    Each call of the helper makes the request and is the ``api_call``; these are plain
+    statements. (A relay's call passing the parameter on is skipped by the call-site
+    detector.)"""
+    fact = index_fact(index, FACT)
+    if not fact:
+        return frozenset()
+    helpers = fact["helpers"]
+    _, spans = _scan_file(root, source, path)
+    return frozenset(span for key, span in spans if key in helpers)
+
+
+def _own_parameter(node: Node, source: bytes) -> bool:
+    """``node`` is a parameter of the method or constructor it is written in."""
+    if node.type != "identifier":
+        return False
+    decl = node.parent
+    while decl is not None and decl.type not in ("method_declaration",
+                                                 "constructor_declaration"):
+        if decl.type in ("lambda_expression", "class_body"):
+            return False  # a lambda's or an inner class's own name
+        decl = decl.parent
+    params = _signature(decl, source)[0] if decl is not None else []
+    return node_text(node, source) in params
+
+
+def _enclosing_function(record: FileRecord, line: int):
+    best = None
+    for fn in record.functions:
+        start, end = fn.startLine or 0, fn.endLine or 0
+        if start <= line <= end and (best is None or end - start < (best.endLine or 0)
+                                     - (best.startLine or 0)):
+            best = fn
+    return best
+
+
+def _detect(dc: DetectContext) -> Detection | None:
+    index = dc.ctx.resolution_index
+    fact = index_fact(index, FACT)
+    if not fact:
+        return None
+    helpers: dict[str, Helper] = fact["helpers"]
+    sites: dict[tuple[str, str], str | None] = fact["sites"]
+    names = {member.partition("/")[0] for _, member in sites}
+    source = dc.source
+    if not any(n.encode() in source for n in names):
+        return None
+    consts: dict[str, str] | None = None
+    found: list[Emit] = []
+    stack = [dc.root]
+    while stack:
+        n = stack.pop()
+        stack.extend(n.named_children)
+        if n.type not in ("method_invocation", "object_creation_expression"):
+            continue
+        if n.type == "method_invocation":
+            name = name_of(n.child_by_field_name("name"), source)
+        else:
+            typ = n.child_by_field_name("type")
+            name = name_of(typ, source).split("<", 1)[0].rsplit(".", 1)[-1] if typ else ""
+        if name not in names:
+            continue
+        args = arguments(n)
+        fn = _enclosing_function(dc.record, n.start_point[0] + 1)
+        if fn is None:
+            continue
+        keys: set[str] = set()
+        for c in fn.calls:
+            if c.name == name and c.path:
+                hit = next((sites[(c.path, m)] for m in _members(name, len(args))
+                            if (c.path, m) in sites), None)
+                if hit is not None:
+                    keys.add(hit)
+        if len(keys) != 1:
+            continue  # not a helper call, or two helpers it may be: unsure
+        obj = n.child_by_field_name("object") if n.type == "method_invocation" else None
+        if obj is not None and node_text(obj, source) != "this" and any(
+                c.name == name and not c.path for c in fn.calls):
+            continue  # another `name` here resolves nowhere (`map.get(…)`): only an unqualified
+            # or `this.` call is surely the helper's
+        helper = helpers.get(next(iter(keys)))
+        if helper is None or helper[0] >= len(args):
+            continue
+        url, template, slot, verb, vidx, framework = helper
+        if _own_parameter(args[url], source):
+            continue  # a relay passing its own URL parameter on: its callers make the request
+        if consts is None:
+            cross = index.consts if isinstance(index, JavaIndex) else {}
+            consts = resolve_all(collect_constants(dc.root, source), base=cross)
+        arg = args[url]
+        if arg.type == "identifier":
+            # `String url = "id"; getClient(url)`: a local given one constant value
+            init = local_value(arg, node_text(arg, source), source)
+            if init is not None and known_address(init, source, consts) is not None:
+                arg = init
+        value = request_address(arg, source, consts)
+        if value is None:
+            continue
+        if vidx >= 0 and vidx < len(args):
+            folded = known_address(args[vidx], source, consts)
+            verb = folded.upper() if folded and folded.upper() in _VERBS else None
+        fields: dict[str, Any] = {"semanticType": "api_call", "method": verb,
+                                  "endpoint": template.replace(slot, value)}
+        if framework:
+            fields["framework"] = framework
+        found.append(Emit(n, fields, enrich="unclassified",
+                          reclassify=frozenset({"api_call", "db_method_call"})))
+    return Detection(found) if found else None
+
+
+register_detector(Detector(
+    name="java-http-helpers",
+    gate=Gate("java", order=85, guard=None, skip_fixtures=True),
+    detect=_detect,
+))

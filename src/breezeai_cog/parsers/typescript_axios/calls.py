@@ -10,6 +10,8 @@ anywhere in the file shadows that evidence, and nothing is labelled through it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
@@ -75,14 +77,18 @@ def axios_names(root: Node, source: bytes) -> frozenset[str]:
     return frozenset(names)
 
 
-def _detect(dc: DetectContext) -> Detection | None:
-    clients = axios_names(dc.root, dc.source) - shadowed_names(dc.root, dc.source)
+def axios_evidence(root: Node, source: bytes) -> Callable[[Node], bool] | None:
+    """Whether a call of this file is made through axios; None when the file binds no axios."""
+    clients = axios_names(root, source) - shadowed_names(root, source)
     if not clients:
         return None
+    return lambda call: callee_root(call, source) in clients
 
-    def evidenced(call: Node) -> bool:
-        return callee_root(call, dc.source) in clients
 
+def _detect(dc: DetectContext) -> Detection | None:
+    evidenced = axios_evidence(dc.root, dc.source)
+    if evidenced is None:
+        return None
     emits = label_http_client(dc.root, dc.source, dc.path, dc.record, "axios", evidenced)
     return Detection(emits) if emits else None
 

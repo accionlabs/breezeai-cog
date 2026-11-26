@@ -87,7 +87,7 @@ def _collect_calls(
     """Calls in ``node``, inline function literals included; a literal stored in a variable
     (its span in ``barriers``) is a Function of its own and keeps its calls."""
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def walk(current: Node) -> None:
         for child in current.named_children:
@@ -95,9 +95,10 @@ def _collect_calls(
                 continue
             if child.type == "call_expression":
                 name, receiver = _call_name(child, source)
-                if name and name not in seen:
-                    seen.add(name)
-                    calls.append(Call(name=name, path=resolve(name, receiver)))
+                path = resolve(name, receiver) if name else None
+                if name and (name, path) not in seen:
+                    seen.add((name, path))
+                    calls.append(Call(name=name, path=path))
             walk(child)
 
     walk(node)

@@ -1,6 +1,6 @@
 """``new X(…)`` is a call to X's constructor — a call named ``X`` with the file declaring X —
-when X resolves, as Java resolves a type name, to another file of the repository
-(java/functions.py ``_calls``)."""
+when X resolves, as Java resolves a type name, to a file of the repository: this file for a
+type of this file in scope there, else another file (java/functions.py ``_calls``)."""
 
 from __future__ import annotations
 
@@ -32,6 +32,19 @@ public class Builder {
 """,
     "b/Other.java": "package b;\nimport a.Report;\n"
                     "public class Other { Object x() { return new Report(\"r\"); } }\n",
+    # this file's types: a factory, a nested class hiding a/Money.java, a local class, and a
+    # nested class of another top-level class (not in scope there)
+    "a/Shop.java": """package a;
+public class Shop {
+  static class Money { Money() {} }
+  public static Shop create() { return new Shop(); }
+  private Shop() {}
+  Object price() { return new Money(); }
+  Object later() { Object m = new Local(); class Local { } return new Local(); }
+  class Cart { Object total() { return new Money(); } Object back() { return new Shop(); } }
+}
+class Till { Object cash() { return new Money(); } Object shop() { return new Shop(); } }
+""",
     # a library import hides this package's class of the same name
     "a/Lib.java": "package a;\nimport org.lib.Report;\n"
                   "public class Lib { Object x(Report r) { r.render(); return new Report(\"r\"); } }\n",
@@ -63,9 +76,33 @@ def test_a_class_of_another_file_is_a_call_to_its_constructor(tmp_path: Path) ->
 def test_what_adds_no_call(tmp_path: Path) -> None:
     calls = _calls(tmp_path, "a/Builder.java")
     assert calls["anon"] == {}  # an anonymous class: linked by its `extends` / `implements`
-    assert calls["self"] == {}  # this file's own class
     assert calls["lib"] == {}  # a library class
     assert calls["qualified"] == {}  # a qualified name
+
+
+def test_a_class_of_this_file_is_a_call_to_its_constructor(tmp_path: Path) -> None:
+    shop = f"{_A}/Shop.java"
+    calls = _calls(tmp_path, "a/Builder.java")
+    assert calls["self"] == {"Builder": f"{_A}/Builder.java"}
+    calls = _calls(tmp_path, "a/Shop.java")
+    assert calls["create"] == {"Shop": shop}  # a factory reaches the private constructor
+    assert calls["back"] == {"Shop": shop}  # an enclosing class
+    assert calls["shop"] == {"Shop": shop}  # a top-level type of this file
+
+
+def test_a_type_of_this_file_in_scope_hides_one_of_the_package(tmp_path: Path) -> None:
+    # `Money` in Shop and in its inner class Cart is the nested Shop.Money, not a/Money.java
+    calls = _calls(tmp_path, "a/Shop.java")
+    assert calls["price"] == {"Money": f"{_A}/Shop.java"}
+    assert calls["total"] == {"Money": f"{_A}/Shop.java"}
+
+
+def test_a_type_of_this_file_out_of_scope_adds_no_call(tmp_path: Path) -> None:
+    calls = _calls(tmp_path, "a/Shop.java")
+    # Till cannot see Shop.Money; which Money it means is left unsaid rather than guessed
+    assert calls["cash"] == {}
+    # a local class: only after its declaration, in its own block
+    assert calls["later"] == {"Local": f"{_A}/Shop.java"}
 
 
 def test_an_imported_class_resolves(tmp_path: Path) -> None:

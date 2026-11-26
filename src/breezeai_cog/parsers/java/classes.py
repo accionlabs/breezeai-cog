@@ -20,6 +20,7 @@ from .functions import (
     extract_annotations,
     extract_params,
     modifiers_node,
+    class_calls,
 )
 from .statements import extract_statements
 
@@ -95,6 +96,7 @@ def build_class(
     for comp in components.named_children if components is not None else ():
         fields.update(declarations(comp, source))  # `record R(Repo repo)` — a field `repo`
     fields.update(class_fields(body, source))
+
     if body is not None:
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids,
@@ -105,7 +107,7 @@ def build_class(
                 fn, fn_statements = build_method(
                     member, source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, fields=fields, own_anonymous=True,
+                    resolve=resolve, fields=fields, own_anonymous=True, kind_of=kind_of,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
@@ -147,6 +149,10 @@ def build_class(
             )
         )
 
+    # The code no method holds — field initializers, initializer blocks, enum constants'
+    # arguments — runs when the class loads or an object is built: its calls are the class's.
+    calls = class_calls(body, source, resolve, name, fields, own_path=path, kind_of=kind_of)
+
     cls = Class(
         id=cid,
         parentId=parent_id,
@@ -160,6 +166,7 @@ def build_class(
         implements=implements,
         constructorParams=ctor_params,
         decorators=extract_annotations(modifiers, source),
+        calls=calls or None,
         startLine=start,
         endLine=end,
     )

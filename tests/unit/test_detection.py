@@ -965,7 +965,7 @@ def test_client_name_must_end_the_receiver_name() -> None:
 
     # A name ending in a client word is a client …
     assert match_api("dataApiClient.get", "get", language="java") == "GET"
-    assert match_api("new P3APIClient(uri).get", "get", language="groovy") == "GET"
+    assert match_api("new OrderApiClient(uri).get", "get", language="groovy") == "GET"
     assert match_api("DefaultHttpClient.PostAsync", "PostAsync", language="csharp") == "POST"
     assert match_api("this._http.post", "post", language="typescript") == "POST"
     assert match_api("this.http\n      .post", "post", language="typescript") == "POST"

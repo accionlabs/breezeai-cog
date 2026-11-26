@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from tree_sitter import Node
 
@@ -33,7 +36,7 @@ def defined_names(root: Node, source: bytes) -> set[str]:
                 for d in c.named_children:
                     if d.type == "variable_declarator":
                         val = d.child_by_field_name("value")
-                        if val is not None and val.type in ("arrow_function", "function_expression", "function"):
+                        if val is not None and val.type in ("arrow_function", "function_expression", "function", "generator_function"):
                             nm = d.child_by_field_name("name")
                             if nm is not None:
                                 names.add(node_text(nm, source))
@@ -158,7 +161,22 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-NESTED_FN_VALUE_TYPES = ("arrow_function", "function_expression", "function")
+NESTED_FN_VALUE_TYPES = ("arrow_function", "function_expression", "function", "generator_function")
+
+#: Spans of the nodes :func:`build_function` turned into a Function during one file's parse
+#: (:func:`track_built`): the file-level pass stops there, since their code is theirs.
+_BUILT: ContextVar[set[tuple[int, int]] | None] = ContextVar("ts_built_functions", default=None)
+
+
+@contextmanager
+def track_built() -> Iterator[set[tuple[int, int]]]:
+    """Collect the span of every node built as a Function while the block runs."""
+    spans: set[tuple[int, int]] = set()
+    token = _BUILT.set(spans)
+    try:
+        yield spans
+    finally:
+        _BUILT.reset(token)
 
 
 def _span(node: Node) -> tuple[int, int]:
@@ -242,14 +260,56 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
     return out
 
 
+#: Function values that may carry a name of their own (``function factorial() {}``).
+_NAMED_VALUES = ("function_expression", "function", "generator_function")
+#: Nodes that bind a name in a function body (a local hiding the function's own name).
+_BINDINGS = ("variable_declarator", "function_declaration", "generator_function_declaration",
+             "class_declaration", "required_parameter", "optional_parameter")
+
+
+def own_name(node: Node, source: bytes) -> str | None:
+    """The name a function expression gives itself (``function factorial() {}`` →
+    ``factorial``), else None. Only the function's own body can call it by that name."""
+    if node.type not in _NAMED_VALUES:
+        return None
+    nm = node.child_by_field_name("name")
+    return node_text(nm, source) if nm is not None else None
+
+
+def _binds(node: Node, name: str, source: bytes) -> bool:
+    """Whether a parameter or a declaration anywhere in ``node`` binds ``name`` (it then hides
+    the function's own name there)."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type in _BINDINGS:
+            target = n.child_by_field_name("name") or n.child_by_field_name("pattern")
+            if target is not None and target.type == "identifier" and node_text(target, source) == name:
+                return True
+        elif n.type == "identifier" and n.parent is not None and n.parent.type in (
+                "formal_parameters", "catch_clause") or (
+                n.type == "identifier" and n.parent is not None
+                and n.parent.type == "arrow_function"
+                and n.parent.child_by_field_name("parameter") == n):
+            if node_text(n, source) == name:
+                return True
+        stack.extend(n.named_children)
+    return False
+
+
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     owner: str | None = None, barriers: frozenset[tuple[int, int]] = frozenset(),
+    self_call: tuple[str, str, str] | None = None,
+    opaque: frozenset[str] = frozenset(), skip: frozenset[str] = frozenset(),
 ) -> list[Call]:
+    """``self_call``: (own name, stored name, this file) — a bare call to the function's own name
+    is a call to the function itself, recorded under the name callers use. ``opaque``: node
+    types not descended (a class, a decorator); ``skip``: bare call names not recorded."""
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def record(call: Node) -> None:
         fn = call.child_by_field_name("function")
@@ -259,16 +319,27 @@ def _calls(
             callee = node_text(fn, source).replace("?.", ".")
             name = callee.rsplit(".", 1)[-1]
             receiver = callee.rsplit(".", 1)[0] if "." in callee else None
-            if name.isidentifier() and name not in seen:
-                seen.add(name)
-                calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+            if self_call is not None and receiver is None and name == self_call[0]:
+                # `factorial(n - 1)` inside `const fact = function factorial`: `fact` itself,
+                # never a same-name function elsewhere in the file
+                if (self_call[1], self_call[2]) not in seen:
+                    seen.add((self_call[1], self_call[2]))
+                    calls.append(Call(name=self_call[1], path=self_call[2]))
+                return
+            if receiver is None and name in skip:
+                return
+            if name.isidentifier():
+                path = resolve(name, receiver, owner)
+                if (name, path) not in seen:  # one entry per name and target file
+                    seen.add((name, path))
+                    calls.append(Call(name=name, path=path))
 
     def visit(node: Node) -> None:
         # Descend into inline callbacks/lambdas — their calls belong to the nearest
         # named enclosing function — but stop at ``barriers``: the spans of nested
         # named functions extracted as their own scope. See build_function.
         for child in node.named_children:
-            if _span(child) in barriers:
+            if _span(child) in barriers or child.type in opaque:
                 continue
             if child.type == "call_expression":
                 record(child)
@@ -297,6 +368,9 @@ def build_function(
     typed_db_ids: frozenset[str] | None = None,
 ) -> tuple[list[Function], list[Statement]]:
     start, end = line_span(node)
+    built = _BUILT.get()
+    if built is not None:
+        built.add(_span(node))
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     body = node.child_by_field_name("body")
     # Nested named functions (in-body `function`/`const f = () =>`) are extracted as
@@ -304,6 +378,12 @@ def build_function(
     # this function does not also fold their calls/statements.
     nested = collect_nested_functions(body, source)
     barriers = frozenset(_span(v) for v, _, _ in nested)
+    # `const fact = function factorial() {…}`: `factorial` is the function's own name, the one
+    # stack traces show (alias); inside its body a bare `factorial()` is the function itself,
+    # unless a parameter or a local of that name hides it.
+    own = own_name(node, source)
+    alias = own if own and name and own != name.rsplit(".", 1)[-1] else None
+    self_call = (own, name, path) if alias and not _binds(node, alias, source) else None
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -317,9 +397,10 @@ def build_function(
         params=extract_params(node.child_by_field_name("parameters"), source),
         decorators=decorators,
         returnType=_type_text(node.child_by_field_name("return_type"), source),
+        alias=alias,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name, barriers),
+        calls=_calls(body, source, resolve, class_name, barriers, self_call),
     )
     statements: list[Statement] = []
     if (body is not None and node.type == "arrow_function" and body.type != "statement_block"

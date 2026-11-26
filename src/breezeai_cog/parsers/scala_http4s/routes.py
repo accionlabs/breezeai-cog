@@ -163,7 +163,7 @@ def detect_http4s_routes(
                                         endpoint=endpoint,
                                         routeKind="route",
                                         isRegex=False,
-                                    ), parent=parent_id, node_type="synthetic",
+                                    ), parent=parent_id,
                                         text=node_text(clause, source))
                                 routes.append(route)
                                 if route_binding is not None:

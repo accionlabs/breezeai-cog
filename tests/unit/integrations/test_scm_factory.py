@@ -112,7 +112,7 @@ def test_for_repo_threads_everything_through() -> None:
 # ── Bitbucket Data Center ──────────────────────────────────────────────────
 
 _DC_REF = RepoRef(
-    "bitbucket_server", "p3", "kit", host="stash.payroll.co.jp", context_path="/stash"
+    "bitbucket_server", "proj", "kit", host="stash.example.com", context_path="/stash"
 )
 
 
@@ -137,7 +137,7 @@ def test_bitbucket_server_has_no_deployment_wide_token_fallback() -> None:
 def test_bitbucket_server_api_base_is_derived_from_the_context_path() -> None:
     settings = Settings(_env_file=None)
     assert resolve_api_base_url(_DC_REF, settings) == (
-        "https://stash.payroll.co.jp/stash/rest/api/1.0"
+        "https://stash.example.com/stash/rest/api/1.0"
     )
 
 
@@ -145,11 +145,11 @@ def test_bitbucket_server_api_base_mapping_wins_over_the_derived_one() -> None:
     settings = Settings(
         _env_file=None,
         scm_instance_base_url_mapping={
-            "stash.payroll.co.jp": "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+            "stash.example.com": "https://stash.example.com/proxied/rest/api/1.0"
         },
     )
     assert resolve_api_base_url(_DC_REF, settings) == (
-        "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+        "https://stash.example.com/proxied/rest/api/1.0"
     )
 
 
@@ -160,7 +160,7 @@ def test_a_loopback_host_is_refused() -> None:
     from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError
 
     settings = Settings(_env_file=None)
-    ref = RepoRef("bitbucket_server", "P3", "kit", host="localhost", context_path="")
+    ref = RepoRef("bitbucket_server", "PROJ", "kit", host="localhost", context_path="")
     with pytest.raises(SCMHostNotAllowedError) as info:
         SCMClientFactory.for_repo(ref, settings, request_token="dXNlcjpwYXNz")
     assert info.value.status_code == 400
@@ -184,7 +184,7 @@ def test_private_hosts_can_be_blocked_explicitly() -> None:
 def test_an_allow_list_bounds_the_reachable_hosts() -> None:
     from breezeai_cog.integrations.scm.netguard import SCMHostNotAllowedError, ensure_host_allowed
 
-    settings = Settings(_env_file=None, scm_allowed_api_hosts=["stash.payroll.co.jp"])
-    ensure_host_allowed("stash.payroll.co.jp", settings)
+    settings = Settings(_env_file=None, scm_allowed_api_hosts=["stash.example.com"])
+    ensure_host_allowed("stash.example.com", settings)
     with pytest.raises(SCMHostNotAllowedError):
         ensure_host_allowed("evil.example.com", settings)

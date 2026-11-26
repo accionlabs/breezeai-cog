@@ -114,7 +114,9 @@ def test_soap_operations() -> None:
     assert set(routes) == {"SaveOrder", "GetOrder"}  # NotAnOperation excluded
     save = routes["SaveOrder"]
     assert save.framework == "wcf"
-    assert save.nodeType == "synthetic"  # normalized synthetic marker (was "attribute")
+    # at the [OperationContract] attribute it was read from, not the whole method
+    assert (save.nodeType, save.startLine, save.endLine, save.text) == (
+        "attribute", 6, 6, "OperationContract")
     assert save.method == "RPC"
     assert save.routeKind == "rpc"
     assert save.endpoint == "OrderService/SaveOrder"  # [ServiceContract(Name=…)]
@@ -257,6 +259,7 @@ def test_asmx_webmethod() -> None:
     assert r.method == "RPC" and r.routeKind == "rpc"
     assert r.endpoint is None  # no .asmx host file in this test: the address is not known
     assert r.responseDTO == "Report"  # Task<Report> unwrapped
+    assert (r.nodeType, r.text) == ("attribute", "WebMethod")  # at its [WebMethod]
     assert rec.framework == "asmx"
 
 

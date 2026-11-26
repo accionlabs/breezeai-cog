@@ -102,10 +102,10 @@ def _calls_in_block(body: Node | None, source: bytes, resolve: CallResolver = no
                 return
             name = parts[-1]
             receiver = parts[0] if len(parts) > 1 else None
-            key = (name, receiver)
-            if key not in seen:
-                seen.add(key)
-                calls.append(Call(name=name, path=resolve(name, receiver)))
+            path = resolve(name, receiver)
+            if (name, path) not in seen:  # one entry per name and target file
+                seen.add((name, path))
+                calls.append(Call(name=name, path=path))
         for child in node.named_children:
             visit(child)
 

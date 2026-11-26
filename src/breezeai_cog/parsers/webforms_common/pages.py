@@ -26,6 +26,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import Class, FileRecord, Function
 from ..dotnet_common import simple_attr_name
+from ..dotnet_nodes import attribute_at, method_nodes
 from ..emits import Emit
 
 #: code-behind suffix → (routeKind, nodeType). nodeType is the shared ``synthetic`` sentinel
@@ -107,17 +108,22 @@ def _page_methods(
     record: FileRecord, root: Node, cls: Class, endpoints: list[str],
 ) -> list[Emit]:
     """A static ``[WebMethod]`` on a page class is an ASP.NET AJAX *page method*: its own entry
-    point, called with ``POST <page URL>/<Method>`` (JSON). One binding per page URL; the
-    handler is the method itself (handlerLine its declaration, attributes included)."""
+    point, called with ``POST <page URL>/<Method>`` (JSON). One binding per page URL, at its
+    ``[WebMethod]`` attribute; the handler is the method itself (handlerLine its declaration,
+    attributes included)."""
     out: list[Emit] = []
+    nodes = method_nodes(root)
     methods: list[Function] = [
         fn for fn in record.functions
         if fn.parentId == cls.id and fn.isStatic
         and any(simple_attr_name(d.name) in _PAGE_METHOD_ATTRS for d in fn.decorators)
     ]
     for fn in methods:
+        i = next(i for i, d in enumerate(fn.decorators)
+                 if simple_attr_name(d.name) in _PAGE_METHOD_ATTRS)
+        at = attribute_at(nodes.get(fn.startLine), fn, i)
         for endpoint in endpoints:
-            out.append(Emit(root, dict(
+            fields = dict(
                 semanticType="route",
                 method="POST",
                 endpoint=f"{endpoint.rstrip('/')}/{fn.name}" if endpoint else None,
@@ -125,6 +131,11 @@ def _page_methods(
                 routeKind="route",
                 handler=fn.name,
                 handlerLine=fn.startLine,
-            ), parent=fn.id, node_type="synthetic", text=f"[WebMethod] {cls.name}.{fn.name}",
-                line=fn.startLine, col=0, end_line=fn.endLine))
+            )
+            if at is None:  # the method is not in this tree: the root stands in
+                out.append(Emit(root, fields, parent=fn.id, node_type="synthetic",
+                                text=f"[WebMethod] {cls.name}.{fn.name}",
+                                line=fn.startLine, col=0, end_line=fn.endLine))
+            else:
+                out.append(Emit(at, fields, parent=fn.id))
     return out

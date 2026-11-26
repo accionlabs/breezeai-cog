@@ -809,6 +809,33 @@ def test_wrapped_config_object_form(tmp_path) -> None:
     assert ("POST", "/login") in calls
 
 
+def test_wrapped_jquery_settings_type_form(tmp_path) -> None:
+    # An app's own wrapper given jQuery `$.ajax` settings names the method with `type`.
+    calls = _api_calls(
+        tmp_path,
+        "function save(body) {\n"
+        "  sendAjax({ type: 'POST', url: '/orders/save', data: body, success: done });\n"
+        "}\n"
+        "function load() {\n"
+        "  sendAjax({ type: \"get\", url: base + '/orders', dataType: 'json' });\n"
+        "}\n",
+    )
+    assert calls == {("POST", "/orders/save"), ("GET", "{base}/orders")}
+
+
+def test_type_key_alone_is_not_a_request(tmp_path) -> None:
+    # `type` is a common key: without another jQuery setting, with a value that is not an HTTP
+    # verb literal, or on a method call, an object with `type` and `url` is not request settings.
+    calls = _api_calls(
+        tmp_path,
+        "addItem({ type: 'post', url: permalink });\n"
+        "show({ type: 'image', url: src, cache: false });\n"
+        "send({ type: kind, url: '/x', data: d });\n"
+        "feed.add({ type: 'post', url: '/x', data: d });\n",
+    )
+    assert calls == set()
+
+
 def test_direct_axios_still_detected(tmp_path) -> None:
     # No regression: hinted callees keep matching.
     assert ("GET", "/direct") in _api_calls(tmp_path, "export const raw = () => axios.get('/direct');\n")

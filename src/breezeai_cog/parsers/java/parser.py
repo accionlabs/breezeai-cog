@@ -16,6 +16,7 @@ from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
+from ..index_common import inherited_member_type
 from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .anonymous import type_kinds
 from .classes import build_class
@@ -96,9 +97,10 @@ class JavaParser(BaseParser):
             root, source, path, ctx.repo_root, fqcn
         )
         set_datastore_vendor(external)
+        heritage = file_heritage(view, bindings, {}) if view is not None else None
         resolve = make_resolver(  # calls[].path (Tiers 1+2, receiver type, inherited methods)
             bindings, defined_names(root, source), path, type_map(root, source),
-            heritage=file_heritage(view, bindings, {}) if view is not None else None,
+            heritage=heritage,
             declared_only=True,
             owner_defs=class_method_names(root, source),
             unknown_methods=view.unknown_methods if view is not None else None,
@@ -110,7 +112,11 @@ class JavaParser(BaseParser):
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
-        kind_of = type_kinds(root, source, idx.type_kinds if isinstance(idx, JavaIndex) else None)
+        kind_of = type_kinds(
+            root, source, idx.type_kinds if isinstance(idx, JavaIndex) else None,
+            # `new Handler() { … }` in a subclass of the class declaring `Handler`
+            inherited=lambda name, owner: inherited_member_type(name, owner, heritage),
+        )
 
         for child in root.named_children:
             if child.type in _CLASS_TYPES:

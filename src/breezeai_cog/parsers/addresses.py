@@ -35,7 +35,9 @@ markers, so two values never share a name only because their last parts match:
   ``System.getenv("X")``);
 - a name or member path, written whole less a leading ``this.`` / ``self.``
   (``config.contextRoot`` → ``${config.contextRoot}``, ``user.id`` → ``{user.id}``);
-- another lookup by a literal key: the key; another call: the called function;
+- another lookup by a literal key: the key; a conversion with no argument of a name or member
+  path (``uri.toString()``, ``json.getAsString()``): that path, as the value it converts;
+  another call: the called function;
 - anything else: ``${value}`` (``{param}`` for a request value).
 """
 
@@ -62,6 +64,9 @@ _DOTTED = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 _SELF = ("this.", "self.")
 _KEYED = re.compile(r"""\(\s*["'`]([\w.\-]+)["'`]\s*[,)]""")
 _CALLED = re.compile(r"([A-Za-z_$][\w$]*)\s*\(")
+#: A conversion of a value to its text, with no argument: names nothing but the value converted.
+_CONVERSION = re.compile(
+    r"([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\.\s*(?:toString|ToString|getAsString)\s*\(\s*\)")
 #: A name that already carries its source kind (``config:a.b``, ``env:X``).
 _KINDED = re.compile(r"(?:config|env):[^{}\s]+")
 _STR = r"""["'`]([^"'`]+)["'`]"""
@@ -133,7 +138,9 @@ def runtime_name(expr_text: str) -> str:
     environment variable read by literal keys carries its kind (:func:`source_kind`:
     ``config:api-verticle.address``, ``env:BASE_PATH``); a name or member path is
     written whole (:func:`value_path`; ``config.contextRoot`` → ``config.contextRoot``,
-    ``this.prefix`` → ``prefix``); a lookup by a literal key gives the key
+    ``this.prefix`` → ``prefix``); a conversion with no argument of a name or member path is
+    named as that path (``uri.toString()`` → ``uri``, ``this.sb.toString()`` → ``sb``); a lookup
+    by a literal key gives the key
     (``config().getString("pathPrefix")``, ``os.getenv("BASE")`` → ``pathPrefix``, ``BASE``);
     another call gives the called name (``prefixFromEnv()`` → ``prefixFromEnv``); anything
     else is ``value``."""
@@ -146,6 +153,9 @@ def runtime_name(expr_text: str) -> str:
         return path
     if _SIMPLE.fullmatch(text):  # a JavaScript name with a `$` in it
         return _drop_self("".join(text.split()))
+    conversion = _CONVERSION.fullmatch(text)
+    if conversion is not None:
+        return _drop_self("".join(conversion.group(1).split()))
     keyed: list[str] = _KEYED.findall(text)
     if keyed:
         return keyed[-1]
