@@ -12,6 +12,7 @@ from ..statements_common import (
     render_concat,
     resolve_endpoint,
     url_first,
+    url_placeholder,
 )
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -37,12 +38,28 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
+#: A GString's interpolated parts: ``${expr}`` and ``$name``.
+_INTERPOLATIONS = frozenset({"gstring_brace_interpolation", "gstring_dollar_interpolation"})
+
+
 def _render_url(node: Node, source: bytes) -> str | None:
-    """Best-effort URL/path from a string literal or ``+`` concatenation. A GString
-    interpolation part becomes ``{name}`` via the shared placeholder logic."""
+    """Best-effort URL/path from a string literal or ``+`` concatenation. Each GString
+    interpolation becomes ``{name}`` via the shared placeholder logic, in its place among the
+    literal fragments (``"/${table}/x"`` → ``/{table}/x``)."""
     if node.type == "string_literal":
-        frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
-        return node_text(frag, source) if frag is not None else node_text(node, source).strip("\"'")
+        parts = [c for c in node.named_children
+                 if c.type == "string_fragment" or c.type in _INTERPOLATIONS]
+        if not parts:
+            return node_text(node, source).strip("\"'")
+        out: list[str] = []
+        for c in parts:
+            if c.type == "string_fragment":
+                out.append(node_text(c, source))
+            else:
+                value = c.child_by_field_name("value")
+                out.append(url_placeholder(node_text(value, source)) if value is not None
+                           else "{param}")
+        return "".join(out)
     if node.type == "binary_expression":  # "/users/" + id
         return render_concat(node, source, _render_url)
     return None

@@ -351,3 +351,127 @@ def test_url_converted_to_text_is_named_after_the_value(api_calls) -> None:
         # no named value: the called function
         ("Caller.java", 10, "POST", "${apiPath}${toString}"),
     ]
+
+
+SWITCH_CLIENT = """package com.acme;
+import org.apache.http.client.methods.*;
+public class RestClient {
+  public HttpRequestBase request(String method, String uri) {
+    HttpRequestBase req;
+    switch (method) {
+      case HttpGet.METHOD_NAME:
+        req = new HttpGet(uri);
+        break;
+      case "POST":
+      case "post":
+        req = new HttpPost(uri);
+        break;
+      case HttpPut.METHOD_NAME:
+        req = new HttpPut(uri);
+        break;
+      default:
+        throw new IllegalArgumentException(method);
+    }
+    return req;
+  }
+}
+"""
+BASE_CLIENT = """package com.acme;
+public abstract class BaseClient {
+  protected static final String GET = "GET";
+  protected static final String PUT = "PUT";
+  protected Object get(String uri) { return execute(GET, uri, null); }
+  protected Object put(String uri, Object body) { return execute(PUT, uri, body); }
+  protected Object execute(String method, String uri, Object body) {
+    RestClient client = new RestClient();
+    return client.request(method, uri);
+  }
+}
+"""
+
+
+def test_verb_picked_by_a_switch_on_a_parameter(api_calls) -> None:
+    # `request(method, uri)` picks its request by a switch on `method`: a helper whose verb is
+    # the caller's. `get` / `put` pass a constant verb; `OrderClient` builds its URL itself.
+    got = api_calls({
+        P + "RestClient.java": SWITCH_CLIENT, P + "BaseClient.java": BASE_CLIENT,
+        P + "OrderClient.java": """package com.acme;
+public class OrderClient extends BaseClient {
+  public Object find(String id) {
+    String uri = buildUri(id);
+    return super.get(uri);
+  }
+  private String buildUri(String id) { return "/orders/" + id; }
+  public Object save(Object o) { return put("/orders", o); }
+}
+""",
+    })
+    # the URL built by another method keeps the local's name
+    assert got == [("OrderClient.java", 5, "GET", "${uri}"),
+                   ("OrderClient.java", 8, "PUT", "/orders")]
+
+
+def test_switch_verb_unsure_keeps_the_records(api_calls) -> None:
+    # A label naming another verb, a fall-through from a case with statements, or a switch on
+    # something other than a parameter: the verb is not the caller's. Each method is then a
+    # helper with its request's own fixed verb, whatever the caller passes.
+    got = api_calls({P + "RestClient.java": """package com.acme;
+import org.apache.http.client.methods.*;
+public class RestClient {
+  public HttpRequestBase wrongLabel(String method, String uri) {
+    switch (method) { case "POST": return new HttpGet(uri); default: return null; }
+  }
+  public HttpRequestBase fallsThrough(String method, String uri) {
+    HttpRequestBase r = null;
+    switch (method) {
+      case "GET": log(uri);
+      case "POST": r = new HttpPost(uri); break;
+    }
+    return r;
+  }
+  public HttpRequestBase onAField(String uri) {
+    switch (this.mode) { case "GET": return new HttpGet(uri); default: return null; }
+  }
+  void log(String s) {}
+  String mode;
+}
+""", P + "Caller.java": """package com.acme;
+public class Caller {
+  void run(RestClient c) { c.wrongLabel("POST", "/a"); c.fallsThrough("POST", "/b"); }
+}
+"""})
+    # `onAField` has no caller: no record
+    assert got == [("Caller.java", 3, "GET", "/a"), ("Caller.java", 3, "POST", "/b")]
+
+
+def test_relay_through_a_typed_local(api_calls) -> None:
+    # `var c = new RestClient()` is followed like a typed local; a name declared twice in the
+    # method (two types possible) is not.
+    got = api_calls({P + "RestClient.java": SWITCH_CLIENT, P + "Client.java": """package com.acme;
+public class Client {
+  public Object byVar(String uri) { var c = new RestClient(); return c.request("GET", uri); }
+  public Object twice(String uri, boolean b) {
+    if (b) { RestClient c = new RestClient(); return c.request("GET", uri); }
+    else { Other c = new Other(); return c.request("GET", uri); }
+  }
+  public void run() { byVar("/a"); twice("/b", true); }
+}
+"""})
+    assert got == [("Client.java", 8, "GET", "/a")]
+
+
+def test_super_call_beside_an_unresolved_call_of_the_same_name(api_calls) -> None:
+    # `data.get(0)` resolves nowhere, but `super.get(…)` can only be the superclass's method
+    got = api_calls({
+        P + "RestClient.java": SWITCH_CLIENT, P + "BaseClient.java": BASE_CLIENT,
+        P + "EnvClient.java": """package com.acme;
+import java.util.List;
+public class EnvClient extends BaseClient {
+  public Object module(List<Object> data) {
+    Object r = super.get("/module");
+    return data.get(0);
+  }
+}
+""",
+    })
+    assert got == [("EnvClient.java", 5, "GET", "/module")]

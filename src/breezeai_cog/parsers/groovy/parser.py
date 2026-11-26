@@ -24,6 +24,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from ..additive import run_additive
 from ..callresolve import make_resolver
 from ..index_common import ClassHeritage
 from ..treesitter import parse_source
@@ -162,7 +163,7 @@ class GroovyParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -174,3 +175,6 @@ class GroovyParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors (parsers/additive.py) — layered on top of the base extraction.
+        run_additive("groovy", root, ctx, record, is_fixture=self.is_fixture_file(path))
+        return record

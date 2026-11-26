@@ -162,6 +162,82 @@ def _param_refs(node: Node, params: list[str], reassigned: Mapping[str, Any],
     return out
 
 
+#: Statements that end a ``case`` group: control never falls through into the next group.
+_CASE_ENDS = frozenset({"break_statement", "return_statement", "throw_statement",
+                        "continue_statement", "yield_statement"})
+
+
+def _label_verb(label: Node, source: bytes) -> str | None:
+    """The verb a ``case`` label names: a string literal (``case "GET":``) or an Apache request
+    class's ``METHOD_NAME`` (``case HttpGet.METHOD_NAME:`` → ``GET``); None for anything else,
+    ``default`` included."""
+    expr = next(iter(label.named_children), None)
+    if expr is None:
+        return None
+    if expr.type == "string_literal":
+        frag = next((c for c in expr.named_children if c.type == "string_fragment"), None)
+        value = node_text(frag, source).upper() if frag is not None else ""
+        return value if value in _VERBS else None
+    if expr.type == "field_access":
+        obj, field = expr.child_by_field_name("object"), expr.child_by_field_name("field")
+        if obj is not None and field is not None and obj.type == "identifier" \
+                and node_text(field, source) == "METHOD_NAME":
+            value = node_text(obj, source).removeprefix("Http").upper()
+            return value if node_text(obj, source).startswith("Http") and value in _VERBS \
+                else None
+    return None
+
+
+def _switch_verb(node: Node, verb: str, params: list[str], reassigned: Mapping[str, Any],
+                 source: bytes) -> int:
+    """The index of the parameter that picks ``node``'s verb through a ``switch``, or -1.
+
+    A request with a fixed verb takes it from a parameter when it sits in a ``case`` of a
+    ``switch`` on that parameter (not rewritten in the method) and every label reaching it names
+    that verb::
+
+        switch (method) {
+          case HttpGet.METHOD_NAME: req = new HttpGet(uri); break;   // GET only when method is "GET"
+          case "POST": case "post":  req = new HttpPost(uri); break;
+        }
+
+    Labels reaching it are its own and those of the empty groups just before it (``case A: case
+    B: …``); a group before it with statements that does not end in ``break`` / ``return`` /
+    ``throw`` falls through into it, so its verb is not certain."""
+    group = node.parent
+    while group is not None and group.type not in ("switch_block_statement_group",
+                                                   "switch_rule"):
+        if group.type in ("method_declaration", "constructor_declaration", "lambda_expression",
+                          "class_body"):
+            return -1
+        group = group.parent
+    if group is None:
+        return -1
+    block = group.parent
+    switch = block.parent if block is not None else None
+    cond = switch.child_by_field_name("condition") if switch is not None else None
+    inner = next(iter(cond.named_children), None) if cond is not None else None
+    if inner is None or inner.type != "identifier":
+        return -1
+    name = node_text(inner, source)
+    if name not in params or name in reassigned:
+        return -1
+    labels = [c for c in group.named_children if c.type == "switch_label"]
+    if group.type == "switch_block_statement_group":
+        prev = group.prev_named_sibling
+        while prev is not None and prev.type == "switch_block_statement_group":
+            body = [c for c in prev.named_children if c.type != "switch_label"]
+            if body:
+                if body[-1].type not in _CASE_ENDS:
+                    return -1  # falls through into this group with statements of its own
+                break
+            labels += [c for c in prev.named_children if c.type == "switch_label"]
+            prev = prev.prev_named_sibling
+    if not labels or any(_label_verb(lb, source) != verb.upper() for lb in labels):
+        return -1
+    return params.index(name)
+
+
 def _requests(root: Node, calls: list[Node], source: bytes
               ) -> list[tuple[Node, str | None, Node | None, Node | None, str]]:
     """This file's HTTP client requests: (node, verb, verb argument, URI argument, framework),
@@ -224,9 +300,14 @@ def _scan_file(root: Node, source: bytes, rel: str
                         and name_of(verb_arg, source) in params \
                         and name_of(verb_arg, source) not in d.assigned:
                     vidx = params.index(name_of(verb_arg, source))
+                elif verb is not None:
+                    vidx = _switch_verb(node, verb, params[:fixed], d.assigned, source)
+                    if vidx >= 0:
+                        verb = None  # the parameter picks it: each caller's value decides
                 helpers.append((key, (params.index(refs[0]), template, slot, verb, vidx,
                                       framework or None)))
                 spans.append((key, (node.start_byte, node.end_byte)))
+            table: _Locals | None = None  # the method's locals: one walk, on first use
             for call in d.calls:
                 args = arguments(call)
                 mapping = tuple((i, params.index(name_of(a, source))) for i, a in enumerate(args)
@@ -234,13 +315,24 @@ def _scan_file(root: Node, source: bytes, rel: str
                                 and name_of(a, source) not in d.assigned)
                 if not mapping:
                     continue
+                if table is None:
+                    table = _locals(d.node, source)
                 callee = _callee(call, cls.name, cls.superclass, names, source) \
-                    or _field_callee(call, fields, d.node, params, names, source)
+                    or _field_callee(call, fields, table, params, names, source) \
+                    or _local_callee(call, table, params, names, source)
                 if callee is None:
                     continue
-                constants = tuple((i, node_text(a, source)) for i, a in enumerate(args)
-                                  if a.type in ("string_literal", "field_access", "identifier")
-                                  and not any(i == j for j, _ in mapping))
+                # a bare constant is the class's own (``execute(GET, uri)`` → ``Client.GET``,
+                # as the constant index keys it); a parameter or local of that name is not one
+                simple = cls.name.rsplit(".", 1)[-1]
+                constants = tuple(
+                    (i, f"{simple}.{node_text(a, source)}" if a.type == "identifier"
+                     else node_text(a, source))
+                    for i, a in enumerate(args)
+                    if a.type in ("string_literal", "field_access", "identifier")
+                    and not any(i == j for j, _ in mapping)
+                    and not (a.type == "identifier" and (node_text(a, source) in params
+                             or node_text(a, source) in table.declared)))
                 relays.append((key, callee[0], callee[1], callee[2], mapping, constants))
     decls, anonymous = _types(found_types, source, names)
     return (rel, helpers, relays, classes, decls, anonymous), spans
@@ -267,29 +359,94 @@ _LOCAL_NAMES = frozenset({"variable_declarator", "formal_parameter", "catch_form
                           "enhanced_for_statement", "spread_parameter"})
 
 
-def _declares_local(decl: Node, name: str, source: bytes) -> bool:
-    """Whether a local variable, a lambda / catch / for parameter of ``decl`` is ``name``."""
+class _Locals:
+    """A method's local names, from one walk of its body (§11: never one walk per call).
+
+    ``declared``: every name a local variable, a lambda / catch / for parameter declares.
+    ``typed``: for each name declared by a local variable declaration, the class type each
+    declaration gives it (``RestClient client = …``, or ``var`` with a ``new T(…)``; generics
+    dropped), None where it has none; a lambda / catch / for parameter of the name adds a None."""
+
+    __slots__ = ("declared", "typed")
+
+    def __init__(self) -> None:
+        self.declared: set[str] = set()
+        self.typed: dict[str, list[str | None]] = {}
+
+    def type_of(self, name: str) -> str | None:
+        """The class type of ``name`` when the method declares it exactly once, as a typed local;
+        None otherwise — not declared, declared twice, or as a lambda / catch / for parameter."""
+        found = self.typed.get(name, [])
+        return found[0] if len(found) == 1 else None
+
+
+def _locals(decl: Node, source: bytes) -> _Locals:
+    out = _Locals()
     body = decl.child_by_field_name("body")
     stack = [body] if body is not None else []
     while stack:
         n = stack.pop()
-        if n.type in _LOCAL_NAMES:
-            nm = n.child_by_field_name("name")
-            if nm is not None and node_text(nm, source) == name:
-                return True
-        elif n.type == "lambda_expression":
-            ps = n.child_by_field_name("parameters")
-            if ps is not None and ps.type == "identifier" and node_text(ps, source) == name:
-                return True
-            if ps is not None and ps.type == "inferred_parameters" and any(
-                    node_text(c, source) == name for c in ps.named_children):
-                return True
         stack.extend(n.named_children)
-    return False
+        if n.type == "lambda_expression":
+            ps = n.child_by_field_name("parameters")
+            names = [node_text(ps, source)] if ps is not None and ps.type == "identifier" else \
+                [node_text(c, source) for c in ps.named_children] \
+                if ps is not None and ps.type == "inferred_parameters" else []
+            for name in names:
+                out.declared.add(name)
+                out.typed.setdefault(name, []).append(None)
+            continue
+        if n.type not in _LOCAL_NAMES:
+            continue
+        nm = n.child_by_field_name("name")
+        if nm is None:
+            continue
+        name = node_text(nm, source)
+        out.declared.add(name)
+        if n.type != "variable_declarator":
+            out.typed.setdefault(name, []).append(None)  # a lambda / catch / for parameter
+            continue
+        parent = n.parent
+        if parent is None or parent.type != "local_variable_declaration":
+            continue  # a field of a class declared in the method: not a local of it
+        typ = parent.child_by_field_name("type")
+        written: str | None = None
+        if typ is not None and node_text(typ, source) == "var":  # a type_identifier too
+            value = n.child_by_field_name("value")
+            vtype = value.child_by_field_name("type") \
+                if value is not None and value.type == "object_creation_expression" \
+                and value.child_by_field_name("body") is None else None
+            written = node_text(vtype, source) if vtype is not None else None
+        elif typ is not None and typ.type in ("type_identifier", "scoped_type_identifier",
+                                              "generic_type"):
+            written = node_text(typ, source)
+        out.typed.setdefault(name, []).append(written.split("<", 1)[0].strip()
+                                               if written else None)
+    return out
 
 
-def _field_callee(call: Node, fields: Mapping[str, str | None], decl: Node, params: list[str],
-                  names: _Names, source: bytes) -> tuple[tuple[str, ...], bool, str] | None:
+def _local_callee(call: Node, table: _Locals, params: list[str], names: _Names, source: bytes
+                  ) -> tuple[tuple[str, ...], bool, str] | None:
+    """(owner candidates, exact, ``method/arity``) of a call on a local variable of the method
+    by its declared type (``RestClient client = new RestClient(); client.request(m, uri)``), the
+    same as a field's (:func:`_field_callee`); None otherwise."""
+    obj = call.child_by_field_name("object")
+    if call.type != "method_invocation" or obj is None or obj.type != "identifier":
+        return None
+    name = node_text(obj, source)
+    if name in params:
+        return None
+    written = table.type_of(name)
+    if not written:
+        return None
+    found, exact = names.candidates(written)
+    return found, exact, f"{name_of(call.child_by_field_name('name'), source)}/" \
+                         f"{len(arguments(call))}"
+
+
+def _field_callee(call: Node, fields: Mapping[str, str | None], table: _Locals,
+                  params: list[str], names: _Names, source: bytes
+                  ) -> tuple[tuple[str, ...], bool, str] | None:
     """(owner candidates, exact, ``method/arity``) of a call on a field of the class
     (``this.client.put(…)``, or ``client.put(…)`` when no parameter or local is ``client``),
     by the field's declared type; None otherwise."""
@@ -303,7 +460,7 @@ def _field_callee(call: Node, fields: Mapping[str, str | None], decl: Node, para
         field = name_of(obj.child_by_field_name("field"), source)
     elif obj.type == "identifier":
         field = node_text(obj, source)
-        if field in params or field not in fields or _declares_local(decl, field, source):
+        if field in params or field not in fields or field in table.declared:
             return None
     else:
         return None
@@ -630,10 +787,10 @@ def _detect(dc: DetectContext) -> Detection | None:
         if len(keys) != 1:
             continue  # not a helper call, or two helpers it may be: unsure
         obj = n.child_by_field_name("object") if n.type == "method_invocation" else None
-        if obj is not None and node_text(obj, source) != "this" and any(
+        if obj is not None and node_text(obj, source) not in ("this", "super") and any(
                 c.name == name and not c.path for c in fn.calls):
-            continue  # another `name` here resolves nowhere (`map.get(…)`): only an unqualified
-            # or `this.` call is surely the helper's
+            continue  # another `name` here resolves nowhere (`map.get(…)`): only an unqualified,
+            # `this.` or `super.` call is surely the helper's
         helper = helpers.get(next(iter(keys)))
         if helper is None or helper[0] >= len(args):
             continue
