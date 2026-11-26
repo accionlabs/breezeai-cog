@@ -278,7 +278,10 @@ performs it is defined. It is the outbound twin of the rule above: an entry poin
 binding, which names the handler; an outbound record lives at the call that names the target.
 
 A **helper** is a function of the repository that makes an outbound call on an address taken from
-one of its own parameters, whole or as a part. A **relay** passes its own parameter on to a
+one of its own parameters, whole or as a part (an event-bus address); for an HTTP call, the
+parameter is the URL's last part (`{url}`, `{apiPath}{url}`, `/api{path}`) — a function that only
+takes a base or an id from a parameter (`${apiUrl}/orders`, `/orders/${id}/items`) names its
+endpoint itself, and its call keeps its record. A **relay** passes its own parameter on to a
 helper's address (an overload, a `getClient(url)` that calls `requestClient(GET, url)`); it is a
 helper too.
 
@@ -306,7 +309,7 @@ its record at the call, the parameter marked (`${url}`, [§6](#a-part-read-at-ru
 | Outbound kind | Helpers followed | Where |
 |---|---|---|
 | `eventbus_send` / `eventbus_publish` (and `eventbus_consumer` registrations) | Vert.x (Java) address forwarders | [Vert.x](../entry-point-roles/vertx.md) |
-| `api_call` | Not yet: proposed for Java, TypeScript / JavaScript, Python (BREEZEAI-1654) | — |
+| `api_call` | Java: methods whose Vert.x 2 `HttpClient` or Apache `HttpGet`… request takes its URL from a parameter, and relays to them (varargs included); TypeScript / JavaScript: functions, methods, stored functions and object properties whose HTTP call (the shared classifier's) does, and relays to them in the same file (a `fetch` helper's verb from its init's `method`); Python: functions and methods whose HTTP call (the shared classifier's) does, matched by position or keyword, with a verb parameter's default, and relays to them in the same file. In every language a call is taken as the helper's only when the call resolver links it there, and — when another call of that name in the function resolves nowhere (`map.get(…)`) — only a bare or own-class call | `parsers/java_http_helpers.py`, `parsers/typescript_http_helpers.py`, `parsers/python_http_helpers.py` |
 | `route` (`navigation`), `mcp_call` | Not yet | — |
 
 Inbound registrations made through a helper follow the same rule: each call of the helper is
