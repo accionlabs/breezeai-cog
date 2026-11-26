@@ -40,9 +40,17 @@ _HOLDS_STATEMENTS = frozenset({"module", "block", "decorated_definition", "case_
 #: How many re-exports deep a name is followed.
 _DEPTH = 8
 
+#: A class of a file: (its name, its bases as written, the methods it declares).
+ClassFacts = tuple[str, tuple[str, ...], frozenset[str]]
 #: One file: (its def / class names, ``from`` imports: local name → (file, imported name),
-#: files it star-imports).
-FileFacts = tuple[frozenset[str], dict[str, tuple[str, str]], tuple[str, ...]]
+#: files it star-imports, its classes).
+FileFacts = tuple[frozenset[str], dict[str, tuple[str, str]], tuple[str, ...],
+                  tuple[ClassFacts, ...]]
+#: Bases that add no methods a call could mean: ``class A(object)``, ``Generic[T]``, ``ABC``.
+_TRANSPARENT = frozenset({"object", "ABC", "Generic", "Protocol", "typing.Generic",
+                          "typing.Protocol", "abc.ABC"})
+#: A base outside the repository (a library class, an unresolved name) in a resolution order.
+_LIBRARY = ("", "")
 
 
 def from_imports(root: Node, source: bytes, rel: str, repo_root: Path
@@ -93,12 +101,38 @@ def from_imports(root: Node, source: bytes, rel: str, repo_root: Path
     return named, tuple(stars)
 
 
+def classes_of(root: Node, source: bytes) -> tuple[ClassFacts, ...]:
+    """This file's classes, at any depth: name, bases as written (``Base``, ``mod.Base``;
+    ``Generic[T]`` → ``Generic``; keyword arguments such as ``metaclass=`` left out) and the
+    methods its body declares (decorated ones included)."""
+    out: list[ClassFacts] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        stack.extend(c for c in n.named_children if c.type in _HOLDS_STATEMENTS
+                     or c.type.endswith(("_statement", "_clause", "_definition")))
+        if n.type != "class_definition":
+            continue
+        sup = n.child_by_field_name("superclasses")
+        bases = tuple(node_text(a, source).split("[", 1)[0]
+                      for a in (sup.named_children if sup is not None else [])
+                      if a.type in ("identifier", "attribute", "subscript"))
+        methods: set[str] = set()
+        body = n.child_by_field_name("body")
+        for c in body.named_children if body is not None else []:
+            d = c.child_by_field_name("definition") if c.type == "decorated_definition" else c
+            if d is not None and d.type == "function_definition":
+                methods.add(node_text(d.child_by_field_name("name"), source))
+        out.append((node_text(n.child_by_field_name("name"), source), bases, frozenset(methods)))
+    return tuple(out)
+
+
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None
              ) -> tuple[str, FileFacts] | None:
     if repo_root is None:
         return None
     named, stars = from_imports(root, source, rel, repo_root)
-    return rel, (frozenset(defined_names(root, source)), named, stars)
+    return rel, (frozenset(defined_names(root, source)), named, stars, classes_of(root, source))
 
 
 def _resolve_fact(values: list[tuple[str, FileFacts]], index: Any) -> dict[str, FileFacts]:
@@ -128,7 +162,7 @@ def declaring(files: Mapping[str, FileFacts], file: str, name: str,
     facts = files.get(file)
     if facts is None or depth == 0:
         return None
-    names, named, stars = facts
+    names, named, stars = facts[0], facts[1], facts[2]
     if name in names:
         return file, False
     if name in named:
@@ -164,6 +198,94 @@ def follow_bindings(bindings: Mapping[str, str], root: Node, source: bytes, rel:
     return out, frozenset(modules)
 
 
+def _class(files: Mapping[str, FileFacts], file: str, name: str) -> ClassFacts | None:
+    """The class ``name`` declared once in ``file``."""
+    facts = files.get(file)
+    hits = [c for c in facts[3] if c[0] == name] if facts is not None else []
+    return hits[0] if len(hits) == 1 else None
+
+
+def class_of(files: Mapping[str, FileFacts], file: str, written: str
+             ) -> tuple[str, str] | None:
+    """``(file, class)`` a class name written in ``file`` means: a class of the file, a
+    ``from … import`` followed to the file declaring it, or ``module.Class`` on a module imported
+    that way. None when it is no class of the repository (a library class, unresolved)."""
+    head, _, rest = written.partition(".")
+    if not rest:
+        if _class(files, file, written) is not None:
+            return file, written
+        named = files[file][1] if file in files else {}
+        if written in named:
+            hit = declaring(files, *named[written])
+            orig = named[written][1]
+            if hit is not None and not hit[1] and _class(files, hit[0], orig) is not None:
+                return hit[0], orig
+        return None
+    named = files[file][1] if file in files else {}
+    if head in named and "." not in rest:
+        hit = declaring(files, *named[head])
+        if hit is not None and hit[1] and _class(files, hit[0], rest) is not None:
+            return hit[0], rest
+    return None
+
+
+def _mro(files: Mapping[str, FileFacts], key: tuple[str, str],
+         cache: dict[tuple[str, str], list[tuple[str, str]] | None],
+         active: frozenset[tuple[str, str]] = frozenset()) -> list[tuple[str, str]] | None:
+    """Python's method resolution order (C3) of class ``key``; a base outside the repository is
+    :data:`_LIBRARY` (it may declare any method). None when C3 fails or a cycle."""
+    if key in cache:
+        return cache[key]
+    if key in active:
+        return None
+    cls = _class(files, *key)
+    if cls is None:
+        cache[key] = None
+        return None
+    seqs: list[list[tuple[str, str]]] = []
+    direct: list[tuple[str, str]] = []
+    for written in cls[1]:
+        if written in _TRANSPARENT:
+            continue
+        base = class_of(files, key[0], written)
+        if base is None:
+            seqs.append([_LIBRARY]); direct.append(_LIBRARY)
+            continue
+        sub = _mro(files, base, cache, active | {key})
+        if sub is None:
+            cache[key] = None
+            return None
+        seqs.append(list(sub)); direct.append(base)
+    seqs.append(direct)
+    out = [key]
+    while any(seqs):
+        seqs = [q for q in seqs if q]
+        head = next((q[0] for q in seqs
+                     if q[0] == _LIBRARY or not any(q[0] in r[1:] for r in seqs)), None)
+        if head is None:
+            cache[key] = None  # no consistent order: Python would refuse the class too
+            return None
+        out.append(head)
+        seqs = [q[1:] if q[0] == head else q for q in seqs]
+    cache[key] = out
+    return out
+
+
+def method_file(files: Mapping[str, FileFacts], key: tuple[str, str], name: str, skip: int,
+                cache: dict[tuple[str, str], list[tuple[str, str]] | None]) -> str | None:
+    """The file declaring ``name`` for an instance of class ``key``: the first class of its
+    resolution order (after ``skip`` of them — 1 for ``super()``) that declares it. None when
+    none does, or a library base comes first (it may declare it)."""
+    mro = _mro(files, key, cache)
+    for cls in (mro or [])[skip:]:
+        if cls == _LIBRARY:
+            return None
+        facts = _class(files, *cls)
+        if facts is not None and name in facts[2]:
+            return cls[0]
+    return None
+
+
 def checked_resolver(base: CallResolver, *, path: str, bindings: Mapping[str, str],
                      modules: frozenset[str], index: Any | None) -> CallResolver:
     """``base`` (given the followed ``bindings``), keeping a path only when that file declares
@@ -176,8 +298,23 @@ def checked_resolver(base: CallResolver, *, path: str, bindings: Mapping[str, st
         facts = files.get(file)
         return facts is not None and name in facts[0]
 
+    orders: dict[tuple[str, str], list[tuple[str, str]] | None] = {}
+
     def resolve(name: str, receiver: str | None, owner: str | None = None,
                 *args: Any, **kwargs: Any) -> str | None:
+        # A method call on the class itself, its parent (`super()`) or a repository class:
+        # Python's resolution order over the repository's classes decides (a library base
+        # first → no path).
+        if receiver is not None and owner is not None \
+                and (receiver in ("self", "cls") or receiver.startswith("super(")) \
+                and _class(files, path, owner) is not None:
+            return method_file(files, (path, owner), name,
+                               1 if receiver.startswith("super(") else 0, orders)
+        if receiver is not None and receiver not in modules and receiver[:1].isupper() \
+                and receiver.replace(".", "").isidentifier():
+            key = class_of(files, path, receiver)
+            if key is not None:
+                return method_file(files, key, name, 0, orders)
         found = base(name, receiver, owner, *args, **kwargs)
         if found is None or found == path:
             return found
