@@ -37,6 +37,19 @@ def _settings(key: str | None = KEY) -> Settings:
     return Settings(_env_file=None, credentials_encryption_key=SecretStr(key) if key else None)
 
 
+def test_the_key_is_read_from_the_shared_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CREDENTIALS_ENCRYPTION_KEY", KEY)
+    settings = Settings(_env_file=None)
+    assert settings.credentials_encryption_key is not None
+    assert open_git_token(ENCRYPTED, AAD, settings) == TOKEN
+
+
+def test_the_key_is_also_read_with_the_service_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CREDENTIALS_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("BREEZEAI_COG_CREDENTIALS_ENCRYPTION_KEY", KEY)
+    assert open_git_token(ENCRYPTED, AAD, Settings(_env_file=None)) == TOKEN
+
+
 def test_opens_a_token_the_backend_encrypted() -> None:
     assert open_git_token(ENCRYPTED, AAD, _settings()) == TOKEN
 
