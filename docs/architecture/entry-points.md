@@ -503,6 +503,7 @@ never share a name only because their last parts match:
 | A name or member path (a variable, a field, a constant cog cannot resolve) | written whole, less a leading `this.` / `self.`: `config.contextRoot` → `${config.contextRoot}`, `user.id` → `{user.id}`, `this.userId` → `{userId}` |
 | A local variable assigned once from a configuration or environment lookup | named after that lookup (`String address = config().getString("a"); send(address, …)` → `${config:a}`; `const p = process.env.P; app.get(p, h)` → `${env:P}`). Assigned twice, reassigned, or shadowed by a parameter of that name: named as itself (`${address}`) |
 | Another lookup by a literal key | the key: `map.get("pathPrefix")` → `${pathPrefix}` |
+| A conversion to text with no argument, of a name or member path: `uri.toString()`, `this.sb.toString()`, `json.getAsString()`, `options.Base.ToString()` | that path, as the value it converts: `${uri}`, `${sb}`, `${json}`, `${options.Base}`. With an argument (`n.toString(16)`) or on a call (`new UrlMaker().toString()`): the next row |
 | Another call | `${…}`: the called function (`prefixFromEnv()` → `${prefixFromEnv}`); `{param}` for a request value (`encodeURIComponent(id)`) |
 | A formatted string: `String.format("%s/notice", prefix)` (Java Vert.x) | as the same concatenation: `${prefix}/notice`; only `%s` / `%d` with a format cog can read |
 | Values added with no string between them | one marker each: `prefix + host + ":" + port` → `${prefix}${host}:${port}`; a parenthesised sum `(page + 1)` stays one value |
