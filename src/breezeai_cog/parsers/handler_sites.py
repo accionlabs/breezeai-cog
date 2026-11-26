@@ -8,7 +8,7 @@ the handler up does so here:
 The detector knows …                        Call
 ==========================================  ==================================================
 a class and a method (``ExampleJob`` +      :func:`locate_method` — the ``<lang>.method-lines``
-``Execute``, ``users#show``)                fact (Apex, C#, Java, PHP, Ruby)
+``Execute``, ``users#show``)                fact (Apex, C#, Groovy, Java, PHP, Ruby)
 a module and an exported name               :func:`locate_export` — the
 (``import * as queries``)                   ``typescript.declarations`` fact (TS / JS)
 only a name written in this file            nothing — name it; the parser's ``link_handlers``
@@ -54,6 +54,8 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "apex": (frozenset({"class_declaration"}), frozenset({"method_declaration"})),
     "csharp": (frozenset({"class_declaration", "struct_declaration", "record_declaration"}),
                frozenset({"method_declaration"})),
+    "groovy": (frozenset({"class_declaration", "enum_declaration"}),
+               frozenset({"method_declaration"})),
     "java": (frozenset({"class_declaration", "record_declaration", "enum_declaration"}),
              frozenset({"method_declaration"})),
     "php": (frozenset({"class_declaration"}), frozenset({"method_declaration"})),
@@ -64,7 +66,7 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 #: Languages with a repo-wide ``<lang>.method-lines`` fact. Play's ``conf/routes`` lookup has no
 #: Scala index to ask, so it reads the few controller files a routes file names instead
 #: (:func:`method_sites`); Play's SIRD routers, parsed as Scala, use ``scala.method-lines``.
-_FACT_LANGUAGES = ("apex", "csharp", "java", "php", "ruby", "scala")
+_FACT_LANGUAGES = ("apex", "csharp", "groovy", "java", "php", "ruby", "scala")
 
 _Key = tuple[str, str]  # (class simple name, method name)
 _Site = tuple[str, int]  # (file, line)

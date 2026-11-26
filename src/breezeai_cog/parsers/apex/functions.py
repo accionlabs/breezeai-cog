@@ -41,7 +41,7 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver) -> list[Call
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
     stack = [body]
     while stack:
         node = stack.pop()
@@ -51,9 +51,10 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver) -> list[Call
                 name = node_text(name_node, source)
                 obj = node.child_by_field_name("object")
                 receiver = node_text(obj, source).lower() if obj is not None else None
-                if name.lower() not in seen:
-                    seen.add(name.lower())
-                    calls.append(Call(name=name, path=resolve(name.lower(), receiver)))
+                path = resolve(name.lower(), receiver)
+                if (name.lower(), path) not in seen:
+                    seen.add((name.lower(), path))
+                    calls.append(Call(name=name, path=path))
         stack.extend(reversed(node.named_children))
     return calls
 

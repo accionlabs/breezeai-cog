@@ -333,7 +333,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def visit(node: Node) -> None:
         # Descend into every scope, including inline lambdas — their calls belong to the
@@ -343,8 +343,7 @@ def _calls(
                 res = _callee(child, source)
                 if res is not None:
                     name, receiver = res
-                    if name and name not in seen:
-                        seen.add(name)
+                    if name:
                         through_variable = receiver is None and name in variables
                         call_types = types
                         fn = child.child_by_field_name("function")
@@ -357,7 +356,9 @@ def _calls(
                             # never a class that shares its name.
                             call_types = {**(types or {}), receiver: None}
                         path = None if through_variable else resolve(name, receiver, owner, call_types)
-                        calls.append(Call(name=name, path=path))
+                        if (name, path) not in seen:
+                            seen.add((name, path))
+                            calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)

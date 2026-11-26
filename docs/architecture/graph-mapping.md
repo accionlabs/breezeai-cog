@@ -136,11 +136,14 @@ find the target the way it looks for it.**
 | `HAS_STATEMENT` | File / Class / Function → Statement | `statement.parentId` | matched against the same file's ids: classes and functions by `captureId`, the file by `path` | **statement skipped** |
 | `IMPORTS` | File → File | `importFiles[]` | the File whose `path` is exactly that string | edge dropped silently |
 | `CALLS` | Function → Function | `functions[].calls[]` | source by `captureId`; target = **every** Function with `name = calls[].name` and `path = calls[].path` | edge dropped silently (always, when `path` is empty) |
+| `CALLS` | Class → Function | `classes[].calls[]` (schema 2.8) | source by `captureId`; target as for a Function's calls | as above. Needs the backend change ([§10](#10-known-mismatches-between-cog-and-the-backend) #7) |
+| `CALLS` | File → Function | `calls[]` on the file record (schema 2.8) | source by `path`; target as for a Function's calls | as above. Needs the backend change ([§10](#10-known-mismatches-between-cog-and-the-backend) #7) |
 | `EXTENDS` | Class → Class | `classes[].extends` | **every** Class in the repository whose `name` equals the `extends` text | no edge |
 | `HAS_FILE` | CodeOntologyNode → File | — | all files of the ontology | — |
 
 Things that create **no** edge: `implements` (stored as a property only), `decorators`,
-`externalImports`, `exports`.
+`externalImports`, `exports`, a route's `handlerChain` (its record's own `handler` fields point at
+the first step; a reader parses `handlerChain` for the rest).
 
 What this means for cog:
 
@@ -148,6 +151,7 @@ What this means for cog:
 |---|---|
 | `calls: [{name: "findAll", path: "src/order.repo.ts"}]` | `CALLS` to `findAll` in that file (to every overload, if there are several) |
 | `calls: [{name: "map"}]` (no path) | no edge — correct for external or unresolved calls |
+| `calls: [{name: "create", path: "a.ts"}, {name: "create", path: "b.ts"}]` | one `CALLS` per entry: a name appears once per target file, so same-name calls to two files are two edges |
 | `extends: "BaseController"` | `EXTENDS` to every class named `BaseController` in the repo |
 | `extends: "com.acme.BaseController"` or `"Repo<Order>"` | **no edge** — no class has that exact name |
 | a statement whose `parentId` matches nothing in the file | the statement is not stored |
@@ -164,9 +168,9 @@ What this means for cog:
 | Label | Policy | Stored | Notes |
 |---|---|---|---|
 | `File` | **Open** — everything except a strip list | `type`, `language`, `loc`, `framework`, `platform`, `project`, `projectRoot`, `uiRole`, `externalImports` (array), `imports` (= `importFiles`, array), `exports` (JSON string), `metadata` (JSON string), **and any extra key** | Removed: `id`, `functions`, `classes`, `importFiles`, `statements`. Added: `name`, `repositoryName`, `description`, `projectUuid`, `codeOntologyId`. Nx `project` / `projectRoot` are set only for files inside an Nx project; `project` is empty when the configuration names none. |
-| `Class` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `visibility`, `isAbstract`, `isSealed`, `isAnonymous`, `description`, `roles`, `uiRole`, `extends` (string), `alias` (string), `generics` (string, as written: `<T>`); `implements` / `decorators` / `constructorParams` / `metadata` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
-| `Function` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `returnType`, and when present `visibility`, `isStatic`, `isAsync`, `receiverType`, `uiRole`, `generics` (string, as written: `<T>`); `params` / `decorators` / `metadata` / `calls` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
-| `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`, `description`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` and `params` as JSON strings (`params` only when it is a list of at most 16 KB as JSON, otherwise dropped whole — cog keeps an MCP statement's `params` within 15 KB of UTF-8 JSON; `description` and `params` need a backend change: not stored before it) | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
+| `Class` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `visibility`, `isAbstract`, `isSealed`, `isAnonymous`, `description`, `roles`, `uiRole`, `extends` (string), `alias` (string), `generics` (string, as written: `<T>`); `implements` / `decorators` / `constructorParams` / `metadata` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped** — `calls` too, until the backend stores it as a JSON string ([§10](#10-known-mismatches-between-cog-and-the-backend) #7). |
+| `Function` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `returnType`, and when present `visibility`, `isStatic`, `isAsync`, `receiverType`, `uiRole`, `generics` (string, as written: `<T>`); `params` / `decorators` / `metadata` / `calls` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped** — `alias` too, until the backend stores it ([§10](#10-known-mismatches-between-cog-and-the-backend) #7). |
+| `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`, `description`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` and `params` as JSON strings (`params` only when it is a list of at most 16 KB as JSON, otherwise dropped whole — cog keeps an MCP statement's `params` within 15 KB of UTF-8 JSON; `description` and `params` need a backend change: not stored before it); `handlerChain` as a JSON string once the backend stores it ([§10](#10-known-mismatches-between-cog-and-the-backend) #7) | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
 
 Further points:
 - **`semanticType` is stored as-is.** The backend does not check it against a list, so a new
@@ -218,7 +222,7 @@ but not for `/stream-ingest`. Either way the same information is available per f
 | Label | Embedded? | Text that is embedded |
 |---|---|---|
 | `File` | Yes | path, name, language, framework, type, LOC, UI role, platform, imports, external imports, function signatures, class names, **`metadata`** |
-| `Function` | Yes | name, file, type, visibility, modifiers, decorator names, params, return type, generics, called names, **`metadata`** |
+| `Function` | Yes | name, file, type, visibility, modifiers, decorator names, params, return type, generics, called names, **`metadata`**; `alias` once the backend stores it ([§10](#10-known-mismatches-between-cog-and-the-backend) #7) |
 | `Class` | Yes | kind, name, file, modifiers, decorator names, constructor params, `extends`, `implements`, generics, **`metadata`** (not `alias`: stored and filterable, not embedded) |
 | `Statement` | **No** | — (statement embedding is switched off in `graph-embed.service.ts`; there is no Statement vector index) |
 
@@ -281,6 +285,7 @@ node on re-ingest. The old one is removed by the delete step.
 | 4 | `projectMetaData.configs` is not stored for `/stream-ingest` (an uploaded capture keeps it) | Repository-level config summary is missing for server-mode ingests | Persist it on the CodeOntology record there too |
 | 5 | Incoming edges are not rebuilt on incremental ingest ([§9](#9-re-ingest-and-incremental-updates)) | Edges from unchanged files are lost | Rebuild edges that target re-ingested paths |
 | 6 | `Statement` nodes have no `createdAt` / `updatedAt` | Can't tell when a statement was last written | Set them in the statement write |
+| 7 | The schema 2.8 fields are not read: `classes[].calls[]` (a class's code outside any method — Java field initializers, initializer blocks, enum constants' arguments), the file record's `calls[]` (a file's code outside any function or class), `functions[].alias`, `statements[].handlerChain`. A strict JSON upload **rejects** a capture whose file or function carries one of the new keys | Calls made when a class loads or an object is built have no edge: `ServiceServer`'s `static { … }` registrations do not reach the handlers' constructors; a stack-trace name and a route's later handler steps can't be found | Backend branch `feat/class-calls-edges`: `calls` on `Class` and `File` as JSON strings with `CALLS` Class/File → Function (same name + path match); `alias` on `Function` (stored and embedded); `handlerChain` on `Statement` as a JSON string. Deploy it before a cog release that emits them |
 
 ---
 

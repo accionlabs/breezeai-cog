@@ -166,15 +166,13 @@ def test_address_through_a_helper_or_constructor_is_resolved_at_each_call_site(
     EventBusUtil.send(container, vertx, new JsonObject(), TARGET, 5000L);
     register("orders/info", new InfoHandler());
     new MessageHandler(vertx, container, "orders/view");""", _REGISTER)}
-    # Each call site is a record with its own address. Each helper keeps its own record
-    # (address unknown), in this file or another.
+    # Each call site is a record with its own address. A helper's own send or registration, on
+    # its address parameter or the field its constructor sets, only defines it: no record, in
+    # this file or another (contract §5, "Where an outbound record is written").
     assert _bus(analyze_files(files)) == [
-        ("Caller.java", "eventbus_consumer", "${address}", "h", None),
         ("Caller.java", "eventbus_consumer", "orders/info", "handle", "InfoHandler.java"),
         ("Caller.java", "eventbus_consumer", "orders/view", "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
-        ("MessageHandler.java", "eventbus_consumer", "${address}", "handle", None),
     ]
 
 
@@ -187,8 +185,6 @@ def test_forwarded_argument_that_is_not_a_constant_leaves_the_address_empty(
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_consumer", "${where}", "handle", "MessageHandler.java"),
         ("Caller.java", "eventbus_send", "${where}", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
-        ("MessageHandler.java", "eventbus_consumer", "${address}", "handle", None),
     ]
 
 
@@ -217,22 +213,18 @@ def test_subclass_passing_its_address_to_super_is_a_consumer_at_that_call(analyz
   public Twin(Vertx v, String a) { super(v, null, a); }"""),
     }
     # The handler is the subclass's own `handle` (same file: its line, no path); a call passing
-    # a parameter on keeps its record with the address unknown, like any helper's.
+    # a parameter on (Mid) relays it: no record, like the helper's own registration.
     stmts = analyze_files(files)
     assert _bus(stmts) == [
         ("Leaf.java", "eventbus_consumer", "orders/leaf", "handle", None),
-        ("MessageHandler.java", "eventbus_consumer", "${address}", "handle", None),
-        ("Mid.java", "eventbus_consumer", "${a}", "handle", None),
         ("OrderView.java", "eventbus_consumer", "OrderView", "handle", None),
         ("Plain.java", "eventbus_consumer", "orders/plain", "handle", None),
-        ("Twin.java", "eventbus_consumer", "${a}", "handle", None),
         ("Twin.java", "eventbus_consumer", "orders/twin", "handle", None),
     ]
     lines = {(s.path.rsplit("/", 1)[-1], s.endpoint): (s.nodeType, s.handlerLine)
              for s in stmts if s.semanticType == "eventbus_consumer"}
     assert lines[("OrderView.java", "OrderView")] == ("explicit_constructor_invocation", 12)
     assert lines[("Plain.java", "orders/plain")] == ("explicit_constructor_invocation", 6)
-    assert lines[("Mid.java", "${a}")][1] is None  # abstract, no `handle` of its own
 
 
 def test_super_of_a_class_that_does_not_register_itself_is_not_a_consumer(analyze_files) -> None:
@@ -248,9 +240,7 @@ def test_super_of_a_class_that_does_not_register_itself_is_not_a_consumer(analyz
         # A superclass whose constructor stores nothing to register.
         **_sub("Info2", "InfoHandler", "  public Info2() { super(); }"),
     }
-    assert _bus(analyze_files(files)) == [
-        ("MessageHandler.java", "eventbus_consumer", "${address}", "handle", None),
-    ]
+    assert _bus(analyze_files(files)) == []
 
 
 def test_helper_that_rewrites_the_address_is_not_a_forwarder(analyze_files) -> None:
@@ -355,8 +345,8 @@ def test_helper_overload_relaying_to_the_real_helper_is_followed(analyze_files) 
     assert _bus(analyze_files(files)) == [
         ("Caller.java", "eventbus_send", "orders/OrderWriter", None, None),
         ("Caller.java", "eventbus_send", "orders/direct", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None),
+        # the overload relaying its address parameter and the real helper's send: definitions;
+        # a send to a constant inside the helper is executed there
         ("EventBusUtil.java", "eventbus_send", "orders/fixed", None, None),
     ]
 
@@ -459,12 +449,14 @@ def test_vertx3_helper_passing_its_address_on_is_followed(analyze_files) -> None
   void ping(String address) { vertx.eventBus().send(address, "x"); }
   public void start() { listen("orders.created"); ping("orders.ping"); }
 }""", V3))
-    # Forwarders hold for Vert.x 3+ too: each call site has its address, each helper keeps its
-    # own record (address unknown).
+    # Forwarders hold for Vert.x 3+ too: each call site has its address; a helper's own call on
+    # its address parameter is no record.
     got = sorted(((s.semanticType, s.parentId.rsplit("#", 1)[-1].split("@")[0], s.endpoint or "")
                   for s in st if s.semanticType in ("eventbus_consumer", "eventbus_send")))
-    assert got == [("eventbus_consumer", "listen", "${address}"), ("eventbus_consumer", "start", "orders.created"),
-                   ("eventbus_send", "ping", "${address}"), ("eventbus_send", "start", "orders.ping")]
+    # `ping` sends on its address parameter: executed, and recorded, where `start` calls it
+    # nor does `listen` register on its own: `start` calls it with the address
+    assert got == [("eventbus_consumer", "start", "orders.created"),
+                   ("eventbus_send", "start", "orders.ping")]
 
 
 def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:
@@ -480,19 +472,19 @@ def test_vertx3_map_and_loop_is_not_a_registration_table(analyze_files) -> None:
         == [("eventbus_consumer", "${k}")]
 
 
-# ── a helper keeps its own record ───────────────────────────────────────────────────────────
+# ── a send is recorded where it is executed, not where it is defined ────────────────────────
 
-def test_helper_never_called_keeps_its_own_record(analyze_files) -> None:
-    assert _bus(analyze_files(dict(UTIL))) == [
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None)]
+def test_helper_never_called_sends_nothing(analyze_files) -> None:
+    # its send on its own address parameter only defines one; nothing executes it
+    assert _bus(analyze_files(dict(UTIL))) == []
 
 
-def test_helper_called_only_from_a_file_without_vertx_keeps_its_own_record(analyze_files) -> None:
+def test_helper_called_from_a_file_without_vertx_is_recorded_at_that_call(analyze_files) -> None:
     files = {**UTIL, f"{SRC}Plain.java": "package com.acme;\npublic class Plain { void go() {"
              ' EventBusUtil.send(null, null, null, "orders/plain", 5L); } }\n'}
-    # The detector does not read Plain.java (no Vert.x marker): the helper's send is the record.
+    # Plain.java has no Vert.x marker but names the forwarder's class: its call is the send
     assert _bus(analyze_files(files)) == [
-        ("EventBusUtil.java", "eventbus_send", "${address}", None, None)]
+        ("Plain.java", "eventbus_send", "orders/plain", None, None)]
 
 
 def test_helper_declared_with_two_shapes_keeps_both_records(analyze_files) -> None:

@@ -46,8 +46,9 @@ Every framework construct a parser recognises has **exactly one** role:
 | **Binding** | names **one** handler as the target of an inbound trigger | **one entry-point record** | `@GetMapping("/x")` on a method · `r.get('/x', h)` · `{ path, component }` · `@KafkaListener` · `@Scheduled` |
 | **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; a record is written only when what it carries is recorded nowhere else ([§5](#how-wiring-is-written-today)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
 | **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` · a `<ProtectedRoute/>` layout element |
-| **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
+| **Outbound** | is our code calling something outside | an outbound record at the call that runs with its target (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …), not inside a helper of the repo that only passes the target on ([§5](#where-an-outbound-record-is-written)) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
 | **None** | is not inbound, or names one handler that has no address of its own | nothing | start-up calls, GraphQL data-type fields, everything else |
+| **Chain step** | adds a step to a route registered before it on the same router, path and verb, in the same statement list (Vert.x `router.get(p).handler(b)` after `router.get(p).handler(a)`) | **no record of its own** — the step goes into that route's `handlerChain` ([§3](#one-chain-one-binding)) | Vert.x-web: one path registered several times, `.handler(a).handler(b)`, `.failureHandler(h)` on the path |
 
 The **handler** is the declaration a binding points at: a method, a function or a component —
 named, or anonymous (an inline function, [§5](#anonymous-handlers)).
@@ -90,6 +91,21 @@ flowchart TD
 
 Layouts, partials, child components and modals never reach the test: no inbound construct
 targets them.
+
+### One chain, one binding
+
+Some frameworks let one address run several handlers in sequence, each passing the request on
+(`ctx.next()`). A **chain** of registrations is **one binding**: it identifies one handler, its
+first step, and its record lives at the first registration with every step in `handlerChain`
+([§5](#5-what-a-binding-records)). Registrations are one chain only when the code shows for
+certain that they are steps of one endpoint in a known order — the same router variable, the same
+verb form and verb, the same path written as the same expression, all in one statement list, no
+`.order(n)` / `.last()`, no differing alternatives (`.produces()` / `.consumes()` /
+`.virtualHost()`), not under a mounted sub-router, and nothing registered on the router between
+the first and the last of them that might match the path. **If any check fails for any
+registration, the whole group keeps one record per registration**, as before: a partial chain
+would give a wrong endpoint count and lose the earlier steps. Which constructs chain is written in
+the framework's role table ([Vert.x](../entry-point-roles/vertx.md)).
 
 > **Decision —** two checks, both about what the source shows: one handler, and an address.
 > **Why:** an earlier check ("not reached only through another binding") asked how the code
@@ -147,6 +163,7 @@ the route-table entry, or — for a registered container — the member.
 | `handlerLine` | Line of the handler's declaration — the start line of its `Function` record, which for C# / Java includes attributes and annotations (for an anonymous handler, the line where the function starts); a line of `handlerPath` when that is set | Yes |
 | `handlerPath` | Repo-relative file of the handler, when it is not the record's own file. A handler that can't be located, or is declared twice, leaves `handlerPath` and `handlerLine` empty — never a guessed file | When different |
 | `guards` | Names of the guards that apply to it, outermost first — scoped ones (on the handler, its class, its route) and global ones (app-wide middleware, filters, router hooks) alike, when the code shows for certain that they cover this binding | When present |
+| `handlerChain` | The steps of a route served by several handlers in sequence, in run order: each `{name, handler, handlerLine, handlerPath, phase}`, every key optional (an anonymous step has `handlerLine` / `handlerPath` only; one that can't be located its `name` only). Steps without `phase` run in list order while each passes the request on (`ctx.next()`, `next()`, `c.Next()`); `phase: "failure"` marks a failure handler on the route's own method and path, which runs when a guard or a step fails, instead of the remaining steps, and is listed after them. `guards` run before the first step; the record's `handler` / `handlerLine` / `handlerPath` are the first step's. Stored as a property, no edges. Schema 2.8; filled for Vert.x-web in Java ([§3](#one-chain-one-binding)) | When the route has 2 or more steps, or a failure handler |
 
 ### Anonymous handlers
 
@@ -165,8 +182,22 @@ It is still an entry point. Record it with:
 | `handlerPath` | empty — an inline handler is in the record's own file, except on a property of an imported object (`Query: queries`, [GraphQL in TypeScript](../entry-point-roles/graphql-typescript.md)), where it is that object's file |
 
 A function is **named** when the source gives it a name: a declaration (`function getUser`), a
-method, or a function assigned to a variable or property (`const getUser = async () => …`). Only
-a function with none of these is anonymous.
+method, a function assigned to a variable or property (`const getUser = async () => …`), or a
+named function expression written inline (`app.post('/users', function createUser(req, res) {
+… })` → `handler: "createUser"`, the `Function` cog records for it). Only a function with none of
+these is anonymous.
+
+**The body of an anonymous handler** is the statements inside the record's line range: it has no
+`Function`, so its statements and calls belong to the code it is written in — the enclosing
+function, else the file (`File.calls`) or the class (`Class.calls`) — and a reader takes those
+whose lines fall between the record's `startLine` and `endLine`:
+
+```ts
+app.get('/users/:id', async (req, res) => {   // route, lines 2–5, handler "", handlerLine 2
+  const u = await repo.find(req.params.id);   // line 3  db_method_call — the body
+  res.json(u);                                // line 4 — the body
+});
+```
 
 A Java **anonymous class** passed as the handler (`new Handler<Message>() { public void handle(…)
 { … } }`) is a `Class` of its own, and its method is a named `Function` (`Svc$1#handle`). Where
@@ -239,6 +270,57 @@ The entry points are the `mcp_tool`, `mcp_resource` and `mcp_prompt` records, an
 > prefix) or sits in another file (a registration, a config), so it can never own an entry
 > point. **Cost:** wiring in another file must reach the binding's record through the repository
 > index ([cross-file route composition](cross-file-resolution.md#8-cross-file-route-composition)).
+
+### Where an outbound record is written
+
+An outbound record is written **where the call runs with its target**, not where the code that
+performs it is defined. It is the outbound twin of the rule above: an entry point lives at the
+binding, which names the handler; an outbound record lives at the call that names the target.
+
+A **helper** is a function of the repository that makes an outbound call on an address taken from
+one of its own parameters, whole or as a part. A **relay** passes its own parameter on to a
+helper's address (an overload, a `getClient(url)` that calls `requestClient(GET, url)`); it is a
+helper too.
+
+```ts
+async function getRequest(url: string) { return axios.get(url); }      // helper
+
+const url = `https://${domain}.atlassian.net/rest/api/3/field`;
+await getRequest(url);                                                  // the call that runs
+```
+
+When a parser **follows** a helper:
+
+| Where | Recorded |
+|---|---|
+| Each call of the helper | The outbound record, its address the caller's argument folded into the helper's address ([§6](#6-address-format-endpoint)); `api_call`: `method` from the helper (fixed, or the argument that carries it). Above: `api_call` `GET https://${domain}.atlassian.net/rest/api/3/field` |
+| The helper's (and each relay's) call on its address parameter | A plain statement: each call of the helper is that call with its target, so a record here would count the request again with no target (`${url}`). A helper that is never called makes no outbound call |
+| A call of the helper the parser cannot link to it (no resolved path) | A plain statement, as before |
+
+Following is per kind and per language, written in the framework's role table: a helper is
+followed only when the parser proves it — a function of the repo, whose outbound call takes the
+parameter as written (a helper that rewrites the address, `"x/" + address`, or one declared with a
+different shape in two files, is not followed). Where a kind is **not followed**, its call keeps
+its record at the call, the parameter marked (`${url}`, [§6](#a-part-read-at-runtime-name)).
+
+| Outbound kind | Helpers followed | Where |
+|---|---|---|
+| `eventbus_send` / `eventbus_publish` (and `eventbus_consumer` registrations) | Vert.x (Java) address forwarders | [Vert.x](../entry-point-roles/vertx.md) |
+| `api_call` | Not yet: proposed for Java, TypeScript / JavaScript, Python (BREEZEAI-1654) | — |
+| `route` (`navigation`), `mcp_call` | Not yet | — |
+
+Inbound registrations made through a helper follow the same rule: each call of the helper is
+the binding, with its address, and the helper's own registration on its parameter, or on the
+field its constructor sets (`registerHandler(address, this)`), is a plain statement — one
+consumer, one record ([Vert.x](../entry-point-roles/vertx.md)).
+
+> **Decision —** an outbound call is recorded where it runs with its target; a helper's own call
+> on its parameter is a plain statement, whether or not its callers resolve.
+> **Why:** the address is known only at the call. A record in the helper carries no target
+> (`${url}` matches nothing), and with its callers recorded too, one request would count twice.
+> **Cost:** when no call of a helper resolves (a shared library whose callers are in another
+> repository, a call the resolver cannot link), the repository shows no record for that request
+> — missing, not wrong.
 
 ### MCP tools
 
@@ -450,7 +532,7 @@ only on the bus itself (`vertx.eventBus().send(addr, …)`, not a wrapper such a
 | `router.get(path).handler(h)`, `app.get(ordersPath, h)`, `app.get(routes.orders, h)` (a whole path that is one value: [how it is told from another argument](#a-path-that-is-one-value)) | route | `${path}`, `${ordersPath}`, `${routes.orders}`; `${config:orders.path}` / `${env:ORDERS_PATH}` when the variable is read once from there |
 | `axios.post(config.contextRoot + "/orders/confirm")`, `` fetch(`${base}/orders/${id}`) ``, `$.ajax({ url: ctx + "/x/" + order.id })` — and the same shapes in every language's HTTP calls | outbound | `${config.contextRoot}/orders/confirm`, `${base}/orders/{id}`, `${ctx}/x/{order.id}` |
 | `$.get("/api/users/" + user.id + "/roles")`, `` $.getJSON(`/api/users/${id}`) `` — a jQuery URL reads exactly as the same `axios` URL | outbound | `/api/users/{user.id}/roles`, `/api/users/{id}` |
-| `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` |
+| `axios.get(url)`, `$.ajax({ url: form.action })`, `new HttpGet(uri)`, `` fetch(`${host}${path}`) `` | outbound | `${url}`, `${form.action}`, `${uri}`, `${host}${path}` — when `url` is a parameter of a helper the parser follows, the record is at each call of the helper instead ([§5](#where-an-outbound-record-is-written)) |
 | `new HttpPost(fileApiPrefix + fileApiHost + ":" + filePort + fileApiPath)` | outbound | `${fileApiPrefix}${fileApiHost}:${filePort}${fileApiPath}` |
 | `send(config().getObject("api-verticle").getString("address"), …)`, `consumer(config().getString("address"), h)`, `send(System.getenv("BUS") + ".orders", …)` | event bus | `${config:api-verticle.address}`, `${config:address}`, `${env:BUS}.orders` |
 | `axios.get(buildUrl(a, b) \|\| fallback)` | outbound | empty: no part has a name |
@@ -551,10 +633,15 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
   `${name}` where it stands ([§6](#a-part-read-at-runtime-name)), never dropped (a partial path
   would read as the whole address) and never written `{name}` (a path parameter). A message address that can't be resolved
   is empty on both sides — consumer and sender — rather than the symbol it was read from.
+- **One outbound call, one record, where it runs.** An outbound record sits at the call that
+  names its target; inside a followed helper, the call on its own address parameter is a plain
+  statement ([§5](#where-an-outbound-record-is-written)).
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
 - **One binding, one record.** Wiring and guards never produce entry-point records (wiring the
-  Target Spec records today is written in its form, §5).
+  Target Spec records today is written in its form, §5). A chain of registrations is one binding
+  as a whole ([§3](#one-chain-one-binding)); a group that fails any chain check keeps one record
+  per registration.
 - **Every record leads to its handler** (`handler` + `handlerLine` + `handlerPath`; for an
   anonymous handler, `handlerLine` alone) — that is where the rest of the flow starts.
 

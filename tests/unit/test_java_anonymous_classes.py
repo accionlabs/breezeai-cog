@@ -240,7 +240,10 @@ public class Ctl {
     line = next(c for c in record.classes if c.id == f"{_REL}#Ctl$1.Line")
     assert (line.name, line.parentId) == ("Line", _REL)
     assert {s.text for s in record.statements if s.parentId == line.id} == {"String text;"}
-    assert _calls(record, "Ctl$1", "write") == ["keep"]
+    # `new Line(s)`: the anonymous class's own member type, a call to its constructor here
+    assert _calls(record, "Ctl$1", "write") == ["keep", "Line"]
+    write = _fn(record, "Ctl$1", "write")
+    assert next(c.path for c in write.calls if c.name == "Line") == _REL
     assert _calls(record, "Ctl", "m") == ["strip"]
 
 

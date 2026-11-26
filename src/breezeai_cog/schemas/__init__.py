@@ -10,6 +10,7 @@ from .capture import (
     Decorator,
     FileRecord,
     Function,
+    HandlerStep,
     Parameter,
     ProjectMetaData,
     Statement,
@@ -28,6 +29,7 @@ __all__ = [
     "ConstructorParam",
     "Decorator",
     "Call",
+    "HandlerStep",
     # vocabularies
     "FileType",
     "ClassType",

@@ -77,7 +77,7 @@ def _prune_template_edges(record: FileRecord, dropped: frozenset[str]) -> None:
 
     record.importFiles = [p for p in record.importFiles if not is_template(p)]
     for holder in (*record.functions, *record.classes):
-        for call in getattr(holder, "calls", ()):
+        for call in getattr(holder, "calls", None) or ():  # `Class.calls` is None when empty
             if call.path is not None and is_template(call.path):
                 call.path = None
 
