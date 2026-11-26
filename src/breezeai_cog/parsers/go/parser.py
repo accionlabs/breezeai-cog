@@ -7,6 +7,7 @@ from typing import Sequence
 
 from tree_sitter import Node
 
+from ...errors import ParseError
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, ConstructorParam, FileRecord, Function, Statement
 from ...utils import count_loc
@@ -64,6 +65,21 @@ def _owner(literal: Node, bound: frozenset[tuple[int, int]]) -> Node | None:
     return None
 
 
+def _first_syntax_error(root: Node) -> Node | None:
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "ERROR" or node.is_missing:
+            return node
+        stack.extend(
+            reversed([
+                child for child in node.children
+                if child.has_error or child.is_missing
+            ])
+        )
+    return None
+
+
 class GoParser(BaseParser):
     name = "go"
     extensions = (".go", "go.mod", "go.sum")
@@ -102,6 +118,21 @@ class GoParser(BaseParser):
             )
 
         root = parse_source("go", ctx.source, ctx.parse_timeout_micros).root_node
+        if root.has_error:
+            error = _first_syntax_error(root)
+            if error is None:
+                raise ParseError(
+                    "Go syntax error reported by Tree-sitter",
+                    path=ctx.path,
+                    parser=self.name,
+                )
+            row, column = error.start_point
+            detail = f"expected {error.type!r}" if error.is_missing else "unexpected syntax"
+            raise ParseError(
+                f"Go syntax error at line {row + 1}, column {column + 1}: {detail}",
+                path=ctx.path,
+                parser=self.name,
+            )
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
