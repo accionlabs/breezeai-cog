@@ -2,9 +2,10 @@
 
 HotChocolate declares its API surface with attributes: a class marked ``[QueryType]`` /
 ``[MutationType]`` / ``[SubscriptionType]`` is a schema root, and each **public** method on it
-is one client-callable field. There is no backing AST node for the route itself (it is derived
-from the attribute), so emitted statements carry ``nodeType="synthetic"`` — the same shape the
-ASP.NET attribute routes and the TypeScript code-first GraphQL detector use.
+is one client-callable field. A record sits at the node it was read from: an operation or a
+field resolver at its method (``nodeType: method_declaration`` — the field is the method), an
+entity resolver at its ``[ReferenceResolver]`` / ``[NodeResolver]`` attribute and a subscription's
+topic consumer at its ``[Topic]`` attribute (``nodeType: attribute``).
 
 ``framework="graphql"`` (not ``"hotchocolate"``) so the backend joins GraphQL operations
 uniformly across stacks, matching ``csharp_graphql`` and both TypeScript GraphQL detectors.
@@ -23,6 +24,7 @@ from tree_sitter import Node
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..dotnet_common import innermost_type, named_arg, response_dto, simple_attr_name
+from ..dotnet_nodes import named_attribute
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import first_line, node_text
@@ -155,12 +157,14 @@ def _guard_arg(arg: str) -> str:
 
 def _statement(
     cls: Class, fn: Function, *, kind: str, method: str, endpoint: str | None, text: str,
-    root: Node, generated_loaders: dict[str, str | None] | None = None,
+    root: Node, at: Node | None, generated_loaders: dict[str, str | None] | None = None,
 ) -> Emit:
-    """One route record for a resolver method. ``endpoint`` is the field address the framework
-    serves; ``handler`` keeps the C# method name."""
+    """One route record for a resolver method, at ``at`` (its method, or the attribute that
+    declares it). ``endpoint`` is the field address the framework serves; ``handler`` keeps the
+    C# method name. Without ``at`` (the method is not in ``root``) the file's root stands in,
+    as ``synthetic`` with the method's span."""
     guards = guards_of(cls, fn)
-    return Emit(root, dict(
+    fields = dict(
         semanticType="route",
         method=method,
         endpoint=endpoint,
@@ -174,24 +178,27 @@ def _statement(
         requestDTO=request_dto(fn),
         responseDTO=response_dto(fn.returnType),
         dataLoaders=data_loaders(fn, generated_loaders),
-    ), parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
-        end_line=fn.endLine)
+    )
+    if at is None:
+        return Emit(root, fields, parent=fn.id, node_type="synthetic", text=text,
+                    line=fn.startLine, col=0, end_line=fn.endLine)
+    return Emit(at, fields, parent=fn.id, text=text if at.type == "method_declaration" else None)
 
 
 def operation_statement(
-    cls: Class, fn: Function, kind: str, text: str, root: Node,
+    cls: Class, fn: Function, kind: str, text: str, root: Node, method: Node | None,
     generated_loaders: dict[str, str | None] | None = None,
 ) -> Emit:
     """A client-callable operation on a schema root."""
     return _statement(
         cls, fn, kind=kind, method=kind.upper(),
-        endpoint=field_name(fn.name, fn.decorators), text=text, root=root,
+        endpoint=field_name(fn.name, fn.decorators), text=text, root=root, at=method,
         generated_loaders=generated_loaders,
     )
 
 
 def field_resolver_statement(
-    cls: Class, fn: Function, target: str, text: str, root: Node,
+    cls: Class, fn: Function, target: str, text: str, root: Node, method: Node | None,
     generated_loaders: dict[str, str | None] | None = None,
 ) -> Emit:
     """A resolver for one field of a data type. Not client-callable — it runs once per parent
@@ -201,12 +208,13 @@ def field_resolver_statement(
     return _statement(
         cls, fn, kind="field_resolver", method="RESOLVE_FIELD",
         endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, root=root,
-        generated_loaders=generated_loaders,
+        at=method, generated_loaders=generated_loaders,
     )
 
 
 def entity_resolver_statements(
-    cls: Class, record: FileRecord, root: Node, *, on_root: bool,
+    cls: Class, record: FileRecord, root: Node, nodes: dict[tuple[str, int], Node], *,
+    on_root: bool,
     generated_loaders: dict[str, str | None] | None = None,
 ) -> list[Emit]:
     """One ``RESOLVE_REFERENCE`` binding per ``[ReferenceResolver]`` / ``[NodeResolver]`` method of
@@ -224,7 +232,9 @@ def entity_resolver_statements(
         entity = target or innermost_type(fn.returnType)
         out.append(_statement(
             cls, fn, kind="query", method="RESOLVE_REFERENCE", endpoint=entity,
-            text=f"[{attr}] {fn.name}", root=root, generated_loaders=generated_loaders,
+            text=f"[{attr}] {fn.name}", root=root,
+            at=named_attribute(nodes.get((fn.name, fn.startLine)), fn, attr),
+            generated_loaders=generated_loaders,
         ))
     return out
 
@@ -251,30 +261,10 @@ def subscription_topic(fn: Function) -> str | None:
     return None
 
 
-#: Key of the anchor map: (method name, its declaration's start line).
-Anchor = tuple[int, int]
-
-
-def _attribute_position(method: Node, source: bytes, wanted: str) -> Anchor | None:
-    """``(line, col)`` of the ``wanted`` attribute on ``method``'s declaration, else None."""
-    for lst in method.named_children:
-        if lst.type != "attribute_list":
-            continue
-        for attr in lst.named_children:
-            if attr.type != "attribute":
-                continue
-            name = attr.child_by_field_name("name")
-            if name is None:
-                continue
-            if simple_attr_name(node_text(name, source).rsplit(".", 1)[-1]) == wanted:
-                return attr.start_point[0] + 1, attr.start_point[1]
-    return None
-
-
 def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
     """``(method name, declaration start line)`` → its ``method_declaration`` node.
 
-    One walk shared by the two things that need the tree: the topic anchors below, and the
+    One walk shared by the two things that need the tree: where each record sits, and the
     fluent-descriptor bodies (whose field declarations are statements, not declarations, so they
     cannot be read off the ``FileRecord``).
     """
@@ -290,28 +280,8 @@ def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
     return nodes
 
 
-def topic_anchors(
-    nodes: dict[tuple[str, int], Node], source: bytes
-) -> dict[tuple[str, int], Anchor]:
-    """Map each method to the position of the attribute that declares what it consumes.
-
-    A ``Decorator`` on the record carries no position, but the consumer record is emitted
-    *because of* one specific attribute — ``[Topic("x")]``, or ``[Subscribe]`` when the topic
-    falls back to the field name — so its span should point there rather than at the whole
-    member. This one pass over the tree supplies that position; without it the consumer would
-    reuse the route's position and its id would depend on the route existing.
-    """
-    anchors: dict[tuple[str, int], Anchor] = {}
-    for key, node in nodes.items():
-        pos = (_attribute_position(node, source, TOPIC_ATTR)
-               or _attribute_position(node, source, SUBSCRIBE_ATTR))
-        if pos is not None:
-            anchors[key] = pos
-    return anchors
-
-
 def topic_consumer_statement(
-    fn: Function, topic: str, root: Node, anchor: Anchor | None = None
+    fn: Function, topic: str, root: Node, method: Node | None
 ) -> Emit:
     """The server-side half of a subscription: it consumes ``topic`` to push to subscribers.
 
@@ -319,33 +289,39 @@ def topic_consumer_statement(
     each gets its own record, answering "what can a client subscribe to" and "who consumes this
     topic" respectively. Both hang off the same method (``parentId``), and a route inventory and
     an event inventory each see exactly one of them, so nothing is double-counted.
+
+    The record sits at the ``[Topic("x")]`` attribute it was read from (``nodeType: attribute``).
+    Without the method (not in ``root``) the file's root stands in, as ``synthetic``.
     """
-    line, col = anchor if anchor is not None else (fn.startLine, 0)
-    return Emit(root, dict(
+    fields = dict(
         semanticType="eventbus_consumer",
         method="CONSUMER",
         endpoint=topic,
         framework="graphql",
         handler=fn.name,
         handlerLine=fn.startLine,
-    ), parent=fn.id, node_type="synthetic", text=f"[{TOPIC_ATTR}] {topic}", line=line, col=col,
-        end_line=line)
+    )
+    at = named_attribute(method, fn, TOPIC_ATTR)
+    if at is None:
+        return Emit(root, fields, parent=fn.id, node_type="synthetic",
+                    text=f"[{TOPIC_ATTR}] {topic}", line=fn.startLine, col=0, end_line=fn.startLine)
+    return Emit(at, fields, parent=fn.id)
 
 
 def _operation_records(
     cls: Class, fn: Function, kind: str, text: str, root: Node,
-    anchors: dict[tuple[str, int], Anchor],
+    nodes: dict[tuple[str, int], Node],
     generated_loaders: dict[str, str | None] | None = None,
 ) -> list[Emit]:
     """The route for one operation, plus a topic consumer when it is a resolvable subscription."""
-    route = operation_statement(cls, fn, kind, text, root, generated_loaders)
+    method = nodes.get((fn.name, fn.startLine))
+    route = operation_statement(cls, fn, kind, text, root, method, generated_loaders)
     if kind != "subscription":
         return [route]
     topic = subscription_topic(fn)
     if topic is None:
         return [route]
-    anchor = anchors.get((fn.name, fn.startLine))
-    return [route, topic_consumer_statement(fn, topic, root, anchor)]
+    return [route, topic_consumer_statement(fn, topic, root, method)]
 
 
 #: The generic attributes that name an extended type, with and without the ``Attribute`` suffix.
@@ -450,7 +426,7 @@ def resolves_parent(fn: Function, target: str) -> bool:
 def _extension_routes(
     cls: Class, target: str, methods: list[Function], record: FileRecord,
     heritage: dict[str, object], path: str, root: Node,
-    anchors: dict[tuple[str, int], Anchor],
+    nodes: dict[tuple[str, int], Node],
     generated_loaders: dict[str, str | None] | None = None,
     hc_root_types: dict[str, str] | None = None, attr: str = EXTEND_ATTR,
 ) -> list[Emit]:
@@ -461,7 +437,7 @@ def _extension_routes(
     if kind is not None:
         return [s for fn in methods
                 for s in _operation_records(
-                    cls, fn, kind, f"[{attr}] {fn.name}", root, anchors,
+                    cls, fn, kind, f"[{attr}] {fn.name}", root, nodes,
                     generated_loaders)]
     resolvers = [fn for fn in methods if resolves_parent(fn, target)]
     if not resolvers:
@@ -471,7 +447,8 @@ def _extension_routes(
         )
         return []
     return [field_resolver_statement(
-                cls, fn, target, f"[{attr}({target})] {fn.name}", root, generated_loaders)
+                cls, fn, target, f"[{attr}({target})] {fn.name}", root,
+                nodes.get((fn.name, fn.startLine)), generated_loaders)
             for fn in resolvers]
 
 
@@ -648,7 +625,7 @@ def detect_hotchocolate_routes(
 ) -> list[Emit]:
     """Every operation, field resolver and entity / node resolver declared in this file, for
     :func:`~..emits.apply`. A record read off the parsed record (an attribute-declared resolver)
-    has no node of its own: the file's ``root`` stands in and its span is the method's.
+    sits at its method or at the attribute that declares it (see the module docstring).
 
     Two declaration sites: a class carrying a root attribute, and a class extending another type
     with ``[ExtendObjectType]``. ``index`` supplies the repo heritage map so a root attributed in
@@ -658,7 +635,6 @@ def detect_hotchocolate_routes(
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
     generated_loaders = generated_loaders_of(index)
     nodes = method_nodes(root, source)
-    anchors = topic_anchors(nodes, source)
     methods: dict[str, list[Function]] = {}
     for fn in record.functions:
         if is_operation(fn):
@@ -681,17 +657,17 @@ def detect_hotchocolate_routes(
             own = [fn for fn in own
                    if not _attr_names(fn.decorators) & set(ENTITY_RESOLVER_ATTRS)]
         routes.extend(_class_routes(
-            cls, kind, own, record, nodes, source, heritage, root, anchors,
+            cls, kind, own, record, nodes, source, heritage, root,
             generated_loaders, hc_root_types, index))
         routes.extend(entity_resolver_statements(
-            cls, record, root, on_root=on_root, generated_loaders=generated_loaders))
+            cls, record, root, nodes, on_root=on_root, generated_loaders=generated_loaders))
     return routes
 
 
 def _class_routes(
     cls: Class, kind: str | None, own: list[Function], record: FileRecord,
     nodes: dict[tuple[str, int], Node], source: bytes, heritage: dict[str, object],
-    root: Node, anchors: dict[tuple[str, int], Anchor],
+    root: Node,
     generated_loaders: dict[str, str | None], hc_root_types: dict[str, str] | None,
     index: Any = None,
 ) -> list[Emit]:
@@ -700,11 +676,11 @@ def _class_routes(
         attr = next((name for name, k in ROOT_ATTRS.items() if k == kind), kind.capitalize() + "Type")
         return [s for fn in own
                 for s in _operation_records(
-                    cls, fn, kind, f"[{attr}] {fn.name}", root, anchors, generated_loaders)]
+                    cls, fn, kind, f"[{attr}] {fn.name}", root, nodes, generated_loaders)]
     target = extend_target(cls)
     if target is not None and is_object_type(cls):
         extension = _extension_routes(
-            cls, target, own, record, heritage, record.path, root, anchors,
+            cls, target, own, record, heritage, record.path, root, nodes,
             generated_loaders, hc_root_types=hc_root_types, attr=OBJECT_TYPE_ATTR) if own else []
         return extension + _descriptor_routes(
             cls, record, nodes, source, heritage, root, hc_root_types, generated_loaders, index)
@@ -712,7 +688,7 @@ def _class_routes(
         if not own:
             return []
         return _extension_routes(
-            cls, target, own, record, heritage, record.path, root, anchors,
+            cls, target, own, record, heritage, record.path, root, nodes,
             generated_loaders, hc_root_types=hc_root_types)
     return _descriptor_routes(
         cls, record, nodes, source, heritage, root, hc_root_types, generated_loaders, index)

@@ -45,7 +45,7 @@ def test_routes_link_to_the_handler_function(tmp_path) -> None:
     assert sorted(r.method for r in routes) == ["GET", "PUT"]
     assert {r.parentId for r in routes} == {"app.py#user@5"}
     assert {(r.nodeType, r.framework, r.endpoint) for r in routes} == {
-        ("synthetic", "flask", "/users/<int:id>")}
+        ("decorator", "flask", "/users/<int:id>")}
     assert rec.framework == "flask"
 
 

@@ -6,7 +6,13 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
+from ..statements_common import (
+    classify_statement,
+    current_http_client_ids,
+    render_concat,
+    resolve_endpoint,
+    url_first,
+)
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -102,6 +108,10 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     else:
         method = node_text(fn, source)
         callee = method
+    if "." in callee and callee.rsplit(".", 1)[0] in current_http_client_ids():
+        # a local holding a client built with its URL (`client = new OrderApiClient(uri)`): the
+        # call's arguments are its body, as on `new OrderApiClient(uri).put(body)`
+        return callee, method, None
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
     url_arg = _named_url_argument(arg_nodes, source)

@@ -68,7 +68,7 @@ def test_record_trigger_is_a_consumer_of_its_sobject(analyze_files) -> None:
     src = "trigger OrderTrigger on Order__c (before insert, after update) {\n    System.debug('x');\n}\n"
     [r] = _eps(analyze_files({path: src}), path)
     assert (r.semanticType, r.framework, r.method, r.endpoint, r.handler, r.handlerLine, r.nodeType) == (
-        "eventbus_consumer", "apex-trigger", "EVENT", "Order__c", "OrderTrigger", 1, "synthetic")
+        "eventbus_consumer", "apex-trigger", "EVENT", "Order__c", "OrderTrigger", 1, "trigger_declaration")
     assert r.text == "trigger OrderTrigger on Order__c (before insert, after update)"
 
 

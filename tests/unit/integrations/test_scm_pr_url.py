@@ -80,13 +80,13 @@ def test_repo_web_and_api_url_helpers() -> None:
 
 
 def test_bitbucket_server_derives_its_api_base_from_the_context_path() -> None:
-    settings = _s(scm_instances={"stash.payroll.co.jp": "bitbucket_server"})
+    settings = _s(scm_instances={"stash.example.com": "bitbucket_server"})
     out = parse_pr_url(
-        "https://stash.payroll.co.jp/stash/projects/P3/repos/cog/pull-requests/42/overview",
+        "https://stash.example.com/stash/projects/PROJ/repos/cog/pull-requests/42/overview",
         settings,
     )
-    api = "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
-    web = "https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+    api = "https://stash.example.com/stash/rest/api/1.0/projects/PROJ/repos/cog"
+    web = "https://stash.example.com/stash/projects/PROJ/repos/cog"
     assert out == PrUrlInfo("bitbucket_server", web, "42", PrLinks(
         web, f"{api}/pull-requests/42/diff", f"{api}/pull-requests/42/comments",
         f"{api}/pull-requests/42/decline",
@@ -95,29 +95,29 @@ def test_bitbucket_server_derives_its_api_base_from_the_context_path() -> None:
 
 def test_bitbucket_server_mapped_base_url_wins_over_the_derived_one() -> None:
     settings = _s(
-        scm_instances={"stash.payroll.co.jp": "bitbucket_server"},
+        scm_instances={"stash.example.com": "bitbucket_server"},
         scm_instance_base_url_mapping={
-            "stash.payroll.co.jp": "https://stash.payroll.co.jp/proxied/rest/api/1.0"
+            "stash.example.com": "https://stash.example.com/proxied/rest/api/1.0"
         },
     )
-    ref = RepoRef("bitbucket_server", "P3", "cog",
-                  host="stash.payroll.co.jp", context_path="/stash")
+    ref = RepoRef("bitbucket_server", "PROJ", "cog",
+                  host="stash.example.com", context_path="/stash")
     assert repo_api_url(ref, settings) == (
-        "https://stash.payroll.co.jp/proxied/rest/api/1.0/projects/P3/repos/cog"
+        "https://stash.example.com/proxied/rest/api/1.0/projects/PROJ/repos/cog"
     )
     # The web URL still follows the instance's own context path.
-    assert repo_web_url(ref) == "https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+    assert repo_web_url(ref) == "https://stash.example.com/stash/projects/PROJ/repos/cog"
 
 
 def test_bitbucket_server_provider_override_works_without_scm_instances() -> None:
     """`gitProvider` is what makes an unregistered Data Center host addressable."""
-    url = ("https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+    url = ("https://stash.example.com/stash/projects/PROJ/repos/cog"
            "/pull-requests/42/overview")
     assert parse_pr_url(url, _s()) is None
     out = parse_pr_url(url, _s(), provider="bitbucket_server")
     assert out is not None and out.source == "bitbucket_server"
     assert out.links.diff == (
-        "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
+        "https://stash.example.com/stash/rest/api/1.0/projects/PROJ/repos/cog"
         "/pull-requests/42/diff"
     )
 

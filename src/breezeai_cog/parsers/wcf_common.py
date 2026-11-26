@@ -31,6 +31,7 @@ from tree_sitter import Node
 from ..schemas import Class, Decorator, FileRecord, Function
 from .dotnet_common import named_arg, response_dto, simple_attr_name
 from .dotnet_hosts import HostFiles
+from .dotnet_nodes import method_nodes, named_attribute
 from .emits import Emit
 
 SERVICE_ATTR = "ServiceContract"
@@ -110,11 +111,17 @@ def _service_name(decorators: list[Decorator], class_name: str) -> str:
     return class_name
 
 
-def _on_operation(fn: Function, text: str) -> dict[str, Any]:
-    """Where an operation's record sits: read off the record, so the file's root stands in for
-    a node and the span is the operation method's."""
-    return dict(parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
-                end_line=fn.endLine)
+def _operation(root: Node, methods: dict[int, Node], fn: Function, attr: str,
+               fields: dict[str, Any], text: str) -> Emit:
+    """An operation's record, at the attribute it was read from (``[OperationContract]``,
+    ``[WebMethod]``: ``nodeType: attribute``). Only when the method is not in ``root`` (a VB
+    type nested in another, parsed apart) does the file's root stand in, as ``synthetic`` with
+    the operation method's span and ``text``."""
+    node = named_attribute(methods.get(fn.startLine), fn, attr)
+    if node is None:
+        return Emit(root, fields, parent=fn.id, node_type="synthetic", text=text,
+                    line=fn.startLine, col=0, end_line=fn.endLine)
+    return Emit(node, fields, parent=fn.id)
 
 
 def detect_wcf_services(
@@ -139,6 +146,7 @@ def detect_wcf_services(
     known = host_files or HostFiles()
     web_hosts = {cid: known.web(host) for cid, host in hosts.items()}
 
+    methods = method_nodes(root)
     routes: list[Emit] = []
     for fn in record.functions:
         svc = services.get(fn.parentId)
@@ -164,20 +172,18 @@ def detect_wcf_services(
         impl = lookups.implementer(iface, fn) if iface else None
         if impl is not None:
             handler, handler_line, handler_path = impl
-        routes.append(
-            Emit(root, dict(
-                semanticType="route",
-                method=method,
-                endpoint=endpoint,
-                framework="wcf",
-                handler=handler,
-                handlerLine=handler_line,
-                handlerPath=handler_path,
-                routeKind=route_kind,
-                isRegex=False,
-                responseDTO=response_dto(fn.returnType),
-            ), **_on_operation(fn, f"[{OP_ATTR}] {svc}.{fn.name}"))
-        )
+        routes.append(_operation(root, methods, fn, OP_ATTR, dict(
+            semanticType="route",
+            method=method,
+            endpoint=endpoint,
+            framework="wcf",
+            handler=handler,
+            handlerLine=handler_line,
+            handlerPath=handler_path,
+            routeKind=route_kind,
+            isRegex=False,
+            responseDTO=response_dto(fn.returnType),
+        ), f"[{OP_ATTR}] {svc}.{fn.name}"))
     return routes
 
 
@@ -213,6 +219,7 @@ def detect_asmx_services(
     repo-relative, as on the host record) when the ``.asmx`` file is found
     (:func:`asmx_host`); otherwise empty — a service or class name is not an address."""
     cls_by_id = {c.id: c for c in record.classes}
+    methods = method_nodes(root)
     routes: list[Emit] = []
     for fn in record.functions:
         if not has_attr(fn.decorators, _WEB_METHOD_ATTR):
@@ -223,17 +230,15 @@ def detect_asmx_services(
         svc = (_name_arg(cls.decorators, _WEB_SERVICE_ATTR) or cls.name) if cls is not None else "WebService"
         host = asmx_host(fn.path or record.path, hosts or HostFiles(), cls.name) \
             if cls is not None else None
-        routes.append(
-            Emit(root, dict(
-                semanticType="route",
-                method="RPC",
-                endpoint=f"{host}/{fn.name}" if host is not None else None,
-                framework="asmx",
-                handler=fn.name,
-                handlerLine=fn.startLine,
-                routeKind="rpc",
-                isRegex=False,
-                responseDTO=response_dto(fn.returnType),
-            ), **_on_operation(fn, f"[{_WEB_METHOD_ATTR}] {svc}.{fn.name}"))
-        )
+        routes.append(_operation(root, methods, fn, _WEB_METHOD_ATTR, dict(
+            semanticType="route",
+            method="RPC",
+            endpoint=f"{host}/{fn.name}" if host is not None else None,
+            framework="asmx",
+            handler=fn.name,
+            handlerLine=fn.startLine,
+            routeKind="rpc",
+            isRegex=False,
+            responseDTO=response_dto(fn.returnType),
+        ), f"[{_WEB_METHOD_ATTR}] {svc}.{fn.name}"))
     return routes

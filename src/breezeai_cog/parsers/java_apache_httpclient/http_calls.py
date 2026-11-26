@@ -74,14 +74,29 @@ def _walk(node: Node) -> Iterator[Node]:
         stack.extend(reversed(current.named_children))
 
 
-def _detect(dc: DetectContext) -> Detection | None:
-    source = dc.source
-    imported = _imported(dc.record.externalImports)
-    found: list[Emit] = []
-    for node in _walk(dc.root):
+def requests(root: Node, source: bytes, imports: list[str]) -> Iterator[tuple[Node, str, Node | None]]:
+    """Each ``new HttpX(…)`` of Apache's request classes under ``root``: (the creation, its
+    verb, its URI argument or None). ``imports``: the file's imports as written (``a.b.C``,
+    ``a.b.*``). One matcher for capture and the HTTP-helper index (``java_http_helpers.py``)."""
+    imported = _imported(imports)
+    for node in _walk(root):
         verb = _verb(node, source, imported)
         if verb is None:
             continue
+        args = node.child_by_field_name("arguments")
+        first = args.named_children[0] if args is not None and args.named_children else None
+        yield node, verb, first
+
+
+def _detect(dc: DetectContext) -> Detection | None:
+    from ..java_http_helpers import defining_requests  # lazy: it imports this module
+
+    source = dc.source
+    defining = defining_requests(dc.root, source, dc.path, dc.ctx.resolution_index)
+    found: list[Emit] = []
+    for node, verb, _uri in requests(dc.root, source, dc.record.externalImports):
+        if (node.start_byte, node.end_byte) in defining:
+            continue  # inside an HTTP helper, on its own URL parameter: its callers make it
         found.append(Emit(
             node, {"semanticType": "api_call", "method": verb},
             fill={"endpoint": _endpoint(node, source)}, enrich="unclassified",

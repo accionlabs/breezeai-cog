@@ -386,7 +386,7 @@ def test_parse_pr_url_requires_pr_url() -> None:
 
 # --- gitProvider override (Bitbucket Data Center only) ------------------------------
 
-DC_REPO = "https://stash.payroll.co.jp/stash/scm/p3/zaike-non-unity-kit-create.git"
+DC_REPO = "https://stash.example.com/stash/scm/proj/order-batch-create.git"
 
 
 def test_bitbucket_server_is_addressable_without_scm_instances() -> None:
@@ -401,8 +401,8 @@ def test_bitbucket_server_is_addressable_without_scm_instances() -> None:
     assert r.status_code == 200
     ref = seen[0][0]
     assert ref == RepoRef(
-        "bitbucket_server", "p3", "zaike-non-unity-kit-create",
-        host="stash.payroll.co.jp", context_path="/stash",
+        "bitbucket_server", "proj", "order-batch-create",
+        host="stash.example.com", context_path="/stash",
     )
 
 
@@ -437,7 +437,7 @@ def test_bitbucket_server_slug_on_a_cloud_url_is_a_400_not_a_silent_fallback() -
 
 def test_parse_pr_url_honours_the_bitbucket_server_override() -> None:
     r = _app(FakeClient()).post("/api/git/parse-pr-url", json={
-        "prUrl": ("https://stash.payroll.co.jp/stash/projects/P3/repos/cog"
+        "prUrl": ("https://stash.example.com/stash/projects/PROJ/repos/cog"
                   "/pull-requests/42/overview"),
         "gitProvider": "bitbucket_server",
     })
@@ -445,6 +445,6 @@ def test_parse_pr_url_honours_the_bitbucket_server_override() -> None:
     body = r.json()
     assert body["source"] == "bitbucket_server" and body["prId"] == "42"
     assert body["prLinks"]["comment"] == (
-        "https://stash.payroll.co.jp/stash/rest/api/1.0/projects/P3/repos/cog"
+        "https://stash.example.com/stash/rest/api/1.0/projects/PROJ/repos/cog"
         "/pull-requests/42/comments"
     )

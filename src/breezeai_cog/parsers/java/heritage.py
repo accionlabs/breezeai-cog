@@ -43,6 +43,8 @@ class HeritageFrag:
     fields: tuple[tuple[str, str, tuple[str, ...] | None], ...] = ()
     #: The declaration's tree-sitter type (``class_declaration``, ``interface_declaration`` …).
     kind: str = ""
+    #: Each type declared directly in the class body: its simple name and declaration kind.
+    member_types: tuple[tuple[str, str], ...] = ()
 
 
 def file_imports(root: Node, source: bytes) -> tuple[dict[str, str], list[str]]:
@@ -171,8 +173,13 @@ def collect_heritage(root: Node, source: bytes, package: str) -> list[HeritageFr
             returns[name] = ret if name not in returns or returns[name] == ret else None
         fqcn = f"{package}.{qualified}" if package else qualified
         fields = _field_types(body, source, candidates_of) if node.type == "class_declaration" else ()
+        members = tuple(
+            (node_text(nm, source), m.type)
+            for m in (class_members(body) if body else ())
+            if m.type in _CLASS_DECLS and (nm := m.child_by_field_name("name")) is not None
+        )
         out.append(HeritageFrag(fqcn, base, candidates, local, tuple(names),
-                                tuple(returns.items()), fields, node.type))
+                                tuple(returns.items()), fields, node.type, members))
     return out
 
 
@@ -222,7 +229,9 @@ def build_heritage(
                                  methods={m: rel for m in frag.methods},
                                  returns=dict(frag.returns),
                                  fields={name: _field_class(written, cands, fqcn_index)
-                                         for name, written, cands in frag.fields})
+                                         for name, written, cands in frag.fields},
+                                 member_types={name: (kind, rel)
+                                               for name, kind in frag.member_types})
         # The same simple name declared twice in the repo → ambiguous (None).
         record_distinct(out, frag.fqcn.rsplit(".", 1)[-1], heritage, same=lambda a, b: False)
     return out

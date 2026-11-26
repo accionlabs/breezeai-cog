@@ -117,7 +117,7 @@ def _calls(
     if body is None:
         return []
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def visit(node: Node) -> None:
         # Descend into inline lambdas/anonymous methods — their calls belong to the
@@ -130,9 +130,10 @@ def _calls(
                 func = child.child_by_field_name("function")
                 if func is not None:
                     name, receiver = _callee(func, source)
-                    if name and name not in seen:
-                        seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+                    path = resolve(name, receiver, owner) if name else None
+                    if name and (name, path) not in seen:
+                        seen.add((name, path))
+                        calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)
@@ -201,6 +202,27 @@ def type_map(root: Node, source: bytes) -> dict[str, str]:
     return types
 
 
+def merged_calls(groups: list[list[Call]]) -> list[Call]:
+    """Calls of several parts of one owner, one entry per name and target file, in order;
+    ``nameof(…)`` left out (a compile-time name, not a call)."""
+    out: list[Call] = []
+    seen: set[tuple[str, str | None]] = set()
+    for calls in groups:
+        for c in calls:
+            if c.name != "nameof" and (c.name, c.path) not in seen:
+                seen.add((c.name, c.path))
+                out.append(c)
+    return out
+
+
+def _initializer_calls(ctor: Node, source: bytes, resolve: CallResolver,
+                       class_name: str | None) -> list[Call]:
+    """The calls in a constructor's ``: base(…)`` / ``: this(…)`` arguments: they run as part
+    of the constructor, before its body."""
+    init = next((c for c in ctor.named_children if c.type == "constructor_initializer"), None)
+    return merged_calls([_calls(init, source, resolve, class_name)]) if init is not None else []
+
+
 def build_method(
     node: Node,
     source: bytes,
@@ -247,7 +269,10 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name, barriers),
+        calls=_initializer_calls(node, source, resolve, class_name)
+        + _calls(body, source, resolve, class_name, barriers)
+        if node.type == "constructor_declaration"
+        else _calls(body, source, resolve, class_name, barriers),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

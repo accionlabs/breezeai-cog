@@ -498,18 +498,18 @@ def test_analyze_diff_resolves_a_bitbucket_server_url_via_git_provider() -> None
     `acquire_diff`. Honouring `gitProvider` in only one of the two rejected the request
     with a 400 before acquisition ever ran."""
     body = {
-        "repoUrl": "https://stash.payroll.co.jp/stash/scm/p3/pippen-navigate-for-webkit.git",
+        "repoUrl": "https://stash.example.com/stash/scm/proj/web-portal-app.git",
         "gitProvider": "bitbucket_server",
     }
     ref = _REAL_RESOLVE(body, {})
     assert ref is not None
     assert (ref.provider, ref.owner, ref.repo, ref.context_path) == (
-        "bitbucket_server", "p3", "pippen-navigate-for-webkit", "/stash",
+        "bitbucket_server", "proj", "web-portal-app", "/stash",
     )
 
 
 def test_analyze_diff_rejects_a_bitbucket_server_url_without_the_slug() -> None:
-    body = {"repoUrl": "https://stash.payroll.co.jp/stash/scm/p3/kit.git"}
+    body = {"repoUrl": "https://stash.example.com/stash/scm/proj/kit.git"}
     assert _REAL_RESOLVE(body, {}) is None
 
 

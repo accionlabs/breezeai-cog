@@ -1,6 +1,6 @@
 """Vert.x-web middleware in a route's ``guards``: path-less registrations made before it on the
-same router and method, and Vert.x library handlers chained ahead of its own handler. Each
-registration keeps its own route record — the app's own handlers on one path are not guards."""
+same router and method, and Vert.x library handlers chained ahead of its own handler. The app's
+own handlers on one path are not guards but steps (``handlerChain``, test_vertx_handler_chains)."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _summary(stmts):
     return [(r.startLine, r.method, r.endpoint, r.handler, r.guards) for r in _routes(stmts)]
 
 
-def test_each_registration_keeps_its_own_record(analyze_files) -> None:
+def test_registrations_of_one_path_are_one_record_with_its_chain(analyze_files) -> None:
     body = """    Router router = Router.router(vertx);
     router.route().handler(LoggerHandler.create());
     router.post().handler(BodyHandler.create());
@@ -61,13 +61,16 @@ def test_each_registration_keeps_its_own_record(analyze_files) -> None:
     router.post("/claim").handler(SaveHandler.create(null));
     router.post("/claim").failureHandler(this::c);"""
     st = analyze_files(_main(body, "SessionHandler", "SaveHandler"))
-    routes = _routes(st)
-    guards = ["LoggerHandler", "BodyHandler"]
-    assert [(r.startLine, r.handlerPath, r.guards) for r in routes] == [
-        (11, "src/main/java/a/SessionHandler.java", guards),
-        (12, "src/main/java/a/SaveHandler.java", guards),
+    [route] = _routes(st)
+    # the path-less middleware stays in guards; the record leads to the first step
+    assert (route.startLine, route.handlerPath, route.guards) == (
+        11, "src/main/java/a/SessionHandler.java", ["LoggerHandler", "BodyHandler"])
+    assert [(s.name, s.handlerPath, s.phase) for s in route.handlerChain] == [
+        ("SessionHandler", "src/main/java/a/SessionHandler.java", None),
+        ("SaveHandler", "src/main/java/a/SaveHandler.java", None),
+        ("c", None, "failure"),
     ]
-    assert all(r.endLine == r.startLine for r in routes)  # no record spans another
+    assert route.endLine == route.startLine  # the record stays at its first registration
 
 
 def test_route_middleware_reaches_every_method_registered_after_it(analyze_files) -> None:
@@ -107,10 +110,12 @@ def test_a_library_handler_chained_ahead_is_a_guard(analyze_files) -> None:
 
 
 def test_an_app_handler_chained_ahead_is_not_a_guard(analyze_files) -> None:
-    # a step of the endpoint, not middleware: no existing field holds it
+    # a step of the endpoint, not middleware: the chain holds every step, the record the first
     body = """    Router router = Router.router(vertx);
     router.post("/x").handler(this::a).handler(SessionHandler.create(null)).handler(this::b);"""
-    assert _summary(analyze_files(_main(body, "SessionHandler"))) == [(9, "POST", "/x", "b", None)]
+    st = analyze_files(_main(body, "SessionHandler"))
+    assert _summary(st) == [(9, "POST", "/x", "a", None)]
+    assert [s.name for s in _routes(st)[0].handlerChain] == ["a", "SessionHandler", "b"]
 
 
 def test_order_or_last_on_the_route_drops_the_pathless_guards(analyze_files) -> None:
@@ -210,7 +215,10 @@ import io.vertx.ext.web.handler.*;
     body = """    Router router = Router.router(vertx);
     router.post("/x").handler(SessionHandler.create(null)).handler(this::a);"""
     files = _main(body, "SessionHandler", imports=imports)
-    assert _summary(analyze_files(files)) == [(8, "POST", "/x", "a", None)]
+    # a.SessionHandler is the app's: the first step, whose `handle` the record leads to
+    st = analyze_files(files)
+    assert _summary(st) == [(8, "POST", "/x", "handle", None)]
+    assert [s.name for s in _routes(st)[0].handlerChain] == ["SessionHandler", "a"]
 
 
 def test_an_app_class_imported_by_name_is_not_library(analyze_files) -> None:
@@ -222,7 +230,11 @@ import a.web.BodyHandler;
 """
     body = """    Router router = Router.router(vertx);
     router.post("/x").handler(BodyHandler.create()).handler(this::a);"""
-    assert _summary(analyze_files(_main(body, imports=imports))) == [(9, "POST", "/x", "a", None)]
+    # a.web.BodyHandler is the app's but not in the repository: a first step known by name only
+    st = analyze_files(_main(body, imports=imports))
+    assert _summary(st) == [(9, "POST", "/x", None, None)]
+    assert [(s.name, s.handler) for s in _routes(st)[0].handlerChain] == [
+        ("BodyHandler", None), ("a", "a")]
 
 
 def test_vertx2_route_matcher_is_unchanged(analyze_files) -> None:

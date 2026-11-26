@@ -50,12 +50,12 @@ _CASES = [
     # ── data (record arrays) ────────────────────────────────────────────────────
     pytest.param("n8n-workflow.json", {"nodes": [{"id": "1"}], "connections": {}}, CAPTURE,
                  id="data:n8n-nodes-array"),
-    pytest.param("json/MAAP(X).json", {"values": [{"MAAPAK1": "MAAP"}]}, CAPTURE,
-                 id="data:maap-values-array"),
+    pytest.param("json/ITEM(X).json", {"values": [{"ITEMAK1": "ITEM"}]}, CAPTURE,
+                 id="data:item-values-array"),
     pytest.param("records.json", [{"id": 1}, {"id": 2}], CAPTURE, id="data:root-record-array"),
 
     # ── map-shaped data: previously reduced to keys (values lost), now captured ──
-    pytest.param("p3-keyed-map.json", {"19000101": {"MAAPP01": "x"}, "19000102": {"MAAPP01": "y"}},
+    pytest.param("date-keyed-map.json", {"19000101": {"ITEM01": "x"}, "19000102": {"ITEM01": "y"}},
                  CAPTURE, id="data:keyed-map-of-objects"),
     pytest.param("cms-template-mappings.json", {"00 01 03": "t1", "00 01 05": "t1"}, CAPTURE,
                  id="data:flat-scalar-map"),

@@ -70,7 +70,7 @@ def _bitbucket_server(origin: "_Origin", path: str) -> RepoRef | None:
 
     ``projects``/``users`` is tried **before** ``scm`` because a browsed file path may
     itself contain a directory called ``scm``
-    (``/projects/P3/repos/app/browse/scm/dir/f.py``); matching ``scm`` first would read
+    (``/projects/PROJ/repos/app/browse/scm/dir/f.py``); matching ``scm`` first would read
     that directory as the project key.
 
     Data Center serves a personal repository under both ``/users/{name}`` and

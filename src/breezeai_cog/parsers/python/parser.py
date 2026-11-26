@@ -15,8 +15,9 @@ from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
+from .call_targets import checked_resolver, follow_bindings
 from .classes import build_class, iter_definitions
-from .functions import build_function, defined_names, extract_decorators
+from .functions import build_function, defined_names, extract_decorators, scope_calls
 from .imports import extract_imports
 from .index import PythonIndex, build_python_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -52,7 +53,14 @@ class PythonParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, exports, bindings = extract_imports(root, source, path, ctx.repo_root)
-        resolve = make_resolver(bindings, defined_names(root, source), path)  # calls[].path
+        # calls[].path: an import followed to the file that declares it, and a path kept only
+        # when that file declares what is called (call_targets.py)
+        called, modules = follow_bindings(bindings, root, source, path, Path(ctx.repo_root),
+                                          ctx.resolution_index)
+        resolve = checked_resolver(
+            make_resolver(called, defined_names(root, source), path),
+            path=path, bindings=called, modules=modules, index=ctx.resolution_index,
+        )
 
         functions: list[Function] = []
         classes = []
@@ -104,6 +112,9 @@ class PythonParser(BaseParser):
             functions=functions,
             classes=classes,
             statements=statements,  # flat: file + class + function-scoped, linked by parentId
+            # what runs when the module loads, outside its functions and classes: DAG wiring,
+            # `if __name__ == "__main__": main()`, module-level lambdas
+            calls=scope_calls(root, source, resolve) or None,
         )
         # Additive detectors (parsers/additive.py) — layered on top of the base extraction, before
         # any framework subclass adds its own (a Celery task co-exists with a FastAPI route).

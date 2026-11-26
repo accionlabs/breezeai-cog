@@ -194,7 +194,7 @@ def extract_params(
 
 def _calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
     calls: list[Call] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
 
     def visit(n: Node) -> None:
         # Descend into every scope, including inline lambdas — their calls belong to
@@ -210,9 +210,10 @@ def _calls(node: Node, source: bytes, resolve: CallResolver = noop_resolver) -> 
                     receiver = node_text(obj, source) if obj is not None else None
                 elif target is not None:
                     name = node_text(target, source)
-                if name and name not in seen:
-                    seen.add(name)
-                    calls.append(Call(name=name, path=resolve(name, receiver)))
+                path = resolve(name, receiver) if name else None
+                if name and (name, path) not in seen:
+                    seen.add((name, path))
+                    calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(node)

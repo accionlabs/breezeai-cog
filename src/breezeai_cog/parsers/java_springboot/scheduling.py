@@ -166,9 +166,8 @@ def detect_spring_scheduled(
                     framework="spring",
                     handler=fn.name,
                     handlerLine=fn.startLine,
-                ), parent=fn.id, node_type="synthetic",
-                    text=first_line(node_text(ann, source))[:200],
-                    line=fn.startLine, col=0, end_line=fn.endLine))
+                ), parent=fn.id,
+                    text=first_line(node_text(ann, source))[:200]))
     return out
 
 

@@ -197,15 +197,16 @@ def _methods(value: Node | None, source: bytes, default: list[str | None]) -> li
 
 def _route(node: Node, method: str | None, endpoint: str | None, handler: str | None,
            line: int | None, handler_path: str | None, guards: list[str], certain: bool,
-           parent: str | None = None, node_type: str | None = None) -> Emit:
+           parent: str | None = None, at_decorator: bool = False) -> Emit:
     """One route record. A call-based binding (``add_url_rule``) enriches the call's own
-    statement; a decorator route is appended (``synthetic``) under its function."""
+    statement; a decorator route is a new record at the decorator (``nodeType: decorator``),
+    under its function."""
     return Emit(node, dict(
         semanticType="route", method=method, endpoint=endpoint or None, framework=FRAMEWORK,
         handler=handler or None, handlerLine=line, handlerPath=handler_path,
         guards=list(dict.fromkeys(guards)) or None, authRequired=True if certain else None,
         routeKind="route",
-    ), parent=parent, node_type=node_type, enrich="never" if node_type else "own")
+    ), parent=parent, enrich="never" if at_decorator else "own")
 
 
 #: The address of a rule that Flask would refuse to register (no leading ``/``).
@@ -250,7 +251,7 @@ def _decorated(f: _File, decorated: Node, fdef: Node, class_name: str | None) ->
                  and (n := decorator_name(d, source)) is not None]
         methods = [verb.upper()] if verb != "route" else _methods(keyword(call, source, "methods"), source, ["GET"])
         out.extend(_route(dec, m, endpoint, name, line, None, [*inherited, *below], f.certain(below),
-                          f.parent(name, line, class_name), node_type="synthetic") for m in methods)
+                          f.parent(name, line, class_name), at_decorator=True) for m in methods)
     return out
 
 
@@ -312,21 +313,20 @@ def _add_url_rule(f: _File, call: Node) -> list[Emit]:
 
 
 def _resource_records(f: _File, node: Node, cls: tuple[str, ViewClass, str] | None, written: str,
-                      endpoints: list[str | None], guards: tuple[str, ...], synthetic: bool) -> list[Emit]:
+                      endpoints: list[str | None], guards: tuple[str, ...], at_decorator: bool) -> list[Emit]:
     """One record per URL and HTTP method of a resource class (a ``MethodView``): its verb
     methods; one record with no method, at the class, when it defines none here; one record
     named as written when the class is not in the repo."""
-    node_type = "synthetic" if synthetic else None
     out: list[Emit] = []
     for endpoint in endpoints:
         if cls is None:
             out.append(_route(node, None, endpoint, written.rsplit(".", 1)[-1], None, None, list(guards),
-                              False, node_type=node_type))
+                              False, at_decorator=at_decorator))
             continue
         name, view, file = cls
         verbs = view.verbs or {"": view.line}
         out.extend(_route(node, verb.upper() or None, endpoint, verb or name,
-                          *handler_location((file, line), f.path), list(guards), False, node_type=node_type)
+                          *handler_location((file, line), f.path), list(guards), False, at_decorator=at_decorator)
                    for verb, line in verbs.items())
     return out
 

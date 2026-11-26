@@ -20,6 +20,7 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..contract import HTTP_METHODS
 from ..emits import Emit
+from ..typescript_http_common import inline_handler
 from ..treesitter import node_text
 from ..typescript.imports import Consts, resolve_const_value
 from ..typescript.scopes import file_consts
@@ -61,7 +62,7 @@ def _handler(node: Node | None, source: bytes, lines: dict[str, int | None]
     if node is None:
         return None, None
     if node.type in _FUNCTIONS:
-        return None, node.start_point[0] + 1
+        return inline_handler(node, source)
     if node.type in ("identifier", "member_expression"):
         name = node_text(node, source)
         return name, lines.get(name)

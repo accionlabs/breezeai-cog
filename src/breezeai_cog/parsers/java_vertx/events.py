@@ -24,6 +24,7 @@ with its own argument folded, and the helper's own call keeps its record with no
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from tree_sitter import Node
@@ -33,10 +34,13 @@ from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
                           invocations, java_string, local_value, value_source)
-from .forwarders import forwarder_sites
+from .forwarders import defining_calls, forwarder_sites
 from .handler_factories import FactoryCalls
 from .legacy import http_client_calls, registration_tables
-from .route_guards import library_handlers, pathless_middleware, route_guards
+from .route_chains import Locator, Other, Registration, chain_emits
+from .route_guards import (alternatives, chained_handlers, chained_names, failure_args,
+                           library_handlers, pathless_calls, pathless_middleware, reordered,
+                           route_guards, scope_of)
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..handler_sites import handler_info, handler_location, locate_method, method_lines
@@ -59,7 +63,10 @@ from ..vertx_common import (
     failure_handler_only,
     join_path,
     render_address,
+    non_router_vars,
     route_template,
+    route_verb,
+    ANY_METHOD,
     router_vars,
     service_builder_vars,
     sub_router_bases,
@@ -68,6 +75,13 @@ from ..vertx_common import (
 
 
 _NOT_MOUNTED = object()
+
+
+def _is_regex(call: Node, source: bytes, semantic: str) -> bool | None:
+    """True for a route registered with a regex path (``getWithRegEx``), else None (not set)."""
+    name = call.child_by_field_name("name")
+    regex = semantic == "route" and name is not None and route_verb(node_text(name, source))[1]
+    return True if regex else None
 
 
 def _root_receiver(receiver: Node, source: bytes) -> str:
@@ -107,11 +121,12 @@ def _classify(
     consts: dict[str, str],
     service_vars: dict[str, str] | None = None,
     routers: frozenset[str] = frozenset(),
+    non_routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """→ (semanticType, method, endpoint, routeKind) or None."""
     method, first_str, first_arg, obj = _parts(call, source, consts)
     return classify_call(method, first_str, first_arg, obj, service_vars=service_vars,
-                         routers=routers)
+                         routers=routers, non_routers=non_routers)
 
 
 def _value_route(
@@ -165,6 +180,37 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
             found = pargs.named_children[0] if pargs is not None and pargs.named_children else None
         node = parent
     return found
+
+
+def _registration(
+    call: Node, source: bytes, consts: dict[str, str], semantic: str, method: str | None,
+    endpoint: str | None, recv: str, is_regex: bool | None, not_mounted: bool,
+) -> Registration | None:
+    """A route registration as route_chains.py compares it: its router, verb, form and path,
+    the handlers and failure handlers chained on it. None for anything but a route."""
+    if semantic != "route":
+        return None
+    name_node = call.child_by_field_name("name")
+    args = call.child_by_field_name("arguments")
+    verb, regex = route_verb(node_text(name_node, source) if name_node is not None else "")
+    if regex or is_regex or args is None or len(args.named_children) != 1 \
+            or "method" in chained_names(call, source):
+        # `route(HttpMethod.GET, p)`, `route(p).method(GET)`, a regex route, a 2.x RouteMatcher
+        # route taking its handler as an argument: never a step of a chain
+        form = "other"
+    else:
+        form = "route" if verb in ANY_METHOD else "verb"
+    path = None if regex or is_regex else (
+        endpoint if endpoint is not None else _parts(call, source, consts)[2])
+    first = args.named_children[0] if args is not None and args.named_children else None
+    return Registration(
+        call=call, slot=-1, router=recv, method=method, form=form, path=path,
+        written=" ".join(node_text(first, source).split()) if first is not None else None,
+        scope=scope_of(call), handlers=chained_handlers(call, source),
+        failures=failure_args(call, source), reordered=reordered(call, source),
+        alternatives=alternatives(call, source), chainable=not_mounted and bool(recv),
+        emit=None,
+    )
 
 
 def _chained(call: Node, source: bytes) -> list[str]:
@@ -440,15 +486,20 @@ def detect_vertx(
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
     routers = router_vars(source)
+    non_routers = non_router_vars(source)
     # Vert.x 2 idioms (legacy.py): registration tables, HttpClient calls.
     if b"org.vertx" in source:
         tables, replaced = registration_tables(calls, source, consts, index, path, built_by)
         suppress |= replaced
         found.extend(tables)
-        found.extend(http_client_calls(root, calls, source, record, consts))
+        from ..java_http_helpers import defining_requests  # lazy: it imports this package
+        defining = defining_requests(root, source, path, index) \
+            if b"org.vertx.java.core.http" in source else frozenset()
+        found.extend(http_client_calls(root, calls, source, record, consts, defining))
     # Calls to an address forwarder (forwarders.py), any Vert.x version.
     sites, handled = forwarder_sites(root, calls, creations, source, path, record, consts,
                                      index, suppress, built_by)
+    defining = defining_calls(root, source, index)
     found.extend(sites)
     # Middleware for the routes' `guards` (route_guards.py): path-less registrations, and the
     # Vert.x library handlers chained ahead of a route's own handler.
@@ -456,6 +507,18 @@ def detect_vertx(
     singles, wildcards, package = imports_and_package(root, source)
     is_library = library_handlers(singles, wildcards, package,
                                   {c.name for c in record.classes}, index)
+    # Route registrations and what else is registered on a router, for one record per chain of
+    # registrations of an endpoint (route_chains.py), made after the loop.
+    registrations: list[Registration] = []
+    others: list[Other] = []
+    if b"handler(" in source.lower():
+        others = [Other(c.start_byte, recv, "pathless", None if verb == "route" else verb.upper())
+                  for c, recv, verb in pathless_calls(calls, source, routers)]
+        others += [Other(c.start_byte, router_name(_root_receiver(obj, source)), "mount")
+                   for c in calls
+                   if (obj := c.child_by_field_name("object")) is not None
+                   and (n := c.child_by_field_name("name")) is not None
+                   and node_text(n, source) in ("mountSubRouter", "subRouter")]
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # a table loop's own registration
@@ -464,14 +527,21 @@ def detect_vertx(
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        info = _classify(call, source, consts, service_vars, routers) \
+        info = _classify(call, source, consts, service_vars, routers, non_routers) \
             or _value_route(call, source, consts, routers)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
-        if semantic == "route" and failure_handler_only(_chained(call, source)):
-            continue  # `router.get(p).failureHandler(h)`: error wiring, no request lands here
-        if semantic == "route" and endpoint is None:
+        if semantic in ("eventbus_send", "eventbus_publish", "eventbus_consumer") \
+                and (call.start_byte, call.end_byte) in defining:
+            # `send(address, …)` / `registerHandler(address, this)` inside a forwarder, on its
+            # own address: the definition — each call of the forwarder makes it, recorded there
+            continue
+        # `router.get(p).failureHandler(h)` alone: error wiring, no request lands here; a chain
+        # on that path lists `h` as its failure handler (route_chains.py).
+        failure_only = semantic == "route" and failure_handler_only(_chained(call, source))
+        is_regex = _is_regex(call, source, semantic)
+        if semantic == "route" and endpoint is None and not is_regex:  # `{3}` is a quantifier
             # A path with a part read at runtime (`pathPrefix + "/x"`): `${pathPrefix}/x`.
             endpoint = route_template(_parts(call, source, consts)[1])
         unknown_base = False
@@ -494,6 +564,13 @@ def detect_vertx(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(str(base), endpoint)
+        registration = _registration(call, source, consts, semantic, method, endpoint, recv,
+                                     is_regex, base is _NOT_MOUNTED and not unknown_base
+                                     and recv not in runtime_mounts)
+        if failure_only:
+            if registration is not None:
+                registrations.append(dataclasses.replace(registration, slot=-1))
+            continue
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
@@ -536,9 +613,12 @@ def detect_vertx(
             first_path = None
         guards = route_guards(call, recv, method, middleware, is_library, source) \
             if semantic == "route" else None
-        found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
-                                handler_line, unknown_base=unknown_base,
-                                handler_path=first_path, guards=guards))
+        emit = vertx_emit(call, semantic, method, endpoint, route_kind, handler, handler_line,
+                          unknown_base=unknown_base, handler_path=first_path, guards=guards,
+                          is_regex=is_regex)
+        if registration is not None:
+            registrations.append(dataclasses.replace(registration, slot=len(found), emit=emit))
+        found.append(emit)
         for extra in handlers[1:]:  # the others: their own records on the same span
             line, extra_path = site(extra)
             found.append(Emit(call, {
@@ -547,4 +627,13 @@ def detect_vertx(
                 "handlerLine": line, "handlerPath": extra_path,
             }))
 
+    if registrations:
+        locate = Locator(source, path, methods, index, built_by, is_library)
+        chained = chain_emits(
+            registrations, others, locate,
+            lambda reg: route_guards(reg.call, reg.router, reg.method, middleware,
+                                     lambda _name: False, source) or [],
+        )
+        found = [chained[i] if i in chained else e for i, e in enumerate(found)
+                 if chained.get(i, e) is not None]
     return found

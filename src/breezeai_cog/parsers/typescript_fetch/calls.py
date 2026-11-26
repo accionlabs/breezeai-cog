@@ -10,6 +10,8 @@ A local function, variable, parameter or other import named ``fetch`` leaves it 
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
@@ -65,14 +67,22 @@ def fetch_is_the_api(root: Node, source: bytes) -> bool:
     return clear
 
 
-def _detect(dc: DetectContext) -> Detection | None:
-    if not fetch_is_the_api(dc.root, dc.source):
+def fetch_evidence(root: Node, source: bytes) -> Callable[[Node], bool] | None:
+    """Whether a call of this file is the global ``fetch``; None when the file rebinds it."""
+    if not fetch_is_the_api(root, source):
         return None
 
     def evidenced(call: Node) -> bool:
         fn = call.child_by_field_name("function")
-        return fn is not None and node_text(fn, dc.source) in _CALLEES
+        return fn is not None and node_text(fn, source) in _CALLEES
 
+    return evidenced
+
+
+def _detect(dc: DetectContext) -> Detection | None:
+    evidenced = fetch_evidence(dc.root, dc.source)
+    if evidenced is None:
+        return None
     emits = label_http_client(dc.root, dc.source, dc.path, dc.record, "fetch", evidenced)
     return Detection(emits) if emits else None
 
