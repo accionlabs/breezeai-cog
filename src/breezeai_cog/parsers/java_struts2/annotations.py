@@ -31,7 +31,9 @@ The Convention plugin maps a class's ``execute`` at the Convention name when its
 declares the plugin, its package holds a locator (``action``, ``actions``, ``struts``,
 ``struts2``, or the configured ones), it ends in ``Action`` (or the configured suffix) or extends
 ``ActionSupport`` / implements ``Action``, it is not abstract, it has ``execute`` (declared, or
-inherited: it extends a class; or ``mapAllMatches``), and neither the class nor its ``execute``
+inherited: it extends a class, unless its parent chain is all repository classes without
+``execute`` ending at one that extends and implements nothing; or ``mapAllMatches``), and
+neither the class nor its ``execute``
 carries an ``@Action`` — an ``@Action`` on another method keeps the default mapping
 (``register.action`` → ``execute`` beside ``@Action("register-input") input()``).
 
@@ -62,6 +64,7 @@ from ...schemas import Function
 
 from ..additive import DetectContext, Detection, Detector, Gate, index_fact, register_detector
 from ..emits import Emit
+from ..index_common import ClassHeritage
 from ..treesitter import node_text
 from .common import (
     DEFAULT_LOCATORS, DEFAULT_SUFFIX, FRAMEWORK, LOCATORS_KEY, MAP_ALL_KEY, MAPPER_KEY,
@@ -69,8 +72,8 @@ from .common import (
     convention_namespace, namespace_key, suffix_of,
 )
 from .facts import (
-    CONVENTION, PACKAGE_NAMESPACES, SETTINGS, annotation_name, annotation_values,
-    module_settings, namespaces_of, string_value,
+    CONVENTION, EXTENDS, HERITAGE_CLAUSES, IMPLEMENTS, PACKAGE_NAMESPACES, SETTINGS,
+    annotation_name, annotation_values, module_settings, namespaces_of, string_value,
 )
 from .views import CONVENTION_RESULT_PATH, VIEW_EXTENSIONS, VIEW_TYPES, result_target, web_root
 
@@ -101,6 +104,10 @@ def _detect(dc: DetectContext) -> Detection | None:
     rules = _Rules(settings, index_fact(index, PACKAGE_NAMESPACES) or {}, package)
     rules.web = web_root(dc.ctx.repo_root, posixpath.dirname(dc.path))
     rules.repo_root = dc.ctx.repo_root
+    clauses = index_fact(index, HERITAGE_CLAUSES)
+    if clauses is not None:  # without it a class extending nothing cannot be told apart
+        rules.heritage = getattr(index, "class_heritage", None) or {}
+        rules.extending, rules.implementing = clauses[EXTENDS], clauses[IMPLEMENTS]
     functions = {(f.name, f.startLine): f for f in dc.record.functions}
 
     emits: list[Emit] = []
@@ -135,6 +142,9 @@ class _Rules:
         self.web: str | None = None
         self.repo_root = Path(".")
         self._listings: dict[str, list[str]] = {}
+        self.heritage: dict[str, ClassHeritage | None] = {}
+        self.extending: frozenset[str] = frozenset()
+        self.implementing: frozenset[str] = frozenset()
 
     def result_base(self, namespace: str | None) -> str | None:
         """The namespace a relative ``@Result`` location resolves under."""
@@ -165,6 +175,26 @@ class _Rules:
             except OSError:
                 self._listings[folder] = []
         return self._listings[folder]
+
+    def may_inherit_execute(self, class_name: str) -> bool:
+        """False only when ``execute()`` certainly cannot be inherited: the class's parent chain
+        is all repository classes, none of them declares ``execute``, and it ends at a class
+        that extends and implements nothing. A library or ambiguous parent, an interface on the
+        way (a ``default`` method), a cycle, or no index leave it possible."""
+        if not self.heritage:
+            return True
+        current, seen = class_name, set()
+        while current not in seen:
+            seen.add(current)
+            entry = self.heritage.get(current)
+            if entry is None or current in self.implementing:
+                return True
+            if current != class_name and "execute" in entry.methods:
+                return True
+            if entry.extends is None:  # no repository parent: none at all, or not one we know
+                return current in self.extending
+            current = entry.extends
+        return True
 
     def namespaces(self, declared: tuple[str, ...]) -> tuple[str | None, ...]:
         if declared:
@@ -207,8 +237,9 @@ def _class_routes(cls: Node, source: bytes, rules: _Rules,
         pairs = list(dict.fromkeys((ns, action) for ns in namespaces))
         if rules.rest:
             out.extend(_rest_routes(methods, source, pairs, functions, name_node))
-        elif (execute is not None or cls.child_by_field_name("superclass") is not None
-              or rules.map_all):
+        elif (execute is not None or rules.map_all
+              or (cls.child_by_field_name("superclass") is not None
+                  and rules.may_inherit_execute(class_name))):
             out.extend(Emit(name_node, _route(action_endpoint(ns, a, rules.suffix), "execute",
                                               _line(execute))) for ns, a in pairs)
             if not class_results:

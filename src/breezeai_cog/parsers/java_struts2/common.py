@@ -62,6 +62,8 @@ def xml_constants(source: bytes) -> dict[str, str]:
 
 
 def properties_constants(source: bytes) -> dict[str, str]:
+    # Java's `Properties` ends a line at LF, CRLF or a lone CR (classic Mac OS files).
+    source = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     return {
         m.group(1).decode("utf-8", "replace"): m.group(2).decode("utf-8", "replace")
         for m in _PROPERTY.finditer(source)
@@ -159,7 +161,7 @@ class Layered:
 
 def suffix_of(settings: dict[str, str | None]) -> str | None:
     """The action suffix a module's settings give: the default when the extension is not set,
-    None when its sources disagree or it is a placeholder."""
+    None when its sources disagree or the value cannot be read (:func:`readable_extension`)."""
     if EXTENSION_KEY not in settings:
         return extension(None)
     value = settings[EXTENSION_KEY]
@@ -173,7 +175,7 @@ def bare_of(settings: dict[str, str | None]) -> bool:
     if EXTENSION_KEY not in settings:
         return True
     value = settings[EXTENSION_KEY]
-    return value is not None and "${" not in value and any(
+    return value is not None and readable_extension(value) and any(
         not part.strip() for part in value.split(","))
 
 
@@ -231,12 +233,24 @@ class ActionTable:
         return "" if found == {""} else None
 
 
+#: One entry of ``struts.action.extension`` as it can end a URL (``action``, ``do``, ``json``).
+_EXTENSION_ENTRY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def readable_extension(value: str) -> bool:
+    """Whether every comma entry of a ``struts.action.extension`` value is empty or a plain
+    word. A placeholder (``${…}``), an unexpanded entity (``&x;``), a path (``a/../x``) or two
+    lines run together are not an extension anyone can request, so the value is unknown."""
+    return all(not part.strip() or _EXTENSION_ENTRY.fullmatch(part.strip())
+               for part in value.split(","))
+
+
 def extension(value: str | None) -> str | None:
     """The suffix (``.action``, ``""``) the ``struts.action.extension`` value gives, or None
-    when the value is a placeholder that cannot be read."""
+    when the value cannot be read (:func:`readable_extension`)."""
     if value is None:
         return "." + DEFAULT_EXTENSION
-    if "${" in value:
+    if not readable_extension(value):
         return None
     first = value.split(",", 1)[0].strip()
     return "." + first if first else ""
