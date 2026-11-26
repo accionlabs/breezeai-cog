@@ -35,6 +35,8 @@ from .functions import defined_names
 from .imports import _Roots, _dotted, _resolve
 
 FACT = "python.callables"
+#: Nodes a statement can sit in, besides ``*_statement`` / ``*_clause`` / ``*_definition``.
+_HOLDS_STATEMENTS = frozenset({"module", "block", "decorated_definition", "case_clause"})
 #: How many re-exports deep a name is followed.
 _DEPTH = 8
 
@@ -54,7 +56,10 @@ def from_imports(root: Node, source: bytes, rel: str, repo_root: Path
     while stack:
         node = stack.pop()
         if node.type != "import_from_statement":
-            stack.extend(node.named_children)
+            # an import is a statement: only statements and the blocks holding them are read,
+            # never an expression's subtree (the bulk of a file)
+            stack.extend(c for c in node.named_children if c.type in _HOLDS_STATEMENTS
+                         or c.type.endswith(("_statement", "_clause", "_definition")))
             continue
         module_node = node.child_by_field_name("module_name")
         if module_node is None:
@@ -145,7 +150,10 @@ def follow_bindings(bindings: Mapping[str, str], root: Node, source: bytes, rel:
     be followed keeps its file."""
     files: Mapping[str, FileFacts] = index_fact(index, FACT) or {}
     out = dict(bindings)
-    named, _ = from_imports(root, source, rel, repo_root) if files else ({}, ())
+    # this file's `from … import` bindings were read once, for the fact
+    facts = files.get(rel)
+    named = facts[1] if facts is not None else (
+        from_imports(root, source, rel, repo_root)[0] if files else {})
     modules = {local for local in bindings if local not in named}  # `import m` / `import a.b`
     for local, (src, orig) in named.items():
         found = declaring(files, src, orig)
