@@ -24,6 +24,7 @@ from ..treesitter import line_span, node_text
 from .functions import (
     STATEMENT_WORDS,
     build_method,
+    class_calls,
     class_fields,
     decl_name,
     extract_annotations,
@@ -166,6 +167,9 @@ def build_class(
         implements=implements,
         constructorParams=ctor_params,
         decorators=extract_annotations(node, source),
+        # The code outside its methods — field initializers, initializer blocks, enum constant
+        # arguments — runs when the class loads or an object is built: its calls are the class's.
+        calls=class_calls(body, source, resolve, name, fields) or None,
         startLine=start,
         endLine=end,
     )

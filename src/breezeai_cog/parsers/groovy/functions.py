@@ -20,7 +20,9 @@ from tree_sitter import Node
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, method_types, noop_resolver
+from ..detection.api_calls import names_http_client_type
 from ..index_common import record_distinct
+from ..statements_common import reset_http_client_ids, set_http_client_ids
 from ..treesitter import line_span, node_text
 from .statements import MEMBER_ACCESS, extract_statements
 
@@ -288,6 +290,90 @@ def method_scope(
     return method_types(fields, params, locals_)
 
 
+def _new_client(value: Node | None, source: bytes) -> bool:
+    """``new T(…)`` where ``T`` names an HTTP client."""
+    if value is None or value.type != "object_creation_expression":
+        return False
+    created = value.child_by_field_name("type")
+    return created is not None and names_http_client_type(node_text(created, source), "groovy")
+
+
+def client_locals(node: Node, source: bytes, fields: Mapping[str, str | None]) -> frozenset[str]:
+    """A method's locals assigned a new HTTP client and nothing else —
+    ``OrderApiClient client = new OrderApiClient(uri)``, ``def c = new RESTClient(base)``. A call on one
+    is that client's call, as ``new OrderApiClient(uri).put(v)`` is: ``client.put(v)``. A name
+    also declared another way in the method (a parameter, another local, a closure or loop
+    variable), assigned again, or a field of the class is left out: a call on it may mean something else.
+    Fields and parameters typed as a client are not followed: their type may be the
+    repository's own wrapper, whose methods take what is no URL."""
+    clients: set[str] = set()
+    others: set[str] = set(fields)
+    ps = node.child_by_field_name("parameters")
+    for p in ps.named_children if ps is not None else ():
+        others.update(name for name, _ in declarations(p, source))
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            if c.type == "local_variable_declaration" and not has_declaration_error(c):
+                pairs = [(d.child_by_field_name("name"), d.child_by_field_name("value"))
+                         for d in c.named_children if d.type == "variable_declarator"]
+                names = c.children_by_field_name("name")
+                if names:  # a typed local holds its name and value directly
+                    pairs.append((names[0], c.child_by_field_name("value") if len(names) == 1 else None))
+                for nm, value in pairs:
+                    if nm is not None:
+                        (clients if _new_client(value, source) else others).add(node_text(nm, source))
+            elif c.type == "assignment_expression":  # `client = other`: no longer that client
+                left = c.child_by_field_name("left")
+                if left is not None and left.type == "identifier":
+                    others.add(node_text(left, source))
+            else:
+                others.update(name for name, _ in declarations(c, source))
+            walk(c)
+
+    body = node.child_by_field_name("body")
+    if body is not None:
+        walk(body)
+    return frozenset(clients - others)
+
+
+#: Class-body members whose code runs when the class loads or an object is built.
+_INITIALIZATION = frozenset({"field_declaration", "static_initializer", "block", "enum_constant"})
+
+
+def class_calls(
+    body: Node | None, source: bytes, resolve: CallResolver, owner: str | None,
+    fields: Mapping[str, str | None],
+) -> list[Call]:
+    """The calls of a class's code outside any method — its field initializers (closures
+    stored in a field included), its ``static { … }`` and ``{ … }`` initializer blocks and its
+    enum constants' arguments — in the shape of ``Function.calls``: one per name and target
+    file, in order of first appearance. Methods, constructors and nested types have their own.
+    Variables resolve with the class's ``fields`` and the names declared inside those members."""
+    if body is None:
+        return []
+    members = [m for m in body.named_children
+               if m.type in _INITIALIZATION and not has_declaration_error(m)]
+    locals_: list[tuple[str, str | None]] = []
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            locals_.extend(declarations(c, source))
+            walk(c)
+
+    for member in members:
+        walk(member)
+    scope = method_types(fields, [], locals_)
+    calls: list[Call] = []
+    seen: set[tuple[str, str | None]] = set()
+    for member in members:
+        for call in _calls(member, source, resolve, scope, owner):
+            if (call.name, call.path) not in seen:
+                seen.add((call.name, call.path))
+                calls.append(call)
+    return calls
+
+
 def build_method(
     node: Node,
     source: bytes,
@@ -331,10 +417,14 @@ def build_method(
         endLine=end,
         calls=_calls(body, source, resolve, method_scope(node, source, fields or {}), class_name),
     )
-    statements = extract_statements(
-        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
-        descend_all=True,  # walk inline closures — attribute their statements here
-    )
+    token = set_http_client_ids(client_locals(node, source, fields or {}) if capture else frozenset())
+    try:
+        statements = extract_statements(
+            body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
+            descend_all=True,  # walk inline closures — attribute their statements here
+        )
+    finally:
+        reset_http_client_ids(token)
     return fn, statements
 
 
