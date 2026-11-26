@@ -137,3 +137,16 @@ class Scraper:
 '''})
     # `config.get("request")` reads a dict; `self.get(…)` is the helper
     assert got == [("scraper.py", 10, "GET", "https://site.example/{kind}")]
+
+
+def test_a_keyword_splat_may_carry_the_verb(api_calls) -> None:
+    got = api_calls({"util/__init__.py": "", "util/http.py": RETRY, "app.py": '''from util.http import make_request
+
+
+async def run(session, opts):
+    await make_request(session, "https://docs.acme.com/a", **opts)
+    await make_request(session, "https://docs.acme.com/b", method="POST", **opts)
+'''})
+    # no `method` written: the default is unsure, `**opts` may pass one
+    assert got == [("app.py", 5, None, "https://docs.acme.com/a"),
+                   ("app.py", 6, "POST", "https://docs.acme.com/b")]

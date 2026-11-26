@@ -195,3 +195,136 @@ public class Svc {{
 }}
 """})
     assert got == [("Svc.java", 8, "GET", "/orders")]
+
+
+APACHE = "import org.apache.http.client.methods.HttpPut;\nimport org.apache.http.client.methods.HttpGet;\n"
+CLIENT = """package com.acme;
+public interface Client {
+  Object put(String uri, Object body);
+  Object get(String uri);
+}
+"""
+
+
+def _impl(name: str, base: str = "implements Client") -> str:
+    return f"""package com.acme;
+{APACHE}public class {name} {base} {{
+  public Object put(String uri, Object body) {{ return new HttpPut("https://api.acme.com" + uri); }}
+  public Object get(String uri) {{ return new HttpGet("https://api.acme.com" + uri); }}
+}}
+"""
+
+
+CALLER = """package com.acme;
+public class Accessor {
+  protected Client client = new ClientImpl();
+  public void save() { this.client.put("/v1/orders", null); }
+  public void load() { Object o = client.get("/v1/orders/1"); }
+}
+"""
+
+
+def test_call_through_an_interface_whose_implementations_agree(api_calls) -> None:
+    # CommonBatch: `HttpClient client = new HttpClientImpl()`; every implementation of the
+    # interface method is a helper with the same request, so the call is that request
+    got = api_calls({
+        P + "Client.java": CLIENT,
+        P + "ClientImpl.java": _impl("ClientImpl"),
+        P + "Base.java": "package com.acme;\npublic abstract class Base implements Client {}\n",
+        P + "NoLogClientImpl.java": _impl("NoLogClientImpl", "extends Base"),
+        P + "Accessor.java": CALLER,
+    })
+    assert got == [
+        ("Accessor.java", 4, "PUT", "https://api.acme.com/v1/orders"),
+        ("Accessor.java", 5, "GET", "https://api.acme.com/v1/orders/1"),
+    ]
+
+
+def test_interface_with_an_implementation_that_is_no_helper(api_calls) -> None:
+    mock = """package com.acme;
+public class MockClient implements Client {
+  public Object put(String uri, Object body) { return null; }
+  public Object get(String uri) { return null; }
+}
+"""
+    got = api_calls({P + "Client.java": CLIENT, P + "ClientImpl.java": _impl("ClientImpl"),
+                     P + "MockClient.java": mock, P + "Accessor.java": CALLER})
+    assert got == []  # which one runs is not known: no request is claimed
+
+
+def test_interface_with_an_anonymous_implementation(api_calls) -> None:
+    other = """package com.acme;
+public class Other {
+  Client c = new Client() {
+    public Object put(String uri, Object body) { return null; }
+    public Object get(String uri) { return null; }
+  };
+}
+"""
+    got = api_calls({P + "Client.java": CLIENT, P + "ClientImpl.java": _impl("ClientImpl"),
+                     P + "Other.java": other, P + "Accessor.java": CALLER})
+    assert got == []
+
+
+def test_interface_implementation_overridden_in_a_subclass(api_calls) -> None:
+    sub = """package com.acme;
+public class CachedClient extends ClientImpl {
+  public Object get(String uri) { return null; }
+}
+"""
+    got = api_calls({P + "Client.java": CLIENT, P + "ClientImpl.java": _impl("ClientImpl"),
+                     P + "CachedClient.java": sub, P + "Accessor.java": CALLER})
+    # `get` may run CachedClient's: no record; `put` is ClientImpl's wherever it runs
+    assert got == [("Accessor.java", 4, "PUT", "https://api.acme.com/v1/orders")]
+
+
+def test_single_method_interface_is_not_followed(api_calls) -> None:
+    # a lambda may implement it where no class declaration shows it
+    fetch = "package com.acme;\npublic interface Fetch {\n  Object get(String uri);\n}\n"
+    impl = f"""package com.acme;
+{APACHE}public class HttpFetch implements Fetch {{
+  public Object get(String uri) {{ return new HttpGet("https://api.acme.com" + uri); }}
+}}
+"""
+    caller = """package com.acme;
+public class Reader {
+  private Fetch fetch = new HttpFetch();
+  public void load() { Object o = fetch.get("/v1/a"); }
+}
+"""
+    got = api_calls({P + "Fetch.java": fetch, P + "HttpFetch.java": impl,
+                     P + "Reader.java": caller})
+    assert got == []
+
+
+def _accessor(field_type: str, made: str) -> str:
+    return f"""package com.acme;
+import java.util.Map;
+public class AccessorBase {{
+  protected {field_type} client = new {made}();
+  private Map<String, Object> cache;
+  public Object put(String uri, Object values) {{ return this.client.put(uri, values); }}
+  public Object remember(String uri, Object values) {{ return this.cache.put(uri, values); }}
+  public void dataPut(String key) {{
+    Object o = null;
+    put("/v1/data/" + key, o);
+  }}
+  public void keep(String key) {{ remember("/v1/keep/" + key, null); }}
+}}
+"""
+
+
+def test_relay_through_a_field_of_a_helper_class(api_calls) -> None:
+    # CommonBatch: AccessorBase.put(uri, …) passes its parameter on to `this.client.put(uri, …)`;
+    # the request is made at each caller of AccessorBase.put
+    got = api_calls({P + "ClientImpl.java": _impl("ClientImpl", ""),
+                     P + "AccessorBase.java": _accessor("ClientImpl", "ClientImpl")})
+    assert got == [("AccessorBase.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]
+
+
+def test_relay_through_a_field_typed_as_an_interface(api_calls) -> None:
+    got = api_calls({P + "Client.java": CLIENT, P + "ClientImpl.java": _impl("ClientImpl"),
+                     P + "NoLogClientImpl.java": _impl("NoLogClientImpl"),
+                     P + "AccessorBase.java": _accessor("Client", "ClientImpl")})
+    # a Map field's `put` is no request: `keep` has no record
+    assert got == [("AccessorBase.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]

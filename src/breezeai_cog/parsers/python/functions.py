@@ -8,6 +8,7 @@ from ...emit import disambiguate, file_id, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
+from .receivers import local_types, maybe_typed
 from .statements import extract_statements
 
 
@@ -119,12 +120,17 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
 def _extract_calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
     barriers: frozenset[tuple[int, int]] = frozenset(), owner: str | None = None,
+    params: Node | None = None, typed_locals: bool = True,
 ) -> list[Call]:
-    """``owner``: the class the function is a method of (``self.m()`` / ``super().m()``)."""
+    """``owner``: the class the function is a method of (``self.m()`` / ``super().m()``).
+    ``params``: the function's parameters, for the classes its local names hold (read once, at
+    the first call on a plain name)."""
     if body is None:
         return []
     calls: list[Call] = []
     seen: set[tuple[str, str | None]] = set()  # one entry per name and target file
+    scope: dict[str, tuple[str, ...] | None] | None = None
+    candidates: frozenset[str] | None = None
 
     def visit(node: Node) -> None:
         # Descend into lambdas — their calls belong to the nearest named enclosing
@@ -139,7 +145,18 @@ def _extract_calls(
                     callee = node_text(fn, source)
                     name = callee.rsplit(".", 1)[-1]
                     receiver = callee.rsplit(".", 1)[0] if "." in callee else None
-                    path = resolve(name, receiver, owner) if name else None
+                    if typed_locals and receiver is not None and receiver.isidentifier() \
+                            and receiver not in ("self", "cls"):
+                        nonlocal scope, candidates
+                        if candidates is None:  # a cheap check first, the full walk if needed
+                            candidates = maybe_typed(params, body, source)
+                        if scope is None and receiver in candidates:
+                            scope = local_types(params, body, source)
+                        path = resolve(name, receiver, owner,
+                                       py_scope=scope if receiver in candidates else None) \
+                            if name else None
+                    else:
+                        path = resolve(name, receiver, owner) if name else None
                     if name and (name, path) not in seen:
                         seen.add((name, path))
                         calls.append(Call(name=name, path=path))
@@ -147,6 +164,30 @@ def _extract_calls(
 
     visit(body)
     return calls
+
+
+_DEFINITIONS = frozenset({"function_definition", "class_definition", "decorated_definition"})
+
+
+def scope_calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver
+                ) -> list[Call]:
+    """The calls of a module's or class body's own code: everything outside its ``def`` and
+    ``class`` definitions (their bodies are their own; decorators are no call the scope makes —
+    they are the definition's ``decorators``) — control-flow blocks (``if __name__ ==
+    "__main__":``, ``with DAG(…):``) and lambdas included. A module-level name may be rebound in
+    any function (``global``), so no local's class is read here."""
+    if body is None:
+        return []
+    spans: set[tuple[int, int]] = set()
+    stack = [body]
+    while stack:
+        n = stack.pop()
+        for c in n.named_children:
+            if c.type in _DEFINITIONS:
+                spans.add(_span(c))
+            else:
+                stack.append(c)
+    return _extract_calls(body, source, resolve, frozenset(spans), None, None, typed_locals=False)
 
 
 def build_function(
@@ -192,7 +233,8 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_extract_calls(body, source, resolve, barriers, class_name),
+        calls=_extract_calls(body, source, resolve, barriers, class_name,
+                             fnode.child_by_field_name("parameters")),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
