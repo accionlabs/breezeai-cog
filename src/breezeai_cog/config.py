@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     scm_token_gitlab: SecretStr | None = None
     scm_token_bitbucket: SecretStr | None = None
     scm_token_azure_devops: SecretStr | None = None
+    # Shared key (base64 of 32 bytes) that opens the git token the Breeze backend sends encrypted
+    # with `gitTokenAad`. Without it an encrypted token is refused; a raw `gitToken` still works.
+    credentials_encryption_key: SecretStr | None = None
     # Bitbucket Data Center has no scm_token_* fallback on purpose. Every host is a
     # different customer's instance, so a deployment-wide credential would be sent to
     # whichever host the request named — one customer's credential to another's server.

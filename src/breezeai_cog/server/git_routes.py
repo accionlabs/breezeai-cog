@@ -41,6 +41,7 @@ from ..integrations.scm.pr_url import parse_pr_url
 from .deps import ServerDeps
 from .errors import ApiError
 from .git import INVALID_REPO_URL_MESSAGE, provider_override, resolve_repo_ref
+from .git_token import request_git_token
 
 router = APIRouter(prefix="/api/git")
 
@@ -73,7 +74,7 @@ def _with_client(
     ref = _ref(settings, body)
     if deps.open_scm is None:  # pragma: no cover — default_deps always sets it
         raise ApiError("SCM client factory is not configured", 500)
-    token = body.get("gitToken") or None
+    token = request_git_token(body, settings)
     try:
         with deps.open_scm(ref, settings, token) as client:
             return fn(client, ref)
