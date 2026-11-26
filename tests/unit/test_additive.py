@@ -67,7 +67,8 @@ def test_inventory_in_run_order() -> None:
         "mdx": ["nextjs-mdx-pages"],
         "python": ["celery", "flask", "drf-routers", "django-channels", "python-fastmcp", "python-mcp",
                    "python-mcp-client", "fastapi-imported-routes", "python-http-helpers"],
-        "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
+
+        "php": ["wordpress-hooks", "wordpress-rest-routes", "laravel-events", "symfony-events", "laravel-data-access",
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
         "scala": ["akka-events", "spark"],
