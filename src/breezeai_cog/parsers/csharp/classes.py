@@ -8,12 +8,12 @@ from tree_sitter import Node
 from .preproc import members
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, ConstructorParam, Function, Statement
+from ...schemas import Call, Class, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from .attributes import extract_attributes
-from .functions import build_method, extract_params, flags
+from .functions import _calls, build_method, extract_params, flags, merged_calls
 from .statements import extract_statements
 
 _TYPE = {
@@ -94,6 +94,9 @@ def build_class(
                        if p.type is not None]
 
     body = node.child_by_field_name("body")
+    # what runs outside the methods: field / event initializers, property bodies and
+    # initializers (accessors, `=> …`, `{ get; } = …`) — the class's own calls
+    member_calls: list[list[Call]] = []
     if body is not None:
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
@@ -125,6 +128,8 @@ def build_class(
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
                 statements.extend(sub_statements)
+            else:  # a field, property, event, …: its code is the class's
+                member_calls.append(_calls(member, source, resolve, name))
 
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable); `enum_member_declaration` is otherwise captured nowhere (it is not a
@@ -152,5 +157,6 @@ def build_class(
         decorators=extract_attributes(node, source),
         startLine=start,
         endLine=end,
+        calls=merged_calls(member_calls) or None,
     )
     return [cls, *nested_classes], methods, statements

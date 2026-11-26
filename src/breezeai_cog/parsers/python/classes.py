@@ -11,7 +11,7 @@ from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
-from .functions import _visibility, build_function, extract_decorators
+from .functions import _visibility, build_function, extract_decorators, scope_calls
 from .statements import extract_statements
 
 #: Standard-library enum base classes. A class deriving (directly) from one of these is an enum,
@@ -157,6 +157,8 @@ def build_class(
                 methods.extend(sub_methods)
                 statements.extend(sub_statements)
 
+    # what runs when the class body executes, outside its methods (`repo = Repo()`)
+    class_calls = scope_calls(body, source, resolve)
     cls = Class(
         id=cid,
         parentId=parent_id,
@@ -172,5 +174,6 @@ def build_class(
         decorators=extract_decorators(decorator_nodes, source),
         startLine=start,
         endLine=end,
+        calls=class_calls or None,
     )
     return [cls, *nested_classes], methods, statements

@@ -17,7 +17,7 @@ from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from .call_targets import checked_resolver, follow_bindings
 from .classes import build_class, iter_definitions
-from .functions import build_function, defined_names, extract_decorators
+from .functions import build_function, defined_names, extract_decorators, scope_calls
 from .imports import extract_imports
 from .index import PythonIndex, build_python_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -112,6 +112,9 @@ class PythonParser(BaseParser):
             functions=functions,
             classes=classes,
             statements=statements,  # flat: file + class + function-scoped, linked by parentId
+            # what runs when the module loads, outside its functions and classes: DAG wiring,
+            # `if __name__ == "__main__": main()`, module-level lambdas
+            calls=scope_calls(root, source, resolve) or None,
         )
         # Additive detectors (parsers/additive.py) — layered on top of the base extraction, before
         # any framework subclass adds its own (a Celery task co-exists with a FastAPI route).

@@ -33,6 +33,7 @@ from ..callresolve import CallResolver
 from ..treesitter import node_text
 from .functions import defined_names
 from .imports import _Roots, _dotted, _resolve
+from .receivers import SPOILED, class_attributes
 
 FACT = "python.callables"
 #: Nodes a statement can sit in, besides ``*_statement`` / ``*_clause`` / ``*_definition``.
@@ -40,8 +41,9 @@ _HOLDS_STATEMENTS = frozenset({"module", "block", "decorated_definition", "case_
 #: How many re-exports deep a name is followed.
 _DEPTH = 8
 
-#: A class of a file: (its name, its bases as written, the methods it declares).
-ClassFacts = tuple[str, tuple[str, ...], frozenset[str]]
+#: A class of a file: (its name, its bases as written, the methods it declares, its attributes →
+#: the class their bindings name as written, or ``""`` — see ``receivers.py``).
+ClassFacts = tuple[str, tuple[str, ...], frozenset[str], tuple[tuple[str, str], ...]]
 #: One file: (its def / class names, ``from`` imports: local name → (file, imported name),
 #: files it star-imports, its classes).
 FileFacts = tuple[frozenset[str], dict[str, tuple[str, str]], tuple[str, ...],
@@ -123,7 +125,8 @@ def classes_of(root: Node, source: bytes) -> tuple[ClassFacts, ...]:
             d = c.child_by_field_name("definition") if c.type == "decorated_definition" else c
             if d is not None and d.type == "function_definition":
                 methods.add(node_text(d.child_by_field_name("name"), source))
-        out.append((node_text(n.child_by_field_name("name"), source), bases, frozenset(methods)))
+        out.append((node_text(n.child_by_field_name("name"), source), bases, frozenset(methods),
+                    class_attributes(n, source)))
     return tuple(out)
 
 
@@ -286,22 +289,112 @@ def method_file(files: Mapping[str, FileFacts], key: tuple[str, str], name: str,
     return None
 
 
+class _Shared:
+    """What every file of one index asks the same: resolution orders, the classes binding or
+    declaring each attribute name, the class an attribute holds."""
+
+    def __init__(self, files: Mapping[str, FileFacts]) -> None:
+        self.files = files
+        self.orders: dict[tuple[str, str], list[tuple[str, str]] | None] = {}
+        self.attributes: dict[tuple[tuple[str, str], str], tuple[str, str] | None] = {}
+        self._by_name: dict[str, list[tuple[str, str]]] | None = None
+
+    def by_name(self, attr: str) -> list[tuple[str, str]]:
+        """The classes that bind ``attr`` or declare a method of that name."""
+        if self._by_name is None:
+            idx: dict[str, list[tuple[str, str]]] = {}
+            for file, facts in self.files.items():
+                for cls in facts[3]:
+                    for name in {*cls[2], *(a for a, _ in cls[3])}:
+                        idx.setdefault(name, []).append((file, cls[0]))
+            self._by_name = idx
+        return self._by_name.get(attr, [])
+
+
+_SHARED: list[_Shared] = []
+
+
+def _shared(files: Mapping[str, FileFacts]) -> _Shared:
+    """One per index (the latest kept)."""
+    if not _SHARED or _SHARED[0].files is not files:
+        _SHARED[:] = [_Shared(files)]
+    return _SHARED[0]
+
+
+def attribute_class(shared: _Shared, key: tuple[str, str], attr: str) -> tuple[str, str] | None:
+    """The repository class ``self.<attr>`` holds in a method of class ``key``: the one class
+    every binding of it names — in the class, its repository ancestors, and every repository
+    subclass that binds it (an instance may be one). None when a binding names no class, two
+    name different ones, or a class of them declares a method / property of that name."""
+    memo = (key, attr)
+    if memo in shared.attributes:
+        return shared.attributes[memo]
+    files = shared.files
+    mro = _mro(files, key, shared.orders)
+    found: tuple[str, str] | None = None
+    if mro:
+        related = {c for c in mro if c != _LIBRARY}
+        for other in shared.by_name(attr):
+            if other not in related and key in (_mro(files, other, shared.orders) or ()):
+                related.add(other)
+        seen: set[tuple[str, str]] = set()
+        ok = True
+        for cls_key in related:
+            facts = _class(files, *cls_key)
+            if facts is None or attr in facts[2]:
+                ok = False
+                break
+            for name, written in facts[3]:
+                if name != attr:
+                    continue
+                target = class_of(files, cls_key[0], written) if written != SPOILED else None
+                if target is None:
+                    ok = False
+                    break
+                seen.add(target)
+            if not ok:
+                break
+        if ok and len(seen) == 1:
+            found = next(iter(seen))
+    shared.attributes[memo] = found
+    return found
+
+
 def checked_resolver(base: CallResolver, *, path: str, bindings: Mapping[str, str],
                      modules: frozenset[str], index: Any | None) -> CallResolver:
     """``base`` (given the followed ``bindings``), keeping a path only when that file declares
-    what is called. ``m.fn()`` on a module ``m`` follows ``fn`` through ``m``'s re-exports."""
+    what is called. ``m.fn()`` on a module ``m`` follows ``fn`` through ``m``'s re-exports.
+    ``py_scope`` (keyword): the calling function's local names → the classes their bindings
+    name (``receivers.local_types``), for ``x.m()`` on a typed local."""
     files: Mapping[str, FileFacts] = index_fact(index, FACT) or {}
     if not files:
-        return base
+        def plain(name: str, receiver: str | None, owner: str | None = None,
+                  *args: Any, py_scope: Any = None, **kwargs: Any) -> str | None:
+            return base(name, receiver, owner, *args, **kwargs)
+        return plain
 
     def declares(file: str, name: str) -> bool:
         facts = files.get(file)
         return facts is not None and name in facts[0]
 
-    orders: dict[tuple[str, str], list[tuple[str, str]] | None] = {}
+    shared = _shared(files)
+    orders = shared.orders
+
+    def typed(receiver: str, owner: str | None,
+              py_scope: Mapping[str, tuple[str, ...] | None] | None) -> tuple[str, str] | None:
+        """The repository class a receiver holds: a typed local, or ``self.<attr>``."""
+        if py_scope is not None and receiver in py_scope:
+            written = py_scope[receiver]
+            keys = {class_of(files, path, w) for w in written or ()}
+            return keys.pop() if len(keys) == 1 and None not in keys else None
+        if owner is not None and receiver.startswith("self.") and receiver.count(".") == 1 \
+                and _class(files, path, owner) is not None:
+            return attribute_class(shared, (path, owner), receiver[5:])
+        return None
 
     def resolve(name: str, receiver: str | None, owner: str | None = None,
-                *args: Any, **kwargs: Any) -> str | None:
+                *args: Any, py_scope: Mapping[str, tuple[str, ...] | None] | None = None,
+                **kwargs: Any) -> str | None:
         # A method call on the class itself, its parent (`super()`) or a repository class:
         # Python's resolution order over the repository's classes decides (a library base
         # first → no path).
@@ -315,6 +408,12 @@ def checked_resolver(base: CallResolver, *, path: str, bindings: Mapping[str, st
             key = class_of(files, path, receiver)
             if key is not None:
                 return method_file(files, key, name, 0, orders)
+        # a receiver holding an instance of a repository class: `repo: OrderRepo` /
+        # `self.repo = OrderRepo()` → the file its resolution order says declares `name`
+        if receiver is not None:
+            held = typed(receiver, owner, py_scope)
+            if held is not None:
+                return method_file(files, held, name, 0, orders)
         found = base(name, receiver, owner, *args, **kwargs)
         if found is None or found == path:
             return found

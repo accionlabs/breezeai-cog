@@ -23,6 +23,7 @@ from ...utils import count_loc
 from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
+from .static_calls import static_receivers, with_static_calls
 from ..statements_common import (
     begin_datastore_vendor,
     end_datastore_vendor,
@@ -36,6 +37,7 @@ from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import (
+    type_resolver,
     CSharpIndex,
     bind_static_import_members,
     build_csharp_index,
@@ -122,6 +124,14 @@ class CSharpParser(BaseParser):
             ext_index=getattr(ctx.resolution_index, "ext_methods", None),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
         )
+        # `Type.M()` where the file names `Type` only as a call receiver (static_calls.py)
+        heritage_index = getattr(ctx.resolution_index, "class_heritage", None) or {}
+        others, own = static_receivers(
+            root, source, path, bindings, type_resolver(root, source, index, path),
+            lambda name: name in heritage_index or name in local_names)
+        resolve = with_static_calls(
+            resolve, path=path, others=others, own=own,
+            heritage=getattr(ctx.resolution_index, "class_heritage", None))
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
