@@ -518,6 +518,27 @@ func Pair(int, string) *User { return nil }
     assert fns["Pair"].returnType == "*User"
 
 
+def test_go_exports_exclude_methods_but_keep_them_in_function_extraction(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package payment
+
+type Payment struct{}
+type Invoice struct{}
+
+func Pay() {}
+func (p *Payment) Pay() {}
+func (p *Payment) Describe() {}
+func CreateInvoice() {}
+func (i *Invoice) Validate() {}
+''')
+
+    assert record.exports == ["CreateInvoice", "Invoice", "Pay", "Payment"]
+    assert {
+        (fn.name, fn.type)
+        for fn in record.functions
+        if fn.type == "method"
+    } == {("Pay", "method"), ("Describe", "method"), ("Validate", "method")}
+
+
 def test_go_interface_method_set_is_captured(tmp_path) -> None:
     record = _parse(tmp_path, b'''package p
 

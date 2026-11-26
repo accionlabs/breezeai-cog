@@ -168,7 +168,7 @@ class GoParser(BaseParser):
                 functions.append(fn)
                 owner_ids[child.start_byte] = fn.id
                 statements.extend(fn_statements)
-                if fn.name[:1].isupper():
+                if child.type == "function_declaration" and fn.name[:1].isupper():
                     exports.add(fn.name)
                 if owner is not None:
                     owner.metadata = {**(owner.metadata or {}), "hasMethods": True}
