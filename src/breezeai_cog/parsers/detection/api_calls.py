@@ -37,7 +37,7 @@ _CLIENT_HINTS: dict[str, tuple[str, ...]] = {
 
 def _ends_with_word(name: str, hint: str) -> bool:
     """``name`` ends with ``hint`` (any case), and the hint starts a word there: at the start, at
-    a capital (``myHttp``, ``P3APIClient``) or after a non-letter (``this._http``, ``$http``)."""
+    a capital (``myHttp``, ``OrderApiClient``) or after a non-letter (``this._http``, ``$http``)."""
     i = len(name) - len(hint)
     if i < 0 or name[i:].lower() != hint:
         return False
@@ -53,6 +53,17 @@ def _names_client(receiver: str, hints: tuple[str, ...]) -> bool:
             if any(_ends_with_word(name, hint) for hint in hints):
                 return True
     return False
+
+
+def names_http_client_type(type_text: str, language: str) -> bool:
+    """Whether a type names an HTTP client in ``language``: its simple name is read as a
+    receiver segment is (:func:`_names_client`) — ``OrderApiClient``, ``RESTClient``,
+    ``org.apache.http.client.HttpClient``; not ``S3Client`` or ``Map<String, Client>``."""
+    hints = _CLIENT_HINTS.get(language)
+    if hints is None:
+        return False
+    simple = type_text.split("<", 1)[0].strip().rsplit(".", 1)[-1]
+    return bool(simple) and _names_client(simple, hints)
 
 
 #: .NET languages: ``…Async`` verbs and the ``HttpClient`` helper verbs below apply only there.
