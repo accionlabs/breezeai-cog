@@ -55,5 +55,11 @@ The capture contract's source of truth is
   or core affects every parser that uses it and needs a before/after capture diff.
 - **Committed code and docs are self-contained:** no links to analysis reports or local paths,
   no tracking ids in prose.
+- **No client identifiers anywhere that is committed or published:** code, tests, fixtures, docs,
+  commit messages and PR text never name a client or the repositories you dogfooded on. That
+  includes company and project names, repository slugs, hostnames, package prefixes
+  (`<tld>.<company>.…`) and class names unique to a client's code. Fixtures use neutral names
+  (`com.acme`, `example.com`, `OrderService`). Describe a measurement by its shape, not its
+  source: "on a 111-repo Vert.x fleet", not "on <client>'s repos".
 - **Commits** are `type(scope): what is now true` (e.g. `fix(express): …`, `docs(skill): …`).
   **PR titles** must contain a Jira id, `BREEZEAI-<number>` — CI rejects them otherwise.

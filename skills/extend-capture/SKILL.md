@@ -342,7 +342,9 @@ The ones most often broken:
   `jobs<=1`) like the parse stage, instead of looping single-threaded.
 - **Test every behavioral change** — happy path, edges, failure modes. For parser work,
   also validate emitted records against the schema and dogfood on a real repository; a unit
-  test passing is not enough. Anything that crosses files is also tested end to end through
+  test passing is not enough. A test built from a dogfood repository keeps the construct, not
+  the client: rename its packages, classes, hosts and values to neutral ones (`com.acme`,
+  `example.com`). Anything that crosses files is also tested end to end through
   `analyze_repo` with `jobs` 1 and 2 — a hand-built index cannot catch a fact that never
   reaches the workers.
 
@@ -376,7 +378,11 @@ REPL/`python -c`/stdin (or pass `--jobs 1`).
 3. **Commit and PR conventions.** Commits use `type(scope): what is now true`, scoped by
    framework or area — e.g. `fix(express): .all() before other verbs in a route() chain is their
    middleware`, `docs(statement-model): …`, `feat(go): …`. CI rejects a PR whose title has no
-   Jira id: include `BREEZEAI-<number>` in the title.
+   Jira id: include `BREEZEAI-<number>` in the title. A dogfood result in a commit message or
+   PR describes the fleet by its shape ("on 8 Groovy repositories: 4 `api_call` added, no
+   other change"), never by client, project or repository name. Before pushing, grep the diff
+   and `git log --format=%B origin/main..HEAD` for the dogfood repositories' names, hosts and
+   package prefixes. A commit that already reached `main` is not rewritten.
 
 ## 8. Directory structure
 
@@ -443,6 +449,9 @@ src/breezeai_cog/parsers/
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
       and every emitted record validates against the schema and the entry-point contract
       (`parsers/contract.py`; role tests through `analyze_files` fail on a contract error).
+- [ ] No client identifiers in code, tests, fixtures, docs, commit messages or PR text: no
+      client, project or dogfood repository names, hostnames, package prefixes or class names
+      unique to a client; dogfood results described by fleet shape (§6, §7).
 - [ ] Support docs updated, the change self-reviewed with the parser review guide, and the PR
       title carries a `BREEZEAI-<number>` id (§7).
 
