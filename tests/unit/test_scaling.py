@@ -104,6 +104,23 @@ def _python(n: int) -> str:
     )
 
 
+def _python_sessions(n: int) -> str:
+    # The HTTP-client and SQLAlchemy-session names the Python parser reads (python/clients.py).
+    head = (
+        "import requests\nfrom sqlalchemy.orm import Session, sessionmaker\n"
+        "SessionLocal = sessionmaker()\n"
+    )
+    return head + "".join(
+        f"def f{i}(session: Session, url, o):\n"
+        f"    http{i} = requests.Session()\n"
+        f"    http{i}.delete(url)\n"
+        f"    with SessionLocal() as s{i}:\n"
+        f"        s{i}.delete(o)\n"
+        f"    session.delete(o)\n\n"
+        for i in range(n)
+    )
+
+
 def _python_flask(n: int) -> str:
     body = "".join(
         f"@bp.route('/items/{i}', methods=['GET', 'POST'])\n@login_required\n"
@@ -725,6 +742,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "typescript-express-locals": ("app.js", _ts_express_locals),
     "typescript-backbone": ("app.ts", _ts_backbone),
     "python": ("mod.py", _python),
+    "python-sessions": ("svc.py", _python_sessions),
     "python-flask": ("app.py", _python_flask),
     "python-django": ("urls.py", _python_django),
     "python-django-method-decorators": ("urls.py", _python_django_method_decorators),

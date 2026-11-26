@@ -238,6 +238,9 @@ bound twice or shadowed by a parameter, `Promise.all([axios.get(a), fetch(b)])` 
    `HttpRuntime.Cache.Get(…)` is most often in memory, so only a name that says Redis
    (`redisClient.get`) or a Redis verb (`hset`, `lpush`) gives `redis`.
    Django's `objects` manager counts only in Python; elsewhere `objects` is an ordinary name.
+   A Python `session` names SQLAlchemy only where the file shows it is a SQLAlchemy session, or
+   as Flask-SQLAlchemy's `db.session`; any other is not recorded
+   ([HTTP client names](#http-client-names-per-language)).
    A collection-iteration method whose only argument is a closure (Groovy
    `collection.find { it.id == id }`, `model.findAll { it.enabled }`) filters a list in memory,
    so it is no data access whatever the receiver is called. The parser says when a call's only
@@ -283,8 +286,8 @@ client name that starts a word there, because the last word of a name says what 
 | `sky`, `forgot` (`ky` and `got` do not start a word) | no |
 
 Each language reads only its own libraries' names, because the same word is an ordinary name
-elsewhere: `session` is Python's `requests.Session`, but in Java it is often a JSON object, so
-`session.getString("platformId")` reads a field, and in Groovy a Map.
+elsewhere: `ky` and `got` are JavaScript libraries, and `sky` or `forgot` in another language is
+just a name.
 
 ```mermaid
 flowchart LR
@@ -297,7 +300,7 @@ flowchart LR
 |---|---|
 | all below | `http`, `httpClient`, `restClient`, `apiClient` |
 | JavaScript / TypeScript | `httpService`, `axios`, `fetch`, `superagent`, `got`, `ky`, `ofetch`, `webClient`, and a bare `fetch(…)` |
-| Python | `requests`, `session`, `httpx`, `aiohttp`, `urllib`, `urllib3` |
+| Python | `requests`, `httpx`, `aiohttp`, `urllib`, `urllib3`, and the names the file binds to a client (below) |
 | Java, Kotlin, Groovy, Scala | `restTemplate`, `webClient` |
 | C#, VB | `restTemplate` (Spring.NET), `webClient`, and the `HttpClient` verbs `GetAsync`, `GetStringAsync`, `PostAsJsonAsync` … |
 | Go | only the shared names |
@@ -310,12 +313,28 @@ where the request is built: `new HttpGet(url)`, with `HttpGet` imported from
 → `api_call`, `method: GET`, `endpoint` from `url` when it holds a string. A class of the
 repository's own with the same name is not one.
 
+`session` is in no list. In Python it is a `requests.Session` as often as a SQLAlchemy session
+or another library's, so the Python parser (`python/clients.py`) passes the classifier the names
+the file shows are one or the other, and any other `session` is left unrecorded:
+
+| Python file | `session.delete(x)` |
+|---|---|
+| `session = requests.Session()`, `with httpx.Client() as session`, `def f(session: requests.Session)` | `api_call DELETE` |
+| `def f(session: Session)` with `Session` from `sqlalchemy.orm` or `sqlmodel`, `with Session(engine) as session`, `session = SessionLocal()` after `SessionLocal = sessionmaker(…)` | `db_method_call`, `sqlalchemy` |
+| `db.session.delete(x)` (Flask-SQLAlchemy, whatever the file imports) | `db_method_call`, `sqlalchemy` |
+| `def f(session)`, whatever the file imports; `session = niquests.Session()`; a Cassandra session; `request.session` beside a SQLAlchemy `session` | — |
+
+A name the file binds both ways (`session = requests.Session()` in one function,
+`session = Session(engine)` in another) is neither, and a name is matched whole: the file's
+`self.session` is not another object's `request.session`. In Java, `session` is often a JSON object
+(`session.getString("platformId")` reads a field), and in Groovy a Map.
+
 In C# and VB, a receiver ending in `Session` (ASP.NET session state, NHibernate `ISession`) is
 never a client, not even `HttpContext.Session`.
 
 ### Languages that skip the name match
 
-The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `session`, `repo`).
+The HTTP and ORM steps partly decide by the receiver's name (`axios`, `http`, `repo`).
 Some languages have no naming convention to rely on, so they skip those steps and record such
 calls only through evidence-based detectors (an import, a declared type). A language with no
 client names above skips the HTTP step:
