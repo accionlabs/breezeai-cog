@@ -203,7 +203,7 @@ def build_function(
     seen_ids: set[str],
     capture: bool,
     limit: int,
-    resty_imported: bool = False,
+    resty_aliases: frozenset[str] = frozenset(),
     resolve: CallResolver = noop_resolver,
     barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[Function, list[Statement]]:
@@ -238,7 +238,7 @@ def build_function(
     )
     statements = extract_statements(
         body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids,
-        resty_imported=resty_imported,
+        resty_aliases=resty_aliases,
         descend_all=True, barriers=barriers,
     ) if body is not None else []
     return fn, statements
@@ -255,7 +255,7 @@ def build_literal_function(
     seen_ids: set[str],
     capture: bool,
     limit: int,
-    resty_imported: bool = False,
+    resty_aliases: frozenset[str] = frozenset(),
     barriers: frozenset[tuple[int, int]],
     resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
@@ -279,7 +279,7 @@ def build_literal_function(
     )
     statements = extract_statements(
         body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids,
-        resty_imported=resty_imported,
+        resty_aliases=resty_aliases,
         descend_all=True, barriers=barriers,
     ) if body is not None else []
     return fn, statements

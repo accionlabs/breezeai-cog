@@ -475,10 +475,15 @@ def test_go_resty_builder_chains_are_api_calls(tmp_path) -> None:
 
 import restyAlias "github.com/go-resty/resty/v2"
 
-func callAPI() {
+func callAPI(router *Router) {
     client := restyAlias.New()
     client.R().Get("https://example.test/a")
     client.R().SetBody("x").Post("https://example.test/b")
+    router.R().Get("/route")
+}
+
+func callInjected(client *restyAlias.Client) {
+    client.R().Put("https://example.test/c")
 }
 ''')
 
@@ -486,6 +491,7 @@ func callAPI() {
     assert [(s.method, s.endpoint) for s in calls] == [
         ("GET", "https://example.test/a"),
         ("POST", "https://example.test/b"),
+        ("PUT", "https://example.test/c"),
     ]
 
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from tree_sitter import Node
 
 from ...schemas import Statement
+from ..contract import HTTP_METHODS
 from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -46,22 +49,92 @@ def _render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _is_resty_request(call: Node, source: bytes) -> bool:
+def _is_resty_constructor(node: Node, source: bytes, resty_aliases: frozenset[str]) -> bool:
+    while node.type == "expression_list" and len(node.named_children) == 1:
+        node = node.named_children[0]
+    if node.type != _CALL_TYPE:
+        return False
+    fn = node.child_by_field_name("function")
+    if fn is None or fn.type != "selector_expression":
+        return False
+    operand = fn.child_by_field_name("operand")
+    field = fn.child_by_field_name("field")
+    return (
+        operand is not None
+        and node_text(operand, source) in resty_aliases
+        and field is not None
+        and node_text(field, source) in {"New", "NewWithClient"}
+    )
+
+
+def _is_resty_request(call: Node, source: bytes, resty_aliases: frozenset[str]) -> bool:
     fn = call.child_by_field_name("function")
     operand = fn.child_by_field_name("operand") if fn is not None else None
+    resty_client = None
     while operand is not None and operand.type == _CALL_TYPE:
         inner_fn = operand.child_by_field_name("function")
         if inner_fn is None or inner_fn.type != "selector_expression":
             return False
         field = inner_fn.child_by_field_name("field")
         if field is not None and node_text(field, source) == "R":
-            return True
+            resty_client = inner_fn.child_by_field_name("operand")
+            break
         operand = inner_fn.child_by_field_name("operand")
+    if resty_client is None:
+        return False
+    if _is_resty_constructor(resty_client, source, resty_aliases):
+        return True
+
+    client_name = node_text(resty_client, source)
+    if resty_client.type != "identifier":
+        return False
+
+    scope: Node | None = call
+    while scope is not None and scope.type not in {
+        "function_declaration", "method_declaration", "func_literal",
+    }:
+        scope = scope.parent
+    if scope is None:
+        return False
+
+    params = scope.child_by_field_name("parameters")
+    if params is not None:
+        for param in params.named_children:
+            typ = param.child_by_field_name("type")
+            if (
+                typ is not None
+                and node_text(typ, source).replace(" ", "").lstrip("*")
+                in {f"{alias}.Client" for alias in resty_aliases}
+                and any(
+                    node_text(item, source) == client_name
+                    for item in param.children_by_field_name("name")
+                )
+            ):
+                return True
+
+    body = scope.child_by_field_name("body")
+    if body is None:
+        return False
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if node is not body and node.type == "func_literal":
+            continue
+        if node.start_byte >= call.start_byte:
+            continue
+        if node.type in {"short_var_declaration", "var_spec"}:
+            if any(
+                node_text(name, source) == client_name
+                and _is_resty_constructor(value, source, resty_aliases)
+                for name, value in _pairs(node) or []
+            ):
+                return True
+        stack.extend(node.named_children)
     return False
 
 
 def _call_details(
-    call: Node, source: bytes, *, resty_imported: bool = False,
+    call: Node, source: bytes, *, resty_aliases: frozenset[str] = frozenset(),
 ) -> tuple[str, str, str | None] | None:
     if call.type != "call_expression":
         return None
@@ -78,7 +151,11 @@ def _call_details(
         method = callee
     args = call.child_by_field_name("arguments")
     arg_nodes: list[Node] = list(args.named_children) if args is not None else []
-    resty_request = resty_imported and _is_resty_request(call, source)
+    resty_request = (
+        method.upper() in HTTP_METHODS
+        and bool(resty_aliases)
+        and _is_resty_request(call, source, resty_aliases)
+    )
     if resty_request:
         callee = f"resty.{callee}"
     endpoint, override = resolve_endpoint(
@@ -323,13 +400,14 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
-    resty_imported: bool = False,
+    resty_aliases: frozenset[str] = frozenset(),
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    call_details = partial(_call_details, resty_aliases=resty_aliases)
     for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(
@@ -343,9 +421,7 @@ def extract_statements(
                 control_flow=CONTROL_FLOW,
                 call_type=_CALL_TYPE,
                 name_of=_name_of,
-                call_details=lambda call, src: _call_details(
-                    call, src, resty_imported=resty_imported,
-                ),
+                call_details=call_details,
                 language="go",
                 decorators=[],
             )

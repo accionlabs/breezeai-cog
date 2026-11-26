@@ -143,9 +143,9 @@ class GoParser(BaseParser):
 
         idx = ctx.resolution_index
         external, packages = extract_imports(root, source, idx if isinstance(idx, GoIndex) else None)
-        resty_imported = any(
-            module in {"github.com/go-resty/resty/v2", "github.com/go-resty/resty/v3"}
-            for module in import_aliases(root, source).values()
+        resty_aliases = frozenset(
+            alias for alias, module in import_aliases(root, source).items()
+            if module in {"github.com/go-resty/resty/v2", "github.com/go-resty/resty/v3"}
         )
         scan = scan_file(root, source)
         decls = declarations(idx)
@@ -197,7 +197,7 @@ class GoParser(BaseParser):
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
-                    resty_imported=resty_imported,
+                    resty_aliases=resty_aliases,
                     resolve=resolve,
                     barriers=bound,
                 )
@@ -226,7 +226,7 @@ class GoParser(BaseParser):
                 parent_id=owner_ids.get(enclosing.start_byte, fid) if enclosing is not None else fid,
                 package_level=enclosing is None,
                 seen_ids=seen_ids, capture=capture, limit=limit,
-                resty_imported=resty_imported,
+                resty_aliases=resty_aliases,
                 barriers=bound - {(node.start_byte, node.end_byte)}, resolve=resolve,
             )
             functions.append(fn)
@@ -239,7 +239,7 @@ class GoParser(BaseParser):
         # same-line trailing comment rides on the statement's `text`.
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture,
-                               limit=limit, seen_ids=seen_ids, resty_imported=resty_imported,
+                               limit=limit, seen_ids=seen_ids, resty_aliases=resty_aliases,
                                barriers=bound)
         )
 
