@@ -127,6 +127,8 @@ class GoParser(BaseParser):
         classes = []
         statements: list[Statement] = []
         exports: set[str] = set()
+        # If New and NewType both return a type, retain params from the first declaration.
+        constructor_targets_seen: set[str] = set()
 
         class_by_name = {}
         for child in root.named_children:
@@ -173,12 +175,13 @@ class GoParser(BaseParser):
                 if fn.type == "constructor":
                     target_name = _constructor_target_name(fn.name, fn.returnType)
                     target = class_by_name.get(target_name)
-                    if target is not None:
+                    if target is not None and target_name not in constructor_targets_seen:
                         target.constructorParams = [
                             ConstructorParam(name=p.name, type=p.type)
                             for p in fn.params
                             if p.type is not None
                         ]
+                        constructor_targets_seen.add(target_name)
 
         for node, name in scan.bound:  # document order: an enclosing literal comes first
             enclosing = _owner(node, bound)

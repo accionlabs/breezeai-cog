@@ -143,13 +143,13 @@ func (l *List[T]) Add(value T) {}
     assert functions["Add"].receiverType == "List"
 
 
-def test_go_constructor_target_uses_return_type(tmp_path) -> None:
+def test_go_constructor_params_come_from_matching_return_type(tmp_path) -> None:
     src = b'''\
 package demo
 
 type Config struct{}
 
-func NewFromEnv(host string) *Config {
+func NewConfig(host string) *Config {
     return &Config{}
 }
 '''
@@ -162,6 +162,72 @@ func NewFromEnv(host string) *Config {
 
     config = next(item for item in record.classes if item.name == "Config")
     assert [param.name for param in config.constructorParams] == ["host"]
+
+
+def test_go_constructor_name_and_return_type_must_match(tmp_path) -> None:
+    source = b'''\
+package demo
+
+type Solo struct{}
+type Svc struct{}
+type Thing struct{}
+
+func NewSolo(n int, name string) *Solo { return &Solo{} }
+func Newton(x int) *Solo { return nil }
+func NewSvc(token string) *Svc { return &Svc{} }
+func NewMulti() (*Svc, error) { return nil, nil }
+func NewThing() int { return 1 }
+func New() int { return 1 }
+'''
+    path = tmp_path / "constructors.go"
+    path.write_bytes(source)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="constructors.go",
+            abs_path=path,
+            source=source,
+            repo_root=tmp_path,
+        )
+    )
+
+    functions = {item.name: item for item in record.functions}
+    classes = {item.name: item for item in record.classes}
+    assert functions["NewSolo"].type == "constructor"
+    assert functions["Newton"].type == "function"
+    assert functions["NewSvc"].type == "constructor"
+    assert functions["NewMulti"].type == "function"
+    assert functions["NewThing"].type == "function"
+    assert functions["New"].type == "function"
+    assert [param.name for param in classes["Solo"].constructorParams] == ["n", "name"]
+    assert [param.name for param in classes["Svc"].constructorParams] == ["token"]
+
+
+def test_go_uses_first_valid_constructor_in_source_order(tmp_path) -> None:
+    source = b'''\
+package demo
+
+type Svc struct{}
+
+func NewSvc(token string) *Svc { return &Svc{} }
+func New(region string) *Svc { return &Svc{} }
+'''
+    path = tmp_path / "constructors.go"
+    path.write_bytes(source)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="constructors.go",
+            abs_path=path,
+            source=source,
+            repo_root=tmp_path,
+        )
+    )
+
+    svc = next(item for item in record.classes if item.name == "Svc")
+    new = next(item for item in record.functions if item.name == "New")
+    assert new.type == "constructor"
+    assert [param.name for param in svc.constructorParams] == ["token"]
 
 
 def test_go_code_and_config_parsing(tmp_path) -> None:
