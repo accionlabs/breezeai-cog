@@ -236,16 +236,28 @@ class _Class:
         self.assigned: dict[str, list[Node]] = {}
 
 
-def _scan(root: Node, source: bytes, names_of: _Names) -> list[_Class]:
+#: Type declarations :func:`_scan` hands back in ``types`` (every one, local ones included).
+TYPE_DECLARATIONS = frozenset({"class_declaration", "interface_declaration", "enum_declaration",
+                               "record_declaration"})
+
+
+def _scan(root: Node, source: bytes, names_of: _Names,
+          types: list[Node] | None = None) -> list[_Class]:
     """One walk of the file: each class reached outside a method (a top-level one, or a member
     of a scanned class, named with its outer classes) with its methods and constructors, each
     method's calls (those in its anonymous / local classes too) and the assignments of each
-    method and class (``this.`` dropped)."""
+    method and class (``this.`` dropped). ``types``, when given, also gets every type
+    declaration of the file (:data:`TYPE_DECLARATIONS`) and every anonymous class creation
+    (``new X() { … }``), in the same walk."""
     classes: list[_Class] = []
 
     def walk(n: Node, stack: tuple[_Class, ...], chain: tuple[str, ...],
              decl: _Decl | None) -> None:
         kind = n.type
+        if types is not None and (kind in TYPE_DECLARATIONS or (
+                kind == "object_creation_expression"
+                and any(c.type == "class_body" for c in n.named_children))):
+            types.append(n)
         if kind == "class_declaration" and decl is None \
                 and (not stack or n.parent == stack[-1].body):
             simple = name_of(n.child_by_field_name("name"), source)
