@@ -50,6 +50,23 @@ def parsers_for(path: str | Path) -> list[LanguageParser]:
     return [p for p in _REGISTRY if p.matches(path)]
 
 
+def extensionless_parser_for(path: str | Path, source: bytes) -> LanguageParser | None:
+    """The base parser claiming this extensionless file, if any.
+
+    Parsers opt in with an optional ``claims_extensionless(path, source)`` hook. The
+    lowest-priority claimant is the language parser; framework parsers remain candidates
+    for :func:`select` after the file has been classified.
+    """
+    if Path(path).suffix:
+        return None
+    claiming = [
+        parser for parser in _REGISTRY
+        if (claims := getattr(parser, "claims_extensionless", None)) is not None
+        and claims(str(path), source)
+    ]
+    return min(claiming, key=lambda parser: getattr(parser, "priority", 0), default=None)
+
+
 def language_candidates(path: str | Path) -> list[LanguageParser]:
     """The base language parsers that register this file: every candidate at the lowest
     priority, in registration order. More than one means the file is shared."""
@@ -68,7 +85,15 @@ def base_parser_for(path: str | Path, language: str | None = None) -> LanguagePa
     names no candidate) the first-registered candidate is returned, as before."""
     candidates = language_candidates(path)
     if not candidates:
-        return None
+        if language is None or Path(path).suffix:
+            return None
+        candidates = [
+            parser for parser in _REGISTRY
+            if parser.name == language
+            and getattr(parser, "claims_extensionless", None) is not None
+        ]
+        if not candidates:
+            return None
     if language is not None:
         for parser in candidates:
             if parser.name == language:
@@ -104,6 +129,13 @@ def select(
     ``language`` is the ownership step's decision for a shared file: only that language's
     parsers (its base and framework parsers) are candidates."""
     candidates = parsers_for(path)
+    if not Path(path).suffix:
+        candidates.extend(
+            parser for parser in _REGISTRY
+            if parser not in candidates
+            and (claims := getattr(parser, "claims_extensionless", None)) is not None
+            and claims(str(path), source)
+        )
     if language is not None:
         base = base_parser_for(path, language)
         if base is not None:

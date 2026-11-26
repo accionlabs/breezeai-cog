@@ -49,7 +49,7 @@ def _file_facts(args: tuple[Path, Path]) -> _FileFacts:
 def build_ruby_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> RubyIndex:
     root = Path(repo_root)
     files, fact_files = split_fact_sources("ruby", list(files))
-    ruby_files = [f for f in files if f.suffix == ".rb"]
+    ruby_files = [f for f in files if f.suffix in {"", ".rb"}]
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("ruby", fact_files, root, jobs)
     if not ruby_files:

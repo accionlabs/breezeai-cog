@@ -108,6 +108,16 @@ def test_config_filename_matching() -> None:
     assert registry.select("main.go", b"") is None
 
 
+def test_extensionless_parser_selection() -> None:
+    registry.discover_builtin()
+    source = b"#!/usr/bin/env ruby\nputs 'hello'\n"
+
+    assert registry.extensionless_parser_for("server", source).name == "ruby"
+    assert registry.base_parser_for("server", "ruby").name == "ruby"
+    assert registry.select("server", source).name == "ruby"
+    assert registry.select("server", b"#!/usr/bin/env python\n") is None
+
+
 def test_specific_framework_outranks_express() -> None:
     # A NestJS/LoopBack controller that also imports express must be parsed by the
     # specific framework, not the base Express parser (both claim; priority breaks the tie).

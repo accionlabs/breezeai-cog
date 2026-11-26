@@ -56,6 +56,8 @@ end
     assert route.handler == "students#index"
     assert route.framework == "rails"
     assert route.routeKind == "route"
+    assert route.startLine == 3
+    assert route.id == "config/routes.rb:3:2"
     assert route.parentId == record.id
 
     ordinary_calls = [
@@ -64,6 +66,27 @@ end
     ]
     assert len(ordinary_calls) == 1
     assert ordinary_calls[0].semanticType is None
+
+
+def test_rails_routes_on_the_same_line_keep_distinct_call_statements(
+    tmp_path: Path,
+) -> None:
+    source = b'''require "rails"
+Rails.application.routes.draw do
+  get "/a", to: "a#show"; post "/b", to: "b#create"
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+
+    routes = [item for item in record.statements if item.startLine == 3]
+    assert len(routes) == 2
+    assert {
+        (item.id, item.semanticType, item.method, item.endpoint)
+        for item in routes
+    } == {
+        ("config/routes.rb:3:2", "route", "GET", "/a"),
+        ("config/routes.rb:3:26", "route", "POST", "/b"),
+    }
 
 
 def test_rails_routes_are_gated_and_dynamic_paths_are_honest_null(tmp_path: Path) -> None:
@@ -760,6 +783,8 @@ end
     has("GET", "/categories/export", "categories#export")              # on: :collection
     has("GET", "/profile", "accounts#show")                            # singular, controller:
     has("GET", "/profile/edit", "accounts#edit")
+    has("PATCH", "/profile", "accounts#update")
+    has("PUT", "/profile", "accounts#update")
     assert not any(e == "/profile/:id" for _, e, _ in got)
     has("GET", "/admin", "dashboard#show")                             # root in a namespace
     has("GET", "/admin/staff/:slug", "people#show")                    # path:, param:

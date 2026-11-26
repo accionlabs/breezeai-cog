@@ -20,6 +20,24 @@ def test_classify_api() -> None:
     assert classify_call("session.delete", "delete", language="python") == ("api_call", "DELETE", None)
 
 
+@pytest.mark.parametrize(
+    ("callee", "method"),
+    [
+        ("this.apiFetch", "apiFetch"),
+        ("api.authFetch", "authFetch"),
+        ("ofetch.$fetch", "$fetch"),
+        ("window.fetch", "fetch"),
+    ],
+)
+def test_typescript_fetch_wrappers_are_api_calls(callee: str, method: str) -> None:
+    assert classify_call(callee, method, language="typescript") == ("api_call", "GET", None)
+
+
+@pytest.mark.parametrize("callee", ["ENV.fetch", "config.fetch"])
+def test_ruby_fetch_is_not_an_api_call(callee: str) -> None:
+    assert classify_call(callee, "fetch", language="ruby") is None
+
+
 def test_session_query_chain_is_db_not_http() -> None:
     # `session` is both an HTTP client hint (requests.Session) and a SQLAlchemy DB
     # session. A chain carrying an ORM query-builder marker is data access, not HTTP,

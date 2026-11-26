@@ -25,7 +25,13 @@ from . import executor
 from .ignore import IgnoreEngine
 from .nx import discover_nx_projects
 from .ownership import competing_languages, resolve_owners, shared_languages
-from .registry import base_parser_for, discover_builtin, registered, template_extensions
+from .registry import (
+    base_parser_for,
+    discover_builtin,
+    extensionless_parser_for,
+    registered,
+    template_extensions,
+)
 from .scanner import ScanEntry, scan
 from .skips import SkipReport
 
@@ -42,6 +48,16 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
         if languages and base.name not in languages:
             return None
         return base.name
+
+    return classify
+
+
+def _extensionless_classifier(languages: set[str] | None) -> Callable[[str, bytes], str | None]:
+    def classify(path: str, source: bytes) -> str | None:
+        parser = extensionless_parser_for(path, source)
+        if parser is None or (languages and parser.name not in languages):
+            return None
+        return parser.name
 
     return classify
 
@@ -121,6 +137,7 @@ def _scan_entries(
         repo_root, _classifier(scan_languages),
         engine=engine, max_file_size=settings.max_file_size,
         skip_rule=skip_rule, on_skip=on_skip,
+        extensionless_classifier=_extensionless_classifier(scan_languages),
     ):
         # Per-language layer-2 filter, applied post-scan and scoped to the file's
         # own classified language — so e.g. C#'s NuGet ``packages/`` never prunes a

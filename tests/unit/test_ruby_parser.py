@@ -249,6 +249,15 @@ def test_ruby_model_index_identifies_activerecord_receivers(tmp_path: Path) -> N
     assert not any("Tempfile" in k for k in hints), hints
 
 
+def test_ruby_model_index_includes_extensionless_scripts(tmp_path: Path) -> None:
+    script = tmp_path / "models"
+    script.write_bytes(b"#!/usr/bin/env ruby\nclass ScriptModel < ApplicationRecord\nend\n")
+
+    index = RubyParser().build_index(tmp_path, [script])
+
+    assert "ScriptModel" in index.models
+
+
 def test_ruby_generic_verbs_dropped_without_model_evidence(tmp_path: Path) -> None:
     """The cost of the gate: with no index (single-file parse, or a model defined in a gem)
     a generic verb is dropped rather than guessed."""

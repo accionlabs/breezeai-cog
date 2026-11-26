@@ -35,6 +35,21 @@ def test_sinatra_routes_and_base_extraction(tmp_path: Path) -> None:
     assert {item.name for item in record.classes} >= {"API"}
 
 
+def test_sinatra_route_semantics_remain_unchanged(tmp_path: Path) -> None:
+    source = b'''require "sinatra"
+get "/users" do
+  "ok"
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert len(routes) == 1
+    assert (routes[0].method, routes[0].endpoint, routes[0].framework) == (
+        "GET", "/users", "sinatra",
+    )
+
+
 def test_sinatra_application_subclass_routes_are_detected(tmp_path: Path) -> None:
     source = b'''class API < Sinatra::Application
   get "/users" do

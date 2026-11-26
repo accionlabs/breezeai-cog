@@ -1,7 +1,8 @@
 """Repository scanner.
 
 Walks a local directory and yields ``(path, language)`` for each file that survives
-the ordered filter chain — **paths only, no content reads**:
+the ordered filter chain. Classification is path-only, except that an optional
+extensionless-parser hook can inspect a bounded content prefix:
 
     ignore/include  ->  skip_rule  ->  extension allow-list (classify)  ->  max_file_size  ->  symlink guard
 
@@ -31,6 +32,9 @@ _Stack = list[tuple[str, object]]
 
 #: Returns the language name for a path, or ``None`` if no parser claims it.
 Classifier = Callable[[str], str | None]
+
+# Used only when path-based classification fails for a path with no extension.
+ExtensionlessClassifier = Callable[[str, bytes], str | None]
 
 #: Returns a skip reason for a path, or ``None`` to keep it. Lets a caller drop files for
 #: its own reason without teaching the scanner what that reason means.
@@ -73,6 +77,7 @@ def scan(
     follow_symlinks: bool = False,
     skip_rule: SkipRule | None = None,
     on_skip: OnSkip | None = None,
+    extensionless_classifier: ExtensionlessClassifier | None = None,
 ) -> Iterator[ScanEntry]:
     root = Path(repo_root)
     visited: set[str] = set()
@@ -122,6 +127,17 @@ def scan(
                         on_skip(rel, reason)
                     continue
                 language = classify(rel)
+                if (
+                    language is None
+                    and extensionless_classifier is not None
+                    and not Path(entry.name).suffix
+                ):
+                    try:
+                        with open(entry.path, "rb") as source_file:
+                            prefix = source_file.read(4096)
+                    except OSError:
+                        prefix = b""
+                    language = extensionless_classifier(rel, prefix)
                 if language is None:
                     if on_skip is not None:
                         on_skip(rel, "unsupported")  # no parser for this extension

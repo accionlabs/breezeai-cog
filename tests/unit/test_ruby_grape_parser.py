@@ -61,6 +61,8 @@ end
     assert route.routeKind == "route"
     assert route.handler is None
     assert route.handlerLine == 3
+    assert route.startLine == 3
+    assert route.id == "api.rb:3:2"
     api = next(item for item in record.classes if item.name == "API")
     assert route.parentId == api.id
 
@@ -70,6 +72,27 @@ end
     ]
     assert len(ordinary_calls) == 1
     assert ordinary_calls[0].semanticType is None
+
+
+def test_grape_routes_on_the_same_line_keep_distinct_call_statements(
+    tmp_path: Path,
+) -> None:
+    source = b'''require "grape"
+class API < Grape::API
+  get "/a" do; "a"; end; post "/b" do; "b"; end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+
+    routes = [item for item in record.statements if item.startLine == 3]
+    assert len(routes) == 2
+    assert {
+        (item.id, item.semanticType, item.method, item.endpoint)
+        for item in routes
+    } == {
+        ("api.rb:3:2", "route", "GET", "/a"),
+        ("api.rb:3:25", "route", "POST", "/b"),
+    }
 
 
 def test_grape_dynamic_prefix_is_not_guessed(tmp_path: Path) -> None:

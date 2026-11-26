@@ -136,3 +136,41 @@ def test_repoinclude_does_not_override_the_template_gate(tmp_path) -> None:
     )
     assert "page.html" not in [e.path for e in entries]
     assert ("page.html", "template") in skips
+
+def test_unsupported_files_are_not_opened(tmp_path, monkeypatch) -> None:
+    """Files unsupported by every parser must be skipped without reading content."""
+    from pathlib import Path
+
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n")
+    (tmp_path / "README.md").write_text("# Readme\n")
+    (tmp_path / "font.woff2").write_bytes(b"font data")
+    (tmp_path / "app.py").write_text("print('hello')\n")
+
+    opened: list[str] = []
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def tracked_read_bytes(path: Path) -> bytes:
+        opened.append(path.name)
+        return original_read_bytes(path)
+
+    def tracked_read_text(path: Path, *args, **kwargs) -> str:
+        opened.append(path.name)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read_bytes)
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+    entries = list(
+        scan(
+            tmp_path,
+            classify,
+            engine=IgnoreEngine.build(),
+            max_file_size=10_000,
+        )
+    )
+
+    assert [entry.path for entry in entries] == ["app.py"]
+    assert "logo.png" not in opened
+    assert "README.md" not in opened
+    assert "font.woff2" not in opened

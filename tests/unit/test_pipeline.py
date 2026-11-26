@@ -196,3 +196,63 @@ def test_vue_import_edges_never_dangle(tmp_path) -> None:
     opted_in = {r.path: r for r in iter_file_records(repo, capture_templates=True)}
     assert "src/Avatar.vue" in opted_in
     assert opted_in["src/router.ts"].importFiles == ["src/Avatar.vue"]
+
+def test_unsupported_files_are_not_read_during_scan(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+
+    repo = tmp_path / "unsupported"
+    repo.mkdir()
+    (repo / "logo.png").write_bytes(b"\x89PNG\r\n")
+    (repo / "README.md").write_text("# Readme\n")
+    (repo / "font.woff2").write_bytes(b"font data")
+    (repo / "app.py").write_text("print('hello')\n")
+
+    opened: list[str] = []
+    original_open = open
+
+    def tracked_open(file, *args, **kwargs):
+        path = Path(file)
+        if path.is_relative_to(repo):
+            opened.append(path.name)
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracked_open)
+
+    entries = pipeline._scan_entries(repo, Settings(repo=repo))
+
+    assert "app.py" in [entry.path for entry in entries]
+    assert not {"logo.png", "README.md", "font.woff2"} & set(opened)
+
+
+def test_extensionless_ruby_shebang_is_scanned(tmp_path) -> None:
+    from breezeai_cog import iter_file_records
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+
+    repo = tmp_path / "ruby_shebang"
+    repo.mkdir()
+    script = repo / "server"
+    script.write_text("#!/usr/bin/env ruby\ndef greet\n  puts 'hello'\nend\n")
+
+    entries = pipeline._scan_entries(repo, Settings(repo=repo))
+
+    assert any(entry.path == "server" and entry.language == "ruby" for entry in entries)
+    records = {record.path: record for record in iter_file_records(repo)}
+    assert records["server"].language == "ruby"
+    assert [function.name for function in records["server"].functions] == ["greet"]
+
+
+def test_extensionless_non_ruby_shebang_is_not_classified_as_ruby(tmp_path) -> None:
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+
+    repo = tmp_path / "non_ruby_shebang"
+    repo.mkdir()
+    (repo / "script").write_text("#!/usr/bin/env python\nprint('hello')\n")
+
+    entries = pipeline._scan_entries(repo, Settings(repo=repo))
+
+    assert not any(entry.path == "script" for entry in entries)

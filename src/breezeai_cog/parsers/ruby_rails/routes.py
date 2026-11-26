@@ -175,15 +175,25 @@ _DEVISE_BLOCKS = {"authenticate", "authenticated"}
 
 #: The RESTful actions ``resources`` / ``resource`` declare: (action, verb, path suffix). ``{id}``
 #: is the member segment (``:id``, or ``:<param>``); singular resources have no index and no id.
-# Record ``update`` once using PATCH rather than duplicating the binding as PUT.
+# Rails accepts both PATCH and PUT for the ``update`` action.
 _PLURAL_ACTIONS = (
-    ("index", "GET", ""), ("create", "POST", ""), ("new", "GET", "/new"),
-    ("edit", "GET", "/{id}/edit"), ("show", "GET", "/{id}"), ("update", "PATCH", "/{id}"),
+    ("index", "GET", ""),
+    ("create", "POST", ""),
+    ("new", "GET", "/new"),
+    ("edit", "GET", "/{id}/edit"),
+    ("show", "GET", "/{id}"),
+    ("update", "PATCH", "/{id}"),
+    ("update", "PUT", "/{id}"),
     ("destroy", "DELETE", "/{id}"),
 )
 _SINGULAR_ACTIONS = (
-    ("create", "POST", ""), ("new", "GET", "/new"), ("edit", "GET", "/edit"),
-    ("show", "GET", ""), ("update", "PATCH", ""), ("destroy", "DELETE", ""),
+    ("create", "POST", ""),
+    ("new", "GET", "/new"),
+    ("edit", "GET", "/edit"),
+    ("show", "GET", ""),
+    ("update", "PATCH", ""),
+    ("update", "PUT", ""),
+    ("destroy", "DELETE", ""),
 )
 class _Resource:
     """One ``resources`` / ``resource`` declaration: the path segment, its controller, the
