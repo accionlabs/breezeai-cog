@@ -29,7 +29,8 @@ Rule            Severity Violation
 ``one-record``  error    two entry points with the same file, line, method, endpoint,
                          handler and version (§8); one address serving several handlers (a
                          Vert.x service proxy's methods) or several header-selected versions
-                         is several bindings
+                         is several bindings, and so are two records with no endpoint whose
+                         text differs
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
 ``handlerPath`` error    an empty string, the record's own file, or an absolute path (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
@@ -240,7 +241,10 @@ def validate(record: FileRecord) -> list[Violation]:
             Violation(rule, "gap" if rule in _GAPS else "error", s.id, detail)
             for rule, detail in _check(s)
         )
-        key = (s.startLine, s.method, s.endpoint, s.handler, s.version)
+        # An unknown address is not a shared one: two such records on a line are one binding
+        # only when their text matches too.
+        key = (s.startLine, s.method, s.endpoint, s.handler, s.version,
+               s.text if s.endpoint is None else None)
         seen[key] += 1
         if seen[key] == 2:
             out.append(Violation(

@@ -231,3 +231,36 @@ def test_route_record_is_its_route_object(analyze_files) -> None:
     st = _routes(analyze_files, "  { path: '/users', component: UserList },\n")
     [r] = _at(st, "/users")
     assert r.nodeType == "object"  # the route object's tree-sitter type, not "synthetic"
+
+
+# ---- a file that imports React is never a vue-router config
+
+def _vue_routes(analyze_files, files: dict[str, str]):
+    st = analyze_files({"package.json": PKG, **files})
+    return sorted((s.path, s.endpoint) for s in st if s.semanticType == "route" and s.framework == "vue")
+
+
+def test_react_component_file_has_no_vue_routes(analyze_files) -> None:
+    for head in ("import React from 'react';", "import type { FC } from 'react';",
+                 "import React = require('react');", "const R = require('react-dom');",
+                 "import { jsx } from 'react/jsx-runtime';"):
+        src = f"{head}\nexport const tabs = [ {{ path: '/t1', component: T1 }} ];\n"
+        assert _vue_routes(analyze_files, {"src/Tabs.ts": src}) == [], head
+
+
+def test_text_react_alone_does_not_stop_vue_routes(analyze_files) -> None:
+    src = (
+        "import { createRouter } from 'vue-router';\n"
+        "const frameworks = ['react', 'vue'];\n"
+        "const lib = require('preact');\n"
+        "const other = makeThing('react');\n"
+        "import x from 'react-icons-vue';\n"
+        "export default createRouter({ routes: [ { path: '/vh', component: Home } ] });\n"
+    )
+    assert _vue_routes(analyze_files, {ROUTER: src}) == [(ROUTER, "/vh")]
+
+
+def test_route_fragment_that_imports_nothing_keeps_its_routes(analyze_files) -> None:
+    src = "export default [ { path: '/frag', component: Frag } ];\n"
+    assert _vue_routes(analyze_files, {"src/router/modules/frag.js": src}) == [
+        ("src/router/modules/frag.js", "/frag")]
