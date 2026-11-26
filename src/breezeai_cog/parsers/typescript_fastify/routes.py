@@ -22,7 +22,7 @@ from ..contract import HTTP_METHODS
 from ..emits import Emit
 from ..typescript_http_common import inline_handler
 from ..treesitter import node_text
-from ..typescript.imports import Consts, resolve_const_value
+from ..typescript.imports import Consts, folded_path, resolve_const_value
 from ..typescript.scopes import file_consts
 from ..wiring import compose_guards
 from .plugins import (
@@ -44,9 +44,14 @@ def _join_path(prefix: str | None, path: str | None) -> str | None:
 
 
 def _path(node: Node | None, source: bytes, consts: Consts) -> str | None:
+    """The route's path argument as a string: a literal, a constant, a template, or a ``+``
+    concatenation whose every part folds to one (``BASE + '/users'`` → ``/v1/users``). A part
+    read at runtime leaves the path unknown → None."""
     node = _unwrap(node)
     if node is None:
         return None
+    if node.type == "binary_expression":
+        return folded_path(node, source, consts)
     return resolve_const_value(node, source, consts)
 
 

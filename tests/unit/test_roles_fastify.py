@@ -141,6 +141,39 @@ def test_unresolved_path_leaves_endpoint_empty(analyze_files) -> None:
     assert _routes(st) == {("GET", None, "health")}
 
 
+def test_concatenated_path_folds_its_constants(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\napp.get(BASE + '/concat', a);\n"
+              "app.get('/v1' + '/literal-concat', b);\napp.get(BASE + '/users/' + ':id', c);\n")
+    assert _routes(st) == {("GET", "/v1/concat", "a"), ("GET", "/v1/literal-concat", "b"),
+                           ("GET", "/v1/users/:id", "c")}
+
+
+def test_concatenated_path_with_a_runtime_part_leaves_endpoint_empty(analyze_files) -> None:
+    st = _app(analyze_files, "app.get(config.base + '/x', h);\n")
+    assert _routes(st) == {("GET", None, "h")}
+
+
+def test_template_path_still_resolves(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\napp.get(`${BASE}/tpl/:id`, a);\napp.get(`/v${1}/num`, b);\n")
+    assert _routes(st) == {("GET", "/v1/tpl/:id", "a"), ("GET", "/v1/num", "b")}
+
+
+def test_concatenated_url_in_route_object(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\n"
+              "app.route({ method: 'POST', url: BASE + '/items', handler: create });\n")
+    assert _routes(st) == {("POST", "/v1/items", "create")}
+
+
+def test_concatenated_path_under_a_plugin_prefix(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const BASE = '/v1';\n"
+              "app.register(async (r) => {\n  r.get(BASE + '/inner', h);\n}, { prefix: '/api' });\n")
+    assert _routes(st) == {("GET", "/api/v1/inner", "h")}
+
+
 def test_fastify_plugin_ignores_the_prefix(analyze_files) -> None:
     st = _app(analyze_files,
               "import fp from 'fastify-plugin';\nimport shared from './shared.js';\n"
@@ -326,3 +359,16 @@ def test_helper_called_from_two_plugins_does_not_join_them(analyze_files) -> Non
                                    "export const b = async (s: FastifyInstance) => {\n"
                                    "  s.get('/y', async () => { await audit(s, 'b'); });\n};\n"})
     assert {(r.method, r.endpoint) for r in _eps(st)} == {("GET", "/a/x"), ("GET", "/b/y")}
+
+
+def test_concatenated_numbers_are_added_not_joined(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const A = 1;\nconst B = 2;\nconst BASE = '/v';\nconst SUFFIX = '/x';\n"
+              "app.get('/v' + (A + B), a);\napp.get('/v' + A + B, b);\napp.get(BASE + SUFFIX, c);\n")
+    assert _routes(st) == {("GET", None, "a"), ("GET", "/v12", "b"), ("GET", "/v/x", "c")}
+
+
+def test_parenthesized_string_side_keeps_joining(analyze_files) -> None:
+    st = _app(analyze_files,
+              "const A = 1;\nconst B = 2;\napp.get(('/v' + A) + B, a);\napp.get(A + config.port, b);\n")
+    assert _routes(st) == {("GET", "/v12", "a"), ("GET", None, "b")}
