@@ -384,6 +384,26 @@ func f() {
     assert (call.semanticType, call.method, call.endpoint) == ("api_call", "GET", "http://x/y")
 
 
+def test_go_http_client_do_resolves_request_details(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import "net/http"
+
+func callAPI() {
+    req, _ := http.NewRequest("GET", "https://example.test/api", nil)
+    client := &http.Client{}
+    client.Do(req)
+    http.DefaultClient.Do(req)
+}
+''')
+
+    calls = [s for s in record.statements if s.text.endswith(".Do(req)")]
+    assert [(s.method, s.endpoint) for s in calls] == [
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/api"),
+    ]
+
+
 def test_go_switch_inc_and_package_level_declarations_are_captured(tmp_path) -> None:
     record = _parse(tmp_path, b'''package p
 

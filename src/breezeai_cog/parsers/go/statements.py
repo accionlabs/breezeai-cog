@@ -65,7 +65,146 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     endpoint, override = resolve_endpoint(arg_nodes, source, _render_url, method=url_first(callee, method))
     if override is not None:
         method = override
+    elif method == "Do" and arg_nodes:
+        # http.Client.Do(req) / c.Do(req) carries req as its first argument
+        req_name = node_text(arg_nodes[0], source)
+        req_details = _find_request_definition(call, req_name, source)
+        if req_details is not None:
+            override_method, resolved_ep = req_details
+            if _is_http_client_receiver(call, source):
+                callee = "http.Client.Do"
+            if override_method:
+                method = override_method
+            if resolved_ep:
+                endpoint = resolved_ep
     return callee, method, endpoint
+
+
+def _is_http_client_value(node: Node, source: bytes) -> bool:
+    while node.type == "unary_expression":
+        operand = node.child_by_field_name("operand")
+        if operand is None:
+            return False
+        node = operand
+    type_node = node.child_by_field_name("type") if node.type == "composite_literal" else None
+    return type_node is not None and node_text(type_node, source) == "http.Client"
+
+
+def _is_http_client_receiver(call: Node, source: bytes) -> bool:
+    fn = call.child_by_field_name("function")
+    receiver = fn.child_by_field_name("operand") if fn is not None else None
+    if receiver is None:
+        return False
+    name = node_text(receiver, source)
+    if name == "http.DefaultClient":
+        return True
+
+    scope: Node | None = call
+    while scope is not None and scope.type not in {
+        "function_declaration", "method_declaration", "func_literal",
+    }:
+        scope = scope.parent
+    if scope is None:
+        return False
+
+    params = scope.child_by_field_name("parameters")
+    if params is not None:
+        for param in params.named_children:
+            typ = param.child_by_field_name("type")
+            if (
+                typ is not None
+                and node_text(typ, source).lstrip("*") == "http.Client"
+                and any(node_text(item, source) == name for item in param.children_by_field_name("name"))
+            ):
+                return True
+
+    body = scope.child_by_field_name("body")
+    if body is None:
+        return False
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if node is not body and node.type == "func_literal":
+            continue
+        if node.start_byte >= call.start_byte:
+            continue
+        if node.type in {"short_var_declaration", "var_spec"}:
+            for variable, value in _pairs(node) or []:
+                if node_text(variable, source) == name and _is_http_client_value(value, source):
+                    return True
+        stack.extend(node.named_children)
+    return False
+
+
+def _find_request_definition(call: Node, req_name: str, source: bytes) -> tuple[str | None, str | None] | None:
+    """Find http.NewRequest("METHOD", url, ...) defining req_name in the enclosing scope."""
+    curr: Node | None = call
+    while curr is not None and curr.type not in {"function_declaration", "method_declaration", "func_literal"}:
+        curr = curr.parent
+    if curr is None:
+        return None
+    body = curr.child_by_field_name("body")
+    if body is None:
+        return None
+
+    # Go wraps function-body statements in a statement_list node.
+    statements = list(body.named_children)
+    if len(statements) == 1 and statements[0].type == "statement_list":
+        statements = list(statements[0].named_children)
+
+    # Walk statements in body before the call looking for req_name assignment
+    target_node = None
+    for stmt in statements:
+        if stmt.start_byte >= call.start_byte:
+            break
+        if stmt.type == "short_var_declaration":
+            left = stmt.child_by_field_name("left")
+            right = stmt.child_by_field_name("right")
+            if left is not None and right is not None:
+                names = [node_text(c, source) for c in left.named_children if c.type == "identifier"]
+                if req_name in names:
+                    target_node = right
+                    break
+        elif stmt.type == "assignment_statement":
+            left = stmt.child_by_field_name("left")
+            right = stmt.child_by_field_name("right")
+            if left is not None and right is not None:
+                names = [node_text(c, source) for c in left.named_children if c.type == "identifier"]
+                if req_name in names:
+                    target_node = right
+                    break
+
+    if target_node is None:
+        return None
+
+    # Target node could be an expression_list or a call_expression directly
+    call_expr = None
+    if target_node.type == "call_expression":
+        call_expr = target_node
+    else:
+        for child in target_node.named_children:
+            if child.type == "call_expression":
+                call_expr = child
+                break
+
+    if call_expr is not None:
+        fn = call_expr.child_by_field_name("function")
+        if fn is not None:
+            fn_text = node_text(fn, source)
+            if fn_text.endswith("NewRequest") or fn_text.endswith("NewRequestWithContext"):
+                args = call_expr.child_by_field_name("arguments")
+                if args is not None:
+                    arg_list = list(args.named_children)
+                    req_method = None
+                    req_endpoint = None
+                    # http.NewRequest(method, url, body) or http.NewRequestWithContext(ctx, method, url, body)
+                    offset = 1 if "WithContext" in fn_text else 0
+                    if len(arg_list) > offset:
+                        req_method = _render_url(arg_list[offset], source)
+                    if len(arg_list) > offset + 1:
+                        req_endpoint = _render_url(arg_list[offset + 1], source)
+                    return req_method, req_endpoint
+    return None
 
 
 #: Declarations that bind names to values: ``var x = …`` (one ``var_spec`` each) and ``x := …``.
