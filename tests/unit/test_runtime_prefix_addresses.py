@@ -60,6 +60,16 @@ def _addr(stmt) -> str | None:
         ("config().getString(key)", "getString"),  # a computed key is no config entry
         ('map.get("k")', "k"),  # another lookup by a literal key: the key
         ("prefixFromEnv()", "prefixFromEnv"),
+        # a conversion with no argument names the value it converts
+        ("uri.toString()", "uri"),
+        ("this.sb.toString()", "sb"),
+        ("options.base . ToString()", "options.base"),
+        ("json.getAsString()", "json"),
+        ('map.get("k").toString()', "k"),
+        ("new UrlMaker().toString()", "toString"),  # no named value: the called function
+        ("build().toString()", "toString"),
+        ("n.toString(16)", "toString"),  # an argument: no plain conversion
+        ("rows.get(1)", "get"),
         ("a ? b : c", "value"),
         ("", "value"),
     ],

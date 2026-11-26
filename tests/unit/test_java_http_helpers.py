@@ -328,3 +328,26 @@ def test_relay_through_a_field_typed_as_an_interface(api_calls) -> None:
                      P + "AccessorBase.java": _accessor("Client", "ClientImpl")})
     # a Map field's `put` is no request: `keep` has no record
     assert got == [("AccessorBase.java", 10, "PUT", "https://api.acme.com/v1/data/{key}")]
+
+
+def test_url_converted_to_text_is_named_after_the_value(api_calls) -> None:
+    got = api_calls({P + "ApiUtil.java": UTIL, P + "ApiHandler.java": API,
+                     P + "Caller.java": f"""package com.acme;
+{V2}public class Caller extends ApiHandler {{
+  public void named(StringBuilder path, String id) {{
+    HttpClientRequest a = getClient(path.toString(), null);
+    HttpClientRequest b = getClient(this.path.toString() + "/orders/" + id, null);
+  }}
+  public void unnamed() {{
+    HttpClientRequest c = postClient(new StringBuilder("/x").toString(), "b", null);
+  }}
+}}
+"""})
+    assert got == [
+        ("ApiHandler.java", 18, "GET", "/health"),
+        # a conversion of a named value takes that value's name
+        ("Caller.java", 6, "GET", "${apiPath}${path}"),
+        ("Caller.java", 7, "GET", "${apiPath}${path}/orders/{id}"),
+        # no named value: the called function
+        ("Caller.java", 10, "POST", "${apiPath}${toString}"),
+    ]
