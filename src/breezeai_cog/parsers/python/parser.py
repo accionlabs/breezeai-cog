@@ -13,13 +13,18 @@ from ...utils import count_loc
 from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
-from ..statements_common import reset_http_client_ids, set_http_client_ids
+from ..statements_common import (
+    reset_datastore_receivers,
+    reset_http_client_ids,
+    set_datastore_receivers,
+    set_http_client_ids,
+)
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from .call_targets import checked_resolver, follow_bindings
 from .classes import build_class, iter_definitions
+from .clients import collect_clients
 from .functions import build_function, defined_names, extract_decorators, scope_calls
-from .http_clients import collect_http_client_ids
 from .imports import extract_imports
 from .index import PythonIndex, build_python_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -64,9 +69,11 @@ class PythonParser(BaseParser):
             path=path, bindings=called, modules=modules, index=ctx.resolution_index,
         )
 
-        # A session is an HTTP client only where the file shows it (http_clients.py); reset in
-        # a finally so the names never reach the next file a worker parses.
-        token = set_http_client_ids(collect_http_client_ids(root, source, external))
+        # A session is an HTTP client or a SQLAlchemy session only where the file shows it
+        # (clients.py); reset in a finally so the names never reach the next file a worker parses.
+        http_clients, orm_sessions = collect_clients(root, source)
+        token = set_http_client_ids(http_clients)
+        stores = set_datastore_receivers(orm_sessions or None)
         try:
             functions: list[Function] = []
             classes = []
@@ -106,6 +113,7 @@ class PythonParser(BaseParser):
                     )
                 )
         finally:
+            reset_datastore_receivers(stores)
             reset_http_client_ids(token)
 
         record = FileRecord(

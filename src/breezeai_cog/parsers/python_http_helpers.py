@@ -5,7 +5,8 @@ The shared classifier records ``session.get(url)`` as an ``api_call`` where the 
 Inside a helper of the application that call is made on the helper's parameter; its callers hold
 the URL::
 
-    async def make_generic_request_with_retry(session, url: str, method: str = "GET", **kw):
+    async def make_generic_request_with_retry(session: aiohttp.ClientSession, url: str,
+                                              method: str = "GET", **kw):
         if method.upper() == "POST":
             response = await session.post(url, **kw)        # plain statement
         else:
@@ -50,7 +51,7 @@ from .additive import DetectContext, Detection, Detector, FactSpec, Gate, index_
 from .detection.api_calls import match_api
 from .emits import Emit
 from .index_common import record_distinct
-from .python.http_clients import http_client_ids_of
+from .python.clients import collect_clients
 from .python.statements import _render_url
 from .statements_common import HTTP_VERB_ARGS, url_or_value
 from .treesitter import node_text
@@ -221,7 +222,7 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
     relays: list[tuple[str, str, tuple, tuple]] = []
     functions = list(_functions(root, source))
     names = [name for name, _ in functions]
-    client_ids = http_client_ids_of(root, source)  # the same names the statements are read with
+    client_ids = collect_clients(root, source)[0]  # the same names the statements are read with
     # 1. Direct helpers: only a function whose text names an HTTP client can hold a request.
     candidates = [(name, fn) for name, fn in functions
                   if _CLIENT_WORDS.search(source, fn.start_byte, fn.end_byte)]

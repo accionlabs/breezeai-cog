@@ -20,7 +20,7 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "requ
 # libraries. A bare ``client`` is never one: it would match s3Client / dbClient / graphqlClient.
 # ``session`` is in no list: it is a ``requests.Session`` as often as a SQLAlchemy or Hibernate
 # session, so a session is an HTTP client only where the file shows it (the Python parser's
-# per-file client names, ``python/http_clients.py``).
+# per-file client names, ``python/clients.py``).
 # A language with no entry (PHP, C, C++, an unknown one) has no name match at all; its HTTP
 # calls are recorded only by evidence-based detectors (an import, a declared type).
 _COMMON_HINTS = ("http", "httpclient", "restclient", "apiclient")
