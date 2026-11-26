@@ -43,11 +43,7 @@ class SymfonyParser(PhpParser):
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         record.framework = "symfony"
-        test_directory = any(
-            segment.lower() in {"test", "tests"}
-            for segment in ctx.path.replace("\\", "/").split("/")[:-1]
-        )
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path) and not test_directory:
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
             route_names = detect_symfony_routes(root, ctx.source, ctx.path, record, index)
             detect_symfony_route_builders(root, ctx.source, ctx.path, record)

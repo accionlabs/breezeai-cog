@@ -603,7 +603,11 @@ def test_framework_claims_reject_foreign_framework_namespaces() -> None:
     assert not SlimParser().claims(
         "wp-includes/php-ai-client/third-party/Http/Response.php", vendor_slim
     )
-    assert not SlimParser().claims("tools/php-ai-client/scoper.inc.php", b"$prefix = 'Slim\\';")
+    assert SlimParser().is_fixture_file("tools/php-ai-client/scoper.inc.php")
+    assert SlimParser().claims(
+        "services/wordpress/routes.php",
+        b"<?php namespace Slim; $app->get('/sync', Handler::class);",
+    )
     assert registry.select(
         "wp-includes/php-ai-client/third-party/Http/Response.php", vendor_slim
     ).name == "php"

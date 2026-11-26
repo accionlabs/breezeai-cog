@@ -10,7 +10,7 @@ A hook callback is written as registered and led to its declaration after parsin
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | `add_action(hook, 'my_fn')` / `add_filter(hook, 'my_fn')` | Binding | `eventbus_consumer`, `CONSUMER`, endpoint = the hook, `handler` = the function, `handlerLine` = its declaration when in this file | WordPress invokes the callback |
-| `register_rest_route('ns/v1', '/path', ['methods' => ..., 'callback' => ...])` | Route | `route`, `routeKind: route`, endpoint = `/ns/v1/path`, one record per method, `isRegex` when the path has `(?P<…>)` | WordPress serves the callback over HTTP |
+| `register_rest_route('ns/v1', '/path', ['methods' => ..., 'callback' => ...])` | Route | `route`, `routeKind: route`, endpoint = `/ns/v1/path`, method = `GET` when omitted, one record per literal method (including comma-separated strings), `isRegex` when the path has `(?P<…>)` | WordPress serves the callback over HTTP |
 | `[$this, 'm']` / `[self::class, 'm']` / `[Cls::class, 'm']` / `'Cls::m'` | Binding | handler `m` of the enclosing / named class | The class is in the syntax |
 | `[$object, 'm']` (class not in the syntax) | Binding | empty `handler` | A bare `m` would be read as an unrelated global function |
 | Inline closure callback | Binding | empty `handler`, `handlerLine` = where the closure starts | Anonymous handler |

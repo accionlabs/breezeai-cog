@@ -49,7 +49,7 @@ _GLOBAL_FIXTURE_MARKERS: tuple[str, ...] = (".test.", ".spec.")
 #: routes), not the wired router, so route/entry-point emitters skip it. Segment-exact so
 #: ``mockups/`` (a real word) does not match ``mock``.
 _GLOBAL_FIXTURE_DIRS: frozenset[str] = frozenset(
-    {"mock", "mocks", "__mocks__", "fixtures", "__fixtures__"}
+    {"mock", "mocks", "__mocks__", "fixtures", "__fixtures__", "test", "tests", "user_guide_src"}
 )
 
 
@@ -216,7 +216,7 @@ class BaseParser:
         parts = path.replace("\\", "/").split("/")
         if any(marker in parts[-1] for marker in self.fixture_markers()):
             return True
-        return any(seg in _GLOBAL_FIXTURE_DIRS for seg in parts[:-1])
+        return any(seg.lower() in _GLOBAL_FIXTURE_DIRS for seg in parts[:-1])
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:  # pragma: no cover - abstract
         raise NotImplementedError

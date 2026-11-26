@@ -47,7 +47,6 @@ _CODEIGNITER_ROUTE_CALL = re.compile(
     rb"\$[A-Za-z_]\w*\s*->\s*(?:get|post|put|patch|delete|options|head|any|add|match|group|resource|presenter|map|addRedirect|cli|view|environment)\s*\("
 )
 _ROUTE_FILE = re.compile(rb"(?:^|/)(?:routes?|routing)(?:/|\.php$)", re.IGNORECASE)
-_CODEIGNITER_DOC = re.compile(rb"(?:^|/)user_guide_src/", re.IGNORECASE)
 
 
 def _group_prefix(call: Node, source: bytes) -> str | None:
@@ -358,7 +357,6 @@ class CodeIgniterParser(PhpParser):
         record = self.extract(root, ctx)
         record.framework = "codeigniter"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            if not _CODEIGNITER_DOC.search(ctx.path.replace("\\", "/").encode()):
-                detect_codeigniter_routes(root, ctx.source, ctx.path, record)
+            detect_codeigniter_routes(root, ctx.source, ctx.path, record)
             _detect_codeigniter_events(root, ctx.source, ctx.path, record)
         return record

@@ -93,7 +93,7 @@ def _route_options(node: Node, source: bytes) -> list[dict[str, Node]]:
 
 
 def _method_values(node: Node, source: bytes) -> list[str | None]:
-    values = [value.upper() for value in _string_values(node, source)]
+    values = [part.strip().upper() for value in _string_values(node, source) for part in value.split(",")]
     if values:
         return [value if value in _HTTP_METHODS else None for value in values]
     value_node = unwrap(node)
@@ -145,7 +145,7 @@ def detect_wordpress_routes(dc: DetectContext) -> Detection | None:
                 if callback_node is not None
                 else (None, None)
             )
-            methods = _method_values(option["methods"], source) if "methods" in option else [None]
+            methods = _method_values(option["methods"], source) if "methods" in option else ["GET"]
             for method in methods:
                 found.append(Emit(
                     node,

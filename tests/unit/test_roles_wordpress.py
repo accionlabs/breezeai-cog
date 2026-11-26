@@ -46,6 +46,21 @@ def test_rest_route_method_arrays_emit_one_binding_per_method(analyze_files) -> 
     ]
 
 
+def test_rest_route_defaults_to_get_and_splits_literal_method_strings(analyze_files) -> None:
+    routes = _routes(
+        analyze_files,
+        "register_rest_route('acme/v1', '/list', ['callback' => 'acme_list']);\n"
+        "register_rest_route('acme/v1', '/multi', [\n"
+        "    'methods' => 'GET, POST', 'callback' => 'acme_multi',\n"
+        "]);\n",
+    )
+    assert sorted((route.endpoint, route.method) for route in routes) == [
+        ("/acme/v1/list", "GET"),
+        ("/acme/v1/multi", "GET"),
+        ("/acme/v1/multi", "POST"),
+    ]
+
+
 def test_named_function_callback_is_binding(analyze_files) -> None:
     hooks = _hooks(analyze_files, "add_action('init', 'p_init');\nadd_filter('the_title', 'p_title');\n"
                    "function p_init() {}\nfunction p_title($t) { return $t; }\n")
