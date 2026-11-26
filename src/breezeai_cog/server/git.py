@@ -29,6 +29,7 @@ from ..integrations.scm import (
 from ..integrations.scm.repository import parse_bitbucket_server_url
 from ..integrations.scm.repository import parse_repo_url as _parse_repo_ref
 from .errors import ApiError
+from .git_token import request_git_token
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str
     has_current = current not in (None, "", "null", "undefined")
 
     try:
-        client = SCMClientFactory.for_repo(ref, settings, request_token=body.get("gitToken"))
+        client = SCMClientFactory.for_repo(ref, settings, request_token=request_git_token(body, settings))
     except SCMError as exc:
         raise ApiError(str(exc), exc.status_code) from None
 
