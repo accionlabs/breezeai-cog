@@ -1,5 +1,5 @@
-"""Python HTTP calls made through the application's own helpers are recorded where they run
-(BREEZEAI-1654; Java: ``java_http_helpers.py``, TypeScript: ``typescript_http_helpers.py``).
+"""Python HTTP calls made through the application's own helpers are recorded where they run — the
+Python adapter of the shared rule (``parsers/outbound_helpers.py``; BREEZEAI-1654).
 
 The shared classifier records ``session.get(url)`` as an ``api_call`` where the client is called.
 Inside a helper of the application that call is made on the helper's parameter; its callers hold
@@ -32,37 +32,70 @@ into a helper's URL position. **Call site** — a call the Python call resolver 
 (``calls[].path``) to a helper's file under the helper's name; a name two functions of one file
 share is not followed. Not followed: a URL parameter rewritten, two parameters in the URL, a
 ``*args`` call.
+
+What this module reads is Python grammar only; the engine merges helpers, follows relays, links
+call sites and writes the records. Each helper's request is kept in the fact by position, so the
+helper's own record is cleared without scanning its file again, and a call site's local is read
+from one walk of its function, not one walk per call.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
-from ..emit import statement_id
-from ..schemas import FileRecord
-from .additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
+from ..additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
     register_detector, register_fact
-from .detection.api_calls import match_api
-from .emits import Emit
-from .index_common import record_distinct
-from .python.statements import _render_url
-from .statements_common import HTTP_VERB_ARGS, url_or_value
-from .treesitter import node_text
+from ..detection.api_calls import match_api
+from ..emits import Emit
+from ..index_common import record_distinct
+from ..outbound_helpers import Helper, HelperPolicy, Pass, RelayCall, clear_emits, \
+    enclosing_function, follow_relays, link_site, site_emit, site_verb, unresolved_twin, \
+    url_slot
+from ..statements_common import HTTP_VERB_ARGS, url_or_value
+from ..treesitter import node_text
+from .statements import _render_url
 
 FACT = "python.http-helpers"
-_DEPTH = 4
-_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"})
 _VERB_PARAMS = ("method", "http_method", "verb")
 
-#: A helper: (URL parameter index, its name, URL template, its slot, fixed verb or None, verb
-#: parameter index or -1, verb parameter name or "", the verb parameter's default or None, a
-#: method — ``self`` / ``cls`` dropped from its positions).
-Helper = tuple[int, str, str, str, str | None, int, str, str | None, bool]
+POLICY = HelperPolicy(
+    language="python",
+    relays="same-file",
+    depth=4,
+    sticky_ambiguous=False,
+    verbs=frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"}),
+    own_receivers=frozenset({"", "self", "cls"}),
+)
+_VERBS = POLICY.verbs
+
+#: A helper's request in its file, to clear it in pass 2: (function name, start byte, end byte,
+#: node type).
+RequestAt = tuple[str, int, int, str]
+
+
+@dataclass(frozen=True, slots=True)
+class FileHelpers:
+    """What one file gives the fact."""
+
+    path: str
+    helpers: tuple[tuple[str, Helper], ...]
+    relays: tuple[RelayCall[str], ...]
+    #: Every function name of the file, in order (a name twice is not followed).
+    names: tuple[str, ...]
+    requests: tuple[RequestAt, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Fact:
+    helpers: dict[tuple[str, str], Helper]
+    #: file → the requests of its helpers to clear.
+    requests: dict[str, tuple[RequestAt, ...]]
 
 
 def _is_method(fn: Node) -> bool:
@@ -209,14 +242,14 @@ def http_request(call: Node, source: bytes) -> tuple[str | None, Node | None, No
             return lit.upper(), None, url
         return None, verb_node, url
     url = positional[0] if positional else keywords.get("url")
-    return (verb if verb in _VERBS else None), None, url if url is not None else None
+    return (verb if verb in _VERBS else None), None, url  # type: ignore[return-value]
 
 
 def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
-                                              list[tuple[str, str, tuple, tuple]], list[str]]:
+                                              list[RelayCall[str]], list[str]]:
     """This file's helpers (name, helper, request node), relays and function names."""
     helpers: list[tuple[str, Helper, Node]] = []
-    relays: list[tuple[str, str, tuple, tuple]] = []
+    relays: list[RelayCall[str]] = []
     functions = list(_functions(root, source))
     names = [name for name, _ in functions]
     # 1. Direct helpers: only a function whose text names an HTTP client can hold a request.
@@ -232,33 +265,37 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
         found: list[tuple[Helper, Node]] = []
         for call in _own_calls(fn):
             req = http_request(call, source)
-            if req is not None and req[2] is not None:
-                verb, verb_node, url = req
-                refs = _reads(url, usable, source)
-                if len(refs) != 1:
-                    continue
-                slot = "{" + refs[0] + "}"
-                template = url_or_value(url, source, _render_url) or ""
-                if template.count(slot) != 1 or not template.endswith(slot):
-                    continue
-                vname = node_text(verb_node, source) if verb_node is not None \
-                    and verb_node.type == "identifier" and node_text(verb_node, source) in usable \
-                    else ""
-                vidx = params.index(vname) if vname else -1
-                found.append(((params.index(refs[0]), refs[0], template, slot, verb, vidx, vname,
-                               defaults.get(vname), _is_method(fn)), call))
+            if req is None or req[2] is None:
+                continue
+            verb, verb_node, url = req
+            refs = _reads(url, usable, source)
+            if len(refs) != 1:
+                continue
+            template = url_or_value(url, source, _render_url) or ""
+            slot = url_slot(refs, template)
+            if slot is None:
+                continue
+            vname = node_text(verb_node, source) if verb_node is not None \
+                and verb_node.type == "identifier" and node_text(verb_node, source) in usable \
+                else ""
+            vidx = params.index(vname) if vname else -1
+            found.append((Helper(params.index(refs[0]), template, slot, verb, vidx,
+                                 url_name=refs[0], verb_name=vname,
+                                 verb_default=defaults.get(vname), is_method=_is_method(fn)),
+                          call))
         # One URL slot, several verbs (the function branches on its verb): the verb parameter.
-        shapes = {(h[0], h[2], h[3]) for h, _ in found}
+        shapes = {(h.url_index, h.template, h.slot) for h, _ in found}
         if len(shapes) == 1:
-            verbs = {(h[4], h[5]) for h, _ in found}
+            verbs = {(h.verb, h.verb_index) for h, _ in found}
             if len(verbs) == 1:
                 helper = found[0][0]
             else:
                 vname = next((p for p in _VERB_PARAMS if p in usable), "")
-                url_idx, url_name, template, slot = found[0][0][:4]
-                helper = (url_idx, url_name, template, slot, None,
-                          params.index(vname) if vname else -1, vname, defaults.get(vname),
-                          _is_method(fn))
+                first = found[0][0]
+                helper = Helper(first.url_index, first.template, first.slot, None,
+                                params.index(vname) if vname else -1, url_name=first.url_name,
+                                verb_name=vname, verb_default=defaults.get(vname),
+                                is_method=_is_method(fn))
             helpers.extend((name, helper, call) for _, call in found)
             helper_names.add(name)
     if not helper_names:
@@ -282,125 +319,116 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
             positional, keywords, splat, _ = _arguments(call, source)
             if splat:
                 continue
-            pairs = []
-            for key, a in [*enumerate(positional), *keywords.items()]:
+            args: list[tuple[int | str, Node]] = [*enumerate(positional), *keywords.items()]
+            passes: list[Pass] = []
+            for key, a in args:
                 refs = _reads(a, usable, source)
                 shown = url_or_value(a, source, _render_url) or ""
                 if len(refs) == 1 and shown.count("{" + refs[0] + "}") == 1:
-                    pairs.append((key, params.index(refs[0]), refs[0], shown))
+                    passes.append(Pass(key, params.index(refs[0]), refs[0], shown))
             literals = tuple((key, (_render_url(a, source) or "").upper())
-                             for key, a in [*enumerate(positional), *keywords.items()]
-                             if a.type == "string")
-            if pairs:
-                relays.append((name, target, tuple(pairs), literals, _is_method(fn)))
+                             for key, a in args if a.type == "string")
+            if passes:
+                relays.append(RelayCall(name, target, tuple(passes), literals, _is_method(fn)))
     return helpers, relays, names
 
 
-def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None):
+def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileHelpers | None:
     helpers, relays, names = _scan(root, source)
     if not helpers:
         return None
-    return rel, [(n, h) for n, h, _ in helpers], relays, names
+    return FileHelpers(rel, tuple((n, h) for n, h, _ in helpers), tuple(relays), tuple(names),
+                       tuple((n, c.start_byte, c.end_byte, c.type) for n, _, c in helpers))
 
 
-def _resolve(values: list[tuple[str, list, list, list[str]]], index: Any
-             ) -> dict[tuple[str, str], Helper] | None:
+def _fold_verb(literal: str) -> str | None:
+    return literal if literal in _VERBS else None
+
+
+def _by_name(known: dict[str, Helper]) -> Callable[[RelayCall[str]], Helper | None]:
+    """A relay's callee: the function of that name in the file, as known so far."""
+    def lookup(relay: RelayCall[str]) -> Helper | None:
+        return known.get(relay.target)
+    return lookup
+
+
+def _resolve(values: list[FileHelpers], index: Any) -> Fact | None:
+    """(file, name) → helper, per file: a name two functions share, or a helper of two shapes,
+    is dropped; relays within the file are followed (:data:`POLICY`)."""
     out: dict[tuple[str, str], Helper] = {}
-    for rel, helpers, relays, names in values:
-        twice = {n for n in names if names.count(n) > 1}
+    requests: dict[str, tuple[RequestAt, ...]] = {}
+    for v in values:
+        twice = {n for n in v.names if v.names.count(n) > 1}
         found: dict[str, Helper | None] = {}
-        for name, helper in helpers:
+        for name, helper in v.helpers:
             record_distinct(found, name, helper)
         known = {n: h for n, h in found.items() if h is not None and n not in twice}
-        for _ in range(_DEPTH):
-            new: dict[str, Helper | None] = {}
-            for name, target, pairs, literals, is_method in relays:
-                helper = known.get(target)
-                if name in known or name in twice or helper is None:
-                    continue
-                url_idx, url_name, template, slot, verb, vidx, vname, vdefault, _ = helper
-                own = {key: (p, pname, shown) for key, p, pname, shown in pairs}
-                hit = own.get(url_idx) or own.get(url_name)
-                if hit is None:
-                    continue
-                param, pname, shown = hit
-                new_vidx, new_vname, new_default = -1, "", None
-                if vidx >= 0:
-                    vhit = own.get(vidx) or own.get(vname)
-                    lits = dict(literals)
-                    lit = lits.get(vidx) or lits.get(vname)
-                    if vhit is not None and vhit[2] == "{" + vhit[1] + "}":
-                        new_vidx, new_vname = vhit[0], vhit[1]  # passed on as is
-                    elif lit is not None:
-                        verb = lit if lit in _VERBS else None  # a literal verb
-                    elif vhit is None:
-                        verb = vdefault.upper() if vdefault else None  # left out: its default
-                    else:
-                        verb = None  # an expression: unknown
-                record_distinct(new, name, (param, pname, template.replace(slot, shown),
-                                            "{" + pname + "}", verb, new_vidx, new_vname,
-                                            new_default, is_method))
-            added = {n: h for n, h in new.items() if h is not None}
-            if not added:
-                break
-            known.update(added)
+        follow_relays(known, v.relays, lookup=_by_name(known), fold_verb=_fold_verb,
+                      policy=POLICY, blocked=set(twice))
         for name, helper in known.items():
-            out[(rel, name)] = helper
-    return out or None
+            out[(v.path, name)] = helper
+        kept = tuple(r for r in v.requests if r[0] in known)
+        if kept:
+            requests[v.path] = kept
+    return Fact(out, requests) if out else None
 
 
 register_fact(FactSpec(name=FACT, language="python", gate=(b"(",), collect=_collect,
                        resolve=_resolve))
 
 
-def _enclosing_function(record: FileRecord, line: int):
-    best = None
-    for fn in record.functions:
-        if fn.startLine <= line <= fn.endLine and (
-                best is None or fn.endLine - fn.startLine < best.endLine - best.startLine):
-            best = fn
-    return best
+def _request_node(root: Node, start: int, end: int, kind: str) -> Node | None:
+    """The node a helper's request was found at in pass 1 (same bytes, same tree)."""
+    node: Node | None = root.descendant_for_byte_range(start, end)
+    while node is not None and not (node.type == kind and node.start_byte == start
+                                    and node.end_byte == end):
+        node = node.parent if node.start_byte >= start and node.end_byte <= end else None
+    return node
 
 
-def _statement_node(call: Node, path: str, ids: dict[str, Any]) -> Node | None:
-    node: Node | None = call
-    while node is not None:
-        stmt = ids.get(statement_id(path, node.start_point[0] + 1, node.start_point[1]))
-        if stmt is not None and stmt.nodeType == node.type:
-            return node
-        node = node.parent
-    return None
+def _enclosing_def(node: Node) -> Node | None:
+    fn = node.parent
+    while fn is not None and fn.type != "function_definition":
+        fn = fn.parent
+    return fn
 
 
 def _relayed(node: Node, path: str, helpers: dict[tuple[str, str], Helper],
              scopes: dict[tuple[int, int], str], source: bytes) -> bool:
     """``node`` reads a parameter of the function it is in, and that function is a helper."""
-    fn = node.parent
-    while fn is not None and fn.type != "function_definition":
-        fn = fn.parent
+    fn = _enclosing_def(node)
     name = scopes.get((fn.start_byte, fn.end_byte)) if fn is not None else None
-    if name is None or (path, name) not in helpers:
+    if fn is None or name is None or (path, name) not in helpers:
         return False
     sig = _params(fn, source)
-    return bool(sig) and bool(_reads(node, sig[0], source))
+    return sig is not None and bool(sig[0]) and bool(_reads(node, sig[0], source))
 
 
-def _local_value(node: Node, source: bytes) -> Node | None:
-    """The value of a name assigned once in the enclosing function."""
-    name = node_text(node, source)
-    fn = node.parent
-    while fn is not None and fn.type != "function_definition":
-        fn = fn.parent
-    found: list[Node] = []
-    stack = [fn] if fn is not None else []
+def _assignments(fn: Node, source: bytes) -> dict[str, list[Node]]:
+    """Every ``name = value`` in ``fn`` (its nested functions included): name → values. One
+    walk per function (§11), shared by every call site in it."""
+    out: dict[str, list[Node]] = {}
+    stack = [fn]
     while stack:
         n = stack.pop()
         if n.type == "assignment":
             left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
-            if left is not None and right is not None and left.type == "identifier" \
-                    and node_text(left, source) == name:
-                found.append(right)
+            if left is not None and right is not None and left.type == "identifier":
+                out.setdefault(node_text(left, source), []).append(right)
         stack.extend(n.named_children)
+    return out
+
+
+def _local_value(node: Node, source: bytes,
+                 cache: dict[tuple[int, int], dict[str, list[Node]]]) -> Node | None:
+    """The value of a name assigned once in the enclosing function."""
+    fn = _enclosing_def(node)
+    if fn is None:
+        return None
+    span = (fn.start_byte, fn.end_byte)
+    if span not in cache:
+        cache[span] = _assignments(fn, source)
+    found = cache[span].get(node_text(node, source), [])
     return found[0] if len(found) == 1 else None
 
 
@@ -418,25 +446,30 @@ def _names_pattern(helpers: dict[tuple[str, str], Helper]) -> tuple[set[str], re
     return _PATTERN[1], _PATTERN[2]
 
 
+def _helper_key(helpers: dict[tuple[str, str], Helper], name: str
+                ) -> Callable[[str], tuple[str, str] | None]:
+    """``calls[].path`` → the helper ``name`` is in that file, or None."""
+    def key_of(path: str) -> tuple[str, str] | None:
+        return (path, name) if (path, name) in helpers else None
+    return key_of
+
+
 def _detect(dc: DetectContext) -> Detection | None:
-    helpers: dict[tuple[str, str], Helper] = index_fact(dc.ctx.resolution_index, FACT) or {}
-    if not helpers:
+    fact: Fact | None = index_fact(dc.ctx.resolution_index, FACT)
+    if fact is None:
         return None
+    helpers = fact.helpers
     source, path = dc.source, dc.path
     found: list[Emit] = []
-    own = {name for (rel, name) in helpers if rel == path}
+    own = fact.requests.get(path, ())
     if own:
-        ids = {s.id: s for s in dc.record.statements if s.semanticType == "api_call"}
-        for name, helper, call in _scan(dc.root, source)[0]:
-            if name in own and (path, name) in helpers:
-                node = _statement_node(call, path, ids)
-                if node is not None:
-                    found.append(Emit(node, {"semanticType": None, "method": None,
-                                             "endpoint": None, "framework": None},
-                                      enrich="same"))
+        nodes = [n for _, start, end, kind in own
+                 if (n := _request_node(dc.root, start, end, kind)) is not None]
+        found.extend(clear_emits(nodes, path, dc.record))
     names, pattern = _names_pattern(helpers)
     if pattern.search(source):
         scopes = {(fn.start_byte, fn.end_byte): name for name, fn in _functions(dc.root, source)}
+        assignments: dict[tuple[int, int], dict[str, list[Node]]] = {}
         stack = [dc.root]
         while stack:
             n = stack.pop()
@@ -445,43 +478,40 @@ def _detect(dc: DetectContext) -> Detection | None:
                 continue
             fn = n.child_by_field_name("function")
             name = node_text(fn, source).rsplit(".", 1)[-1] if fn is not None else ""
-            if name not in names:
+            if fn is None or name not in names:
                 continue
-            owner = _enclosing_function(dc.record, n.start_point[0] + 1)
+            owner = enclosing_function(dc.record, n.start_point[0] + 1)
             calls = owner.calls if owner is not None else (dc.record.calls or [])
-            keys = {(c.path, name) for c in calls if c.name == name and c.path
-                    and (c.path, name) in helpers}
-            if len(keys) != 1:
+            key = link_site(calls, name, _helper_key(helpers, name))
+            if key is None:
                 continue
             receiver = node_text(fn, source).rsplit(".", 1)[0] if fn.type == "attribute" else ""
-            if receiver not in ("", "self", "cls") and any(
-                    c.name == name and not c.path for c in calls):
+            if receiver not in POLICY.own_receivers and unresolved_twin(calls, name):
                 continue  # another `name` here resolves nowhere (`config.get(…)`): only a bare or
                 # own-class call is surely the helper's
-            url_idx, url_name, template, slot, verb, vidx, vname, vdefault, is_method = \
-                helpers[next(iter(keys))]
+            helper = helpers[key]
             positional, keywords, splat, kw_splat = _arguments(n, source)
-            if splat or (is_method and receiver[:1].isupper() and receiver.isidentifier()):
+            if splat or (helper.is_method and receiver[:1].isupper() and receiver.isidentifier()):
                 continue  # `Client.get(c, url)`: the instance passed first shifts the positions
-            arg = positional[url_idx] if url_idx < len(positional) else keywords.get(url_name)
+            arg = positional[helper.url_index] if helper.url_index < len(positional) \
+                else keywords.get(helper.url_name)
             if arg is None or _relayed(arg, path, helpers, scopes, source):
                 continue
             if arg.type == "identifier":
-                value_node = _local_value(arg, source)
+                value_node = _local_value(arg, source, assignments)
                 if value_node is not None and _render_url(value_node, source) is not None:
                     arg = value_node
             value = url_or_value(arg, source, _render_url)
             if value is None:
                 continue
-            if vidx >= 0:
-                vnode = positional[vidx] if vidx < len(positional) else keywords.get(vname)
+            literal: str | None = None
+            if helper.verb_index >= 0:
+                vnode = positional[helper.verb_index] \
+                    if helper.verb_index < len(positional) else keywords.get(helper.verb_name)
                 # not passed: the parameter's default — unless a `**kw` may pass it
-                lit = _render_url(vnode, source) if vnode is not None \
-                    else (None if kw_splat else vdefault)
-                verb = lit.upper() if lit and lit.upper() in _VERBS else None
-            found.append(Emit(n, {"semanticType": "api_call", "method": verb,
-                                  "endpoint": template.replace(slot, value)},
-                              enrich="unclassified"))
+                literal = _render_url(vnode, source) if vnode is not None \
+                    else (None if kw_splat else helper.verb_default)
+            found.append(site_emit(n, helper, value, site_verb(helper, literal, _VERBS), POLICY))
     return Detection(found) if found else None
 
 

@@ -1,5 +1,5 @@
 """Python HTTP calls made through the application's own helpers are recorded where they run
-(BREEZEAI-1654, ``parsers/python_http_helpers.py``)."""
+(BREEZEAI-1654, ``parsers/python/http_helpers.py``, on ``parsers/outbound_helpers.py``)."""
 
 from __future__ import annotations
 
@@ -150,3 +150,17 @@ async def run(session, opts):
     # no `method` written: the default is unsure, `**opts` may pass one
     assert got == [("app.py", 5, None, "https://docs.acme.com/a"),
                    ("app.py", 6, "POST", "https://docs.acme.com/b")]
+
+
+def test_many_calls_in_one_function_stay_linear(api_calls) -> None:
+    """Cost guard (architecture §11): each call site reads its local from one walk of its
+    function, not one walk per call. 3,000 calls took about a minute when they did."""
+    import time
+
+    body = "".join(f'    u{i} = "https://api.acme.com/p{i}"\n    fetch_json(u{i})\n'
+                   for i in range(3000))
+    start = time.perf_counter()
+    got = api_calls({"util/__init__.py": "", "util/http.py": RETRY,
+                     "app.py": f"from util.http import fetch_json\n\n\ndef run():\n{body}"})
+    assert len(got) == 3000 and got[0][3].startswith("https://api.acme.com/p")
+    assert time.perf_counter() - start < 15
