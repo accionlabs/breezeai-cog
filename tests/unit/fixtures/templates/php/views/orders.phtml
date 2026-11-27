@@ -1,0 +1,13 @@
+<h1><?= htmlspecialchars($title) ?></h1>
+<form action="/orders/save" method="post">
+    <label for="email">E-mail</label>
+    <input id="email" name="email" type="email" />
+    <button type="submit">Save</button>
+</form>
+<?php if ($isAdmin): ?>
+    <a href="/admin">Admin</a>
+<?php endif; ?>
+<?php foreach ($orders as $order): ?>
+    <p><?= $order->id ?></p>
+<?php endforeach; ?>
+<script>$.post('/api/track', { page: 'orders' }); fetch('/api/orders');</script>

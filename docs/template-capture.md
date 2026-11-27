@@ -35,6 +35,7 @@ code half is captured either way.
 | `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind (VB code-behind, `.aspx.vb`, is `vb-webforms`'s) |
 | `.vue` | `typescript-vue` | `.ts` `.tsx` `.js` `.jsx` … |
 | `.jsp` `.jspx` `.jspf` `.tag` `.tagx` | `jsp` | — |
+| `.twig` | `twig` | — |
 
 For the live list, ask the tool — it is generated from the parsers, never hand-maintained:
 
@@ -70,7 +71,7 @@ like `.aspx` does, but they describe service and handler endpoints, so they stay
 **Never captured, flag or no flag** — these have no parser at all, so they are reported as
 `unsupported` in either mode:
 
-`.hbs` · `.mustache` · `.ejs` · `.erb` · `.twig` · `.blade.php` · `.vm` · `.ftl` ·
+`.hbs` · `.mustache` · `.ejs` · `.erb` · `.blade.php` · `.vm` · `.ftl` ·
 `.jinja` · `.pug` · `.svelte` · `.xhtml` · `.resx`
 
 If a Handlebars template is missing from your graph, `--capture-templates` will not
@@ -289,23 +290,30 @@ discoverable. Skip `.vue` and all of that goes with it.
 |---|---|---|---|
 | `.html` (resolved or fingerprinted) | `angular`, `angularjs`, `vue`, `aurelia`, `knockout`, `thymeleaf` | `template` | `interpolation`, `event_binding`, `property_binding`, `two_way_binding`, `structural_directive`, control-flow blocks |
 | `.html` (plain page) | — | — | a File node only |
-| `.cshtml` | `razor` | `template` | `@page` → a `route`; model and expression statements |
+| `.cshtml` | `razor` | `template` | `@page` → a `route`; model and expression statements (an expression that ends a line keeps to that line); the layout (`Layout = "…"`) and partial views (`<partial name>`, `Html.Partial…("…")`) as file links, found the way ASP.NET searches: the view's folder, each `Shared` folder up to `Views` / `Pages`, then the app's `Pages/Shared` and `Views/Shared`; a name built in code is not linked |
 | `.razor` | `razor` | `component` | same, plus `@code { }` methods as **Functions** |
 | `.vbhtml` | `razor` | `template` | `@ModelType`, `@expr` and control-flow (`@For Each`, `@If`, …) statements, all `nodeType: synthetic` — the Razor grammar is C# only, so a VB view is read by a text scan; no `@page` in VB Razor |
-| `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring |
-| `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
+| `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring and its `handlerPath` / `handlerLine` (the one method of that name in the `Inherits` class's C# code-behind or the page's `<script runat="server">`); a registered user control points at the class its `.ascx` inherits (declared once in its code-behind, else the `.ascx`); `<a href>` links (`navigation`) and `<form action>` posts; the C# server code (split from the markup by the shared splitter, ASP.NET dialect): `<script runat="server">` methods as **Functions** of the page, `<% %>` code as C# statements (`<% if %>` → `if_statement`), `<%= %>` / `<%# %>` expressions cited as written; `<asp:SqlDataSource>` commands as `query_statement`s named by the control's `ID`, and `<asp:ObjectDataSource>` `…Method` attributes pointing at that method of its `TypeName` class (when declared once); markup split across `<% if %>` / `<% else %>` still records every element; a VB page's code is not read as C# |
+| `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes (the `<script>` / `<script setup>` blocks are found with the `vue` grammar, so one inside an HTML comment is not code); `<a href>` links (`navigation`) and `<form action>` posts in `<template>`, read by the shared markup reader; `<script src>` and `<template src>` as file links. The `.html` named by `<template src>` is read as that component's Vue template (`framework: vue`, linked back to the `.vue`) when it sits in the same folder; one elsewhere is linked from the `.vue` but stays a plain html file. A `<template lang="pug">` is skipped (no records). The script blocks run every script detector once, as code — the shared page-script reader is not run again over them |
+| `.ts` / `.js` with `template: '…'` | `angular`, `angularjs`, `vue` | — | a component's markup written as a string in the code file (Angular `@Component({ template })`, AngularJS `.component` / `.directive`, Vue `defineComponent({ template })`) is read like that framework's template file: bindings and event handlers, links (`navigation`) and form posts, at their true lines in the code file. A template literal with a `${…}` part, or a string with no tag, is not read |
+| `.jsx` / `.tsx` (React) | `react` | — | the JSX a component returns, read with the code (no `--capture-templates` needed): `<a href>` links (`navigation`) and `<form action>` posts through the shared markup rules, and each event prop (`onClick={save}`) as a `jsx_attribute` named as written, with `handler` = the function it calls (`save`, `this.save` → `save`, `() => remove(id)` → `remove`; an inline statement → none). Records belong to the component function. A value written as code (`href={url}`) gives no endpoint; conditions and `.map(…)` are not evaluated. React Router `<Link>` / `<NavLink>` are read by the React navigation detector |
 | `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); directives, EL and JSP comments (`nodeType: synthetic` — there is no JSP grammar; directives keep their keyword in `name`, comments carry `semanticType: comment`), prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
 | `.tag` `.tagx` | `jsp` | `component` | same as a page |
+| `.phtml` | — | — | the PHP parser's records for its `<?php ?>` code; links and form posts in its markup (`navigation` / `api_call`) |
+| `.twig` | `twig` | `template` | `{{ }}` and `{% %}` statements; `extends` / `include` / `embed` / `import` targets as `importFiles`; links and form posts in its markup |
 
-**Inline scripts.** In `.html`, `.cshtml`/`.razor`/`.vbhtml` and `.aspx`/`.ascx`/`.master`, the bodies of
+**Inline scripts.** In `.html`, `.cshtml`/`.razor`/`.vbhtml`, `.aspx`/`.ascx`/`.master`, `.jsp`/`.jspx`/`.jspf`/`.tag`/`.tagx`, `.phtml` and `.twig`, the bodies of
 inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
 `$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
 counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
-or a Razor layout / `_ViewStart` chain that loads it). `$.ajax({ url: … })` counts without that
-evidence. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
+or a Razor layout / `_ViewStart` chain that loads it). Scripts run in page order: when the page's
+own `<script src>` loads jQuery, an inline script above that tag gives no record; a bundle,
+`asp:ScriptReference` or layout covers the whole page. `$.ajax({ url: … })` counts without that
+evidence. A jQuery library file itself (`jquery*.js`, e.g. `jquery.signalR.js`) gives no `api_call`:
+its own requests are not the application's. A URL built from strings and values (`"/api/users/" + user.id`) reads as the same `axios`
 URL does (`/api/users/{user.id}`, [entry-point contract §6](architecture/entry-points.md#a-part-read-at-runtime-name));
-a Razor or Web Forms expression in or beside the URL (`'@Url.Action("Save")'`,
-`"/a/" + <%= Id %>`) is server code, and the `endpoint` stays empty. No other inline-script code
+a Razor, Web Forms, JSP, PHP or Twig expression in or beside the URL (`'@Url.Action("Save")'`,
+`"/a/" + <%= Id %>`, `'${ctx}/a'`, `'<c:url value="/a"/>'`, `'<?= $base ?>/a'`, `'{{ path("a") }}'`) is server code, and the `endpoint` stays empty. No other inline-script code
 is captured yet.
 
 `uiRole` separates a **template** (a view rendered by something else) from a **component** (a

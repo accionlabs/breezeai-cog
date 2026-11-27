@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..index_common import parallel_map
+from ..template_common.scripts import page_file
 
 # Directory names never worth walking for component sources (vendored / build output / VCS).
 _SKIP_DIRS: frozenset[str] = frozenset(
@@ -51,6 +52,12 @@ _CLASS_RE = re.compile(r"\bclass\s+([A-Za-z_$][\w$]*)")
 #: Chars scanned around a ``templateUrl`` hit to find its component class / selector — a
 #: whole ``@Component({…}) export class X`` declaration sits comfortably within this window.
 _DECL_WINDOW = 2000
+# Vue ``<template src="./x.html">``: the SFC's markup is kept in another file. To keep this extra
+# pass near free on large Vue repos, only SFCs in a folder that also holds an ``.html`` are read
+# (the template sits beside its SFC), and only their head (the bound below). A template in
+# another folder, or a ``<template src>`` buried deeper, is not linked (honest-null).
+_VUE_TEMPLATE_SRC_RE = re.compile(rb"""<template\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+_VUE_HEAD_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -76,18 +83,49 @@ class HtmlTemplateIndex:
         return self.by_template.get(template_path.replace("\\", "/"))
 
 
-def _ts_files(repo_root: Path) -> list[str]:
-    """Every ``.ts`` file under ``repo_root``, pruning vendor/build/VCS directories."""
-    out: list[str] = []
+def _component_files(repo_root: Path) -> tuple[list[str], list[str]]:
+    """Every ``.ts`` file, and every ``.vue`` file in a folder that also holds an ``.html`` /
+    ``.htm`` file, under ``repo_root`` (one walk), pruning vendor/build/VCS directories."""
+    ts: list[str] = []
+    vue: list[str] = []
     for dirpath, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        has_html = any(n.endswith((".html", ".htm")) for n in filenames)
         for name in filenames:
             if name.endswith(".ts") and not name.endswith(".d.ts"):
-                out.append(os.path.join(dirpath, name))
-    return out
+                ts.append(os.path.join(dirpath, name))
+            elif has_html and name.endswith(".vue"):
+                vue.append(os.path.join(dirpath, name))
+    return ts, vue
 
 
-def _scan_ts_file(item: tuple[str, str]) -> list[tuple[str, str, str, str | None]]:
+def _scan_vue_file(item: tuple[str, str]) -> list[tuple[str, str, str, str | None, str]]:
+    """Worker: ``(template_repo_rel, sfc_repo_rel, componentName, None, "vue")`` when the SFC's
+    ``<template src>`` names a file of the repository. The component is named by its file, as
+    Vue names an SFC."""
+    repo_root_str, vue_path = item
+    try:
+        with open(vue_path, "rb") as fh:
+            head = fh.read(_VUE_HEAD_BYTES)
+    except OSError:
+        return []
+    if b"src" not in head:
+        return []  # cheap guard — almost every SFC keeps its template inline
+    m = _VUE_TEMPLATE_SRC_RE.search(head)
+    if m is None:
+        return []
+    root = Path(repo_root_str).resolve()
+    try:
+        sfc_rel = Path(vue_path).resolve().relative_to(root).as_posix()
+    except ValueError:
+        return []
+    target = page_file(m.group(1).decode("utf-8", "replace"), sfc_rel, root)
+    if target is None:
+        return []
+    return [(target, sfc_rel, Path(vue_path).stem, None, "vue")]
+
+
+def _scan_ts_file(item: tuple[str, str]) -> list[tuple[str, str, str, str | None, str]]:
     """Worker: extract ``(template_repo_rel, component_repo_rel, className, selector)`` for each
     ``templateUrl`` in one ``.ts`` file. Module-level + plain-data args so it is picklable for
     ``parallel_map``. Only templates whose resolved path exists on disk are returned."""
@@ -111,7 +149,7 @@ def _scan_ts_file(item: tuple[str, str]) -> list[tuple[str, str, str, str | None
         component_rel = Path(ts_path).resolve().relative_to(repo_root).as_posix()
     except ValueError:
         return []
-    results: list[tuple[str, str, str, str | None]] = []
+    results: list[tuple[str, str, str, str | None, str]] = []
     for m in _TEMPLATE_URL_RE.finditer(source):
         rel = m.group(1)
         target = (ts_dir / rel).resolve()
@@ -131,7 +169,13 @@ def _scan_ts_file(item: tuple[str, str]) -> list[tuple[str, str, str, str | None
             source[max(0, m.start() - _DECL_WINDOW) : m.start()]
         )
         results.append(
-            (template_rel, component_rel, cls_m.group(1), sel_m.group(1) if sel_m else None)
+            (
+                template_rel,
+                component_rel,
+                cls_m.group(1),
+                sel_m.group(1) if sel_m else None,
+                "angular",
+            )
         )
     return results
 
@@ -139,17 +183,21 @@ def _scan_ts_file(item: tuple[str, str]) -> list[tuple[str, str, str, str | None
 def build_html_template_index(
     repo_root: Path, files: Sequence[Path], jobs: int = 1
 ) -> HtmlTemplateIndex:
-    """Scan every component ``.ts`` under ``repo_root`` and build the template→component map.
-    A template claimed by two different components is dropped as **ambiguous** (no link)."""
-    ts_paths = _ts_files(repo_root)
-    items = [(str(repo_root), p) for p in ts_paths]
-    scanned = parallel_map(items, _scan_ts_file, jobs)
+    """Scan every component ``.ts`` and Vue SFC under ``repo_root`` and build the
+    template→component map. A template claimed by two different components is dropped as
+    **ambiguous** (no link)."""
+    ts_paths, vue_paths = _component_files(repo_root)
+    scanned = parallel_map([(str(repo_root), p) for p in ts_paths], _scan_ts_file, jobs)
+    # A head read per SFC is cheaper than a process pool's start-up: always serial.
+    scanned += [_scan_vue_file((str(repo_root), p)) for p in vue_paths]
 
     by_template: dict[str, ComponentRef] = {}
     ambiguous: set[str] = set()
     for file_results in scanned:
-        for template_rel, component_rel, class_name, selector in file_results:
-            ref = ComponentRef(path=component_rel, className=class_name, selector=selector)
+        for template_rel, component_rel, class_name, selector, framework in file_results:
+            ref = ComponentRef(
+                path=component_rel, className=class_name, framework=framework, selector=selector
+            )
             existing = by_template.get(template_rel)
             if existing is None:
                 by_template[template_rel] = ref

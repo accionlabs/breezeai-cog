@@ -1,0 +1,33 @@
+@page "/counter"
+@inject HttpClient Http
+
+<h1>Counter</h1>
+<p>Current count: @currentCount</p>
+<button class="btn" @onclick="IncrementCount">Click me</button>
+
+<EditForm Model="order" OnValidSubmit="SaveAsync">
+    <InputText @bind-Value="order.Email" />
+    <button type="submit">Save</button>
+</EditForm>
+
+<a href="/help">Help</a>
+
+@code {
+    private int currentCount = 0;
+    private OrderInput order = new OrderInput();
+
+    private void IncrementCount()
+    {
+        currentCount++;
+    }
+
+    private async Task SaveAsync()
+    {
+        await Http.PostAsJsonAsync("/api/orders", order);
+    }
+
+    public class OrderInput
+    {
+        public string Email { get; set; }
+    }
+}

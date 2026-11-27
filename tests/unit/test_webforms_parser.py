@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -924,3 +925,224 @@ def test_page_handler_line_and_page_methods(analyze_files) -> None:
         "attribute", 6, 6, "WebMethod")  # at its [WebMethod], not the whole method
     assert not any(ep and ep.endswith("NotStatic") for _, ep in routes)
     assert not [s for s in st if s.framework == "asmx"]  # not also an ASMX operation
+
+
+# --- server code read as C#, page links and scripts (shared template readers) ----------------
+
+_SERVER_CODE_PAGE = b"""<%@ Page Language="C#" CodeBehind="Enrollment.aspx.cs" Inherits="Acme.Enrollment" %>
+<%-- <% if (commentedOut) { %> --%>
+<asp:Label ID="Hello" runat="server" Text='<%$ Resources:Main, Hello %>' />
+<% if (User.IsInRole("Admin")) { %> <a href="/Admin.aspx">Admin</a> <% } else { %> <p>no</p> <% } %>
+<p><%= Title %></p><p><%# Eval("Id") %></p>
+<script src="/Scripts/jquery.js"></script>
+<script>$.post('/api/track');</script>
+<script runat="server">
+    void Page_Load(object sender, EventArgs e)
+    {
+        if (!IsPostBack) { Bind(); }
+    }
+</script>
+"""
+
+
+def test_server_code_if_is_an_if_statement_at_its_line(tmp_path) -> None:
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    ifs = sorted((s.startLine, s.parentId) for s in rec.statements if s.nodeType == "if_statement")
+    # the page-level <% if %> hangs off the page; the one in Page_Load off its method
+    assert ifs == [(4, "Enrollment.aspx"), (11, "Enrollment.aspx#Page_Load@9")]
+    assert not any("commentedOut" in s.text for s in rec.statements)  # a comment is not code
+
+
+def test_server_script_methods_are_functions_of_the_page(tmp_path) -> None:
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    assert [(f.name, f.parentId, f.startLine, f.endLine) for f in rec.functions] == [
+        ("Page_Load", "Enrollment.aspx", 9, 12)]
+    # structure, not statements: the function is there without statement capture too
+    off = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE, capture=False)
+    assert [f.name for f in off.functions] == ["Page_Load"] and off.statements == []
+
+
+def test_server_expressions_cite_the_page_text(tmp_path) -> None:
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    texts = {s.text for s in rec.statements if s.nodeType == "expression_statement"
+             and s.parentId == "Enrollment.aspx"}
+    assert texts == {"<%= Title %>", '<%# Eval("Id") %>'}  # never the `_= x ;` wrapper
+    assert not any("Resources:Main" in s.text for s in rec.statements
+                   if s.nodeType == "expression_statement")  # <%$ %> is not code
+
+
+def test_a_vb_page_is_not_read_as_csharp(tmp_path) -> None:
+    vb = _SERVER_CODE_PAGE.replace(b'Language="C#"', b'Language="VB"')
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", vb)
+    assert rec.functions == []
+    assert not any(s.nodeType == "if_statement" for s in rec.statements)
+
+
+def test_page_links_scripts_and_script_files(tmp_path) -> None:
+    (tmp_path / "Scripts").mkdir()
+    (tmp_path / "Scripts" / "jquery.js").write_text("")
+    rec = _parse_markup(tmp_path, "Enrollment.aspx", _SERVER_CODE_PAGE)
+    nav = [(s.startLine, s.endpoint) for s in rec.statements if s.routeKind == "navigation"]
+    assert nav == [(4, "/Admin.aspx")]
+    calls = [(s.startLine, s.framework, s.method, s.endpoint)
+             for s in rec.statements if s.semanticType == "api_call"]
+    assert calls == [(7, "jquery", "POST", "/api/track")]
+    assert "Scripts/jquery.js" in rec.importFiles  # <script src> in the repository → file link
+
+
+# --- event handlers and user controls lead to their C# declaration -------------------------
+
+_HOST = (b'<%@ Page Language="C#" CodeBehind="Orders.aspx.cs" Inherits="Shop.Orders" %>\n'
+         b'<%@ Register TagPrefix="uc" TagName="DateField" Src="~/Controls/DateField.ascx" %>\n'
+         b'<uc:DateField ID="Start" runat="server" />\n'
+         b'<asp:Button ID="Save" runat="server" OnClick="Save_Click" />\n'
+         b'<asp:Button ID="Mine" runat="server" OnClick="Own_Click" />\n'
+         b'<asp:Button ID="Twice" runat="server" OnClick="Twice_Click" />\n'
+         b'<asp:Button ID="Base" runat="server" OnClick="FromBase_Click" />\n'
+         b'<script runat="server">\n'
+         b'    void Own_Click(object s, EventArgs e) { }\n'
+         b'</script>\n')
+_HOST_CS = """namespace Shop
+{
+    public partial class Orders : BasePage
+    {
+        protected void Save_Click(object s, EventArgs e) { }
+        protected void Twice_Click(object s, EventArgs e) { }
+        protected void Twice_Click(object s) { }
+    }
+}
+namespace Other { public class Orders { void FromBase_Click() { } } }
+"""
+_CONTROL = '<%@ Control Language="C#" CodeBehind="DateField.ascx.cs" Inherits="Shop.Controls.DateField" %>\n'
+_CONTROL_CS = "namespace Shop.Controls\n{\n    public partial class DateField : TextBox { }\n}\n"
+
+
+def _host(tmp_path: Path, *, host: bytes = _HOST, host_cs: str | None = _HOST_CS,
+          control: str = _CONTROL, control_cs: str = _CONTROL_CS) -> dict[str, tuple]:
+    (tmp_path / "Controls").mkdir()
+    (tmp_path / "Controls" / "DateField.ascx").write_text(control)
+    (tmp_path / "Controls" / "DateField.ascx.cs").write_text(control_cs)
+    if host_cs is not None:
+        (tmp_path / "Orders.aspx.cs").write_text(host_cs)
+    (tmp_path / "Orders.aspx").write_bytes(host)
+    ctx = ParseContext(path="Orders.aspx", abs_path=tmp_path / "Orders.aspx", source=host,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = WebFormsParser().parse_file(ctx)
+    return {s.handler: (s.handlerPath, s.handlerLine) for s in rec.statements if s.handler}
+
+
+def test_event_handler_points_at_its_code_behind_method(tmp_path) -> None:
+    got = _host(tmp_path)
+    assert got["Save_Click"] == ("Orders.aspx.cs", 5)
+    assert got["Own_Click"] == (None, 9)  # in the page itself: a line, no other file
+
+
+def test_event_handler_with_two_or_no_declarations_gets_no_location(tmp_path) -> None:
+    got = _host(tmp_path)
+    assert got["Twice_Click"] == (None, None)  # overloads: which one is not known
+    assert got["FromBase_Click"] == (None, None)  # only in another namespace's class
+
+
+def test_user_control_points_at_its_class(tmp_path) -> None:
+    assert _host(tmp_path)["DateField"] == ("Controls/DateField.ascx.cs", 3)
+
+
+def test_user_control_class_declared_twice_keeps_the_ascx_link(tmp_path) -> None:
+    unqualified = _CONTROL.replace("Shop.Controls.DateField", "DateField")
+    twice = _CONTROL_CS + "namespace Old { public class DateField { } }\n"
+    got = _host(tmp_path, control=unqualified, control_cs=twice)
+    assert got["DateField"] == ("Controls/DateField.ascx", None)  # as before: no class link
+
+
+def test_a_qualified_inherits_picks_its_namespace(tmp_path) -> None:
+    twice = _CONTROL_CS + "namespace Old { public class DateField { } }\n"
+    assert _host(tmp_path, control_cs=twice)["DateField"] == ("Controls/DateField.ascx.cs", 3)
+
+
+def test_vb_code_behind_gives_no_location(tmp_path) -> None:
+    vb = _HOST.replace(b'CodeBehind="Orders.aspx.cs"', b'CodeBehind="Orders.aspx.vb"')
+    (tmp_path / "Orders.aspx.vb").write_text("Partial Class Orders\nEnd Class\n")
+    got = _host(tmp_path, host=vb.replace(b'Language="C#"', b'Language="VB"'), host_cs=None)
+    assert got["Save_Click"] == (None, None)
+
+
+# --- data sources: SqlDataSource commands and ObjectDataSource methods ---------------------
+
+_DS_PAGE = """<%@ Page Language="C#" %>
+<asp:SqlDataSource ID="OrdersDS" runat="server"
+    SelectCommand="SELECT Id FROM Orders"
+    UpdateCommand="UPDATE Orders SET Total = @Total" />
+<asp:SqlDataSource ID="ProcDS" runat="server" SelectCommandType="StoredProcedure"
+    SelectCommand="usp_GetOrders" DeleteCommand="<%$ AppSettings:DeleteSql %>" />
+<asp:ObjectDataSource ID="RepoDS" runat="server" TypeName="Shop.OrderRepo"
+    SelectMethod="GetAll" UpdateMethod="Missing" />
+"""
+_REPO_CS = "namespace Shop\n{\n    public class OrderRepo\n    {\n        public object GetAll() { return null; }\n    }\n}\n"
+
+
+def _data_sources(tmp_path: Path, files: dict[str, str]) -> list[tuple]:
+    from breezeai_cog import iter_file_records
+
+    for rel, text in files.items():
+        (tmp_path / rel).write_text(text)
+    [page] = [r for r in iter_file_records(tmp_path, capture_templates=True)
+              if r.path == "Orders.aspx"]
+    return [(s.startLine, s.semanticType, s.name, s.handler, s.handlerPath, s.handlerLine)
+            for s in page.statements if s.semanticType == "query_statement" or s.handler]
+
+
+def test_sql_data_source_commands_are_queries(tmp_path) -> None:
+    got = _data_sources(tmp_path, {"Orders.aspx": _DS_PAGE, "OrderRepo.cs": _REPO_CS})
+    queries = [(line, name) for line, kind, name, *_ in got if kind == "query_statement"]
+    # one per command, named by the control's ID; a stored procedure counts; <%$ %> is not a query
+    assert queries == [(3, "OrdersDS"), (4, "OrdersDS"), (6, "ProcDS")]
+
+
+def test_object_data_source_method_points_at_its_declaration(tmp_path) -> None:
+    got = _data_sources(tmp_path, {"Orders.aspx": _DS_PAGE, "OrderRepo.cs": _REPO_CS})
+    methods = {handler: (path, line) for _, _, name, handler, path, line in got
+               if name and name.endswith("Method")}
+    assert methods == {"GetAll": ("OrderRepo.cs", 5), "Missing": (None, None)}
+
+
+def test_object_data_source_with_two_classes_of_that_name_gets_no_location(tmp_path) -> None:
+    other = _REPO_CS.replace("namespace Shop", "namespace Old")
+    got = _data_sources(tmp_path, {"Orders.aspx": _DS_PAGE, "OrderRepo.cs": _REPO_CS,
+                                   "OldRepo.cs": other})
+    assert [(h, p, ln) for *_, h, p, ln in got if h == "GetAll"] == [("GetAll", None, None)]
+
+
+# --- unbalanced markup: tags split across <% if %> / <% else %> -----------------------------
+
+@pytest.mark.parametrize(("body", "expected"), [
+    # one opening tag per branch, one shared closing tag
+    ('<% if (w) { %><div class="a"><% } else { %><div class="b"><% } %>\n'
+     '<asp:TextBox ID="N" runat="server" />\n<a href="/one.aspx">one</a>\n</div>\n',
+     [(2, "asp:TextBox"), (3, "/one.aspx")]),
+    # a row closed in one branch, a table closed in the other, inside a loop
+    ('<table>\n<% foreach (var r in Rows) { %>\n<tr><td><asp:Label ID="L" runat="server" /></td>\n'
+     '<% if (r.Last) { %></tr></table><% } else { %></tr><% } %>\n<% } %>\n'
+     '<form action="/send" method="post"><asp:TextBox ID="T" runat="server" /></form>\n',
+     [(3, "asp:Label"), (6, "/send"), (6, "asp:TextBox")]),
+    # server controls opened in both branches and closed once (plus stray closing tags)
+    ('<% if (x) { %><asp:Panel ID="P1" runat="server"><% } else { %>'
+     '<asp:Panel ID="P2" runat="server"><% } %>\n<asp:TextBox ID="In" runat="server" />\n'
+     '</asp:Panel>\n</asp:Panel></div></td>\n<a href="/end.aspx">end</a>\n',
+     [(1, "asp:Panel"), (1, "asp:Panel"), (2, "asp:TextBox"), (5, "/end.aspx")]),
+])
+def test_unbalanced_markup_still_records_every_element(tmp_path, body, expected) -> None:
+    page = b'<%@ Page Language="C#" %>\n' + body.encode()
+    rec = _parse_markup(tmp_path, "Page.aspx", page)
+    got = sorted((s.startLine - 1, s.name if s.nodeType == "element" else s.endpoint)
+                 for s in rec.statements if s.nodeType == "element" or s.routeKind
+                 or s.semanticType == "api_call")
+    assert got == expected
+
+
+def test_form_record_keeps_the_server_code_in_its_text(tmp_path) -> None:
+    page = (b'<%@ Page Language="C#" %>\n'
+            b'<form action="<%= ResolveUrl("~/Orders/Save") %>" method="post"></form>\n')
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Orders.aspx", {"Orders.aspx": page})
+    form = next(s for s in rec.statements if s.semanticType == "api_call")
+    assert (form.startLine, form.method, form.endpoint) == (2, "POST", None)
+    assert form.text == '<form action="<%= ResolveUrl("~/Orders/Save") %>" method="post">'

@@ -16,7 +16,11 @@ type and the shared ``emit_outbound`` (``framework="jquery"``, real HTTP ``metho
   ``jquery``, an alias (``const $ = jQuery``), or a ``jquery*.js`` script reference. The name
   ``jQuery`` is distinctive enough to stand on its own;
 * the call shape matches (known method; for ``.load`` the receiver must be a ``$(…)``/``jQuery(…)``
-  selection).
+  selection);
+* in markup, an inline script runs after the page's jQuery ``<script src>`` (unless a bundle or
+  layout loads jQuery for the whole page);
+* the file is not jQuery itself or one of its plugins (``jquery*.js``, e.g. ``jquery.signalR.js``):
+  a library's own requests are not the application's.
 
 **Options-object exception:** ``$.ajax({ url: …, … })`` is recognised without evidence — an options
 object literal carrying a ``url`` property is a deliberate, narrow signal (the URL may be dynamic:
@@ -41,6 +45,7 @@ from ..additive import (
     DetectContext, Detection, Detector, FactSpec, Gate, index_fact, register_detector, register_fact,
 )
 from ..emits import Emit, apply
+from ..template_common.script_blocks import OPEN_ATTRS, SCRIPT_OPEN, SRC_ATTR, script_shadow, sweep
 from ..treesitter import node_text, parse_source
 from ..statements_common import url_or_value
 from ..typescript.statements import render_url
@@ -374,91 +379,16 @@ def detect_jquery_calls(root: Node, source: bytes, *, evidence_hint: bool = Fals
 
 
 # --- inline <script> blocks in markup (.cshtml / .aspx / .html) -------------------------
-#: the attributes of an open tag, which may hold server code: ``<% … %>`` blocks and quoted values
-#: (``src="@Url.Content("~/x.js")"`` is adjacent quoted / unquoted runs), so the ``>`` of a ``%>``
-#: inside the tag does not end it early. Bounded (no real tag has 2048 attribute tokens), so a
-#: pathological run of unterminated ``<script `` openers cannot make the search quadratic.
-_OPEN_ATTRS = rb"((?:<%.*?%>|\"[^\"]*\"|'[^']*'|[^>\"'<]|<(?!%)){0,2048})>"
-_SCRIPT_OPEN = re.compile(rb"<script\b" + _OPEN_ATTRS, re.IGNORECASE | re.DOTALL)
-_SCRIPT_CLOSE = re.compile(rb"</script\s*>", re.IGNORECASE)
-_SRC_ATTR = re.compile(rb"\bsrc\s*=", re.IGNORECASE)
-#: a ``type=`` that is not JavaScript (``text/template``, ``application/json``…) → not a code block.
-_NON_JS_TYPE = re.compile(
-    rb"\btype\s*=\s*(?![\"']?(?:(?:text|application)/(?:javascript|ecmascript)|module)\b)[\"']?\w",
-    re.IGNORECASE,
-)
-_HTML_COMMENT = (b"<!--", b"-->")
-_RAZOR_COMMENT = (b"@*", b"*@")
-_WEBFORMS_COMMENT = (b"<%--", b"--%>")
-_NOT_NEWLINE = re.compile(rb"[^\r\n]")
-
-
-def _server_comments(path: str) -> tuple[bytes, bytes] | None:
-    """The server-side comment syntax of ``path``'s dialect. Such a comment is removed before the page
-    is sent — wherever it sits, even inside a ``<script>`` — so it exists only for the dialect that
-    owns it (``@*`` in a plain ``.html`` JavaScript string is just text). ``<!-- -->`` is different:
-    an HTML comment, markup only, never inside a script body."""
-    low = path.lower()
-    if low.endswith((".cshtml", ".razor", ".vbhtml")):
-        return _RAZOR_COMMENT
-    if low.endswith((".aspx", ".ascx", ".master")):
-        return _WEBFORMS_COMMENT
+def _first_jquery_tag(clean: bytes) -> int | None:
+    """Where the first ``<script src>`` that loads jQuery starts in comment-free ``clean`` markup:
+    an inline script before it runs before jQuery is loaded."""
+    for tag in _SCRIPT_TAG.finditer(clean):
+        attrs = tag.group(1)
+        src = SRC_ATTR.search(attrs)
+        path = _JS_PATH.search(attrs, src.end()) if src is not None else None
+        if path is not None and _is_jquery_ref(path.group(0).decode("utf-8", "replace")):
+            return tag.start()
     return None
-
-
-def _blank(buf: bytearray, start: int, end: int) -> None:
-    """Space out ``buf[start:end]``, keeping newlines so offsets, lines and columns stay true."""
-    buf[start:end] = _NOT_NEWLINE.sub(b" ", bytes(buf[start:end]))
-
-
-def _sweep(markup: bytes, path: str) -> tuple[bytearray, list[tuple[int, int, bytes]]]:
-    """One left-to-right pass over ``markup``: a copy with every comment blanked, plus the
-    ``(body_start, body_end, attributes)`` of each ``<script>`` that is live (not inside a comment).
-    Walking in order is what lets a comment hide a ``<script>`` while a ``<script>`` body hides an
-    ``<!--`` that is merely JavaScript text."""
-    server = _server_comments(path)
-    closers = dict([_HTML_COMMENT] + ([server] if server else []))
-    opener = re.compile(b"|".join([rb"<!--", rb"<script\b"] + [re.escape(o) for o in closers if o != b"<!--"]),
-                        re.IGNORECASE)
-    clean = bytearray(markup)
-    scripts: list[tuple[int, int, bytes]] = []
-    pos = 0
-    while (m := opener.search(markup, pos)) is not None:
-        tok = m.group(0)
-        if not tok.lower().startswith(b"<script"):  # a comment: blank it up to its close (or EOF)
-            end = markup.find(closers[tok], m.end())
-            end = len(markup) if end < 0 else end + len(closers[tok])
-            _blank(clean, m.start(), end)
-            pos = end
-            continue
-        tag = _SCRIPT_OPEN.match(markup, m.start())
-        close = _SCRIPT_CLOSE.search(markup, tag.end()) if tag is not None else None
-        if tag is None or close is None:
-            pos = m.end()
-            continue
-        if server:  # a server comment inside the body vanishes before the browser sees it
-            rx = re.compile(re.escape(server[0]) + rb".*?" + re.escape(server[1]), re.DOTALL)
-            for c in rx.finditer(markup, tag.end(), close.start()):
-                _blank(clean, c.start(), c.end())
-        scripts.append((tag.end(), close.start(), tag.group(1)))
-        pos = close.end()
-    return clean, scripts
-
-
-def _shadow_scripts(markup: bytes, path: str = "") -> tuple[bytes, bool]:
-    """``markup`` with everything except inline ``<script>`` bodies blanked (newlines kept), so
-    offsets, lines and columns stay true to the original file; plus whether the page loads jQuery
-    (the evidence for ``$`` calls in its inline scripts). Commented-out markup is dead: neither its
-    scripts nor its jQuery references count."""
-    clean, scripts = _sweep(markup, path)
-    keep = bytearray(_NOT_NEWLINE.sub(b" ", markup))
-    found = False
-    for body_start, body_end, attrs in scripts:
-        if _SRC_ATTR.search(attrs) or _NON_JS_TYPE.search(attrs):
-            continue
-        keep[body_start:body_end] = clean[body_start:body_end]
-        found = True
-    return (bytes(keep) if found else b""), _page_loads_jquery(bytes(clean))
 
 
 # --- project-level evidence: jQuery loaded by a page/layout, not by the file under analysis ---
@@ -470,9 +400,9 @@ def _shadow_scripts(markup: bytes, path: str = "") -> tuple[bytes, bool]:
 #   * a Razor view's layout chain (``Layout = "…"`` in the view, else the nearest ``_ViewStart``),
 #     resolved with ASP.NET's own view-location rule (``_find_layout``).
 _MARKUP_EXTS = (".cshtml", ".razor", ".vbhtml", ".html", ".htm", ".aspx", ".ascx", ".master")
-_SCRIPT_TAG = _SCRIPT_OPEN
+_SCRIPT_TAG = SCRIPT_OPEN
 #: ``<asp:ScriptReference Path="~/Scripts/jquery.js" />`` — a ScriptManager's script list
-_SCRIPT_REFERENCE = re.compile(rb"<asp:ScriptReference\b" + _OPEN_ATTRS, re.IGNORECASE | re.DOTALL)
+_SCRIPT_REFERENCE = re.compile(rb"<asp:ScriptReference\b" + OPEN_ATTRS, re.IGNORECASE | re.DOTALL)
 #: ``Scripts.Render("~/bundles/jquery")`` — ASP.NET's bundle for jQuery itself, by the template's
 #: own name. ``~/bundles/jqueryval`` (validation) and other bundles are not it.
 _JQUERY_BUNDLE = re.compile(
@@ -491,7 +421,7 @@ def _script_refs(markup: bytes) -> list[tuple[str, bool]]:
     out: list[tuple[str, bool]] = []
     for tag in _SCRIPT_TAG.finditer(markup):
         attrs = tag.group(1)
-        src = _SRC_ATTR.search(attrs)
+        src = SRC_ATTR.search(attrs)
         path = _JS_PATH.search(attrs, src.end()) if src is not None else None
         if path is None:
             continue
@@ -583,7 +513,7 @@ def _chain_loads_jquery(
             data = layout.read_bytes()
         except OSError:
             continue
-        if _page_loads_jquery(bytes(_sweep(data, layout.name)[0])):
+        if _page_loads_jquery(bytes(sweep(data, layout.name)[0])):
             return True
         if depth < _LAYOUT_DEPTH and _chain_loads_jquery(
             _layout_names(data), layout.parent, repo_root, depth + 1, ext
@@ -609,7 +539,7 @@ def _collect(root: Any, source: bytes, rel: str, repo_root: Path | None) -> froz
     those listed after a jQuery ``<script src>``, or all of them when its layout loads jQuery."""
     if not rel.lower().endswith(_MARKUP_EXTS):
         return None
-    clean = bytes(_sweep(source, rel)[0])  # a commented-out <script src> loads nothing
+    clean = bytes(sweep(source, rel)[0])  # a commented-out <script src> loads nothing
     refs = _script_refs(clean)
     first = next((i for i, (ref, _) in enumerate(refs) if _is_jquery_ref(ref)), None)
     if first is not None:
@@ -639,21 +569,32 @@ def detect_inline_jquery(
 ) -> None:
     """Apply jQuery ``api_call`` statements for the inline ``<script>`` blocks of a markup file to
     ``record`` — the markup parsers' hook into this detector. Only called with statement capture.
-    ``repo_root`` (Razor) lets the view's layout chain supply the jQuery evidence."""
+    ``repo_root`` (Razor) lets the view's layout chain supply the jQuery evidence.
+
+    Scripts run in page order: when the page's own ``<script src>`` is what loads jQuery, a call in
+    an inline script above that tag runs before jQuery exists and is not a request. A bundle,
+    ``<asp:ScriptReference>`` or layout that loads jQuery covers the whole page. Commented-out
+    markup is dead: neither its scripts nor its jQuery references count."""
     if b"$" not in markup and b"jQuery" not in markup:
         return
-    shadow, evidence = _shadow_scripts(markup, path)
+    shadow, clean = script_shadow(markup, path)
     if not shadow:
         return
-    if not evidence and repo_root is not None:
-        evidence = layout_loads_jquery(markup, path, repo_root)
+    loaded_at = _first_jquery_tag(clean)
+    whole_page = _bundle_loads_jquery(clean)
+    if not whole_page and repo_root is not None:
+        whole_page = layout_loads_jquery(markup, path, repo_root)
     root = parse_source("typescript", shadow, timeout_micros).root_node
-    emits = detect_jquery_calls(root, shadow, evidence_hint=evidence)
+    emits = detect_jquery_calls(root, shadow, evidence_hint=whole_page or loaded_at is not None)
+    if loaded_at is not None and not whole_page:
+        emits = [e for e in emits if e.node.start_byte > loaded_at]
     if emits:
         apply(record, emits, shadow, path)
 
 
 def _detect(dc: DetectContext) -> Detection | None:
+    if _SCRIPT_REF.fullmatch(dc.path.rsplit("/", 1)[-1].encode()):
+        return None  # jQuery or a plugin of it (jquery.signalR.js): its own requests are not the app's
     loaded = index_fact(dc.ctx.resolution_index, _FACT)
     emits = detect_jquery_calls(
         dc.root, dc.source, evidence_hint=_loaded_with_jquery(dc.path, loaded)

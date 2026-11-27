@@ -162,14 +162,41 @@ def test_resolved_template_framework_comes_from_resolver(tmp_path) -> None:
 
 def test_fallback_angularjs_framework_no_grammar(tmp_path) -> None:
     # An AngularJS view (ng-* markup) with no resolver hit → tagged framework via the in-file
-    # fingerprint, uiRole=template, but NO statements (no AngularJS grammar) — honest-null.
+    # fingerprint, uiRole=template. There is no AngularJS grammar: only its event directives are
+    # recorded (read as JavaScript); ng-repeat and the rest record nothing.
     rec = _parse(
         tmp_path, {"view.html": '<div ng-repeat="t in todos" ng-click="go()"></div>'}, "view.html"
     )
     assert rec.framework == "angularjs"
     assert rec.uiRole == "template"
     assert rec.importFiles == []  # fingerprint has no owner link
-    assert rec.statements == []  # no angularjs grammar
+    assert [(s.nodeType, s.name, s.handler) for s in rec.statements] == [
+        ("attribute", "ng-click", "go")
+    ]
+
+
+def test_angularjs_event_directives_name_the_method_they_call(tmp_path) -> None:
+    page = (
+        '<div ng-app="shop">\n'
+        '<form ng-submit="vm.save()">\n'
+        '<button data-ng-click="remove(o)">x</button>\n'
+        '<a ng-click="vm.open = true">o</a>\n'
+        '<input ng-model="vm.q" ng-change="ok && vm.search()">\n'
+        "</form></div>"
+    )
+    rec = _parse(tmp_path, {"view.html": page}, "view.html")
+    assert [(s.startLine, s.name, s.handler) for s in rec.statements] == [
+        (2, "ng-submit", "save"),
+        (3, "data-ng-click", "remove"),
+        (4, "ng-click", None),
+        (5, "ng-change", "search"),
+    ]
+
+
+def test_knockout_bindings_are_not_read_as_javascript(tmp_path) -> None:
+    rec = _parse(tmp_path, {"view.html": '<button data-bind="click: save">Save</button>'}, "view.html")
+    assert rec.framework == "knockout"
+    assert rec.statements == []
 
 
 def test_fallback_angular_without_owner_still_parses(tmp_path) -> None:
@@ -223,6 +250,56 @@ def test_rendering_and_htmx_coexist(tmp_path) -> None:
     rec = _parse(tmp_path, {"t.html": '<div th:text="${n}" hx-post="/save"></div>'}, "t.html")
     assert rec.framework == "thymeleaf"
     assert _htmx(rec) == [("POST", "/save", "attribute")]
+
+
+def _script_calls(rec) -> list[tuple[int, str | None, str | None, str | None]]:
+    return sorted((s.startLine, s.framework, s.method, s.endpoint)
+                  for s in rec.statements if s.semanticType == "api_call" and s.framework != "htmx"
+                  and s.nodeType not in ("start_tag", "self_closing_tag"))
+
+
+def test_page_scripts_are_read_by_every_detector(tmp_path) -> None:
+    # A plain page's inline scripts: jQuery (with the page's own jquery*.js), fetch and axios
+    # are all api_calls on the page itself; the <script src> and the htmx attribute stay as before.
+    page = ('<script src="/js/jquery.min.js"></script>\n'
+            "<script>\n"
+            "  function load() { fetch('/api/stock'); }\n"
+            "  $.get('/shop/api/orders');\n"
+            "  axios.post('/api/c', { a: 1 });\n"
+            "</script>\n"
+            '<button hx-get="/api/items">Go</button>\n')
+    rec = _parse(tmp_path, {"page.html": page}, "page.html")
+    assert _script_calls(rec) == [
+        (3, "fetch", "GET", "/api/stock"),
+        (4, "jquery", "GET", "/shop/api/orders"),
+        (5, None, "POST", "/api/c"),
+    ]
+    assert _htmx(rec) == [("GET", "/api/items", "attribute")]
+    assert rec.functions == []
+    assert {s.parentId for s in rec.statements if s.semanticType == "api_call"} == {rec.id}
+
+
+def test_external_script_only_adds_nothing(tmp_path) -> None:
+    rec = _parse(tmp_path, {"p.html": '<script src="/js/app.js"></script>\n<p>Hi</p>'}, "p.html")
+    assert rec.statements == []
+
+
+def test_angular_template_script_calls_are_read(tmp_path) -> None:
+    # A component template keeps its markup statements; an inline script's call is added to them.
+    html = _TEMPLATE_HTML + "\n<script>fetch('/api/audit');</script>"
+    rec = _parse(
+        tmp_path,
+        {"order.component.ts": _COMPONENT_TS, "order.component.html": html},
+        "order.component.html",
+    )
+    assert rec.framework == "angular"
+    assert _script_calls(rec) == [(7, "fetch", "GET", "/api/audit")]
+    assert {s.handler for s in rec.statements if s.nodeType == "event_binding"} == {"load", "remove"}
+
+
+def test_page_scripts_need_statement_capture(tmp_path) -> None:
+    rec = _parse(tmp_path, {"p.html": "<script>fetch('/api/x');</script>"}, "p.html", capture=False)
+    assert rec.statements == []
 
 
 def test_alpine_not_mislabeled_vue(tmp_path) -> None:
@@ -362,3 +439,111 @@ def test_output_validates(tmp_path) -> None:
             )
         )
         assert not errs, errs
+
+
+def _markup(rec) -> list[tuple[int, str | None, str | None, str | None, str | None]]:
+    return [(s.startLine, s.semanticType, s.routeKind, s.method, s.endpoint)
+            for s in rec.statements if s.nodeType in ("start_tag", "self_closing_tag")]
+
+
+def test_links_and_form_posts_of_a_plain_page(tmp_path) -> None:
+    page = (
+        '<form action="/contact/send" method="post"> … </form>\n'
+        '<a href="/about.html">About</a>\n'
+        '<script src="/js/jquery.min.js"></script>\n'
+        "<script>var API = '/api/track';</script>\n"
+        "<script>$.post(API, { page: 'contact' });</script>\n"
+    )
+    rec = _parse(tmp_path, {"contact.html": page}, "contact.html")
+    assert _markup(rec) == [
+        (1, "api_call", None, "POST", "/contact/send"),
+        (2, "route", "navigation", None, "/about.html"),
+    ]
+    assert _script_calls(rec) == [(5, "jquery", "POST", "/api/track")]
+
+
+def test_only_a_page_link_is_navigation(tmp_path) -> None:
+    page = (
+        '<a href="#top">t</a> <a href="https://example.com/x">e</a> <a href="//cdn/x">c</a>\n'
+        '<a href="mailto:a@b.c">m</a> <a href="javascript:void(0)">j</a> <a>no href</a>\n'
+        '<a href="about.html">relative</a>\n'
+        '<a href="{{ url }}">template</a>\n'
+        '<AREA HREF="/map#north">\n'
+        '<a href="/x" routerLink="/x">router</a>\n'
+    )
+    rec = _parse(tmp_path, {"page.html": page}, "page.html")
+    assert _markup(rec) == [
+        (3, "route", "navigation", None, None),
+        (4, "route", "navigation", None, None),
+        (5, "route", "navigation", None, "/map"),
+    ]
+
+
+def test_only_a_form_with_an_action_sends_a_request(tmp_path) -> None:
+    page = (
+        '<form action="/search">a</form>\n'
+        '<form action="https://api.example.com/x" method="POST">b</form>\n'
+        '<form method="post">no action</form>\n'
+        '<form action="/d" method="dialog">dialog</form>\n'
+        '<form action="{% url \'save\' %}" method="post">template</form>\n'
+        '<form action="/m" method="{{ m }}">templated method</form>\n'
+    )
+    rec = _parse(tmp_path, {"page.html": page}, "page.html")
+    assert _markup(rec) == [
+        (1, "api_call", None, "GET", "/search"),
+        (2, "api_call", None, "POST", "https://api.example.com/x"),
+        (5, "api_call", None, "POST", None),
+        (6, "api_call", None, None, "/m"),
+    ]
+
+
+def test_markup_records_need_statement_capture(tmp_path) -> None:
+    page = '<a href="/about.html">About</a>\n<form action="/x"></form>'
+    rec = _parse(tmp_path, {"page.html": page}, "page.html", capture=False)
+    assert rec.statements == []
+
+
+# ── Vue <template src>: the .html is that SFC's template ──────────────────────────────────
+
+_SRC_SFC = '<template src="./Panel.html"></template>\n<script>\nexport default {}\n</script>\n'
+_SRC_HTML = (
+    '<div>\n  <button @click="save">Save</button>\n'
+    '  <router-link to="/help">Help</router-link>\n</div>\n'
+)
+
+
+def test_vue_template_src_html_is_read_as_the_sfc_template(tmp_path) -> None:
+    rec = _parse(tmp_path, {"Panel.vue": _SRC_SFC, "Panel.html": _SRC_HTML}, "Panel.html")
+    assert (rec.framework, rec.uiRole, rec.importFiles) == ("vue", "template", ["Panel.vue"])
+    click = next(s for s in rec.statements if s.name == "click")
+    assert (click.nodeType, click.handler, click.startLine) == ("directive_attribute", "save", 2)
+    nav = next(s for s in rec.statements if s.semanticType == "route")
+    assert (nav.routeKind, nav.endpoint) == ("navigation", "/help")
+
+
+def test_vue_template_src_without_the_file_is_not_linked(tmp_path) -> None:
+    rec = _parse(tmp_path, {"Panel.vue": _SRC_SFC, "Other.html": _SRC_HTML}, "Other.html")
+    assert rec.framework is None and rec.importFiles == []
+
+
+def test_vue_template_src_claimed_by_two_sfcs_is_not_linked(tmp_path) -> None:
+    files = {"Panel.vue": _SRC_SFC, "Copy.vue": _SRC_SFC, "Panel.html": _SRC_HTML}
+    rec = _parse(tmp_path, files, "Panel.html")
+    assert rec.importFiles == []
+
+
+def test_vue_template_src_beyond_the_head_is_not_read(tmp_path) -> None:
+    # Only the head of each .vue is scanned (keeps the pass cheap): a <template src> after a
+    # long script block is not linked — the html stays a plain file, as before.
+    late = "<script>\n" + "// x\n" * 1200 + "export default {}\n</script>\n" + _SRC_SFC.split("\n")[0]
+    rec = _parse(tmp_path, {"Panel.vue": late, "Panel.html": _SRC_HTML}, "Panel.html")
+    assert rec.importFiles == []
+
+
+def test_vue_template_src_in_another_folder_is_not_read(tmp_path) -> None:
+    # Only SFCs beside an .html are scanned (keeps the pass cheap): a template one folder up
+    # is not read as Vue — the html stays a plain file, as before.
+    (tmp_path / "views").mkdir()
+    (tmp_path / "views/Panel.vue").write_text(_SRC_SFC.replace("./Panel.html", "../Panel.html"))
+    rec = _parse(tmp_path, {"Panel.html": _SRC_HTML}, "Panel.html")
+    assert rec.importFiles == []

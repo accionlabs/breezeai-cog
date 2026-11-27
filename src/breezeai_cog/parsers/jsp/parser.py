@@ -52,6 +52,11 @@ Struts tag with no known namespace, a relative link on a page no single action r
 no navigation record (absent beats wrong: a link is never written with an empty endpoint); a
 prefixed tag still keeps its plain ``element`` record.
 
+Inline ``<script>`` blocks go through every script detector (``template_common.scripts``):
+fetch, axios, jQuery and page constants. Scriptlets, EL and custom-tag actions inside a script
+(``'<c:url value="/x"/>'``, ``'${ctx}/x'``) are written by the server, so a URL built from them
+gets an empty endpoint. A ``<script src>`` that is a file of the repository is a file link.
+
 ``language`` is ``jsp``; ``uiRole`` is ``component`` for a tag file and ``template`` otherwise.
 A page served directly is an **entry point** (contract: a page reached by URL): a ``.jsp`` /
 ``.jspx`` inside a web application (the directory holding ``WEB-INF``, or with no ``WEB-INF`` a
@@ -68,6 +73,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -83,6 +89,8 @@ from ..java.functions import build_method
 from ..java.mappings import COMMENT_TYPES, CONTROL_FLOW
 from ..java.statements import extract_statements
 from ..java_web_guards import servlet_match
+from ..template_common.scripts import link_page_scripts, read_page_scripts
+from ..template_common.server_code import JSP, expressions_as_written
 from ..java_struts2.common import ActionTable, action_endpoint, extension
 from ..java_struts2.facts import module_key
 from ..treesitter import node_text, parse_source
@@ -121,6 +129,10 @@ _STRUTS_TAGS = "/struts-tags"
 _STRUTS_ACTION_TAGS = {"form": "action", "url": "action", "a": "action", "submit": "action",
                        "action": "name"}
 #: Link-bearing elements and their URL attribute.
+#: A custom-tag action (``<c:url value="…"/>``, ``<s:url action="…"/>``): the server writes it
+#: out, so inside a ``<script>`` it is server code like ``<% %>`` and EL.
+_CUSTOM_TAG = re.compile(rb"</?[A-Za-z_][\w.-]*:[A-Za-z_][\w.-]*\b[^<>]*>")
+
 _LINKS = {"a": "href", "form": "action", "jsp:forward": "page"}
 _JSTL_LINKS = {"url": "value", "redirect": "url"}
 _STRUTS_LINKS = {"url": "value", "a": "href"}
@@ -180,6 +192,8 @@ class JspParser(BaseParser):
 
         functions: list[Function] = []
         classes: list[Class] = []
+        server_code = [(i.start, i.end) for i in islands]
+        server_code.extend(m.span() for m in _CUSTOM_TAG.finditer(markup))
         if ctx.capture_statements:
             for i in islands:
                 if i.kind == "comment":
@@ -188,6 +202,7 @@ class JspParser(BaseParser):
                         nodeType="synthetic", semanticType="comment"))
             if not page.el_ignored(settings, tag_file):
                 for start, end in el_spans(markup, deferred=page.deferred(settings)):
+                    server_code.append((start, end))
                     statements.append(_statement(
                         src, lines, start, end, path, fid, seen_ids, ctx.statement_text_limit,
                         nodeType="synthetic",
@@ -196,7 +211,7 @@ class JspParser(BaseParser):
             statements.extend(_java(src, islands, path, fid, ctx, seen_ids, functions, classes))
         statements.sort(key=lambda s: s.startLine)  # three passes, one file order
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -210,6 +225,11 @@ class JspParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Inline <script> blocks through every script detector; offsets are the decoded page's.
+        page_ctx = replace(ctx, source=src, path=path)
+        link_page_scripts(record, page_ctx)
+        read_page_scripts(record, page_ctx, server_code=server_code)
+        return record
 
 
 #: Page files a URL can reach (fragments and tag files are parts of pages).
@@ -280,8 +300,10 @@ def _java(src: bytes, islands: list[Island], path: str, fid: str, ctx: ParseCont
             statements.extend(stmts)
     if not capture:
         return statements
-    statements.extend(extract_statements(root, code, path, parent_id=fid, capture=True,
-                                         limit=limit, seen_ids=seen_ids))
+    top = extract_statements(root, code, path, parent_id=fid, capture=True, limit=limit,
+                             seen_ids=seen_ids)
+    expressions_as_written(top, src, islands, JSP, limit)
+    statements.extend(top)
     statements.extend(comment_statements_for(
         root, code, path, file_id=fid, functions=functions, classes=classes,
         statements=statements, control_flow=CONTROL_FLOW, comment_types=COMMENT_TYPES,

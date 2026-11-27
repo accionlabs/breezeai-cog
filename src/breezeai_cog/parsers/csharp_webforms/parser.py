@@ -23,8 +23,10 @@ from ...schemas import FileRecord
 from ...utils import count_loc
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
-from ..typescript_jquery.calls import detect_inline_jquery
 from ..emits import apply
+from ..template_common.markup import read_page_markup
+from ..template_common.scripts import link_page_scripts, read_page_scripts
+from ..template_common.server_code import ASPNET, scan_islands, shadow_markup
 from ..treesitter import parse_source
 from .markup import (
     collect_markup_statements,
@@ -32,8 +34,10 @@ from .markup import (
     register_controls,
     resolve_codebehind,
     resolve_control_mounts,
-    shadow_markup,
 )
+from .data_sources import collect_data_sources
+from .handler_links import link_page_handlers
+from .server_code import read_server_code
 from ..webforms_common.mounts import (
     master_codebehind, read_sibling_markup, resolve_master, resolve_mounts,
 )
@@ -57,6 +61,9 @@ class WebFormsParser(CSharpParser):
     template_extensions: tuple[str, ...] = _MARKUP_EXT  # the markup half only — .cs stays
     priority = 10  # framework parser > base csharp (0); disjoint claims from csharp-aspnet
     frameworks = ["aspnet-webforms"]
+    # A markup file's base parser is this one, so its own index holds only markup: the repo's
+    # C# index locates the methods a page names (ObjectDataSource SelectMethod).
+    related_languages: tuple[str, ...] = ("csharp",)
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).
     # ``synthetic``: a ``<%@ Register %>`` directive, which the html grammar never sees.
     statement_types = [*CSharpParser.statement_types, "element", "attribute", "synthetic"]
@@ -69,8 +76,10 @@ class WebFormsParser(CSharpParser):
         )
 
     def _parse_markup(self, ctx: ParseContext) -> FileRecord:
-        """Step 1: a ``.aspx``/``.ascx``/``.master`` markup File — server-control declarations
-        and ``On<Event>`` handler wiring, parsed from the island-blanked shadow."""
+        """A ``.aspx``/``.ascx``/``.master`` markup File. The splitter (ASP.NET dialect) separates
+        the server code from the markup: the markup gives server-control declarations,
+        ``On<Event>`` handler wiring, links and form posts; the server code is read as C#
+        (:mod:`.server_code`); inline ``<script>`` blocks go through every script detector."""
         fid = file_id(ctx.path)
         codebehind = resolve_codebehind(ctx.source, ctx.path, ctx.repo_root)
         # Host→control mounts declared in this markup (<%@ Register Src %>) → the control's
@@ -94,13 +103,14 @@ class WebFormsParser(CSharpParser):
             loc=count_loc(ctx.source.decode("utf-8", "replace")),
             importFiles=import_files,
         )
+        link_page_scripts(record, ctx)
+        islands = scan_islands(ctx.source, ASPNET)
+        seen_ids: set[str] = set()
         if ctx.capture_statements:
             # Parse the shadow (islands blanked) but read text from the ORIGINAL source — offsets
             # are identical (blanking preserves length), so line/column and text stay true.
-            root = parse_source(
-                "html", shadow_markup(ctx.source), ctx.parse_timeout_micros
-            ).root_node
-            seen_ids: set[str] = set()
+            markup = shadow_markup(ctx.source, islands)
+            root = parse_source("html", markup, ctx.parse_timeout_micros).root_node
             record.statements.extend(collect_register_statements(
                 ctx.source, ctx.path, fid, seen_ids, ctx.statement_text_limit))
             record.statements.extend(
@@ -109,8 +119,14 @@ class WebFormsParser(CSharpParser):
                     register_controls(ctx.source, ctx.path, ctx.repo_root),
                 )
             )
-            # inline <script> jQuery AJAX calls → api_call
-            detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
+            record.statements.extend(collect_data_sources(root, ctx, fid, seen_ids))
+            read_page_markup(record, markup, ctx.path, ctx.parse_timeout_micros,
+                             links=not self.is_fixture_file(ctx.path), source=ctx.source)
+            read_page_scripts(record, ctx, server_code=[(i.start, i.end) for i in islands])
+        # methods are structure (always built); their statements only under capture
+        read_server_code(record, ctx, islands, seen_ids)
+        # On<Event> handlers and user controls → where their C# is declared
+        link_page_handlers(record, ctx)
         return record
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

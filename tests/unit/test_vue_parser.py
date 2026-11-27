@@ -912,3 +912,136 @@ export default routes
         ("page", "Kids", ""),
         ("page", "Pets", ""),
     ]
+
+
+# ── shared template readers: SFC blocks from the vue grammar, links, form posts, <script src> ──
+
+
+def test_template_link_and_form_post_through_the_shared_markup_reader(tmp_path) -> None:
+    src = b"""<template>
+  <a href="/help.html">Help</a>
+  <form action="/orders/save" method="post"><button>Save</button></form>
+  <form @submit.prevent="save"><input v-model="x" /></form>
+  <a :href="url">Bound</a>
+  <a href="https://example.com">Out</a>
+  <router-link to="/orders">Back</router-link>
+</template>
+<script>
+export default { methods: { save() {} } };
+</script>
+"""
+    rec = _parse("src/components/Page.vue", src, tmp_path)
+    records = {
+        (s.startLine, s.semanticType, s.method, s.endpoint)
+        for s in rec.statements
+        if s.semanticType in ("route", "api_call")
+    }
+    assert records == {
+        (2, "route", None, "/help.html"),  # plain link
+        (3, "api_call", "POST", "/orders/save"),  # form with an action
+        (7, "route", None, "/orders"),  # router-link, as before (one record, not two)
+    }
+    link = next(s for s in rec.statements if s.startLine == 2 and s.semanticType == "route")
+    assert link.routeKind == "navigation" and link.text.startswith('<a href="/help.html">')
+
+
+def test_template_link_text_expression_gives_no_endpoint(tmp_path) -> None:
+    src = b'<template>\n  <a href="/users/{{ id }}">User</a>\n</template>\n'
+    rec = _parse("src/components/User.vue", src, tmp_path)
+    links = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(links) == 1 and links[0].endpoint is None
+
+
+def test_script_calls_are_recorded_once(tmp_path) -> None:
+    # The SFC script runs every script detector already; the shared script reader is not
+    # run again over it, so a call is one record.
+    src = b"""<template><p>x</p></template>
+<script>
+import axios from 'axios';
+export default { methods: { load() { return axios.get('/api/a'); } } };
+</script>
+"""
+    rec = _parse("src/components/A.vue", src, tmp_path)
+    calls = [s for s in rec.statements if s.semanticType == "api_call"]
+    assert [(c.startLine, c.endpoint) for c in calls] == [(4, "/api/a")]
+
+
+def test_script_inside_a_comment_is_not_a_block(tmp_path) -> None:
+    src = b"""<!-- <script>
+import axios from 'axios'; axios.get('/api/old');
+</script> -->
+<template><p>x</p></template>
+"""
+    rec = _parse("src/components/C.vue", src, tmp_path)
+    assert rec.loc == 0 and not [s for s in rec.statements if s.semanticType == "api_call"]
+
+
+def test_script_setup_and_second_script_block_both_read(tmp_path) -> None:
+    src = b"""<script lang="ts">
+export const a = 1;
+</script>
+<script setup lang="ts">
+import axios from 'axios';
+axios.post('/api/b');
+</script>
+"""
+    rec = _parse("src/components/B.vue", src, tmp_path)
+    assert rec.language == "typescript"
+    assert [(s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "api_call"] == [
+        (6, "/api/b")
+    ]
+
+
+def test_script_src_is_a_file_link(tmp_path) -> None:
+    (tmp_path / "src/components").mkdir(parents=True)
+    (tmp_path / "src/components/logic.js").write_text("export default {};\n")
+    src = b'<template><p>x</p></template>\n<script src="./logic.js"></script>\n'
+    p = tmp_path / "src/components/D.vue"
+    p.write_bytes(src)
+    ctx = ParseContext(
+        path="src/components/D.vue",
+        abs_path=p,
+        source=src,
+        repo_root=tmp_path,
+        capture_statements=False,
+    )
+    rec = VueParser().parse_file(ctx)
+    assert "src/components/logic.js" in rec.importFiles
+
+
+def test_template_markup_keeps_lines_and_blanks_script(tmp_path) -> None:
+    from breezeai_cog.parsers.treesitter import parse_source
+    from breezeai_cog.parsers.typescript_vue.sfc import template_markup
+
+    src = b'<template>\n  <a href="/x">x</a>\n</template>\n<script>\nconst y = \'<a href="/z">\';\n</script>\n'
+    markup = template_markup(parse_source("vue", src, 0).root_node, src)
+    assert markup is not None and len(markup) == len(src)
+    assert markup.count(b"\n") == src.count(b"\n")
+    assert b'<a href="/x">' in markup and b"/z" not in markup and b"<template>" not in markup
+
+
+def test_template_src_is_a_file_link(tmp_path) -> None:
+    (tmp_path / "src/components").mkdir(parents=True)
+    (tmp_path / "src/components/Panel.html").write_text("<div></div>\n")
+    src = b'<template src="./Panel.html"></template>\n<script>\nexport default {}\n</script>\n'
+    p = tmp_path / "src/components/Panel.vue"
+    p.write_bytes(src)
+    ctx = ParseContext(path="src/components/Panel.vue", abs_path=p, source=src, repo_root=tmp_path)
+    rec = VueParser().parse_file(ctx)
+    assert "src/components/Panel.html" in rec.importFiles
+
+
+def test_template_src_missing_file_is_not_linked(tmp_path) -> None:
+    src = b'<template src="./Missing.html"></template>\n<script>\nexport default {}\n</script>\n'
+    rec = _parse("Panel.vue", src, tmp_path)
+    assert rec.importFiles == []
+
+
+def test_pug_template_is_skipped_without_records(tmp_path) -> None:
+    src = (
+        b'<template lang="pug">\ndiv\n  button(@click="go") Go\n</template>\n'
+        b"<script>\nexport default { methods: { go() {} } }\n</script>\n"
+    )
+    rec = _parse("Pug.vue", src, tmp_path)
+    assert not [s for s in rec.statements if s.nodeType == "directive_attribute"]
+    assert [f.name for f in rec.functions] == ["go"]

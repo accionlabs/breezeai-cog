@@ -12,6 +12,10 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc, repo_relative
 from ..base import BaseParser, ParseContext
+from ..template_common.markup import read_page_markup
+from ..template_common.script_blocks import blank
+from ..template_common.scripts import link_page_scripts, read_page_scripts
+from ..template_common.server_code import code_outside
 from ..treesitter import line_span, node_text, parse_source
 
 _CAPTURED_DIRECTIVES = {
@@ -224,7 +228,7 @@ class TwigParser(BaseParser):
             if ctx.capture_statements
             else []
         )
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -235,3 +239,14 @@ class TwigParser(BaseParser):
             importFiles=list(dict.fromkeys(imports)),
             statements=statements,
         )
+        # Links, form posts and inline scripts; {{ }}, {% %} and {# #} are server code.
+        server_code = code_outside(root, "content")
+        link_page_scripts(record, ctx)
+        if ctx.capture_statements:
+            markup = bytearray(ctx.source)
+            for start, end in server_code:
+                blank(markup, start, end)
+            read_page_markup(record, bytes(markup), path, ctx.parse_timeout_micros,
+                             links=not self.is_fixture_file(path), source=ctx.source)
+            read_page_scripts(record, ctx, server_code=server_code)
+        return record

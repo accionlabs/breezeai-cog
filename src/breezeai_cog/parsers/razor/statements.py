@@ -147,6 +147,38 @@ def _page_handler(root: Node, source: bytes, path: str) -> str | None:
     return None
 
 
+def _implicit_end(source: bytes, start: int, end: int) -> int:
+    """End byte of the implicit expression ``@a.b(c)[d]`` / ``@await f()`` starting at ``start``.
+    The grammar can run one that ends a line into the next line's markup, so stop where Razor
+    itself stops: at the first character outside brackets that is not part of a member chain
+    (a trailing ``.`` is sentence text, not member access)."""
+    i = start + 1
+    if source.startswith(b"await ", i):
+        i += len(b"await ")
+    depth, quote = 0, 0
+    while i < end:
+        c = source[i]
+        if quote:
+            if c == 0x5C:  # backslash: skip the escaped character
+                i += 1
+            elif c == quote:
+                quote = 0
+        elif depth and c in b"\"'":
+            quote = c
+        elif c in b"([":
+            depth += 1
+        elif c in b")]":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and not (chr(c).isalnum() or c in b"_."):
+            break
+        i += 1
+    while depth == 0 and i > start + 1 and source[i - 1] == 0x2E:
+        i -= 1
+    return i
+
+
 def collect_razor_statements(
     root: Node,
     source: bytes,
@@ -161,16 +193,20 @@ def collect_razor_statements(
     """Walk the razor tree and emit one flat Statement per template construct."""
     out: list[Statement] = []
 
-    def _emit(node: Node, **fields: object) -> None:
+    def _emit(node: Node, end_byte: int | None = None, **fields: object) -> None:
         start, col = node.start_point[0] + 1, node.start_point[1]
-        text = node_text(node, source)
+        if end_byte is None:
+            text, end_line = node_text(node, source), node.end_point[0] + 1
+        else:
+            text = source[node.start_byte : end_byte].decode("utf-8", "replace")
+            end_line = start + text.count("\n")
         out.append(
             Statement(
                 id=disambiguate(statement_id(path, start, col), seen_ids),
                 parentId=parent_id,
                 text=text if len(text) <= limit else text[:limit],
                 startLine=start,
-                endLine=node.end_point[0] + 1,
+                endLine=end_line,
                 path=path,
                 **fields,  # type: ignore[arg-type]
             )
@@ -203,7 +239,9 @@ def collect_razor_statements(
             handler = _attr_handler(node, source) if name.startswith("on") else None
             _emit(node, nodeType=t, name=name, handler=handler)
         elif t == "razor_implicit_expression":
-            _emit(node, nodeType=t, name=node_text(node, source).lstrip("@").strip())
+            end = _implicit_end(source, node.start_byte, node.end_byte)
+            name = source[node.start_byte + 1 : end].decode("utf-8", "replace").strip()
+            _emit(node, end, nodeType=t, name=name)
         elif t == "razor_model_directive":
             _emit(node, nodeType=t, name=_model_type(node, source))
         elif t in ("razor_foreach", "razor_if"):

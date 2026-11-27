@@ -83,3 +83,20 @@ def test_inline_jquery_in_a_vb_view_uses_its_layout_chain(tmp_path: Path) -> Non
                         if s.semanticType == "api_call"]
              for rec in iter_file_records(root, capture_templates=True)}
     assert {p: c for p, c in calls.items() if c} == {"Views/Orders/Index.vbhtml": [(2, "GET", "/api/orders")]}
+
+
+def test_links_forms_and_page_scripts_in_a_vb_view(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"Views/Home/Contact.vbhtml": (
+        '@ModelType ContactModel\n'
+        '<a href="/about">About</a>\n'
+        '<form method="post" asp-action="Send"></form>\n'
+        '<script>\nfetch("/api/contact/@Model.Id");\naxios.get("/api/stats");\n</script>\n'
+    )})
+    (rec,) = iter_file_records(root, capture_templates=True)
+    assert [(s.startLine, s.semanticType, s.method, s.endpoint) for s in rec.statements
+            if s.semanticType in ("route", "api_call")] == [
+        (2, "route", None, "/about"),
+        (3, "api_call", "POST", None),
+        (5, "api_call", "GET", None),
+        (6, "api_call", "GET", "/api/stats"),
+    ]

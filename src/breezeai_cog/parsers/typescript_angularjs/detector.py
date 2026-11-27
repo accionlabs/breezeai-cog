@@ -5,7 +5,12 @@ without a cycle."""
 from __future__ import annotations
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..handler_sites import handler_location
+from ..html.angularjs import angularjs_event_emits
+from ..template_common.inline_templates import inline_template_markup
+from ..template_common.markup import markup_emits
+from ..treesitter import parse_source
 from ..typescript.handlers import handler_locator
 from .registrations import Env, Variable, locator, registration_emits, registrations
 from .resources import resource_emits
@@ -48,6 +53,17 @@ def _variable_locator(dc: DetectContext, found: Scan) -> Variable:
     return locate
 
 
+def _inline_template_emits(dc: DetectContext) -> list[Emit]:
+    """A ``template: '…'`` of a component or directive: its event directives, links and form
+    posts, as its ``.html`` template would give them, at their true lines in this file."""
+    markup = inline_template_markup(dc.root, dc.source)
+    if markup is None:
+        return []
+    timeout = dc.ctx.parse_timeout_micros
+    hroot = parse_source("html", markup, timeout).root_node
+    return [*angularjs_event_emits(hroot, markup, timeout), *markup_emits(hroot, markup)]
+
+
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     if not any(marker in source for marker in _MARKERS):
@@ -61,6 +77,7 @@ def _detect(dc: DetectContext) -> Detection | None:
         *state_emits(states, found, env, state_lookup(dc, states)),
         *registration_emits(here, source),
         *resource_emits(found, source),
+        *_inline_template_emits(dc),
     ]
     emits.sort(key=lambda e: e.node.start_byte)
     return Detection(emits, label=FRAMEWORK) if emits else None

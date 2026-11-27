@@ -461,3 +461,78 @@ def test_imported_class_declared_twice_is_external(tmp_path) -> None:
     })
     rec = _parse(repo, "web/a.jsp")
     assert rec.importFiles == [] and rec.externalImports == ["com.shop.Cart"]
+
+
+_SCRIPTS = """<%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core" %>
+<script>$.post('/api/early');</script>
+<script src="/js/jquery.min.js"></script>
+<script src="js/app.js"></script>
+<script>
+  var API = '/api/orders';
+  $.post(API, {});
+  fetch('/api/items');
+  fetch('${pageContext.request.contextPath}/api/el');
+  $.get('<c:url value="/api/tag"/>');
+  $.get('${ctx}/api/el');
+  axios.post('<%= request.getContextPath() %>/api/scriptlet');
+</script>
+"""
+
+
+def _calls(rec: FileRecord) -> list[tuple[int, str | None, str | None]]:
+    return [(s.startLine, s.framework, s.endpoint)
+            for s in rec.statements if s.semanticType == "api_call"]
+
+
+def test_page_scripts_go_through_every_detector(tmp_path) -> None:
+    repo = _repo(tmp_path, {"web/a.jsp": _SCRIPTS, "web/js/app.js": "fetch('/x');"})
+    rec = _parse(repo, "web/a.jsp")
+    calls = _calls(rec)
+    assert (7, "jquery", "/api/orders") in calls  # a page constant
+    assert (8, "fetch", "/api/items") in calls
+    assert not any(line == 2 for line, _, _ in calls)  # before the jQuery tag
+    assert rec.importFiles == ["web/js/app.js"]  # <script src> in the repository
+
+
+def test_server_code_in_a_script_url_gives_no_endpoint(tmp_path) -> None:
+    rec = _parse(_repo(tmp_path, {"a.jsp": _SCRIPTS}), "a.jsp")
+    by_line = {line: endpoint for line, _, endpoint in _calls(rec)}
+    # EL, a custom tag and a scriptlet are written by the server: honest-null, never the text.
+    assert {line: by_line[line] for line in (9, 10, 11, 12)} == dict.fromkeys((9, 10, 11, 12))
+
+
+def test_server_code_in_a_page_constant_gives_no_endpoint(tmp_path) -> None:
+    page = ("<script src='/js/jquery.min.js'></script>\n"
+            "<script>var API = '${ctx}/api/orders';</script>\n<script>$.post(API);</script>\n")
+    rec = _parse(_repo(tmp_path, {"a.jsp": page}), "a.jsp")
+    # Not folded: the call keeps the variable's placeholder, never the EL text.
+    assert _calls(rec) == [(3, "jquery", "{API}")]
+
+
+def test_page_scripts_need_capture(tmp_path) -> None:
+    rec = _parse(_repo(tmp_path, {"a.jsp": _SCRIPTS}), "a.jsp", capture=False)
+    assert _calls(rec) == []
+
+
+def test_unbalanced_markup_keeps_every_element(tmp_path) -> None:
+    page = """<% if (admin) { %>
+  <form action="/orders/save.do" method="post">
+<% } else { %>
+  <form action="/orders/view.do" method="get">
+<% } %>
+  <input name="q"></form>
+"""
+    rec = _parse(_repo(tmp_path, {"a.jsp": page}), "a.jsp")
+    forms = [s.startLine for s in _types(rec, "element") if s.name == "form"]
+    assert forms == [2, 4]
+    assert [s.endpoint for s in rec.statements if s.routeKind == "navigation"] == [
+        "/orders/save.do", "/orders/view.do"]
+    assert "if_statement" in {s.nodeType for s in rec.statements}
+
+
+def test_expression_statement_cites_the_page(tmp_path) -> None:
+    page = '<p><%= request.getContextPath() %></p>\n<%= a(")") %>\n'
+    rec = _parse(_repo(tmp_path, {"a.jsp": page}), "a.jsp")
+    texts = {s.startLine: s.text for s in rec.statements if s.nodeType == "expression_statement"}
+    # The page as written, not the ( x ); wrapper the Java grammar parsed.
+    assert texts == {1: "<%= request.getContextPath() %>", 2: '<%= a(")") %>'}
