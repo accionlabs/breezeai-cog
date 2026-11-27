@@ -21,6 +21,9 @@ from tree_sitter import Node
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..java.statements import render_url
+from ..java.syntax import imports_and_package
+from ..java_http_helpers import defining_requests
+from ..outbound_helpers import Request, RequestSource, register_requests
 from ..statements_common import url_or_value
 from ..treesitter import first_line, node_text
 
@@ -89,8 +92,6 @@ def requests(root: Node, source: bytes, imports: list[str]) -> Iterator[tuple[No
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    from ..java_http_helpers import defining_requests  # lazy: it imports this module
-
     source = dc.source
     defining = defining_requests(dc.root, source, dc.path, dc.ctx.resolution_index)
     found: list[Emit] = []
@@ -111,3 +112,16 @@ register_detector(Detector(
     gate=Gate("java", order=60, guard=b"org.apache.h", skip_fixtures=True),
     detect=_detect,
 ))
+
+
+def _helper_requests(root: Node, source: bytes) -> Iterator[Request]:
+    """The requests an application's own HTTP helper may make with Apache's client: the same
+    matcher, for the helper rule (``outbound_helpers.register_requests``)."""
+    singles, wildcards, _ = imports_and_package(root, source)
+    imports = [*singles, *(f"{w}.*" for w in wildcards)]
+    for node, verb, uri in requests(root, source, imports):
+        yield Request(node=node, url=uri, verb=verb)
+
+
+register_requests(RequestSource("java-apache-httpclient", "java", (b"org.apache.h",),
+                                _helper_requests))

@@ -32,6 +32,7 @@ from tree_sitter import Node
 from ...schemas import FileRecord, SemanticType
 from ..additive import FactSpec, register_fact
 from ..emits import Emit
+from ..java_http_helpers import defining_requests
 from .java_syntax import (anonymous_handle, calls_and_creations, handler_class, imports_and_package,
                           invocations, java_string, local_value, value_source)
 from .forwarders import defining_calls, forwarder_sites
@@ -492,7 +493,6 @@ def detect_vertx(
         tables, replaced = registration_tables(calls, source, consts, index, path, built_by)
         suppress |= replaced
         found.extend(tables)
-        from ..java_http_helpers import defining_requests  # lazy: it imports this package
         defining = defining_requests(root, source, path, index) \
             if b"org.vertx.java.core.http" in source else frozenset()
         found.extend(http_client_calls(root, calls, source, record, consts, defining))

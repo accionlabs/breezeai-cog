@@ -31,6 +31,8 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..emits import Emit
+from ..java.syntax import invocations
+from ..outbound_helpers import Request, RequestSource, register_requests
 from ..java_variables_common import typed_vars
 from ..treesitter import node_text
 from ..vertx_common import EVENTBUS, is_bus_receiver, vertx_emit
@@ -210,3 +212,16 @@ def http_client_calls(
             "endpoint": request_address(uri, source, consts),
         }, enrich="unclassified", reclassify=frozenset({"api_call", "db_method_call"})))
     return found
+
+
+def _helper_requests(root: Node, source: bytes) -> Iterator[Request]:
+    """The requests an application's own HTTP helper may make with a Vert.x 2 ``HttpClient``:
+    the same matcher, for the helper rule (``outbound_helpers.register_requests``)."""
+    returning = returning_client(root, source)
+    for call, verb, verb_arg, uri in client_requests(root, invocations(root), source, returning,
+                                                     {}):
+        yield Request(node=call, url=uri, verb=verb, verb_arg=verb_arg, framework="vertx")
+
+
+register_requests(RequestSource("java-vertx2-httpclient", "java", (b"HttpClient",),
+                                _helper_requests))

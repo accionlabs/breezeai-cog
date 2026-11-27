@@ -77,12 +77,13 @@ from .emits import Emit
 from .index_common import record_distinct
 from .java.constants import collect_constants
 from .java.imports import JavaIndex
-from .java_apache_httpclient.http_calls import requests as apache_requests
-from .java_vertx.forwarders import TYPE_DECLARATIONS, _callee, _class_of, _Names, _scan, pick, \
-    superclass_of
-from .java_vertx.java_syntax import (arguments, imports_and_package, known_address,
-                                     local_value, name_of, request_address)
-from .java_vertx.legacy import client_requests, returning_client
+from .java.scan import TYPE_DECLARATIONS, pick, superclass_of
+from .java.scan import Names as _Names
+from .java.scan import callee as _callee
+from .java.scan import class_of as _class_of
+from .java.scan import scan_classes as _scan
+from .java.syntax import arguments, known_address, local_value, name_of, request_address
+from .outbound_helpers import file_requests
 from .treesitter import node_text
 
 FACT = "java.http-helpers"
@@ -238,22 +239,13 @@ def _switch_verb(node: Node, verb: str, params: list[str], reassigned: Mapping[s
     return params.index(name)
 
 
-def _requests(root: Node, calls: list[Node], source: bytes
+def _requests(root: Node, source: bytes
               ) -> list[tuple[Node, str | None, Node | None, Node | None, str]]:
     """This file's HTTP client requests: (node, verb, verb argument, URI argument, framework),
-    matched as capture matches them, in one pass over the file."""
-    found: list[tuple[Node, str | None, Node | None, Node | None, str]] = []
-    if b"HttpClient" in source:
-        returning = returning_client(root, source)
-        found.extend((call, verb, verb_arg, uri, "vertx")
-                     for call, verb, verb_arg, uri in client_requests(root, calls, source,
-                                                                       returning, {}))
-    if b"org.apache.h" in source:
-        singles, wildcards, _ = imports_and_package(root, source)
-        imports = [*singles, *(f"{w}.*" for w in wildcards)]
-        found.extend((node, verb, None, uri, "") for node, verb, uri in
-                     apache_requests(root, source, imports))
-    return found
+    as the client packages registered for Java recognise them (``register_requests``: the
+    Vert.x 2 ``HttpClient``, Apache ``HttpGet``…) — matched exactly as capture matches them."""
+    return [(r.node, r.verb, r.verb_arg, r.url, r.framework or "")
+            for r in file_requests("java", root, source)]
 
 
 def _scan_file(root: Node, source: bytes, rel: str
@@ -263,8 +255,7 @@ def _scan_file(root: Node, source: bytes, rel: str
     names = _Names(root, source)
     found_types: list[Node] = []
     scanned = _scan(root, source, names, found_types)
-    requests = _requests(root, [c for cls in scanned for d in cls.decls for c in d.calls],
-                         source) if b"HttpClient" in source or b"org.apache.h" in source else []
+    requests = _requests(root, source)
     helpers: list[tuple[str, Helper]] = []
     relays: list[Relay] = []
     classes: list[tuple[str, tuple[str, ...], bool]] = []

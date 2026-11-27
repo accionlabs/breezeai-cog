@@ -26,7 +26,8 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
-from .forwarders import _Names, pick
+from ..java.scan import Names as _Names
+from ..java.scan import pick
 from .java_syntax import arguments, local_value, name_of
 
 FACTORIES = "vertx.handler-factories"
