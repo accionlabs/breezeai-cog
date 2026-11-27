@@ -17,18 +17,50 @@ def test_classify_api() -> None:
     assert classify_call("fetch", "fetch", language="typescript") == ("api_call", "GET", None)
     assert classify_call("this.http.post", "post", language="typescript") == ("api_call", "POST", None)
     assert classify_call("requests.get", "get", language="python") == ("api_call", "GET", None)
-    assert classify_call("session.delete", "delete", language="python") == ("api_call", "DELETE", None)
+    # a session the file shows is an HTTP client (python/clients.py)
+    assert classify_call("session.delete", "delete", language="python",
+                         http_client_ids=frozenset({"session"})) == ("api_call", "DELETE", None)
 
 
 def test_session_query_chain_is_db_not_http() -> None:
-    # `session` is both an HTTP client hint (requests.Session) and a SQLAlchemy DB
-    # session. A chain carrying an ORM query-builder marker is data access, not HTTP,
-    # even though it rides on `session` and ends in an HTTP verb.
-    assert classify_call("session.query(User).filter(x).delete", "delete", language="python") == \
+    # A chain carrying an ORM query-builder marker is not HTTP, even on a `session` the file
+    # shows is an HTTP client, though it ends in an HTTP verb. On a Flask-SQLAlchemy session it
+    # is data access; on a `session` the file shows nothing about, nothing.
+    assert classify_call("db.session.query(User).filter(x).delete", "delete",
+                         language="python") == ("db_method_call", "delete", "sqlalchemy")
+    assert classify_call("session.query(User).filter(x).delete", "delete", language="python") is None
+    assert classify_call("session.query(User).filter(x).delete", "delete", language="python",
+                         http_client_ids=frozenset({"session"})) is None
+
+
+def test_session_name_alone_is_no_http_client() -> None:
+    # The name `session` is a SQLAlchemy session as often as a requests.Session or another
+    # library's: alone it is neither, so it is left unrecorded. `db.session` is Flask-SQLAlchemy's.
+    assert classify_call("db.session.delete", "delete", language="python") == \
         ("db_method_call", "delete", "sqlalchemy")
-    assert classify_call("session.query(User).filter(x).delete", "delete", language="python")[0] != "api_call"
-    # a bare session.delete (requests.Session) stays an HTTP call
-    assert classify_call("session.delete", "delete", language="python") == ("api_call", "DELETE", None)
+    assert classify_call("self.db.session.delete", "delete", language="python") == \
+        ("db_method_call", "delete", "sqlalchemy")
+    assert classify_call("session.delete", "delete", language="python") is None
+    assert classify_call("mongodb.session.delete", "delete", language="python") is None
+    # a session the file shows is SQLAlchemy's (python/clients.py), for its Session methods only
+    # named whole, so another object's `request.session` is not the file's `session`
+    orm = {"session": "sqlalchemy", "self.session": "sqlalchemy"}
+    assert classify_call("session.delete", "delete", language="python", typed_receivers=orm) == \
+        ("db_method_call", "delete", "sqlalchemy")
+    assert classify_call("self.session.query", "query", language="python", typed_receivers=orm) == \
+        ("db_method_call", "query", "sqlalchemy")
+    assert classify_call("request.session.delete", "delete", language="python",
+                         typed_receivers=orm) is None
+    assert classify_call("session.save", "save", language="python", typed_receivers=orm) is None
+    # a session the file shows is an HTTP client, held on self too
+    ids = frozenset({"session", "self.session"})
+    assert classify_call("session.delete", "delete", language="python", http_client_ids=ids) == \
+        ("api_call", "DELETE", None)
+    assert classify_call("self.session.delete", "delete", language="python", http_client_ids=ids) == \
+        ("api_call", "DELETE", None)
+    # an HTTP library's own name still is one
+    assert classify_call("requests.Session().delete", "delete", language="python") == \
+        ("api_call", "DELETE", None)
 
 
 def test_classify_db() -> None:
@@ -868,7 +900,7 @@ def test_dotnet_session_remove_is_session_state() -> None:
     assert classify_call("session.Query", "Query", language="csharp",
                          vendor="entity_framework") == ("db_method_call", "Query", "orm")
     # Other languages keep their session readings.
-    assert classify_call("session.query", "query", language="python")[2] == "sqlalchemy"
+    assert classify_call("db.session.query", "query", language="python")[2] == "sqlalchemy"
     assert classify_call("requests.Session.get", "get", language="python")[0] == "api_call"
 
 
@@ -937,8 +969,9 @@ def test_bundling_include_is_not_entity_framework() -> None:
 def test_client_hints_apply_only_in_their_own_language() -> None:
     from breezeai_cog.parsers.detection.api_calls import match_api
 
-    # `session` is Python's requests.Session; in Java / Groovy it is a JSON object or a Map.
-    assert match_api("session.get", "get", language="python") == "GET"
+    # `session` is no client name in any language: Python's is a SQLAlchemy session as often as a
+    # requests.Session, and in Java / Groovy it is a Hibernate session, a JSON object or a Map.
+    assert match_api("session.get", "get", language="python") is None
     for lang in ("java", "groovy"):
         assert match_api("session.getString", "getString", language=lang) is None
         assert match_api("session.put", "put", language=lang) is None

@@ -5,7 +5,8 @@ The shared classifier records ``session.get(url)`` as an ``api_call`` where the 
 Inside a helper of the application that call is made on the helper's parameter; its callers hold
 the URL::
 
-    async def make_generic_request_with_retry(session, url: str, method: str = "GET", **kw):
+    async def make_generic_request_with_retry(session: aiohttp.ClientSession, url: str,
+                                              method: str = "GET", **kw):
         if method.upper() == "POST":
             response = await session.post(url, **kw)        # plain statement
         else:
@@ -50,6 +51,7 @@ from .additive import DetectContext, Detection, Detector, FactSpec, Gate, index_
 from .detection.api_calls import match_api
 from .emits import Emit
 from .index_common import record_distinct
+from .python.clients import collect_clients
 from .python.statements import _render_url
 from .statements_common import HTTP_VERB_ARGS, url_or_value
 from .treesitter import node_text
@@ -184,12 +186,13 @@ def _arguments(call: Node, source: bytes) -> tuple[list[Node], dict[str, Node], 
     return positional, keywords, splat, kw_splat
 
 
-def http_request(call: Node, source: bytes) -> tuple[str | None, Node | None, Node] | None:
+def http_request(call: Node, source: bytes, client_ids: frozenset[str] = frozenset()
+                 ) -> tuple[str | None, Node | None, Node] | None:
     """(verb, the node carrying it, URL argument) when the shared classifier reads ``call`` as an
-    HTTP call."""
+    HTTP call; ``client_ids`` are the file's HTTP-client names (``python/http_clients.py``)."""
     fn = call.child_by_field_name("function")
     callee = node_text(fn, source) if fn is not None else ""
-    verb = match_api(callee, callee.rsplit(".", 1)[-1], None, "python")
+    verb = match_api(callee, callee.rsplit(".", 1)[-1], client_ids, "python")
     if verb is None:
         return None
     positional, keywords, splat, _ = _arguments(call, source)
@@ -219,6 +222,7 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
     relays: list[tuple[str, str, tuple, tuple]] = []
     functions = list(_functions(root, source))
     names = [name for name, _ in functions]
+    client_ids = collect_clients(root, source)[0]  # the same names the statements are read with
     # 1. Direct helpers: only a function whose text names an HTTP client can hold a request.
     candidates = [(name, fn) for name, fn in functions
                   if _CLIENT_WORDS.search(source, fn.start_byte, fn.end_byte)]
@@ -231,7 +235,7 @@ def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]],
         usable = [p for p in params if p not in _rewritten(fn, source)]
         found: list[tuple[Helper, Node]] = []
         for call in _own_calls(fn):
-            req = http_request(call, source)
+            req = http_request(call, source, client_ids)
             if req is not None and req[2] is not None:
                 verb, verb_node, url = req
                 refs = _reads(url, usable, source)

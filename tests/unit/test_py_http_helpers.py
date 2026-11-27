@@ -9,10 +9,11 @@ import pytest
 
 from breezeai_cog import iter_file_records
 
-RETRY = '''import requests
+RETRY = '''import aiohttp
+import requests
 
 
-async def make_request(session, url: str, method: str = "GET", retries: int = 3, **kw):
+async def make_request(session: aiohttp.ClientSession, url: str, method: str = "GET", retries: int = 3, **kw):
     if method.upper() == "POST":
         response = await session.post(url, **kw)
     else:

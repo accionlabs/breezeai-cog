@@ -13,10 +13,17 @@ from ...utils import count_loc
 from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
+from ..statements_common import (
+    reset_datastore_receivers,
+    reset_http_client_ids,
+    set_datastore_receivers,
+    set_http_client_ids,
+)
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from .call_targets import checked_resolver, follow_bindings
 from .classes import build_class, iter_definitions
+from .clients import collect_clients
 from .functions import build_function, defined_names, extract_decorators, scope_calls
 from .imports import extract_imports
 from .index import PythonIndex, build_python_index
@@ -62,43 +69,53 @@ class PythonParser(BaseParser):
             path=path, bindings=called, modules=modules, index=ctx.resolution_index,
         )
 
-        functions: list[Function] = []
-        classes = []
-        statements: list[Statement] = []
-        # Walk the whole module (not just direct children): defs nested in
-        # module-level blocks (``with DAG(...):``, ``if``/``for`` …) are seeded too.
-        for defn, decs in iter_definitions(root):
-            if defn.type == "class_definition":
-                cls_list, methods, cls_statements = build_class(
-                    defn, decs, source, path,
-                    parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
-                )
-                classes.extend(cls_list)
-                functions.extend(methods)
-                statements.extend(cls_statements)
-            else:  # function_definition
-                fns, fn_statements = build_function(
-                    defn, extract_decorators(decs, source), source, path,
-                    parent_id=fid, class_name=None, seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=resolve,
-                )
-                functions.extend(fns)
-                statements.extend(fn_statements)
+        # A session is an HTTP client or a SQLAlchemy session only where the file shows it
+        # (clients.py); reset in a finally so the names never reach the next file a worker parses.
+        http_clients, orm_sessions = collect_clients(root, source)
+        token = set_http_client_ids(http_clients)
+        stores = set_datastore_receivers(orm_sessions or None)
+        try:
+            functions: list[Function] = []
+            classes = []
+            statements: list[Statement] = []
+            # Walk the whole module (not just direct children): defs nested in
+            # module-level blocks (``with DAG(...):``, ``if``/``for`` …) are seeded too.
+            for defn, decs in iter_definitions(root):
+                if defn.type == "class_definition":
+                    cls_list, methods, cls_statements = build_class(
+                        defn, decs, source, path,
+                        parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    )
+                    classes.extend(cls_list)
+                    functions.extend(methods)
+                    statements.extend(cls_statements)
+                else:  # function_definition
+                    local_classes, fns, fn_statements = build_function(
+                        defn, extract_decorators(decs, source), source, path,
+                        parent_id=fid, class_name=None, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve,
+                    )
+                    classes.extend(local_classes)
+                    functions.extend(fns)
+                    statements.extend(fn_statements)
 
-        # file-scope statements (parented to the file)
-        statements.extend(
-            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
-        )
-
-        # Comments as flat Statements, scoped by the shared binding rule (see comments_common).
-        if capture:
+            # file-scope statements (parented to the file)
             statements.extend(
-                comment_statements_for(
-                    root, source, path, file_id=fid, functions=functions, classes=classes,
-                    statements=statements, control_flow=CONTROL_FLOW,
-                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
-                )
+                extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
             )
+
+            # Comments as flat Statements, scoped by the shared binding rule (see comments_common).
+            if capture:
+                statements.extend(
+                    comment_statements_for(
+                        root, source, path, file_id=fid, functions=functions, classes=classes,
+                        statements=statements, control_flow=CONTROL_FLOW,
+                        comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                    )
+                )
+        finally:
+            reset_datastore_receivers(stores)
+            reset_http_client_ids(token)
 
         record = FileRecord(
             id=fid,

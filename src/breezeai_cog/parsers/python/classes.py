@@ -95,7 +95,7 @@ def build_class(
     resolve: CallResolver = noop_resolver,
     owner: str | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
-    """Return ([this class, *nested classes], methods, statements). Classes,
+    """Return ([this class, *nested and method-local classes], methods, statements). Classes,
     methods and statements are flat — the caller collects them onto
     ``FileRecord.classes``/``.functions``/``.statements`` (linked by parentId),
     not nested on the Class. Nested classes/methods reachable through in-body
@@ -134,11 +134,12 @@ def build_class(
                     s.semanticType = "enum_member"
         for defn, decs in iter_definitions(body):
             if defn.type == "function_definition":
-                fns, fn_statements = build_function(
+                local_classes, fns, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=resolve,
+                    capture=capture, limit=limit, resolve=resolve, scope=qualified,
                 )
+                nested_classes.extend(local_classes)
                 methods.extend(fns)
                 statements.extend(fn_statements)
                 if fns[0].name == "__init__":

@@ -250,6 +250,10 @@ def _names_word(callee: str, words: tuple[str, ...]) -> bool:
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
 _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
 
+# Flask-SQLAlchemy's session: ``db.session``, ``self.db.session``, ``app_db.session`` — read by
+# name, since ``db`` usually comes from the app package (``from app import db``), not the library.
+_FLASK_DB_SESSION = re.compile(r"(?:^|[._])db\.session\.")
+
 # Receiver terminal-segment suffixes that are clearly NOT a database: an opt-out generic ORM
 # verb (``findOne``/``findById`` — the ``_GENERIC`` verbs that are NOT high-collision) on one
 # of these is app logic, not data access, so we drop the weak ``"orm"`` fallback for them.
@@ -432,8 +436,13 @@ _DYNAMODB_TYPED = frozenset({
     "executestatement", "batchexecutestatement", "executetransaction",
     "save", "load", "delete", "fromquery", "fromscan", "executebatchget", "executebatchwrite",
 })
+# A SQLAlchemy session the Python parser found in the file (``python/clients.py``): the generic
+# data-access verbs that are ``Session`` methods, the ones a ``session`` receiver counted for
+# by name before the name stopped naming the product.
+_SQLALCHEMY_TYPED = frozenset({"query", "execute", "delete", "merge"})
 _TYPED_VERBS: dict[str, frozenset[str]] = {
     "dynamodb": _DYNAMODB_TYPED | frozenset(v + "async" for v in _DYNAMODB_TYPED),
+    "sqlalchemy": _SQLALCHEMY_TYPED,
 }
 
 
@@ -466,7 +475,11 @@ def match_db(callee: str, method: str, language: str | None = None,
         return None
     low = callee.lower()
     if typed_receivers and "." in callee:
-        product = typed_receivers.get(callee.rsplit(".", 1)[0].rsplit(".", 1)[-1])
+        # Python names the whole receiver (``self.session``, so another object's
+        # ``request.session`` is not it); the other languages name its last name.
+        typed = callee.rsplit(".", 1)[0]
+        typed = "".join(typed.split()) if language in _PYTHON else typed.rsplit(".", 1)[-1]
+        product = typed_receivers.get(typed)
         if product is not None and m in _TYPED_VERBS.get(product, ()):
             return product
     if m in _PRISMA_VERBS and _is_prisma_chain(low) and (language is None or language in _JSTS):
@@ -539,6 +552,11 @@ def match_db(callee: str, method: str, language: str | None = None,
                 if m == "remove" or "httpcontext.session" in low:
                     return None
                 return "hibernate" if vendor == "hibernate" else "orm"
+            # In Python a ``session`` is SQLAlchemy's, a ``requests.Session`` or another
+            # library's, so its name says nothing: the sessions the file shows are SQLAlchemy's
+            # come in ``typed_receivers`` (matched above). ``db.session`` is Flask-SQLAlchemy's.
+            if needle == "session" and language in _PYTHON and not _FLASK_DB_SESSION.search(low):
+                continue
             # ``objects`` is Django's model manager; in another language it is an ordinary
             # name (``objects.findAll { … }`` filters a list), not evidence of data access.
             if needle == "objects" and language is not None and language not in _PYTHON:

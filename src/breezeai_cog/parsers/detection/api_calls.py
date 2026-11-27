@@ -16,9 +16,11 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "requ
 # ends with one of them, starting a word (:func:`_names_client`): ``dataApiClient``,
 # ``DefaultHttpClient``, ``this._http``, ``axios.create()``; not ``apiClientPool`` (a pool),
 # ``HttpRuntime.Cache`` (a cache) or ``httpContextProvider``. A name is read only in its own
-# languages, because the same word is an ordinary name elsewhere: ``session`` is Python's
-# ``requests.Session`` but a JSON object or a Map in Java and Groovy, and ``ky`` / ``got`` are JS
+# languages, because the same word is an ordinary name elsewhere: ``ky`` / ``got`` are JS
 # libraries. A bare ``client`` is never one: it would match s3Client / dbClient / graphqlClient.
+# ``session`` is in no list: it is a ``requests.Session`` as often as a SQLAlchemy or Hibernate
+# session, so a session is an HTTP client only where the file shows it (the Python parser's
+# per-file client names, ``python/clients.py``).
 # A language with no entry (PHP, C, C++, an unknown one) has no name match at all; its HTTP
 # calls are recorded only by evidence-based detectors (an import, a declared type).
 _COMMON_HINTS = ("http", "httpclient", "restclient", "apiclient")
@@ -27,7 +29,7 @@ _DOTNET_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")  # Spring.NET Rest
 _CLIENT_HINTS: dict[str, tuple[str, ...]] = {
     "typescript": (*_COMMON_HINTS, "httpservice", "axios", "fetch", "superagent", "got", "ky",
                    "ofetch", "webclient"),
-    "python": (*_COMMON_HINTS, "requests", "session", "httpx", "aiohttp", "urllib", "urllib3"),
+    "python": (*_COMMON_HINTS, "requests", "httpx", "aiohttp", "urllib", "urllib3"),
     "java": _JVM_HINTS, "kotlin": _JVM_HINTS, "groovy": _JVM_HINTS, "scala": _JVM_HINTS,
     "csharp": _DOTNET_HINTS, "vb": _DOTNET_HINTS,
     "go": _COMMON_HINTS,
@@ -164,9 +166,11 @@ def match_api(
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
+        # A dotted name (Python's ``self.session``) is matched against the whole receiver.
         own = callee.removeprefix("this.")  # this.client.get → client
         is_client = (callee in http_client_ids or own in http_client_ids
-                     or own.split(".", 1)[0] in http_client_ids)
+                     or own.split(".", 1)[0] in http_client_ids
+                     or "".join(receiver.split()) in http_client_ids)
     if is_client:
         if any(mk in low for mk in _DB_CHAIN_MARKERS):
             return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())
