@@ -67,6 +67,51 @@ def _is_resty_constructor(node: Node, source: bytes, resty_aliases: frozenset[st
     )
 
 
+def _enclosing_function(node: Node) -> Node | None:
+    while node.type not in {"function_declaration", "method_declaration", "func_literal"}:
+        if node.parent is None:
+            return None
+        node = node.parent
+    return node
+
+
+def _has_typed_parameter(
+    scope: Node, name: str, source: bytes, types: frozenset[str],
+) -> bool:
+    params = scope.child_by_field_name("parameters")
+    if params is None:
+        return False
+    for param in params.named_children:
+        typ = param.child_by_field_name("type")
+        if (
+            typ is not None
+            and node_text(typ, source).replace(" ", "").lstrip("*") in types
+            and any(node_text(item, source) == name for item in param.children_by_field_name("name"))
+        ):
+            return True
+    return False
+
+
+def _prior_binding(scope: Node, call: Node, name: str, source: bytes) -> Node | None:
+    body = scope.child_by_field_name("body")
+    if body is None:
+        return None
+    matches: list[tuple[int, Node]] = []
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if node is not body and node.type == "func_literal":
+            continue
+        if node.start_byte >= call.start_byte:
+            continue
+        if node.type in {"short_var_declaration", "var_spec", "assignment_statement"}:
+            for variable, value in _pairs(node) or []:
+                if variable.type == "identifier" and node_text(variable, source) == name:
+                    matches.append((node.start_byte, value))
+        stack.extend(node.named_children)
+    return max(matches, key=lambda match: match[0])[1] if matches else None
+
+
 def _is_resty_request(call: Node, source: bytes, resty_aliases: frozenset[str]) -> bool:
     fn = call.child_by_field_name("function")
     operand = fn.child_by_field_name("operand") if fn is not None else None
@@ -89,48 +134,15 @@ def _is_resty_request(call: Node, source: bytes, resty_aliases: frozenset[str]) 
     if resty_client.type != "identifier":
         return False
 
-    scope: Node | None = call
-    while scope is not None and scope.type not in {
-        "function_declaration", "method_declaration", "func_literal",
-    }:
-        scope = scope.parent
+    scope = _enclosing_function(call)
     if scope is None:
         return False
 
-    params = scope.child_by_field_name("parameters")
-    if params is not None:
-        for param in params.named_children:
-            typ = param.child_by_field_name("type")
-            if (
-                typ is not None
-                and node_text(typ, source).replace(" ", "").lstrip("*")
-                in {f"{alias}.Client" for alias in resty_aliases}
-                and any(
-                    node_text(item, source) == client_name
-                    for item in param.children_by_field_name("name")
-                )
-            ):
-                return True
-
-    body = scope.child_by_field_name("body")
-    if body is None:
-        return False
-    stack = [body]
-    while stack:
-        node = stack.pop()
-        if node is not body and node.type == "func_literal":
-            continue
-        if node.start_byte >= call.start_byte:
-            continue
-        if node.type in {"short_var_declaration", "var_spec"}:
-            if any(
-                node_text(name, source) == client_name
-                and _is_resty_constructor(value, source, resty_aliases)
-                for name, value in _pairs(node) or []
-            ):
-                return True
-        stack.extend(node.named_children)
-    return False
+    client_types = frozenset(f"{alias}.Client" for alias in resty_aliases)
+    if _has_typed_parameter(scope, client_name, source, client_types):
+        return True
+    binding = _prior_binding(scope, call, client_name, source)
+    return binding is not None and _is_resty_constructor(binding, source, resty_aliases)
 
 
 def _call_details(
@@ -198,81 +210,22 @@ def _is_http_client_receiver(call: Node, source: bytes) -> bool:
     if name == "http.DefaultClient":
         return True
 
-    scope: Node | None = call
-    while scope is not None and scope.type not in {
-        "function_declaration", "method_declaration", "func_literal",
-    }:
-        scope = scope.parent
+    scope = _enclosing_function(call)
     if scope is None:
         return False
 
-    params = scope.child_by_field_name("parameters")
-    if params is not None:
-        for param in params.named_children:
-            typ = param.child_by_field_name("type")
-            if (
-                typ is not None
-                and node_text(typ, source).lstrip("*") == "http.Client"
-                and any(node_text(item, source) == name for item in param.children_by_field_name("name"))
-            ):
-                return True
-
-    body = scope.child_by_field_name("body")
-    if body is None:
-        return False
-    stack = [body]
-    while stack:
-        node = stack.pop()
-        if node is not body and node.type == "func_literal":
-            continue
-        if node.start_byte >= call.start_byte:
-            continue
-        if node.type in {"short_var_declaration", "var_spec"}:
-            for variable, value in _pairs(node) or []:
-                if node_text(variable, source) == name and _is_http_client_value(value, source):
-                    return True
-        stack.extend(node.named_children)
-    return False
+    if _has_typed_parameter(scope, name, source, frozenset({"http.Client"})):
+        return True
+    binding = _prior_binding(scope, call, name, source)
+    return binding is not None and _is_http_client_value(binding, source)
 
 
 def _find_request_definition(call: Node, req_name: str, source: bytes) -> tuple[str | None, str | None] | None:
     """Find http.NewRequest("METHOD", url, ...) defining req_name in the enclosing scope."""
-    curr: Node | None = call
-    while curr is not None and curr.type not in {"function_declaration", "method_declaration", "func_literal"}:
-        curr = curr.parent
-    if curr is None:
+    scope = _enclosing_function(call)
+    if scope is None:
         return None
-    body = curr.child_by_field_name("body")
-    if body is None:
-        return None
-
-    # Go wraps function-body statements in a statement_list node.
-    statements = list(body.named_children)
-    if len(statements) == 1 and statements[0].type == "statement_list":
-        statements = list(statements[0].named_children)
-
-    # Walk statements in body before the call looking for req_name assignment
-    target_node = None
-    for stmt in statements:
-        if stmt.start_byte >= call.start_byte:
-            break
-        if stmt.type == "short_var_declaration":
-            left = stmt.child_by_field_name("left")
-            right = stmt.child_by_field_name("right")
-            if left is not None and right is not None:
-                names = [node_text(c, source) for c in left.named_children if c.type == "identifier"]
-                if req_name in names:
-                    target_node = right
-                    break
-        elif stmt.type == "assignment_statement":
-            left = stmt.child_by_field_name("left")
-            right = stmt.child_by_field_name("right")
-            if left is not None and right is not None:
-                names = [node_text(c, source) for c in left.named_children if c.type == "identifier"]
-                if req_name in names:
-                    target_node = right
-                    break
-
+    target_node = _prior_binding(scope, call, req_name, source)
     if target_node is None:
         return None
 
@@ -311,19 +264,24 @@ _BINDING_OWNERS = ("var_spec", "short_var_declaration")
 
 
 def _pairs(owner: Node) -> list[tuple[Node, Node]] | None:
-    """(name, value) per binding of a ``var_spec`` / ``short_var_declaration``, or None when
-    the names and values do not pair up (``a, b := f()``) or there are no values."""
+    """(name, value) per binding declaration or assignment, if their values can be paired."""
     if owner.type == "var_spec":
         names = owner.children_by_field_name("name")
         values = owner.child_by_field_name("value")
-    else:
+    elif owner.type in {"short_var_declaration", "assignment_statement"}:
         left = owner.child_by_field_name("left")
         names = list(left.named_children) if left is not None else []
         values = owner.child_by_field_name("right")
+    else:
+        return None
     if values is None:
         return None
     vals = [v for v in values.named_children if v.type != "comment"]
-    if not names or len(names) != len(vals):
+    if not names or not vals:
+        return None
+    if len(vals) == 1 and vals[0].type == _CALL_TYPE:
+        return [(name, vals[0]) for name in names]
+    if len(names) != len(vals):
         return None
     return list(zip(names, vals))
 

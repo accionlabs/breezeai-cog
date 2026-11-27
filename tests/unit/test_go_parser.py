@@ -174,7 +174,7 @@ type Thing struct{}
 
 func NewSolo(n int, name string) *Solo { return &Solo{} }
 func Newton(x int) *Solo { return nil }
-func NewSvc(token string) *Svc { return &Svc{} }
+func NewSvc(a int, b string, c bool) *Svc { return &Svc{} }
 func NewMulti() (*Svc, error) { return nil, nil }
 func NewThing() int { return 1 }
 func New() int { return 1 }
@@ -200,7 +200,7 @@ func New() int { return 1 }
     assert functions["NewThing"].type == "function"
     assert functions["New"].type == "function"
     assert [param.name for param in classes["Solo"].constructorParams] == ["n", "name"]
-    assert [param.name for param in classes["Svc"].constructorParams] == ["token"]
+    assert [param.name for param in classes["Svc"].constructorParams] == ["a", "b", "c"]
 
 
 def test_go_uses_first_valid_constructor_in_source_order(tmp_path) -> None:
@@ -460,13 +460,22 @@ func callAPI() {
     client := &http.Client{}
     client.Do(req)
     http.DefaultClient.Do(req)
+    http.Get("https://example.test/plain")
 }
 ''')
 
     calls = [s for s in record.statements if s.text.endswith(".Do(req)")]
+    assert all(s.semanticType == "api_call" for s in calls)
     assert [(s.method, s.endpoint) for s in calls] == [
         ("GET", "https://example.test/api"),
         ("GET", "https://example.test/api"),
+    ]
+    api_calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(s.method, s.endpoint) for s in api_calls] == [
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/plain"),
     ]
 
 
@@ -492,6 +501,25 @@ func callInjected(client *restyAlias.Client) {
         ("GET", "https://example.test/a"),
         ("POST", "https://example.test/b"),
         ("PUT", "https://example.test/c"),
+    ]
+
+
+def test_go_resty_v2_default_import_name_is_an_api_client(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import "github.com/go-resty/resty/v2"
+
+func callAPI() {
+    client := resty.New()
+    client.R().Get("https://example.test/a")
+    client.R().SetBody("x").Post("https://example.test/b")
+}
+''')
+
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(s.method, s.endpoint) for s in calls] == [
+        ("GET", "https://example.test/a"),
+        ("POST", "https://example.test/b"),
     ]
 
 
