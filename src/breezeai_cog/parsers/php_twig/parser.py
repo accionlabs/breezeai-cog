@@ -150,8 +150,6 @@ def _statements(root: Node, source: bytes, path: str, parent_id: str, limit: int
 
         start, end = line_span(wrapper)
         text = node_text(wrapper, source).strip()
-        if len(text) > limit:
-            text = text[:limit]
         name = (
             _statement_name(statement_node, source)
             if statement_node.type != "output_directive"

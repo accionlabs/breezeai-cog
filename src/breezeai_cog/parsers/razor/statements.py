@@ -168,7 +168,7 @@ def collect_razor_statements(
             Statement(
                 id=disambiguate(statement_id(path, start, col), seen_ids),
                 parentId=parent_id,
-                text=text if len(text) <= limit else text[:limit],
+                text=text,
                 startLine=start,
                 endLine=node.end_point[0] + 1,
                 path=path,

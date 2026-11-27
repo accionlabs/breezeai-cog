@@ -127,7 +127,7 @@ def collect_register_statements(
             parentId=parent_id,
             nodeType="synthetic",
             name="Register",
-            text=text if len(text) <= limit else text[:limit],
+            text=text,
             startLine=start,
             endLine=start + m.group(0).count(b"\n"),
             path=path,
@@ -223,7 +223,7 @@ def collect_markup_statements(
             Statement(
                 id=disambiguate(statement_id(path, start, col), seen_ids),
                 parentId=parent_id,
-                text=text if len(text) <= limit else text[:limit],
+                text=text,
                 startLine=start,
                 endLine=node.end_point[0] + 1,
                 path=path,

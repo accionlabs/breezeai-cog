@@ -174,7 +174,6 @@ def collect_template_statements(
         node = stack.pop()
         start, col = node.start_point[0] + 1, node.start_point[1]
         text = node_text(node, source)
-        clip = text if len(text) <= limit else text[:limit]
 
         if emit_routes and _is_navigation(node, source):
             out.append(
@@ -187,7 +186,7 @@ def collect_template_statements(
                     routeKind="navigation",
                     endpoint=_nav_endpoint(node, source),  # honest-null when dynamic
                     name=_NAV_DIRECTIVE,
-                    text=clip,
+                    text=text,
                     startLine=start,
                     endLine=node.end_point[0] + 1,
                     path=path,
@@ -200,7 +199,7 @@ def collect_template_statements(
                     id=disambiguate(statement_id(path, start, col), seen_ids),
                     parentId=parent_id,
                     nodeType=node.type,  # real angular-grammar node type
-                    text=clip,
+                    text=text,
                     name=_name_for(node, source),
                     handler=_handler(node, source) if node.type == "event_binding" else None,
                     startLine=start,

@@ -247,7 +247,7 @@ def _collect_routes(
             {"semanticType": "route", "framework": "ktor", "method": method,
              "endpoint": full_endpoint, "routeKind": kind, "handlerLine": handler_line},
             fill={"guards": list(guards) or None, "authRequired": True if required else None},
-            enrich="same", parent=parent_id, text=text[:limit] if limit else text,
+            enrich="same", parent=parent_id, text=text,
         ))
 
     return out
