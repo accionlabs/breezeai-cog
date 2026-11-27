@@ -80,7 +80,7 @@ def _walk(node: Node) -> Iterator[Node]:
 def requests(root: Node, source: bytes, imports: list[str]) -> Iterator[tuple[Node, str, Node | None]]:
     """Each ``new HttpX(…)`` of Apache's request classes under ``root``: (the creation, its
     verb, its URI argument or None). ``imports``: the file's imports as written (``a.b.C``,
-    ``a.b.*``). One matcher for capture and the HTTP-helper index (``java_http_helpers.py``)."""
+    ``a.b.*``). One matcher for capture and the HTTP-helper index (``java/http_helpers.py``)."""
     imported = _imported(imports)
     for node in _walk(root):
         verb = _verb(node, source, imported)

@@ -29,8 +29,6 @@ def _checked_modules() -> list[Path]:
     out = [PARSERS / "outbound_helpers.py"]
     for lang in HELPER_LANGUAGES:
         out += sorted((PARSERS / lang).rglob("*.py"))
-    # a language's helper rule not yet in its package
-    out += sorted(PARSERS.glob("*_http_helpers.py"))
     return out
 
 

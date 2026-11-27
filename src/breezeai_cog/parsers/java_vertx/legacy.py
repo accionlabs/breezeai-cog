@@ -161,7 +161,7 @@ def client_requests(root: Node, calls: list[Node], source: bytes, returning: set
     """Each request made on a Vert.x 2 ``HttpClient`` in ``calls``: (the call, its verb when it
     folds, the verb argument of ``request(method, uri, …)`` else None, the URI argument). One
     matcher for capture (:func:`http_client_calls`) and the HTTP-helper index
-    (``java_http_helpers.py``). ``returning``: this file's methods that return an
+    (``java/http_helpers.py``). ``returning``: this file's methods that return an
     ``HttpClient`` (:func:`returning_client`)."""
     if b"org.vertx.java.core.http" not in source or not _vertx2_http_client(root, source):
         return
@@ -199,7 +199,7 @@ def http_client_calls(
 ) -> list[Emit]:
     """An ``api_call`` for each request made on a Vert.x 2 ``HttpClient`` (module docstring).
     ``defining``: requests made inside an HTTP helper on its own URL parameter — the helper's
-    callers make them (``java_http_helpers.py``), so they are plain statements."""
+    callers make them (``java/http_helpers.py``), so they are plain statements."""
     returning = {f.name for f in record.functions
                  if f.returnType and f.returnType.split("<", 1)[0].rsplit(".", 1)[-1]
                  == "HttpClient"}

@@ -666,6 +666,7 @@ the file:
   │                  36   axios-calls      typescript_axios/calls.py                 │
   │                  37   fetch-calls      typescript_fetch/calls.py                 │
   │                  38   angular-http…    typescript_angular/http_client.py         │
+  │                  39   typescript-ht…   typescript/http_helpers.py        ✔       │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
@@ -689,6 +690,7 @@ the file:
   │  java            10   quartz           java_quartz/jobs.py               ✔       │
   │                  20   struts2          java_struts2/annotations.py       ✔       │
   │                  60   apache-httpcl…   java_apache_httpclient/…calls.py  ✔       │
+  │                  85   java-http-hel…   java/http_helpers.py              ✔       │
   │                  90   vertx            java_vertx/detector.py            ✔       │
   │                                                                                  │
   │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
@@ -708,6 +710,7 @@ the file:
   │                  20   flask            python_flask/routes.py            ✔       │
   │                  30   drf-routers      python_django/routers.py          ✔       │
   │                  40   django-channels  python_django/channels.py         ✔       │
+  │                  95   python-http-h…   python/http_helpers.py            ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala_akka/events.py                      │
   │                  20   spark            scala_spark/io.py                         │
@@ -726,7 +729,7 @@ the file:
   │  vb              10   aws-sdk-calls    vb_aws/sdk_calls.py               ✔       │
   │                  20   graphql-client   vb_graphql_client/…ions.py        ✔       │
   │                                                                                  │
-  │  groovy          95   groovy-http-…    groovy/http_helpers.py                    │
+  │  groovy          95   groovy-http-…    groovy/http_helpers.py            ✔       │
   │                                                                                  │
   │  Kotlin · Ruby · HCL                                                             │
   │   └─ no additive hook yet: shared classifiers only                               │
@@ -1109,6 +1112,9 @@ src/breezeai_cog/
 │  ├─ contract.py                  entry-point contract check
 │  ├─ addresses.py                 the `${name}` notation for parts of an address read at runtime
 │  ├─ handler_sites.py, aws_deploy.py  facts shared by several languages; where a handler is declared
+│  ├─ outbound_helpers.py          the "application's own HTTP helper" rule, language-free; each
+│  │                               language adds an adapter (`<lang>/http_helpers.py`), each client
+│  │                               package registers what it recognises
 │  ├─ detection/                   shared api / db / query classifiers
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
 │  │  java_spring_config.py, java_web_guards.py, java_security_guards.py, java_variables_common.py,
@@ -1148,14 +1154,24 @@ should live in a shared module (like `vertx_common.py`) rather than one framewor
 from another. The same holds between languages: C, C++ and CUDA share their extraction through
 `cfamily_common/`, which each subclasses with its own grammar, index and evidence.
 
+**Plug and play.** A language package never imports a framework or library package, and a
+top-level module holds nothing specific to one language or framework. When a shared rule needs
+what a framework knows, the framework **registers** it: the HTTP-helper rule
+(`outbound_helpers.py`) asks for the requests each client package recognises
+(`register_requests`: the Vert.x 2 and Apache HttpClient packages for Java) and the label each
+client gives them (`register_label`: axios, fetch and Angular for TypeScript). Removing a
+framework's directory then removes only what it recognises; nothing else fails to import.
+`tests/unit/test_outbound_helpers_layout.py` holds the rule for the engine, the helper
+languages' packages and their registrations.
+
 **Change zones.** How much review a change needs depends on where it lands:
 
 | Zone | Paths | Affects |
 |---|---|---|
 | **Parser-local** | `parsers/<lang>_<framework>/`, `parsers/<lang>_<library>/`, its test file | That parser only (a library package's detectors: see *Additive detector*) |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
-| **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
-| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `python_common.py`, `django_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Additive detector** | a module that calls `register_detector(...)`, `register_fact(...)`, `register_requests(...)` or `register_label(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `python_common.py`, `django_common.py`, `cfamily_common/` (C, C++, CUDA), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py`, `outbound_helpers.py` (the HTTP-helper rule of Groovy, Java, Python and TypeScript) | Every parser that imports it |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `addresses.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.

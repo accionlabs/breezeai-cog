@@ -543,6 +543,50 @@ addresses, one record per binding, guards, and a handler for every record. A wro
 `analyze_files` test fixture fails on errors; `--verbose` logs every violation as
 `contract.violation`. It never changes output.
 
+### Following an application's own HTTP helpers (a new language)
+
+Contract §5, "Where an outbound record is written": when an application wraps its HTTP client in
+its own function (`getJson(path) { client.get(BASE + path) }`), each **call** of that function is
+the `api_call`, with the caller's argument in the helper's URL (`GET ${BASE}/orders/{id}`), and
+the helper's own request becomes a plain statement. The rule is implemented once, in
+`parsers/outbound_helpers.py`; a language adds an **adapter**, `parsers/<lang>/http_helpers.py`.
+The four existing adapters are the worked examples (Groovy is the smallest, Java the fullest).
+
+| The adapter (grammar only) | The engine (`outbound_helpers.py`, written once) |
+|---|---|
+| The file's functions, their parameters, and the names assigned in them | `url_slot`: a helper's URL reads one parameter, once, at its end |
+| Its requests: through the shared classifier (`match_api`), a language construct, or the recognizers client packages register (`file_requests`) | `merge_helpers`: a key declared two ways is dropped |
+| Relay candidates: calls passing the function's own parameter on (`RelayCall`, `Pass`) | `derive`, `follow_relays`: relays to a fixed point, as `HelperPolicy` says |
+| Call sites: the call, its arguments, the local an argument names | `link_site`, `unresolved_twin`: one helper through `calls[].path`, never a guess |
+| An argument rendered as an address | `site_verb`, `site_emit`, `clear_emits`: the records |
+
+Steps:
+
+1. Write a `HelperPolicy` (relays: `none` / `same-file` / `cross-file`, depth, the verbs, the
+   receivers that mark a call as the function's own). Each setting is a contract decision; a new
+   difference between languages is a new setting, not a branch in the engine.
+2. Collect in a `FactSpec` (gate on the bytes a request needs): the file's helpers, relays, and
+   **each helper's request by position** (start byte, end byte, node type) — pass 2 clears that
+   record by position instead of scanning the file again.
+3. Resolve once: `merge_helpers`, then `follow_relays` with a `lookup` that finds a relay's
+   callee from what is known.
+4. Detect per file: clear the helper's own request (`clear_emits`); for each call of a helper,
+   `link_site` → guard → render the argument → `site_emit`. Read a function's locals **once per
+   function** and reuse them for every call site in it (architecture §11): a walk per call is
+   quadratic in a generated file.
+5. Never import a framework or library package. A client the language reaches through one
+   (`Vert.x 2 HttpClient`, `HttpGet`, axios) is contributed by that package with
+   `register_requests` or `register_label`, at the bottom of its own module.
+
+Verify:
+
+- The language's helper tests, plus a cost guard: one function with 3,000 helper calls stays
+  linear (`test_many_calls_in_one_*_stay_linear`).
+- `tests/unit/test_outbound_helpers_layout.py`: add the language to `HELPER_LANGUAGES`; list any
+  recognizer or label it registers.
+- Before/after on every repository with files of the language: captures compared record by
+  record. A move onto the engine changes nothing; a new adapter's records are reviewed one by one.
+
 ### Document parser: Markdown (`parsers/markdown/`)
 Documents an AI agent reads (skills, subagents, slash commands, rules files) and the docs a
 project keeps are captured by `MarkdownParser` (`name = "markdown"`). It owns `.md`,
