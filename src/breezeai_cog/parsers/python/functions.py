@@ -5,7 +5,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, function_id
-from ...schemas import Call, Decorator, Function, Parameter, Statement
+from ...schemas import Call, Class, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .receivers import local_types, maybe_typed
@@ -86,14 +86,13 @@ def _span(node: Node) -> tuple[int, int]:
     return (node.start_byte, node.end_byte)
 
 
-def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Node, list[Node]]]:
-    """Nested ``def``s whose nearest named enclosing function is this one (closures,
-    decorator factories, in-method helpers). Descends through lambdas and control
-    flow but stops at each nested function (deeper names belong to its own recursion)
-    and does not descend into a nested class (its methods belong to that class, and
-    nested classes are not extracted here). Returns (function_node, decorator_nodes);
-    the function nodes' spans double as the barrier set so the enclosing function
-    does not also fold their calls/statements."""
+def collect_nested_definitions(body: Node | None, source: bytes) -> list[tuple[Node, list[Node]]]:
+    """Nested ``def``s and ``class``es whose nearest named enclosing function is this one
+    (closures, decorator factories, in-method helpers, function-local classes). Descends
+    through lambdas and control flow but stops at each nested definition (what is inside it
+    belongs to its own extraction). Returns (definition_node, decorator_nodes); the
+    definition nodes' spans double as the barrier set so the enclosing function does not
+    also fold their calls/statements."""
     if body is None:
         return []
     out: list[tuple[Node, list[Node]]] = []
@@ -106,11 +105,9 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
                 inner = next(
                     (d for d in c.named_children if d.type in ("function_definition", "class_definition")), c
                 )
-            if inner.type == "function_definition":
+            if inner.type in ("function_definition", "class_definition"):
                 out.append((inner, decs))
                 continue  # barrier: its body belongs to it, not to the enclosing fn
-            if inner.type == "class_definition":
-                continue  # nested class: not extracted here; leave its folding unchanged
             visit(c)  # lambdas, control flow, blocks, expressions
 
     visit(body)
@@ -203,11 +200,18 @@ def build_function(
     capture: bool = False,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[list[Function], list[Statement]]:
-    """Return the Function(s) and their (flat) statements — the caller collects
-    statements onto ``FileRecord.statements`` (statements are not nested on the
-    Function). The list is this function plus any nested ``def``s, which are
-    extracted as their own Functions parented to this one."""
+    scope: str | None = None,
+) -> tuple[list[Class], list[Function], list[Statement]]:
+    """Return the classes, Function(s) and (flat) statements defined by this function — the
+    caller collects them onto ``FileRecord.classes``/``.functions``/``.statements`` (linked by
+    parentId, not nested). The functions are this one plus any nested ``def``s; the classes are
+    those defined in its body. Each is extracted as its own record parented to the file (a
+    class or function never parents to a function); the nesting is read from line ranges.
+
+    ``scope`` is the qualified name of what encloses this function (``Outer`` for a method,
+    ``f`` for a closure in ``f``). It does not change this function's id; it qualifies the id
+    of a class defined in the body — ``path#f.Local``, ``path#Outer.m.Local`` — the way a
+    nested class is ``path#Outer.Inner``, so two local classes sharing a name never collide."""
     name = node_text(fnode.child_by_field_name("name"), source)
     start, end = line_span(fnode)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
@@ -216,7 +220,8 @@ def build_function(
         function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     ret = fnode.child_by_field_name("return_type")
     body = fnode.child_by_field_name("body")
-    nested = collect_nested_functions(body, source)
+    nested = collect_nested_definitions(body, source)
+    qualified = f"{scope}.{name}" if scope else name
     barriers = frozenset(_span(f) for f, _ in nested)
     fn = Function(
         id=fid,
@@ -239,15 +244,26 @@ def build_function(
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline lambdas — attribute their statements here
-        barriers=barriers,  # …except separately-extracted nested defs
+        barriers=barriers,  # …except separately-extracted nested defs and classes
     )
     functions = [fn]
-    for nested_fnode, nested_decs in nested:
-        sub_fns, sub_stmts = build_function(
-            nested_fnode, extract_decorators(nested_decs, source), source, path,
-            parent_id=file_id(path), class_name=None, seen_ids=seen_ids,
-            capture=capture, limit=limit, resolve=resolve,
-        )
+    classes: list[Class] = []
+    for nested_node, nested_decs in nested:
+        if nested_node.type == "class_definition":
+            from .classes import build_class  # classes.py imports this module
+
+            sub_classes, sub_fns, sub_stmts = build_class(
+                nested_node, nested_decs, source, path,
+                parent_id=file_id(path), seen_ids=seen_ids, capture=capture, limit=limit,
+                resolve=resolve, owner=qualified,
+            )
+        else:
+            sub_classes, sub_fns, sub_stmts = build_function(
+                nested_node, extract_decorators(nested_decs, source), source, path,
+                parent_id=file_id(path), class_name=None, seen_ids=seen_ids,
+                capture=capture, limit=limit, resolve=resolve, scope=qualified,
+            )
+        classes.extend(sub_classes)
         functions.extend(sub_fns)
         statements.extend(sub_stmts)
-    return functions, statements
+    return classes, functions, statements

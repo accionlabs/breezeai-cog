@@ -301,3 +301,85 @@ def test_non_enum_class_assignments_not_tagged(tmp_path) -> None:
                        capture_statements=True)
     rec = PythonParser().parse_file(ctx)
     assert all(s.semanticType is None for s in rec.statements if s.nodeType == "assignment")
+
+
+def _parse_src(tmp_path: Path, src: bytes, *, capture: bool = True) -> FileRecord:
+    p = tmp_path / "local.py"
+    p.write_bytes(src)
+    ctx = ParseContext(path="local.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=capture)
+    return PythonParser().parse_file(ctx)
+
+
+def test_function_local_enum_is_a_class_with_enum_members(tmp_path) -> None:
+    # A class defined in a function body is a Class of its own, parented to the file (the
+    # nesting is read from line ranges), with an id qualified by the enclosing function. Its
+    # body is its own scope, so an enum's members are enum_member statements under it -- not
+    # untagged assignments folded into the function.
+    src = (b"import enum\n"
+           b"class Q(enum.Enum):\n"
+           b"    A = ('x', 1)\n"
+           b"def f():\n"
+           b"    class Local(enum.Enum):\n"
+           b"        L = 1\n"
+           b"    return Local\n")
+    rec = _parse_src(tmp_path, src)
+    by_id = {c.id: c for c in rec.classes}
+    assert set(by_id) == {"local.py#Q", "local.py#f.Local"}
+    local = by_id["local.py#f.Local"]
+    assert local.name == "Local" and local.parentId == rec.id and local.extends == "enum.Enum"
+    f = next(fn for fn in rec.functions if fn.name == "f")
+    assert f.startLine <= local.startLine and local.endLine <= f.endLine
+    member = next(s for s in rec.statements if s.text == "L = 1")
+    assert member.parentId == local.id and member.semanticType == "enum_member"
+    # the function keeps only its own statements
+    assert {s.text for s in rec.statements if s.parentId == f.id} == {"return Local"}
+
+
+def test_local_class_owns_its_methods_calls_and_statements(tmp_path) -> None:
+    # A local class in a method is qualified by the method (`Outer.m.InM`), its methods are
+    # Functions of that class, and their calls/statements no longer fold into the method.
+    # Local classes sharing a name in different functions, or with a module-level class, keep
+    # distinct ids (no positional `#2`); one nested in a block or a closure is found too.
+    src = (b"class Local:\n"
+           b"    pass\n"
+           b"class Outer:\n"
+           b"    def m(self):\n"
+           b"        class InM:\n"
+           b"            x = 1\n"
+           b"            def go(self):\n"
+           b"                return fetch()\n"
+           b"        return InM\n"
+           b"def f():\n"
+           b"    if True:\n"
+           b"        class Local:\n"
+           b"            y = 2\n"
+           b"    def g():\n"
+           b"        @dataclass\n"
+           b"        class Local:\n"
+           b"            z: int = 3\n"
+           b"    return Local\n")
+    rec = _parse_src(tmp_path, src)
+    assert {c.id for c in rec.classes} == {
+        "local.py#Local", "local.py#Outer", "local.py#Outer.m.InM",
+        "local.py#f.Local", "local.py#f.g.Local",
+    }
+    assert all(c.parentId == rec.id for c in rec.classes)
+    assert next(c for c in rec.classes if c.id == "local.py#f.g.Local").decorators[0].name == "dataclass"
+    fns = {f.id: f for f in rec.functions}
+    go = fns["local.py#Outer.m.InM#go@7"]
+    assert go.parentId == "local.py#Outer.m.InM" and go.type == "method"
+    assert "fetch" in {c.name for c in go.calls}
+    assert "fetch" not in {c.name for c in fns["local.py#Outer#m@4"].calls}
+    parents = {s.text: s.parentId for s in rec.statements}
+    assert parents["x = 1"] == "local.py#Outer.m.InM"
+    assert parents["return fetch()"] == go.id
+    assert parents["y = 2"] == "local.py#f.Local"
+    assert parents["z: int = 3"] == "local.py#f.g.Local"
+
+
+def test_local_class_captured_without_statement_capture(tmp_path) -> None:
+    # Classes are structure, not statements: a local class is captured with statements off.
+    rec = _parse_src(tmp_path, b"def f():\n    class Local:\n        pass\n", capture=False)
+    assert [c.id for c in rec.classes] == ["local.py#f.Local"]
+    assert rec.statements == []
