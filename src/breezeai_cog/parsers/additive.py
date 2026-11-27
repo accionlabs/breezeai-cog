@@ -62,7 +62,7 @@ from .emits import Emit, apply
 #: other language is an error: nothing would ever run it.
 HOOKED_LANGUAGES: frozenset[str] = frozenset(
     {"typescript", "csharp", "java", "kotlin", "python", "scala", "php", "go", "c", "cpp", "cuda", "vb",
-     "mdx"})
+     "mdx", "groovy"})
 
 #: Languages whose ``build_index`` calls :func:`collect_additive` / :func:`resolve_additive`.
 #: A fact for any other language is an error: it would never be built, and the detector

@@ -61,6 +61,7 @@ def test_inventory_in_run_order() -> None:
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda", "go-mcpgo", "go-mcpgo-client", "go-mcp", "go-mcp-client"],
+        "groovy": ["groovy-http-helpers"],
         "java": ["quartz", "struts2", "java-springai", "java-mcp", "java-mcp-client", "apache-httpclient",
                  "java-http-helpers", "vertx"],
         "kotlin": ["kotlin-springai", "kotlin-mcp", "kotlin-mcp-client"],
