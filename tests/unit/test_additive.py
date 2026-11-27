@@ -71,7 +71,7 @@ def test_inventory_in_run_order() -> None:
                 "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
         "scala": ["akka-events", "spark"],
-        "typescript": ["express", "fastify", "aws-events", "nestjs-clients", "hubspot",
+        "typescript": ["express", "fastify", "aws-events", "aws-sqs-consumer", "nestjs-clients", "hubspot",
                        "chargebee", "ts-force", "apollo", "aws-sdk-calls", "jquery-calls", "axios-calls", "fetch-calls",
                        "angular-http-client", "typescript-http-helpers",
                        "graphql-client",
