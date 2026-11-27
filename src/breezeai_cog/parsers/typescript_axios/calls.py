@@ -15,6 +15,7 @@ from collections.abc import Callable
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..outbound_helpers import RequestLabel, register_label
 from ..treesitter import node_text
 from ..typescript.imports import _module_of
 from ..typescript_sdk_common import callee_root, label_http_client, shadowed_names
@@ -97,3 +98,7 @@ register_detector(Detector(
     name="axios-calls", gate=Gate("typescript", order=36, guard=b"axios"), detect=_detect,
     frameworks=("axios",),
 ))
+
+# The label an application's own helper built on this client carries to its call sites
+# (``outbound_helpers``).
+register_label(RequestLabel("axios", "typescript", (), axios_evidence))

@@ -1,5 +1,6 @@
 """TypeScript / JavaScript HTTP calls made through the application's own helpers are recorded where
-they run (BREEZEAI-1654, ``parsers/typescript_http_helpers.py``)."""
+they run (BREEZEAI-1654, ``parsers/typescript/http_helpers.py``, on
+``parsers/outbound_helpers.py``)."""
 
 from __future__ import annotations
 
@@ -188,3 +189,16 @@ export async function a(m: string[]) { await request(...m, 'https://x.example/c'
 export async function b() { await request('POST', 'https://x.example/d'); }
 """})
     assert got == [("u.ts", 3, "POST", "https://x.example/d")]
+
+
+def test_many_calls_in_one_function_stay_linear(api_calls) -> None:
+    """Cost guard (architecture §11): each call site reads its ``const`` from one walk of its
+    function, not one walk per call. 3,000 calls took over a minute when they did."""
+    import time
+
+    body = "".join(f'  const u{i} = "/p{i}";\n  await getRequest(u{i}, {{}});\n'
+                   for i in range(3000))
+    start = time.perf_counter()
+    got = api_calls({"src/api.ts": HTTP + "export async function run() {\n" + body + "}\n"})
+    assert len([g for g in got if g[3] and g[3].startswith("/p")]) == 3000
+    assert time.perf_counter() - start < 15

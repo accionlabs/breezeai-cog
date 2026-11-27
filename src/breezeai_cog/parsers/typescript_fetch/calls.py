@@ -15,6 +15,7 @@ from collections.abc import Callable
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..outbound_helpers import RequestLabel, register_label
 from ..treesitter import node_text
 from ..typescript.imports import _module_of
 from ..typescript_sdk_common import label_http_client
@@ -91,3 +92,7 @@ register_detector(Detector(
     name="fetch-calls", gate=Gate("typescript", order=37, guard=b"fetch"), detect=_detect,
     frameworks=("fetch",),
 ))
+
+# The label an application's own helper built on this client carries to its call sites
+# (``outbound_helpers``).
+register_label(RequestLabel("fetch", "typescript", (), fetch_evidence))

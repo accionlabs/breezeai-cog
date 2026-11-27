@@ -17,6 +17,7 @@ from collections.abc import Callable
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..outbound_helpers import RequestLabel, register_label
 from ..treesitter import node_text
 from ..typescript.imports import imported_locals
 from ..typescript_sdk_common import (
@@ -117,3 +118,7 @@ register_detector(Detector(
     name="angular-http-client", gate=Gate("typescript", order=38, guard=b"@angular/common/http"),
     detect=_detect, frameworks=("angular",),
 ))
+
+# The label an application's own helper built on this client carries to its call sites
+# (``outbound_helpers``).
+register_label(RequestLabel("angular", "typescript", (b"@angular/common/http",), angular_evidence))

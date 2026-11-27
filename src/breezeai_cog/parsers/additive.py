@@ -72,7 +72,8 @@ INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
      "python", "ruby", "scala", "typescript", "vb"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
-_MARKERS = (b"register_detector(", b"register_fact(", b"register_requests(")
+_MARKERS = (b"register_detector(", b"register_fact(", b"register_requests(",
+            b"register_label(")
 
 
 @dataclass(slots=True)

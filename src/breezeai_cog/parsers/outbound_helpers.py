@@ -400,3 +400,65 @@ def file_requests(language: str, root: Node, source: bytes) -> list[Request]:
         if any(g in source for g in src.gate):
             out.extend(src.recognize(root, source))
     return out
+
+
+# ── Framework labels a request carries ───────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RequestLabel:
+    """A framework package's evidence that a request is made through its client: the label a
+    helper's own request carries (``axios``), which moves to each of its call sites."""
+
+    name: str
+    language: str
+    #: Bytes a file needs before the evidence is read; empty: every file.
+    gate: tuple[bytes, ...]
+    #: ``(root, source) → (call → made through this client?)``, or None when the file has none.
+    evidence: Callable[[Node, bytes], Callable[[Node], bool] | None] = field(compare=False)
+
+
+_LABELS: dict[str, list[RequestLabel]] = {}
+
+
+def register_label(label: RequestLabel) -> RequestLabel:
+    """Register a framework's request label for its language (idempotent by name)."""
+    with _lock:
+        existing = _LABELS.setdefault(label.language, [])
+        for other in existing:
+            if other.name == label.name:
+                return other
+        existing.append(label)
+        existing.sort(key=lambda lb: lb.name)
+    return label
+
+
+def request_labels(language: str) -> list[RequestLabel]:
+    """The labels registered for ``language``, by name."""
+    from .additive import discover_detectors
+
+    discover_detectors()
+    return list(_LABELS.get(language, ()))
+
+
+class FileLabels:
+    """The registered labels' evidence for one file, read once on first use."""
+
+    __slots__ = ("_language", "_root", "_source", "_read")
+
+    def __init__(self, language: str, root: Node, source: bytes) -> None:
+        self._language, self._root, self._source = language, root, source
+        self._read: list[tuple[str, Callable[[Node], bool]]] | None = None
+
+    def label_of(self, call: Node) -> str | None:
+        """The one label whose evidence vouches for ``call``; None when none, or several, do."""
+        if self._read is None:
+            self._read = []
+            for lb in request_labels(self._language):
+                if lb.gate and not any(g in self._source for g in lb.gate):
+                    continue
+                evidenced = lb.evidence(self._root, self._source)
+                if evidenced is not None:
+                    self._read.append((lb.name, evidenced))
+        hits = [name for name, evidenced in self._read if evidenced(call)]
+        return hits[0] if len(hits) == 1 else None
