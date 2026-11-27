@@ -1,5 +1,5 @@
-"""Groovy HTTP calls made through the application's own helpers are recorded where they run
-(Java: ``java_http_helpers.py``, Python: ``python_http_helpers.py``).
+"""Groovy HTTP calls made through the application's own helpers are recorded where they run — the
+Groovy adapter of the shared rule (``parsers/outbound_helpers.py``).
 
 An HTTP client built with its URL makes the request where its verb is called. When the
 application wraps that in its own method, the request is made on the method's parameter and
@@ -27,39 +27,70 @@ call also names a URL (``client.get(path: '/x')``) is no helper.
 the helper's name; a name two methods of one file share is not followed. The URL argument is
 rendered as written, or through a local of the caller assigned once.
 
-Not followed: a URL parameter rewritten in the method, two parameters in the URL, a method that
-passes its own parameter on to a helper (a relay: neither it nor its callers get a record), a
-client held in a field or a parameter.
+Not followed (:data:`POLICY`): a URL parameter rewritten in the method, two parameters in the
+URL, a method that passes its own parameter on to a helper (a relay: neither it nor its callers
+get a record), a client held in a field or a parameter.
+
+What this module reads is Groovy grammar only: the engine decides helpers, links call sites and
+writes the records. Each helper's request is kept in the fact by position, so the helper's own
+record is cleared without scanning its file again.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
-from ..emit import statement_id
-from ..schemas import FileRecord, Function
-from .addresses import runtime_name
-from .additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
+from ..additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
     register_detector, register_fact
-from .emits import Emit
-from .groovy.functions import _new_client, class_fields, client_locals, declarations
-from .groovy.statements import _render_url
-from .index_common import record_distinct
-from .statements_common import url_or_value
-from .treesitter import node_text
+from ..addresses import runtime_name
+from ..emits import Emit
+from ..outbound_helpers import Helper, HelperPolicy, clear_emits, enclosing_function, \
+    link_site, merge_helpers, site_emit, site_verb, unresolved_twin, url_slot
+from ..statements_common import url_or_value
+from ..treesitter import node_text
+from .functions import _new_client, class_fields, client_locals, declarations
+from .statements import _render_url
 
 FACT = "groovy.http-helpers"
-_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 _URL_KEYS = frozenset({"url", "uri", "path"})
 _DECLARING = frozenset({"local_variable_declaration", "formal_parameter",
                         "catch_formal_parameter", "closure_parameter", "for_in_statement"})
 
-#: A helper: (URL parameter index, URL template, its slot, verb).
-Helper = tuple[int, str, str, str]
+POLICY = HelperPolicy(
+    language="groovy",
+    relays="none",
+    verbs=frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}),
+    own_receivers=frozenset({"", "this", "super"}),
+    reclassify=frozenset({"api_call", "db_method_call"}),
+)
+
+#: A helper's request in its file, to clear it in pass 2: (method name, start byte, end byte,
+#: node type).
+RequestAt = tuple[str, int, int, str]
+
+
+@dataclass(frozen=True, slots=True)
+class FileHelpers:
+    """What one file gives the fact."""
+
+    path: str
+    helpers: tuple[tuple[str, Helper], ...]
+    requests: tuple[RequestAt, ...]
+    #: Method names declared more than once in the file (overloads): their requests are not
+    #: cleared — a call of one may be another's.
+    overloaded: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class Fact:
+    helpers: dict[tuple[str, str], Helper]
+    #: file → the requests of its helpers to clear.
+    requests: dict[str, tuple[RequestAt, ...]]
 
 
 def _methods(root: Node) -> Iterator[tuple[Node, Node | None]]:
@@ -136,11 +167,11 @@ def _reads(node: Node, names: list[str], source: bytes) -> list[str]:
     return out
 
 
-def _requests(fn: Node, body: Node | None, values: dict[str, Node | None], source: bytes
-              ) -> Iterator[tuple[Node, Node, str]]:
+def _requests(fn: Node, fields: dict[str, str | None], values: dict[str, Node | None],
+              source: bytes) -> Iterator[tuple[Node, Node, str]]:
     """The method's requests on a new client: (verb call, the client's URL argument, verb).
-    ``values``: the method's locals (:func:`_scope`, built once by the caller)."""
-    fields = class_fields(body, source) if body is not None else {}
+    ``fields``: its class's fields (read once per class); ``values``: its locals (:func:`_scope`,
+    built once by the caller)."""
     clients = client_locals(fn, source, fields)
     block = fn.child_by_field_name("body")
     stack = [block] if block is not None else []
@@ -154,7 +185,7 @@ def _requests(fn: Node, body: Node | None, values: dict[str, Node | None], sourc
             continue
         field = member.child_by_field_name("field")
         verb = node_text(field, source).upper() if field is not None else ""
-        if verb not in _VERBS:
+        if verb not in POLICY.verbs:
             continue
         obj = member.child_by_field_name("object")
         ctor: Node | None = None
@@ -176,18 +207,29 @@ def _requests(fn: Node, body: Node | None, values: dict[str, Node | None], sourc
             yield n, positional[0], verb
 
 
-def _scan(root: Node, source: bytes) -> list[tuple[str, Helper, Node]]:
-    """This file's helpers: (method name, helper, its request's verb call)."""
+def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, Helper, Node]], frozenset[str]]:
+    """This file's helpers (method name, helper, its request's verb call) and the method names
+    it declares more than once."""
     found: list[tuple[str, Helper, Node]] = []
+    seen: set[str] = set()
+    twice: set[str] = set()
+    fields_of: dict[int, dict[str, str | None]] = {}  # a class's fields: read once per class
     for fn, body in _methods(root):
         name_node = fn.child_by_field_name("name")
+        name = node_text(name_node, source) if name_node is not None else ""
+        (twice if name in seen else seen).add(name)
         if name_node is None or fn.child_by_field_name("body") is None:
             continue
         params = _params(fn, source)
         if not params:
             continue
         values, assigned = _scope(fn, source)
-        for call, url, verb in _requests(fn, body, values, source):
+        fields: dict[str, str | None] = {}
+        if body is not None:
+            if body.id not in fields_of:
+                fields_of[body.id] = class_fields(body, source)
+            fields = fields_of[body.id]
+        for call, url, verb in _requests(fn, fields, values, source):
             expr: Node | None = url
             if url.type == "identifier" and node_text(url, source) not in params:
                 local = node_text(url, source)
@@ -197,45 +239,55 @@ def _scan(root: Node, source: bytes) -> list[tuple[str, Helper, Node]]:
             refs = _reads(expr, params, source)
             if len(refs) != 1 or refs[0] in assigned or refs[0] in values:
                 continue  # no parameter, two, or one rewritten / shadowed in the method
-            slot = "{" + refs[0] + "}"
             template = url_or_value(expr, source, _render_url) or ""
-            if template.count(slot) != 1 or not template.endswith(slot):
+            slot = url_slot(refs, template)
+            if slot is None:
                 continue  # a base or an id from the parameter: the method names its endpoint
-            found.append((node_text(name_node, source),
-                          (params.index(refs[0]), template, slot, verb), call))
-    return found
+            found.append((name, Helper(params.index(refs[0]), template, slot, verb), call))
+    return found, frozenset(twice)
 
 
-def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None
-             ) -> tuple[str, list[tuple[str, Helper]]] | None:
-    helpers = [(name, helper) for name, helper, _ in _scan(root, source)]
-    return (rel, helpers) if helpers else None
+def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileHelpers | None:
+    found, twice = _scan(root, source)
+    if not found:
+        return None
+    return FileHelpers(rel, tuple((name, helper) for name, helper, _ in found),
+                       tuple((name, call.start_byte, call.end_byte, call.type)
+                             for name, _, call in found),
+                       twice)
 
 
-def _resolve(values: list[tuple[str, list[tuple[str, Helper]]]], index: Any
-             ) -> dict[tuple[str, str], Helper] | None:
+def _resolve(values: list[FileHelpers], index: Any) -> Fact | None:
     """(file, method name) → helper; a name declared twice in one file with different helpers
     (or as a helper and not) is dropped: which one a call means is not known."""
-    merged: dict[tuple[str, str], Helper | None] = {}
-    for rel, helpers in values:
-        for name, helper in helpers:
-            record_distinct(merged, (rel, name), helper)
-    out = {k: v for k, v in merged.items() if v is not None}
-    return out or None
+    helpers = merge_helpers(((v.path, name), h) for v in values for name, h in v.helpers)
+    if not helpers:
+        return None
+    requests = {v.path: kept for v in values
+                if (kept := tuple(r for r in v.requests
+                                  if (v.path, r[0]) in helpers and r[0] not in v.overloaded))}
+    return Fact(helpers, requests)
 
 
 register_fact(FactSpec(name=FACT, language="groovy", gate=(b"new ",), collect=_collect,
                        resolve=_resolve))
 
 
-def _enclosing_function(record: FileRecord, line: int) -> Function | None:
-    best = None
-    for fn in record.functions:
-        start, end = fn.startLine or 0, fn.endLine or 0
-        if start <= line <= end and (best is None or end - start < (best.endLine or 0)
-                                     - (best.startLine or 0)):
-            best = fn
-    return best
+def _request_node(root: Node, start: int, end: int, kind: str) -> Node | None:
+    """The node a helper's request was found at in pass 1 (same bytes, same tree)."""
+    node: Node | None = root.descendant_for_byte_range(start, end)
+    while node is not None and not (node.type == kind and node.start_byte == start
+                                    and node.end_byte == end):
+        node = node.parent if node.start_byte >= start and node.end_byte <= end else None
+    return node
+
+
+def _helper_key(helpers: dict[tuple[str, str], Helper], name: str
+                ) -> Callable[[str], tuple[str, str] | None]:
+    """``calls[].path`` → the helper ``name`` is in that file, or None."""
+    def key_of(path: str) -> tuple[str, str] | None:
+        return (path, name) if (path, name) in helpers else None
+    return key_of
 
 
 def _enclosing_method(node: Node) -> Node | None:
@@ -247,44 +299,18 @@ def _enclosing_method(node: Node) -> Node | None:
     return cur
 
 
-def _statement_node(call: Node, path: str, ids: dict[str, Any]) -> Node | None:
-    node: Node | None = call
-    while node is not None:
-        stmt = ids.get(statement_id(path, node.start_point[0] + 1, node.start_point[1]))
-        if stmt is not None and stmt.nodeType == node.type:
-            return node
-        node = node.parent
-    return None
-
-
-def _overloaded(root: Node, source: bytes) -> set[str]:
-    """Method names declared more than once in the file (overloads): a call of one may be
-    another's."""
-    seen: set[str] = set()
-    twice: set[str] = set()
-    for fn, _ in _methods(root):
-        nm = fn.child_by_field_name("name")
-        name = node_text(nm, source) if nm is not None else ""
-        (twice if name in seen else seen).add(name)
-    return twice
-
-
 def _detect(dc: DetectContext) -> Detection | None:
-    helpers: dict[tuple[str, str], Helper] = index_fact(dc.ctx.resolution_index, FACT) or {}
-    if not helpers:
+    fact: Fact | None = index_fact(dc.ctx.resolution_index, FACT)
+    if fact is None:
         return None
+    helpers = fact.helpers
     source, path = dc.source, dc.path
     found: list[Emit] = []
-    if any(rel == path for rel, _ in helpers):
-        ids = {s.id: s for s in dc.record.statements if s.semanticType == "api_call"}
-        twice = _overloaded(dc.root, source)
-        for name, _, call in _scan(dc.root, source):
-            if (path, name) in helpers and name not in twice:
-                node = _statement_node(call, path, ids)
-                if node is not None:
-                    found.append(Emit(node, {"semanticType": None, "method": None,
-                                             "endpoint": None, "framework": None},
-                                      enrich="same"))
+    own = fact.requests.get(path, ())
+    if own:
+        nodes = [n for _, start, end, kind in own
+                 if (n := _request_node(dc.root, start, end, kind)) is not None]
+        found.extend(clear_emits(nodes, path, dc.record))
     names = {name for _, name in helpers}
     if any(name.encode() in source for name in names):
         # each method's parameters and locals, built once on first use (§11: one walk per method)
@@ -308,24 +334,22 @@ def _detect(dc: DetectContext) -> Detection | None:
                 continue
             if name not in names:
                 continue
-            owner = _enclosing_function(dc.record, n.start_point[0] + 1)
+            owner = enclosing_function(dc.record, n.start_point[0] + 1)
             if owner is None:
                 continue
-            keys = {(c.path, name) for c in owner.calls
-                    if c.name == name and c.path and (c.path, name) in helpers}
-            if len(keys) != 1:
+            key = link_site(owner.calls, name, _helper_key(helpers, name))
+            if key is None:
                 continue
-            if receiver not in ("", "this", "super") and any(
-                    c.name == name and not c.path for c in owner.calls):
+            if receiver not in POLICY.own_receivers and unresolved_twin(owner.calls, name):
                 continue  # another `name` here resolves nowhere (`map.get(…)`): only a bare,
                 # `this.` or `super.` call is surely the helper's
-            url_idx, template, slot, verb = helpers[next(iter(keys))]
+            helper = helpers[key]
             args = n.child_by_field_name("arguments")
             positional = [a for a in (args.named_children if args is not None else ())
                           if a.type != "named_argument"]
-            if url_idx >= len(positional):
+            if helper.url_index >= len(positional):
                 continue
-            arg = positional[url_idx]
+            arg = positional[helper.url_index]
             method = _enclosing_method(n)
             if method is not None and arg.type == "identifier":
                 name_text = node_text(arg, source)
@@ -346,10 +370,8 @@ def _detect(dc: DetectContext) -> Detection | None:
                 if name_part == "value":
                     continue
                 rendered = "{" + name_part + "}"
-            found.append(Emit(n, {"semanticType": "api_call", "method": verb,
-                                  "endpoint": template.replace(slot, rendered)},
-                              enrich="unclassified",
-                              reclassify=frozenset({"api_call", "db_method_call"})))
+            found.append(site_emit(n, helper, rendered, site_verb(helper, None, POLICY.verbs),
+                                   POLICY))
     return Detection(found) if found else None
 
 

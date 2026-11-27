@@ -726,7 +726,7 @@ the file:
   │  vb              10   aws-sdk-calls    vb_aws/sdk_calls.py               ✔       │
   │                  20   graphql-client   vb_graphql_client/…ions.py        ✔       │
   │                                                                                  │
-  │  groovy          95   groovy-http-…    groovy_http_helpers.py                    │
+  │  groovy          95   groovy-http-…    groovy/http_helpers.py                    │
   │                                                                                  │
   │  Kotlin · Ruby · HCL                                                             │
   │   └─ no additive hook yet: shared classifiers only                               │

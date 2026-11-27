@@ -1,5 +1,6 @@
 """Groovy HTTP calls made through the application's own helpers are recorded where they run
-(``parsers/groovy_http_helpers.py``; contract §5 "Where an outbound record is written")."""
+(``parsers/groovy/http_helpers.py``, on ``parsers/outbound_helpers.py``; contract §5 "Where an
+outbound record is written")."""
 
 from __future__ import annotations
 
