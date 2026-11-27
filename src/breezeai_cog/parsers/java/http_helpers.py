@@ -1,4 +1,5 @@
-"""HTTP calls made through the application's own helpers are recorded where they run (BREEZEAI-1654).
+"""Java HTTP calls made through the application's own helpers are recorded where they run — the
+Java adapter of the shared rule (``parsers/outbound_helpers.py``; BREEZEAI-1654).
 
 An HTTP client call is an ``api_call`` where the client is called. When the application wraps the
 client in its own method, that call is made on the method's parameter and says nothing of where
@@ -63,42 +64,45 @@ Otherwise which request runs is not known, and the call is no call site.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
-from ..schemas import FileRecord
-from .additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
+from ..additive import DetectContext, Detection, Detector, FactSpec, Gate, index_fact, \
     register_detector, register_fact
-from .constfold import resolve_all
-from .emits import Emit
-from .index_common import record_distinct
-from .java.constants import collect_constants
-from .java.imports import JavaIndex
-from .java.scan import TYPE_DECLARATIONS, pick, superclass_of
-from .java.scan import Names as _Names
-from .java.scan import callee as _callee
-from .java.scan import class_of as _class_of
-from .java.scan import scan_classes as _scan
-from .java.syntax import arguments, known_address, local_value, name_of, request_address
-from .outbound_helpers import file_requests
-from .treesitter import node_text
+from ..constfold import resolve_all
+from ..emits import Emit
+from ..index_common import record_distinct
+from ..outbound_helpers import Helper, HelperPolicy, Pass, RelayCall, enclosing_function, \
+    file_requests, follow_relays, link_site, site_emit, site_verb, unresolved_twin, url_slot
+from ..treesitter import node_text
+from .constants import collect_constants
+from .imports import JavaIndex
+from .scan import TYPE_DECLARATIONS, pick, superclass_of
+from .scan import Names as _Names
+from .scan import callee as _callee
+from .scan import class_of as _class_of
+from .scan import scan_classes as _scan
+from .syntax import arguments, known_address, name_of, request_address
 
 FACT = "java.http-helpers"
-_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE",
-                    "CONNECT"})
-#: How many relays deep a helper is followed.
-_DEPTH = 6
+POLICY = HelperPolicy(
+    language="java",
+    relays="cross-file",
+    depth=6,  # how many relays deep a helper is followed
+    sticky_ambiguous=True,
+    own_receivers=frozenset({"", "this", "super"}),
+    reclassify=frozenset({"api_call", "db_method_call"}),
+)
+_VERBS = POLICY.verbs
 
-#: A helper: (URL parameter index, URL template, its slot, fixed verb or None, verb parameter
-#: index or -1, framework or None).
-Helper = tuple[int, str, str, str | None, int, str | None]
-#: A relay: (key, callee owner candidates, exact, ``method/arity``, (callee argument index, own
-#: parameter index) pairs, (callee argument index, constant text) pairs).
-Relay = tuple[str, tuple[str, ...], bool, str, tuple[tuple[int, int], ...],
-              tuple[tuple[int, str], ...]]
+#: A relay's callee as written: (owner candidates, exact, ``method/arity``).
+Target = tuple[tuple[str, ...], bool, str]
+#: A relay of a ``Class.method/arity`` key (its passes: callee argument index → own parameter
+#: index, passed as it is; its literals: callee argument index → constant text).
+Relay = RelayCall[str]
 #: A type name as one file writes it: (fully-qualified candidates, exact) — ``_Names.candidates``.
 Written = tuple[tuple[str, ...], bool]
 #: A type declared in a file: (fully-qualified name, declaration kind, abstract, local (declared
@@ -108,9 +112,10 @@ Written = tuple[tuple[str, ...], bool]
 TypeDecl = tuple[str, str, bool, bool, Written | None, tuple[Written, ...], tuple[str, ...]]
 #: What one file gives the fact: (its path, helpers, relays, (class, superclass candidates,
 #: exact) for each class, its type declarations, the simple names of the types it instantiates
-#: as anonymous classes).
+#: as anonymous classes, each helper's request span by key — the requests that only define one).
 FileFacts = tuple[str, list[tuple[str, Helper]], list[Relay],
-                  list[tuple[str, tuple[str, ...], bool]], list[TypeDecl], frozenset[str]]
+                  list[tuple[str, tuple[str, ...], bool]], list[TypeDecl], frozenset[str],
+                  list[tuple[str, tuple[int, int]]]]
 
 #: Nodes between a type declaration and the next enclosing one that keep it a member type.
 _MEMBER_PARENTS = frozenset({"program", "class_body", "interface_body", "enum_body",
@@ -248,8 +253,7 @@ def _requests(root: Node, source: bytes
             for r in file_requests("java", root, source)]
 
 
-def _scan_file(root: Node, source: bytes, rel: str
-               ) -> tuple[FileFacts, list[tuple[str, tuple[int, int]]]]:
+def _scan_file(root: Node, source: bytes, rel: str) -> FileFacts:
     """This file's helpers, relays and classes, and each helper's (key, request span): the
     requests that only define one."""
     names = _Names(root, source)
@@ -282,9 +286,9 @@ def _scan_file(root: Node, source: bytes, rel: str
                 refs = _param_refs(uri, params, d.assigned, source)
                 if len(refs) != 1 or params.index(refs[0]) >= fixed:
                     continue  # no parameter (an ordinary call), two, or the varargs: no slot
-                slot = "{" + refs[0] + "}"
                 template = request_address(uri, source, {}) or ""
-                if template.count(slot) != 1 or not template.endswith(slot):
+                slot = url_slot(refs, template)
+                if slot is None:
                     continue  # a base or an id from the parameter: the method names its endpoint
                 vidx = -1
                 if verb is None and verb_arg is not None and verb_arg.type == "identifier" \
@@ -295,8 +299,8 @@ def _scan_file(root: Node, source: bytes, rel: str
                     vidx = _switch_verb(node, verb, params[:fixed], d.assigned, source)
                     if vidx >= 0:
                         verb = None  # the parameter picks it: each caller's value decides
-                helpers.append((key, (params.index(refs[0]), template, slot, verb, vidx,
-                                      framework or None)))
+                helpers.append((key, Helper(params.index(refs[0]), template, slot, verb, vidx,
+                                            framework=framework or None)))
                 spans.append((key, (node.start_byte, node.end_byte)))
             table: _Locals | None = None  # the method's locals: one walk, on first use
             for call in d.calls:
@@ -324,9 +328,10 @@ def _scan_file(root: Node, source: bytes, rel: str
                     and not any(i == j for j, _ in mapping)
                     and not (a.type == "identifier" and (node_text(a, source) in params
                              or node_text(a, source) in table.declared)))
-                relays.append((key, callee[0], callee[1], callee[2], mapping, constants))
+                relays.append(RelayCall(key, callee, tuple(Pass(i, p) for i, p in mapping),
+                                        constants, origin=rel))
     decls, anonymous = _types(found_types, source, names)
-    return (rel, helpers, relays, classes, decls, anonymous), spans
+    return rel, helpers, relays, classes, decls, anonymous, spans
 
 
 def _fields(body: Node, source: bytes) -> dict[str, str | None]:
@@ -529,7 +534,7 @@ def _implementations(values: list[FileFacts], types: dict[str, Any]
     """The interfaces whose implementations the repository shows in full (module docstring,
     "Through an interface"), each with them. Linear in the declarations: every concrete class's
     base chain is walked once."""
-    decls = [(rel, d) for rel, *_, file_decls, _ in values for d in file_decls]
+    decls = [(v[0], d) for v in values for d in v[4]]
     anonymous = frozenset().union(*(v[5] for v in values))
     declared = {d[0] for _, d in decls}
     by_name: dict[str, tuple[str, TypeDecl] | None] = {}
@@ -597,8 +602,8 @@ def _agreed(impls: Mapping[str, Implementations], known: Mapping[str, Helper]
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileFacts | None:
-    facts, _ = _scan_file(root, source, rel)
-    return facts if any(facts[1:]) else None
+    facts = _scan_file(root, source, rel)
+    return facts if any(facts[1:6]) else None
 
 
 def _fold(text: str, consts: Mapping[str, str]) -> str | None:
@@ -611,19 +616,19 @@ def _fold(text: str, consts: Mapping[str, str]) -> str | None:
 
 
 def _resolve(values: list[FileFacts], index: Any) -> dict[str, Any] | None:
-    """(helpers by key, (file, ``method``, arity) → key, key → file). A key declared twice
-    differently is dropped; relays are followed up to :data:`_DEPTH` deep, through the callee's
-    superclasses when it does not declare the method itself."""
+    """(helpers by key, (file, ``method``, arity) → key, key → file, file → its helpers'
+    request spans). A key declared twice differently is dropped; relays are followed
+    (:data:`POLICY`: across files, through the callee's superclasses when it does not declare the
+    method itself, and through an interface whose implementations agree)."""
     merged: dict[str, Helper | None] = {}
     files: dict[str, str | None] = {}
-    relays: list[tuple[str, Relay]] = []
+    relays: list[Relay] = []
     supers_written: dict[str, tuple[tuple[str, ...], bool]] = {}
-    for rel, helpers, rels, classes, _, _ in values:
+    for rel, helpers, rels, classes, _, _, _ in values:
         for key, helper in helpers:
             record_distinct(merged, key, helper)
             record_distinct(files, key, rel)
-        for relay in rels:
-            relays.append((rel, relay))
+        relays.extend(rels)
         for cls, found, exact in classes:
             supers_written[cls] = (found, exact)
     types: dict[str, Any] = getattr(index, "fqcn", None) or {}
@@ -635,8 +640,9 @@ def _resolve(values: list[FileFacts], index: Any) -> dict[str, Any] | None:
     known_types = known_classes | {d[0] for v in values for d in v[4]}
     impls = _implementations(values, types)
     agreed = _agreed(impls, known)
+    members = _member_names(known)
 
-    def lookup(owner: str | None, member: str) -> Helper | None:
+    def lookup_member(owner: str | None, member: str) -> Helper | None:
         name, _, count = member.partition("/")
         seen: set[str] = set()
         while owner is not None and owner not in seen:
@@ -652,35 +658,22 @@ def _resolve(values: list[FileFacts], index: Any) -> dict[str, Any] | None:
             owner = supers.get(owner)
         return None
 
-    for _ in range(_DEPTH):
-        derived: dict[str, Helper | None] = {}
-        derived_files: dict[str, str | None] = {}
-        members = {k.rsplit(".", 1)[-1].partition("/")[0] for k in known}
-        for rel, (key, owners, exact, member, mapping, constants) in relays:
-            if key in merged or member.partition("/")[0] not in members:
-                continue
-            owner = pick(owners, exact, known_types, types)
-            helper = lookup(owner, member)
-            own = dict(mapping)
-            if helper is None or helper[0] not in own:
-                continue
-            url, template, slot, verb, vidx, framework = helper
-            new_vidx = -1
-            if vidx >= 0:
-                if vidx in own:
-                    new_vidx = own[vidx]
-                else:
-                    verb = _fold(dict(constants).get(vidx, ""), consts)
-            record_distinct(derived, key, (own[url], template, slot, verb, new_vidx, framework))
-            record_distinct(derived_files, key, rel)
-        new = {k: v for k, v in derived.items() if v is not None and k not in known}
-        if not new:
-            break
-        known.update(new)
+    def lookup(relay: Relay) -> Helper | None:
+        owners, exact, member = relay.target
+        if member.partition("/")[0] not in members:
+            return None
+        return lookup_member(pick(owners, exact, known_types, types), member)
+
+    def on_round(new: dict[str, Helper], origins: dict[str, str | None]) -> None:
+        nonlocal agreed, members
         agreed = _agreed(impls, known)
-        merged.update(derived)
+        members = _member_names(known)
         for k in new:
-            files[k] = derived_files.get(k)
+            files[k] = origins.get(k)
+
+    follow_relays(known, relays, lookup=lookup, fold_verb=lambda text: _fold(text, consts),
+                  policy=POLICY, blocked={k for k, v in merged.items() if v is None},
+                  on_round=on_round)
     sites: dict[tuple[str, str], str | None] = {}
     for key in known:
         rel = files.get(key)
@@ -693,25 +686,31 @@ def _resolve(values: list[FileFacts], index: Any) -> dict[str, Any] | None:
         record_distinct(sites, (rel, f"{name}/{arity}"), key)
     for (_, member), (rel, key) in _agreed(impls, known).items():
         record_distinct(sites, (rel, member), key)
-    return {"helpers": known, "sites": sites, "files": files} if known else None
+    spans = {v[0]: kept for v in values
+             if (kept := frozenset(span for key, span in v[6] if key in known))}
+    return {"helpers": known, "sites": sites, "files": files, "spans": spans} if known else None
+
+
+def _member_names(known: Mapping[str, Helper]) -> set[str]:
+    """The method names of the known helpers: a relay calling another name reaches none."""
+    return {k.rsplit(".", 1)[-1].partition("/")[0] for k in known}
 
 
 register_fact(FactSpec(name=FACT, language="java", gate=(b"",), collect=_collect,
                        resolve=_resolve))
 
 
-def defining_requests(root: Node, source: bytes, path: str, index: Any | None
-                      ) -> frozenset[tuple[int, int]]:
-    """This file's requests that only define one: a helper's request on its own URL parameter.
-    Each call of the helper makes the request and is the ``api_call``; these are plain
-    statements. (A relay's call passing the parameter on is skipped by the call-site
-    detector.)"""
+def defining_requests(path: str, index: Any | None) -> frozenset[tuple[int, int]]:
+    """This file's requests that only define one: a helper's request on its own URL parameter,
+    by (start byte, end byte), kept in the fact when the index was built — the file is not read
+    again. Each call of the helper makes the request and is the ``api_call``; the client
+    packages (Vert.x 2, Apache) leave these as plain statements. (A relay's call passing the
+    parameter on is skipped by the call-site detector.)"""
     fact = index_fact(index, FACT)
     if not fact:
         return frozenset()
-    helpers = fact["helpers"]
-    _, spans = _scan_file(root, source, path)
-    return frozenset(span for key, span in spans if key in helpers)
+    spans: frozenset[tuple[int, int]] = fact["spans"].get(path, frozenset())
+    return spans
 
 
 def _own_parameter(node: Node, source: bytes) -> bool:
@@ -728,14 +727,50 @@ def _own_parameter(node: Node, source: bytes) -> bool:
     return node_text(node, source) in params
 
 
-def _enclosing_function(record: FileRecord, line: int):
-    best = None
-    for fn in record.functions:
-        start, end = fn.startLine or 0, fn.endLine or 0
-        if start <= line <= end and (best is None or end - start < (best.endLine or 0)
-                                     - (best.startLine or 0)):
-            best = fn
-    return best
+def _method_values(method: Node, source: bytes) -> dict[str, list[Node]]:
+    """Every value a method gives a name — a local initializer or an assignment (``this.``
+    dropped) — name → values, from one walk of the method (§11), shared by its call sites."""
+    out: dict[str, list[Node]] = {}
+    stack = [method]
+    while stack:
+        n = stack.pop()
+        if n.type == "variable_declarator":
+            nm, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if nm is not None and value is not None:
+                out.setdefault(node_text(nm, source), []).append(value)
+        elif n.type == "assignment_expression":
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            if left is not None and right is not None:
+                out.setdefault(node_text(left, source).removeprefix("this."), []).append(right)
+        stack.extend(n.named_children)
+    return out
+
+
+def _local_value(at: Node, source: bytes,
+                 cache: dict[tuple[int, int], dict[str, list[Node]]]) -> Node | None:
+    """The value given to ``at``'s name in the method enclosing it, when exactly one is
+    (``syntax.local_value``, read from :func:`_method_values` once per method)."""
+    method: Node | None = at
+    while method is not None and method.type not in ("method_declaration",
+                                                     "constructor_declaration"):
+        method = method.parent
+    if method is None:
+        return None
+    span = (method.start_byte, method.end_byte)
+    if span not in cache:
+        cache[span] = _method_values(method, source)
+    found = cache[span].get(node_text(at, source), [])
+    return found[0] if len(found) == 1 else None
+
+
+def _site_key(sites: Mapping[tuple[str, str], str | None], name: str, count: int
+              ) -> Callable[[str], str | None]:
+    """``calls[].path`` → the helper a call of ``name`` with ``count`` arguments means in that
+    file (its exact arity, else a varargs one), or None."""
+    def key_of(path: str) -> str | None:
+        return next((sites[(path, m)] for m in _members(name, count) if (path, m) in sites),
+                    None)
+    return key_of
 
 
 def _detect(dc: DetectContext) -> Detection | None:
@@ -750,6 +785,7 @@ def _detect(dc: DetectContext) -> Detection | None:
     if not any(n.encode() in source for n in names):
         return None
     consts: dict[str, str] | None = None
+    values: dict[tuple[int, int], dict[str, list[Node]]] = {}
     found: list[Emit] = []
     stack = [dc.root]
     while stack:
@@ -765,50 +801,37 @@ def _detect(dc: DetectContext) -> Detection | None:
         if name not in names:
             continue
         args = arguments(n)
-        fn = _enclosing_function(dc.record, n.start_point[0] + 1)
+        fn = enclosing_function(dc.record, n.start_point[0] + 1)
         if fn is None:
             continue
-        keys: set[str] = set()
-        for c in fn.calls:
-            if c.name == name and c.path:
-                hit = next((sites[(c.path, m)] for m in _members(name, len(args))
-                            if (c.path, m) in sites), None)
-                if hit is not None:
-                    keys.add(hit)
-        if len(keys) != 1:
+        key = link_site(fn.calls, name, _site_key(sites, name, len(args)))
+        if key is None:
             continue  # not a helper call, or two helpers it may be: unsure
         obj = n.child_by_field_name("object") if n.type == "method_invocation" else None
-        if obj is not None and node_text(obj, source) not in ("this", "super") and any(
-                c.name == name and not c.path for c in fn.calls):
+        receiver = node_text(obj, source) if obj is not None else ""
+        if receiver not in POLICY.own_receivers and unresolved_twin(fn.calls, name):
             continue  # another `name` here resolves nowhere (`map.get(…)`): only an unqualified,
             # `this.` or `super.` call is surely the helper's
-        helper = helpers.get(next(iter(keys)))
-        if helper is None or helper[0] >= len(args):
+        helper = helpers.get(key)
+        if helper is None or helper.url_index >= len(args):
             continue
-        url, template, slot, verb, vidx, framework = helper
-        if _own_parameter(args[url], source):
+        if _own_parameter(args[helper.url_index], source):
             continue  # a relay passing its own URL parameter on: its callers make the request
         if consts is None:
             cross = index.consts if isinstance(index, JavaIndex) else {}
             consts = resolve_all(collect_constants(dc.root, source), base=cross)
-        arg = args[url]
+        arg = args[helper.url_index]
         if arg.type == "identifier":
             # `String url = "id"; getClient(url)`: a local given one constant value
-            init = local_value(arg, node_text(arg, source), source)
+            init = _local_value(arg, source, values)
             if init is not None and known_address(init, source, consts) is not None:
                 arg = init
         value = request_address(arg, source, consts)
         if value is None:
             continue
-        if vidx >= 0 and vidx < len(args):
-            folded = known_address(args[vidx], source, consts)
-            verb = folded.upper() if folded and folded.upper() in _VERBS else None
-        fields: dict[str, Any] = {"semanticType": "api_call", "method": verb,
-                                  "endpoint": template.replace(slot, value)}
-        if framework:
-            fields["framework"] = framework
-        found.append(Emit(n, fields, enrich="unclassified",
-                          reclassify=frozenset({"api_call", "db_method_call"})))
+        literal = known_address(args[helper.verb_index], source, consts) \
+            if 0 <= helper.verb_index < len(args) else None
+        found.append(site_emit(n, helper, value, site_verb(helper, literal, _VERBS), POLICY))
     return Detection(found) if found else None
 
 

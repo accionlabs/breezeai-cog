@@ -1,5 +1,5 @@
 """Java HTTP calls made through the application's own helpers are recorded where they run
-(BREEZEAI-1654, ``parsers/java_http_helpers.py``; contract §5 "Where an outbound record is
+(BREEZEAI-1654, ``parsers/java/http_helpers.py``; contract §5 "Where an outbound record is
 written")."""
 
 from __future__ import annotations
@@ -475,3 +475,18 @@ public class EnvClient extends BaseClient {
 """,
     })
     assert got == [("EnvClient.java", 5, "GET", "/module")]
+
+
+def test_many_calls_in_one_method_stay_linear(api_calls) -> None:
+    """Cost guard (architecture §11): each call site reads its local from one walk of its
+    method, not one walk per call. 3,000 calls took over two minutes when they did."""
+    import time
+
+    body = "".join(f'    String u{i} = "id{i}";\n    HttpClientRequest r{i} = getClient(u{i}, null);\n'
+                   for i in range(3000))
+    start = time.perf_counter()
+    got = api_calls({P + "ApiUtil.java": UTIL, P + "ApiHandler.java": API,
+                     P + "Caller.java": f"package com.acme;\n{V2}public class Caller extends "
+                                        f"ApiHandler {{\n  public void run() {{\n{body}  }}\n}}\n"})
+    assert len([g for g in got if g[0] == "Caller.java"]) == 3000
+    assert time.perf_counter() - start < 20

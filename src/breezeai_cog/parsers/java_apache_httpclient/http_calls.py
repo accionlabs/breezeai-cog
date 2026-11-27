@@ -22,7 +22,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..java.statements import render_url
 from ..java.syntax import imports_and_package
-from ..java_http_helpers import defining_requests
+from ..java.http_helpers import defining_requests
 from ..outbound_helpers import Request, RequestSource, register_requests
 from ..statements_common import url_or_value
 from ..treesitter import first_line, node_text
@@ -93,7 +93,7 @@ def requests(root: Node, source: bytes, imports: list[str]) -> Iterator[tuple[No
 
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
-    defining = defining_requests(dc.root, source, dc.path, dc.ctx.resolution_index)
+    defining = defining_requests(dc.path, dc.ctx.resolution_index)
     found: list[Emit] = []
     for node, verb, _uri in requests(dc.root, source, dc.record.externalImports):
         if (node.start_byte, node.end_byte) in defining:
