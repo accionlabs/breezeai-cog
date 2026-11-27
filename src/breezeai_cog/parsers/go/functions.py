@@ -158,22 +158,40 @@ def scan_file(root: Node, source: bytes) -> FileScan:
 def _constructor_target_name(func_name: str, result_type: str | None) -> str | None:
     if not func_name.startswith("New") or not result_type:
         return None
-    stripped = result_type.strip()
-    candidate = stripped
-    if candidate.startswith("(") and ")" in candidate:
-        inner = candidate[1:candidate.rfind(")")]
-        for part in inner.split(","):
-            t = part.strip()
-            if not t:
-                continue
-            candidate = t
-            break
-    if candidate.startswith("*"):
-        candidate = candidate[1:]
-    candidate = candidate.rsplit(".", 1)[-1]
-    if candidate == "error":
+
+    candidate = result_type.strip()
+    if candidate.startswith("(") and candidate.endswith(")"):
+        inner = candidate[1:-1]
+        depth = 0
+        for char in inner:
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+            elif char == "," and depth == 0:
+                return None
+        candidate = inner.strip()
+
+    if candidate.startswith("**"):
         return None
-    return candidate or None
+    if candidate.startswith("*"):
+        candidate = candidate[1:].strip()
+    if "[" in candidate and candidate.endswith("]"):
+        candidate = candidate[:candidate.index("[")].strip()
+    candidate = candidate.rsplit(".", 1)[-1]
+    if not candidate or not candidate.isidentifier():
+        return None
+
+    if func_name == "New":
+        if candidate in {
+            "any", "bool", "byte", "comparable", "complex64", "complex128", "error",
+            "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune",
+            "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        }:
+            return None
+        return candidate
+
+    return candidate if func_name[3:] == candidate else None
 
 
 def build_function(
@@ -185,6 +203,7 @@ def build_function(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    resty_aliases: frozenset[str] = frozenset(),
     resolve: CallResolver = noop_resolver,
     barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[Function, list[Statement]]:
@@ -197,13 +216,16 @@ def build_function(
     result_type = _result_type(node, source)
     type_parameters = node.child_by_field_name("type_parameters")
     constructor_target = _constructor_target_name(func_name, result_type)
+    function_type = "method" if receiver else "function"
+    if not receiver and constructor_target:
+        function_type = "constructor"
 
     fn = Function(
         id=disambiguate(function_id(path, func_name, start), seen_ids),
         parentId=parent_id,
         path=path,
         name=func_name,
-        type=("constructor" if not receiver and constructor_target and (func_name == "New" or func_name.startswith("New")) else "method" if receiver else "function"),
+        type=function_type,
         startLine=start,
         endLine=end,
         receiverType=receiver,
@@ -216,6 +238,7 @@ def build_function(
     )
     statements = extract_statements(
         body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids,
+        resty_aliases=resty_aliases,
         descend_all=True, barriers=barriers,
     ) if body is not None else []
     return fn, statements
@@ -232,6 +255,7 @@ def build_literal_function(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    resty_aliases: frozenset[str] = frozenset(),
     barriers: frozenset[tuple[int, int]],
     resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
@@ -255,6 +279,7 @@ def build_literal_function(
     )
     statements = extract_statements(
         body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids,
+        resty_aliases=resty_aliases,
         descend_all=True, barriers=barriers,
     ) if body is not None else []
     return fn, statements

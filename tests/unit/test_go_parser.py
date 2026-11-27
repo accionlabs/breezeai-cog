@@ -143,13 +143,13 @@ func (l *List[T]) Add(value T) {}
     assert functions["Add"].receiverType == "List"
 
 
-def test_go_constructor_target_uses_return_type(tmp_path) -> None:
+def test_go_constructor_params_come_from_matching_return_type(tmp_path) -> None:
     src = b'''\
 package demo
 
 type Config struct{}
 
-func NewFromEnv(host string) *Config {
+func NewConfig(host string) *Config {
     return &Config{}
 }
 '''
@@ -162,6 +162,72 @@ func NewFromEnv(host string) *Config {
 
     config = next(item for item in record.classes if item.name == "Config")
     assert [param.name for param in config.constructorParams] == ["host"]
+
+
+def test_go_constructor_name_and_return_type_must_match(tmp_path) -> None:
+    source = b'''\
+package demo
+
+type Solo struct{}
+type Svc struct{}
+type Thing struct{}
+
+func NewSolo(n int, name string) *Solo { return &Solo{} }
+func Newton(x int) *Solo { return nil }
+func NewSvc(a int, b string, c bool) *Svc { return &Svc{} }
+func NewMulti() (*Svc, error) { return nil, nil }
+func NewThing() int { return 1 }
+func New() int { return 1 }
+'''
+    path = tmp_path / "constructors.go"
+    path.write_bytes(source)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="constructors.go",
+            abs_path=path,
+            source=source,
+            repo_root=tmp_path,
+        )
+    )
+
+    functions = {item.name: item for item in record.functions}
+    classes = {item.name: item for item in record.classes}
+    assert functions["NewSolo"].type == "constructor"
+    assert functions["Newton"].type == "function"
+    assert functions["NewSvc"].type == "constructor"
+    assert functions["NewMulti"].type == "function"
+    assert functions["NewThing"].type == "function"
+    assert functions["New"].type == "function"
+    assert [param.name for param in classes["Solo"].constructorParams] == ["n", "name"]
+    assert [param.name for param in classes["Svc"].constructorParams] == ["a", "b", "c"]
+
+
+def test_go_uses_first_valid_constructor_in_source_order(tmp_path) -> None:
+    source = b'''\
+package demo
+
+type Svc struct{}
+
+func NewSvc(token string) *Svc { return &Svc{} }
+func New(region string) *Svc { return &Svc{} }
+'''
+    path = tmp_path / "constructors.go"
+    path.write_bytes(source)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="constructors.go",
+            abs_path=path,
+            source=source,
+            repo_root=tmp_path,
+        )
+    )
+
+    svc = next(item for item in record.classes if item.name == "Svc")
+    new = next(item for item in record.functions if item.name == "New")
+    assert new.type == "constructor"
+    assert [param.name for param in svc.constructorParams] == ["token"]
 
 
 def test_go_code_and_config_parsing(tmp_path) -> None:
@@ -384,6 +450,90 @@ func f() {
     assert (call.semanticType, call.method, call.endpoint) == ("api_call", "GET", "http://x/y")
 
 
+def test_go_http_client_do_resolves_request_details(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import "net/http"
+
+func callAPI() {
+    req, _ := http.NewRequest("GET", "https://example.test/api", nil)
+    client := &http.Client{}
+    client.Do(req)
+    http.DefaultClient.Do(req)
+    http.Get("https://example.test/plain")
+}
+''')
+
+    calls = [s for s in record.statements if s.text.endswith(".Do(req)")]
+    assert all(s.semanticType == "api_call" for s in calls)
+    assert [(s.method, s.endpoint) for s in calls] == [
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/api"),
+    ]
+    api_calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(s.method, s.endpoint) for s in api_calls] == [
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/api"),
+        ("GET", "https://example.test/plain"),
+    ]
+
+
+def test_go_resty_builder_chains_are_api_calls(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import restyAlias "github.com/go-resty/resty/v2"
+
+func callAPI(router *Router) {
+    client := restyAlias.New()
+    client.R().Get("https://example.test/a")
+    client.R().SetBody("x").Post("https://example.test/b")
+    router.R().Get("/route")
+}
+
+func callInjected(client *restyAlias.Client) {
+    client.R().Put("https://example.test/c")
+}
+''')
+
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(s.method, s.endpoint) for s in calls] == [
+        ("GET", "https://example.test/a"),
+        ("POST", "https://example.test/b"),
+        ("PUT", "https://example.test/c"),
+    ]
+
+
+def test_go_resty_v2_default_import_name_is_an_api_client(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import "github.com/go-resty/resty/v2"
+
+func callAPI() {
+    client := resty.New()
+    client.R().Get("https://example.test/a")
+    client.R().SetBody("x").Post("https://example.test/b")
+}
+''')
+
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(s.method, s.endpoint) for s in calls] == [
+        ("GET", "https://example.test/a"),
+        ("POST", "https://example.test/b"),
+    ]
+
+
+def test_go_r_method_without_resty_import_is_not_an_api_call(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+func run(client *Router) {
+    client.R().Get("/route")
+}
+''')
+
+    assert not any(s.semanticType == "api_call" for s in record.statements)
+
+
 def test_go_switch_inc_and_package_level_declarations_are_captured(tmp_path) -> None:
     record = _parse(tmp_path, b'''package p
 
@@ -430,6 +580,27 @@ func Pair(int, string) *User { return nil }
     assert fns["Add"].returnType == "(int, error)"
     assert [(p.name, p.type) for p in fns["Pair"].params] == [("", "int"), ("", "string")]
     assert fns["Pair"].returnType == "*User"
+
+
+def test_go_exports_exclude_methods_but_keep_them_in_function_extraction(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package payment
+
+type Payment struct{}
+type Invoice struct{}
+
+func Pay() {}
+func (p *Payment) Pay() {}
+func (p *Payment) Describe() {}
+func CreateInvoice() {}
+func (i *Invoice) Validate() {}
+''')
+
+    assert record.exports == ["CreateInvoice", "Invoice", "Pay", "Payment"]
+    assert {
+        (fn.name, fn.type)
+        for fn in record.functions
+        if fn.type == "method"
+    } == {("Pay", "method"), ("Describe", "method"), ("Validate", "method")}
 
 
 def test_go_interface_method_set_is_captured(tmp_path) -> None:

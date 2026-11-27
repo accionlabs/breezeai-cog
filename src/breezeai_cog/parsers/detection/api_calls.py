@@ -10,7 +10,7 @@ from __future__ import annotations
 # ``request`` is a generic client verb (axios.request, session.request, restTemplate…);
 # it only counts when the callee also carries a client hint (below), so it can't match a
 # bare ``foo.request()``.
-_HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
+_HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request", "do"}
 
 # Each language's HTTP-client names. A segment of a call's receiver is a client when its name
 # ends with one of them, starting a word (:func:`_names_client`): ``dataApiClient``,
@@ -24,13 +24,14 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "requ
 _COMMON_HINTS = ("http", "httpclient", "restclient", "apiclient")
 _JVM_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")
 _DOTNET_HINTS = (*_COMMON_HINTS, "resttemplate", "webclient")  # Spring.NET RestTemplate
+_GO_HINTS = (*_COMMON_HINTS, "resty")
 _CLIENT_HINTS: dict[str, tuple[str, ...]] = {
     "typescript": (*_COMMON_HINTS, "httpservice", "axios", "fetch", "superagent", "got", "ky",
                    "ofetch", "webclient"),
     "python": (*_COMMON_HINTS, "requests", "session", "httpx", "aiohttp", "urllib", "urllib3"),
     "java": _JVM_HINTS, "kotlin": _JVM_HINTS, "groovy": _JVM_HINTS, "scala": _JVM_HINTS,
     "csharp": _DOTNET_HINTS, "vb": _DOTNET_HINTS,
-    "go": _COMMON_HINTS,
+    "go": _GO_HINTS,
     "ruby": (*_COMMON_HINTS, "httparty"),
 }
 
@@ -156,6 +157,13 @@ def match_api(
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
         return None
     receiver = _receiver_text(callee)
+    if language == "go":
+        if low.startswith("resty."):
+            return m.upper()
+        if m == "do":
+            recv_parts = [p.lower() for p in receiver.split(".")]
+            if any(p in {"c", "client", "defaultclient"} or p.endswith("client") for p in recv_parts):
+                return "REQUEST"
     # In .NET a ``…Session`` is ASP.NET session state or an NHibernate ``ISession``, never an
     # HTTP client, even as the ``HttpContext.Session`` the ``http`` hint would otherwise match.
     dotnet_session = language in _DOTNET \

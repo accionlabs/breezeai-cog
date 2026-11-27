@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from tree_sitter import Node
 
 from ...schemas import Statement
+from ..contract import HTTP_METHODS
 from ..statements_common import classify_statement, render_concat, resolve_endpoint, url_first
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
@@ -46,7 +49,105 @@ def _render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
+def _is_resty_constructor(node: Node, source: bytes, resty_aliases: frozenset[str]) -> bool:
+    while node.type == "expression_list" and len(node.named_children) == 1:
+        node = node.named_children[0]
+    if node.type != _CALL_TYPE:
+        return False
+    fn = node.child_by_field_name("function")
+    if fn is None or fn.type != "selector_expression":
+        return False
+    operand = fn.child_by_field_name("operand")
+    field = fn.child_by_field_name("field")
+    return (
+        operand is not None
+        and node_text(operand, source) in resty_aliases
+        and field is not None
+        and node_text(field, source) in {"New", "NewWithClient"}
+    )
+
+
+def _enclosing_function(node: Node) -> Node | None:
+    while node.type not in {"function_declaration", "method_declaration", "func_literal"}:
+        if node.parent is None:
+            return None
+        node = node.parent
+    return node
+
+
+def _has_typed_parameter(
+    scope: Node, name: str, source: bytes, types: frozenset[str],
+) -> bool:
+    params = scope.child_by_field_name("parameters")
+    if params is None:
+        return False
+    for param in params.named_children:
+        typ = param.child_by_field_name("type")
+        if (
+            typ is not None
+            and node_text(typ, source).replace(" ", "").lstrip("*") in types
+            and any(node_text(item, source) == name for item in param.children_by_field_name("name"))
+        ):
+            return True
+    return False
+
+
+def _prior_binding(scope: Node, call: Node, name: str, source: bytes) -> Node | None:
+    body = scope.child_by_field_name("body")
+    if body is None:
+        return None
+    matches: list[tuple[int, Node]] = []
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if node is not body and node.type == "func_literal":
+            continue
+        if node.start_byte >= call.start_byte:
+            continue
+        if node.type in {"short_var_declaration", "var_spec", "assignment_statement"}:
+            for variable, value in _pairs(node) or []:
+                if variable.type == "identifier" and node_text(variable, source) == name:
+                    matches.append((node.start_byte, value))
+        stack.extend(node.named_children)
+    return max(matches, key=lambda match: match[0])[1] if matches else None
+
+
+def _is_resty_request(call: Node, source: bytes, resty_aliases: frozenset[str]) -> bool:
+    fn = call.child_by_field_name("function")
+    operand = fn.child_by_field_name("operand") if fn is not None else None
+    resty_client = None
+    while operand is not None and operand.type == _CALL_TYPE:
+        inner_fn = operand.child_by_field_name("function")
+        if inner_fn is None or inner_fn.type != "selector_expression":
+            return False
+        field = inner_fn.child_by_field_name("field")
+        if field is not None and node_text(field, source) == "R":
+            resty_client = inner_fn.child_by_field_name("operand")
+            break
+        operand = inner_fn.child_by_field_name("operand")
+    if resty_client is None:
+        return False
+    if _is_resty_constructor(resty_client, source, resty_aliases):
+        return True
+
+    client_name = node_text(resty_client, source)
+    if resty_client.type != "identifier":
+        return False
+
+    scope = _enclosing_function(call)
+    if scope is None:
+        return False
+
+    client_types = frozenset(f"{alias}.Client" for alias in resty_aliases)
+    if _has_typed_parameter(scope, client_name, source, client_types):
+        return True
+    binding = _prior_binding(scope, call, client_name, source)
+    return binding is not None and _is_resty_constructor(binding, source, resty_aliases)
+
+
+def _call_details(
+    call: Node, source: bytes, *, resty_aliases: frozenset[str] = frozenset(),
+) -> tuple[str, str, str | None] | None:
     if call.type != "call_expression":
         return None
     fn = call.child_by_field_name("function")
@@ -62,10 +163,100 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         method = callee
     args = call.child_by_field_name("arguments")
     arg_nodes: list[Node] = list(args.named_children) if args is not None else []
-    endpoint, override = resolve_endpoint(arg_nodes, source, _render_url, method=url_first(callee, method))
+    resty_request = (
+        method.upper() in HTTP_METHODS
+        and bool(resty_aliases)
+        and _is_resty_request(call, source, resty_aliases)
+    )
+    if resty_request:
+        callee = f"resty.{callee}"
+    endpoint, override = resolve_endpoint(
+        arg_nodes, source, _render_url,
+        method=method if resty_request else url_first(callee, method),
+    )
     if override is not None:
         method = override
+    elif method == "Do" and arg_nodes:
+        # http.Client.Do(req) / c.Do(req) carries req as its first argument
+        req_name = node_text(arg_nodes[0], source)
+        req_details = _find_request_definition(call, req_name, source)
+        if req_details is not None:
+            override_method, resolved_ep = req_details
+            if _is_http_client_receiver(call, source):
+                callee = "http.Client.Do"
+            if override_method:
+                method = override_method
+            if resolved_ep:
+                endpoint = resolved_ep
     return callee, method, endpoint
+
+
+def _is_http_client_value(node: Node, source: bytes) -> bool:
+    while node.type == "unary_expression":
+        operand = node.child_by_field_name("operand")
+        if operand is None:
+            return False
+        node = operand
+    type_node = node.child_by_field_name("type") if node.type == "composite_literal" else None
+    return type_node is not None and node_text(type_node, source) == "http.Client"
+
+
+def _is_http_client_receiver(call: Node, source: bytes) -> bool:
+    fn = call.child_by_field_name("function")
+    receiver = fn.child_by_field_name("operand") if fn is not None else None
+    if receiver is None:
+        return False
+    name = node_text(receiver, source)
+    if name == "http.DefaultClient":
+        return True
+
+    scope = _enclosing_function(call)
+    if scope is None:
+        return False
+
+    if _has_typed_parameter(scope, name, source, frozenset({"http.Client"})):
+        return True
+    binding = _prior_binding(scope, call, name, source)
+    return binding is not None and _is_http_client_value(binding, source)
+
+
+def _find_request_definition(call: Node, req_name: str, source: bytes) -> tuple[str | None, str | None] | None:
+    """Find http.NewRequest("METHOD", url, ...) defining req_name in the enclosing scope."""
+    scope = _enclosing_function(call)
+    if scope is None:
+        return None
+    target_node = _prior_binding(scope, call, req_name, source)
+    if target_node is None:
+        return None
+
+    # Target node could be an expression_list or a call_expression directly
+    call_expr = None
+    if target_node.type == "call_expression":
+        call_expr = target_node
+    else:
+        for child in target_node.named_children:
+            if child.type == "call_expression":
+                call_expr = child
+                break
+
+    if call_expr is not None:
+        fn = call_expr.child_by_field_name("function")
+        if fn is not None:
+            fn_text = node_text(fn, source)
+            if fn_text.endswith("NewRequest") or fn_text.endswith("NewRequestWithContext"):
+                args = call_expr.child_by_field_name("arguments")
+                if args is not None:
+                    arg_list = list(args.named_children)
+                    req_method = None
+                    req_endpoint = None
+                    # http.NewRequest(method, url, body) or http.NewRequestWithContext(ctx, method, url, body)
+                    offset = 1 if "WithContext" in fn_text else 0
+                    if len(arg_list) > offset:
+                        req_method = _render_url(arg_list[offset], source)
+                    if len(arg_list) > offset + 1:
+                        req_endpoint = _render_url(arg_list[offset + 1], source)
+                    return req_method, req_endpoint
+    return None
 
 
 #: Declarations that bind names to values: ``var x = …`` (one ``var_spec`` each) and ``x := …``.
@@ -73,19 +264,24 @@ _BINDING_OWNERS = ("var_spec", "short_var_declaration")
 
 
 def _pairs(owner: Node) -> list[tuple[Node, Node]] | None:
-    """(name, value) per binding of a ``var_spec`` / ``short_var_declaration``, or None when
-    the names and values do not pair up (``a, b := f()``) or there are no values."""
+    """(name, value) per binding declaration or assignment, if their values can be paired."""
     if owner.type == "var_spec":
         names = owner.children_by_field_name("name")
         values = owner.child_by_field_name("value")
-    else:
+    elif owner.type in {"short_var_declaration", "assignment_statement"}:
         left = owner.child_by_field_name("left")
         names = list(left.named_children) if left is not None else []
         values = owner.child_by_field_name("right")
+    else:
+        return None
     if values is None:
         return None
     vals = [v for v in values.named_children if v.type != "comment"]
-    if not names or len(names) != len(vals):
+    if not names or not vals:
+        return None
+    if len(vals) == 1 and vals[0].type == _CALL_TYPE:
+        return [(name, vals[0]) for name in names]
+    if len(names) != len(vals):
         return None
     return list(zip(names, vals))
 
@@ -162,12 +358,14 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    resty_aliases: frozenset[str] = frozenset(),
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    call_details = partial(_call_details, resty_aliases=resty_aliases)
     for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(
@@ -181,7 +379,7 @@ def extract_statements(
                 control_flow=CONTROL_FLOW,
                 call_type=_CALL_TYPE,
                 name_of=_name_of,
-                call_details=_call_details,
+                call_details=call_details,
                 language="go",
                 decorators=[],
             )

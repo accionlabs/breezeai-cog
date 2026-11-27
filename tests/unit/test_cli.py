@@ -51,6 +51,36 @@ def test_repo_to_json_tree(tmp_path) -> None:
     assert records[0]["totalFiles"] == 2
 
 
+def test_repo_to_json_tree_reports_go_syntax_errors(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BREEZEAI_COG_LOG_TO_FILE", "true")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "broken.go").write_text(
+        'package p\n\nfunc Broken() {\n    fmt.Println("Hello"\n}\n'
+    )
+    (repo / "valid.go").write_text("package p\n\nfunc Works() {}\n")
+    out_dir = tmp_path / "results"
+
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir), "--jobs", "1"]
+    )
+    assert result.exit_code == 0, result.output
+
+    out = out_dir / "repo-project-analysis.ndjson.gz"
+    records = [json.loads(line) for line in gzip.open(out, "rt", encoding="utf-8")]
+    assert records[0]["totalFiles"] == 1
+    assert any(record.get("path") == "valid.go" for record in records)
+    assert not any(record.get("path") == "broken.go" for record in records)
+
+    logs = list((repo / ".cog" / "logs").glob("breezeai-cog-*.log"))
+    assert logs
+    content = logs[0].read_text("utf-8")
+    assert "parse.file.failed" in content
+    assert "path=broken.go" in content
+    assert "Go syntax error at line 4" in content
+    assert "failed=1" in content
+
+
 def test_repo_to_json_tree_defaults_to_cog_dir(tmp_path) -> None:
     """With no --out, the export lands in <repo>/.cog and the repo's parent stays clean."""
     repo = tmp_path / "repo"

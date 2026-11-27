@@ -11,7 +11,7 @@ Parser: `src/breezeai_cog/parsers/go_nats/` (additive detector, Go files importi
 | `nc.Subscribe(subject, handler)` / `js.Subscribe(…)` | Binding | `eventbus_consumer`, `method: MESSAGE`, `framework: nats`, `endpoint` = the subject, `handler` = the callback (`handlerLine` = where a function literal starts) | One handler, inbound message |
 | `nc.QueueSubscribe(subject, queue, handler)` | Binding | as above | Queue group of the same subject |
 | `nc.SubscribeSync(subject)` / `ChanSubscribe(subject, ch)` / `js.PullSubscribe(…)` | Binding | as above; `handler` = the function the call is in | The function receives the messages |
-| `nc.Publish(subject, data)` / `PublishMsg(&nats.Msg{Subject: …})` | Outbound | `eventbus_publish`, `endpoint` = the subject | Our code publishing |
-| `nc.Request(subject, data, timeout)` | Outbound | `eventbus_send` | Request-reply |
+| `nc.Publish(subject, data)` / `PublishMsg(&nats.Msg{Subject: …})` | Outbound | `eventbus_publish`, `endpoint` = the subject | A NATS publish is distinct from request/reply |
+| `nc.Request(subject, data, timeout)` / `RequestMsg(…)` | Outbound | `eventbus_send`, `endpoint` = the subject | Request/reply |
 | A subject from a variable | Binding / Outbound | `endpoint` empty | Never a guessed address |
 | `client.Subscribe(…)` on a value that is not a NATS connection | None | — | Not bound from the package |

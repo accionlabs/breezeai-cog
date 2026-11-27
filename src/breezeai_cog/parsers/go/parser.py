@@ -7,6 +7,7 @@ from typing import Sequence
 
 from tree_sitter import Node
 
+from ...errors import ParseError
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, ConstructorParam, FileRecord, Function, Statement
 from ...utils import count_loc
@@ -23,7 +24,7 @@ from .functions import (
     scan_file,
 )
 from .declarations import Declarations, declarations, package_dir
-from .imports import GoIndex, build_fqcn_index, extract_imports
+from .imports import GoIndex, build_fqcn_index, extract_imports, import_aliases
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 from .gomod import parse_gomod
@@ -61,6 +62,21 @@ def _owner(literal: Node, bound: frozenset[tuple[int, int]]) -> Node | None:
         ):
             return node
         node = node.parent
+    return None
+
+
+def _first_syntax_error(root: Node) -> Node | None:
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "ERROR" or node.is_missing:
+            return node
+        stack.extend(
+            reversed([
+                child for child in node.children
+                if child.has_error or child.is_missing
+            ])
+        )
     return None
 
 
@@ -102,6 +118,21 @@ class GoParser(BaseParser):
             )
 
         root = parse_source("go", ctx.source, ctx.parse_timeout_micros).root_node
+        if root.has_error:
+            error = _first_syntax_error(root)
+            if error is None:
+                raise ParseError(
+                    "Go syntax error reported by Tree-sitter",
+                    path=ctx.path,
+                    parser=self.name,
+                )
+            row, column = error.start_point
+            detail = f"expected {error.type!r}" if error.is_missing else "unexpected syntax"
+            raise ParseError(
+                f"Go syntax error at line {row + 1}, column {column + 1}: {detail}",
+                path=ctx.path,
+                parser=self.name,
+            )
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
@@ -112,6 +143,10 @@ class GoParser(BaseParser):
 
         idx = ctx.resolution_index
         external, packages = extract_imports(root, source, idx if isinstance(idx, GoIndex) else None)
+        resty_aliases = frozenset(
+            alias for alias, module in import_aliases(root, source).items()
+            if module in {"github.com/go-resty/resty/v2", "github.com/go-resty/resty/v3"}
+        )
         scan = scan_file(root, source)
         decls = declarations(idx)
         resolve = _resolver(packages, scan.names, scan.types, path, decls)
@@ -127,6 +162,8 @@ class GoParser(BaseParser):
         classes = []
         statements: list[Statement] = []
         exports: set[str] = set()
+        # If New and NewType both return a type, retain params from the first declaration.
+        constructor_targets_seen: set[str] = set()
 
         class_by_name = {}
         for child in root.named_children:
@@ -160,25 +197,27 @@ class GoParser(BaseParser):
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
+                    resty_aliases=resty_aliases,
                     resolve=resolve,
                     barriers=bound,
                 )
                 functions.append(fn)
                 owner_ids[child.start_byte] = fn.id
                 statements.extend(fn_statements)
-                if fn.name[:1].isupper():
+                if child.type == "function_declaration" and fn.name[:1].isupper():
                     exports.add(fn.name)
                 if owner is not None:
                     owner.metadata = {**(owner.metadata or {}), "hasMethods": True}
                 if fn.type == "constructor":
                     target_name = _constructor_target_name(fn.name, fn.returnType)
                     target = class_by_name.get(target_name)
-                    if target is not None:
+                    if target is not None and target_name not in constructor_targets_seen:
                         target.constructorParams = [
                             ConstructorParam(name=p.name, type=p.type)
                             for p in fn.params
                             if p.type is not None
                         ]
+                        constructor_targets_seen.add(target_name)
 
         for node, name in scan.bound:  # document order: an enclosing literal comes first
             enclosing = _owner(node, bound)
@@ -187,6 +226,7 @@ class GoParser(BaseParser):
                 parent_id=owner_ids.get(enclosing.start_byte, fid) if enclosing is not None else fid,
                 package_level=enclosing is None,
                 seen_ids=seen_ids, capture=capture, limit=limit,
+                resty_aliases=resty_aliases,
                 barriers=bound - {(node.start_byte, node.end_byte)}, resolve=resolve,
             )
             functions.append(fn)
@@ -199,7 +239,8 @@ class GoParser(BaseParser):
         # same-line trailing comment rides on the statement's `text`.
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture,
-                               limit=limit, seen_ids=seen_ids, barriers=bound)
+                               limit=limit, seen_ids=seen_ids, resty_aliases=resty_aliases,
+                               barriers=bound)
         )
 
         if capture:
